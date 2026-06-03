@@ -1,0 +1,50 @@
+use banshee_common::utils::get_socket_path;
+use banshee_common::{JsonRpcRequest, JsonRpcResponse};
+use serde_json;
+use std::fs;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
+
+use crate::api::dispatch;
+
+pub async fn run() -> Result<(), std::io::Error> {
+    println!("Starting unix socket listener...");
+
+    let socket_path = get_socket_path().expect("Could not find home directory");
+
+    let _ = fs::remove_file(&socket_path);
+
+    if let Some(parent_dir) = socket_path.parent() {
+        fs::create_dir_all(parent_dir)?;
+    }
+
+    println!("No socket found. Creating one...");
+    let listener = UnixListener::bind(&socket_path)?;
+
+    loop {
+        match listener.accept().await {
+            Ok((mut stream, _addr)) => {
+                println!("New client connected!");
+
+                // Spawn a new task to handle the client connection
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.split();
+                    let reader = BufReader::new(reader);
+                    let mut lines = reader.lines();
+
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        // Try to parse the incoming line as a JSON-RPC request
+                        if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(&line) {
+                            let response: JsonRpcResponse = dispatch(request);
+                            if let Ok(mut response_string) = serde_json::to_string(&response) {
+                                response_string.push('\n');
+                                let _ = writer.write_all(response_string.as_bytes()).await;
+                            }
+                        }
+                    }
+                });
+            }
+            Err(error) => println!("Connection failed, Error: {error}"),
+        }
+    }
+}

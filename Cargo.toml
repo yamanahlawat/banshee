@@ -1,0 +1,3 @@
+[workspace]
+members = ["bansheed", "banshee-mcp-shim", "banshee-common"]
+resolver = "2"
