@@ -1,5 +1,6 @@
 mod api;
 mod args;
+mod audio;
 mod daemon;
 mod hotkey;
 
@@ -12,7 +13,9 @@ async fn main() {
 
     match cli.command {
         CommandType::Serve => {
-            hotkey::hotkey_listener();
+            let (_stream, consumer) =
+                audio::start_audio_capture().expect("Failed to start audio capture");
+            hotkey::hotkey_listener(consumer);
             if let Err(error) = daemon::run().await {
                 eprintln!("Daemon crashed {error}")
             }
