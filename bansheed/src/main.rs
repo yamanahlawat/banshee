@@ -1,6 +1,7 @@
 mod api;
 mod args;
 mod daemon;
+mod hotkey;
 
 use args::{Cli, CommandType};
 use clap::Parser;
@@ -11,6 +12,7 @@ async fn main() {
 
     match cli.command {
         CommandType::Serve => {
+            hotkey::hotkey_listener();
             if let Err(error) = daemon::run().await {
                 eprintln!("Daemon crashed {error}")
             }
