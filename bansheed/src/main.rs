@@ -2,9 +2,11 @@ mod api;
 mod args;
 mod audio;
 mod daemon;
+mod dictation;
 mod hotkey;
 mod models;
 mod speech_to_text;
+mod text_to_speech;
 
 use args::{Cli, CommandType};
 use clap::Parser;

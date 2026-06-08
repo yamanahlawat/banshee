@@ -3,14 +3,28 @@ use banshee_common::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use serde_json;
 
 use crate::speech_to_text::mailbox::TRANSCRIPTION_MAILBOX;
+use crate::text_to_speech::sanitizer::sanitize;
 
 pub fn dispatch(request: JsonRpcRequest) -> JsonRpcResponse {
     match request.method.as_str() {
-        BANSHEE_SPEAK => JsonRpcResponse::Success {
-            jsonrpc: "2.0".to_string(),
-            result: serde_json::json!({"ok": true}),
-            id: request.id,
-        },
+        BANSHEE_SPEAK => {
+            if let Some(params) = &request.params {
+                if let Some(raw_text) = params.get("text").and_then(|v| v.as_str()) {
+                    let clean_text = sanitize(&raw_text);
+                    println!("The sanitized text: {clean_text}");
+
+                    std::process::Command::new("say")
+                        .arg(&clean_text)
+                        .spawn()
+                        .expect("Failed to run 'say' command");
+                }
+            }
+            JsonRpcResponse::Success {
+                jsonrpc: "2.0".to_string(),
+                result: serde_json::json!({"ok": true}),
+                id: request.id,
+            }
+        }
         BANSHEE_GET_TRANSCRIPTION => {
             let transcription_text = TRANSCRIPTION_MAILBOX.lock().unwrap().take();
             JsonRpcResponse::Success {
