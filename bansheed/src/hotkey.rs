@@ -5,9 +5,17 @@ use tokio::sync::mpsc;
 
 use rdev::{EventType, Key, listen};
 
+use crate::audio::utils::resample_audio;
+use crate::speech_to_text::mailbox::TRANSCRIPTION_MAILBOX;
+use crate::speech_to_text::whisper::WhisperEngine;
+
 pub static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 
-pub fn hotkey_listener(mut consumer: impl Consumer<Item = f32> + Send + 'static) {
+pub fn hotkey_listener(
+    mut consumer: impl Consumer<Item = f32> + Send + 'static,
+    speech_to_text_engine: WhisperEngine,
+    sample_rate: u32,
+) {
     // Create a mail tube to send messages from rdev to tokio
     let (sender, mut receiver) = mpsc::channel::<()>(32);
 
@@ -41,7 +49,22 @@ pub fn hotkey_listener(mut consumer: impl Consumer<Item = f32> + Send + 'static)
             let mut audio_data = Vec::new();
             audio_data.extend(consumer.pop_iter());
 
-            println!("Captured {} audio samples", audio_data.len());
+            println!("Downsampling audio from {sample_rate} Hz to 16000 Hz...");
+
+            // Downsample the audio by taking every nth sample
+            let final_data = resample_audio(&audio_data, sample_rate, 16000);
+
+            // Resample the audio data if necessary
+            println!("Transcribing...");
+            match speech_to_text_engine.transcribe(&final_data) {
+                Ok(transcription) => {
+                    println!("Transcription: {transcription}");
+                    if let Ok(mut mailbox) = TRANSCRIPTION_MAILBOX.lock() {
+                        *mailbox = Some(transcription)
+                    }
+                }
+                Err(error) => eprintln!("Transcription failed: {error}"),
+            }
         }
     });
 }

@@ -1,3 +1,5 @@
+pub mod utils;
+
 use cpal::{
     Stream,
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -11,7 +13,7 @@ use std::sync::atomic::Ordering;
 use crate::hotkey::IS_RECORDING;
 
 pub fn start_audio_capture()
--> Result<(Stream, impl Consumer<Item = f32>), Box<dyn std::error::Error>> {
+-> Result<(Stream, impl Consumer<Item = f32>, u32), Box<dyn std::error::Error>> {
     // Ask cpal to give us the default OS audio API
     let host = cpal::default_host();
 
@@ -32,6 +34,8 @@ pub fn start_audio_capture()
     let config = device.default_input_config()?;
     println!("Default config {:?}", config);
 
+    let sample_rate = config.sample_rate();
+
     let stream = device.build_input_stream(
         &config.into(),
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -43,5 +47,5 @@ pub fn start_audio_capture()
         None,
     )?;
     stream.play()?;
-    Ok((stream, consumer))
+    Ok((stream, consumer, sample_rate))
 }

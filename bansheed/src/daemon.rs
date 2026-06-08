@@ -10,7 +10,10 @@ use crate::api::dispatch;
 pub async fn run() -> Result<(), std::io::Error> {
     println!("Starting unix socket listener...");
 
-    let socket_path = get_socket_path().expect("Could not find home directory");
+    let Some(socket_path) = get_socket_path() else {
+        println!("Could not find home directory.");
+        return Ok(());
+    };
 
     let _ = fs::remove_file(&socket_path);
 
