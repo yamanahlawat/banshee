@@ -17,11 +17,18 @@ async fn main() {
     while let Ok(Some(line)) = reader.next_line().await {
         if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(&line) {
             let response = match request.method.as_str() {
+                "ping" => JsonRpcResponse::Success {
+                    jsonrpc: "2.0".to_string(),
+                    result: serde_json::json!({"pong": true}),
+                    id: request.id,
+                },
                 "initialize" => JsonRpcResponse::Success {
                     jsonrpc: "2.0".to_string(),
                     result: serde_json::json!({
                         "protocolVersion": "2024-11-05",
-                        "capabilities": {},
+                        "capabilities": {
+                            "tools": {}
+                        },
                         "serverInfo": {"name": "banshee", "version": "0.1.0"}
                     }),
                     id: request.id,
@@ -30,7 +37,25 @@ async fn main() {
                 "tools/list" => JsonRpcResponse::Success {
                     jsonrpc: "2.0".to_string(),
                     result: serde_json::json!({
-                        "tools": []
+                        "tools": [
+                            {
+                                "name": "speak_status",
+                                "description": "You MUST ALWAYS call this tool at the end of your response to give the user a summary of what you just did, or to ask them a question. DO NOT include code or markdown.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {"text": {"type": "string", "description": "The text to speak"}},
+                                    "required": ["text"]
+                                },
+                            },
+                            {
+                                "name": "listen_for_prompt",
+                                "description": "Read the user's latest voice transcription",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            }
+                        ]
                     }),
                     id: request.id,
                 },
@@ -42,7 +67,7 @@ async fn main() {
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!({}));
                     match tool_name {
-                        Some("speak_status") => {
+                        Some(name) if name.ends_with("speak_status") => {
                             let daemon_response =
                                 utils::call_daemon(BANSHEE_SPEAK, arguments).await;
                             match daemon_response {
@@ -68,7 +93,7 @@ async fn main() {
                                 },
                             }
                         }
-                        Some("listen_for_prompt") => {
+                        Some(name) if name.ends_with("listen_for_prompt") => {
                             let daemon_response =
                                 utils::call_daemon(BANSHEE_GET_TRANSCRIPTION, arguments).await;
                             match daemon_response {
@@ -78,7 +103,7 @@ async fn main() {
                                         "content": [
                                             {
                                                 "type": "text",
-                                                "text": result.to_string()
+                                                "text": result.get("transcription").and_then(|v| v.as_str()).unwrap_or("")
                                             }
                                         ]
                                     }),

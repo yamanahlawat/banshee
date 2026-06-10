@@ -9,11 +9,13 @@ mod speech_to_text;
 mod text_to_speech;
 
 use args::{Cli, CommandType};
+use banshee_common::WhisperConfig;
 use clap::Parser;
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    let whisper_config = WhisperConfig::new("ggml-large-v3-turbo-q5_0.bin");
 
     match cli.command {
         CommandType::Serve => {
@@ -22,7 +24,9 @@ async fn main() {
                 return;
             };
             println!("Loading Whisper AI...");
-            let Ok(speech_to_text_engine) = speech_to_text::whisper::WhisperEngine::new() else {
+            let Ok(speech_to_text_engine) =
+                speech_to_text::whisper::WhisperEngine::new(whisper_config)
+            else {
                 eprintln!("Failed to initialize Whisper engine");
                 return;
             };
@@ -33,7 +37,7 @@ async fn main() {
         }
         CommandType::Setup => {
             println!("Download models offline!");
-            let _ = models::download::download_models().await;
+            let _ = models::download::download_models(whisper_config).await;
         }
         CommandType::Status => {
             println!("Querying the running daemon!");

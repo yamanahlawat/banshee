@@ -1,4 +1,4 @@
-use banshee_common::utils::get_models_path;
+use banshee_common::{WhisperConfig, utils::get_models_path};
 use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
 
 pub struct WhisperEngine {
@@ -6,12 +6,12 @@ pub struct WhisperEngine {
 }
 
 impl WhisperEngine {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(whisper_config: WhisperConfig) -> Result<Self, String> {
         let models_path = get_models_path().ok_or(
             "Could not find home directory. Cannot initialize Whisper engine.".to_string(),
         )?;
 
-        let whisper_model_path = models_path.join("ggml-base.en.bin");
+        let whisper_model_path = models_path.join(&whisper_config.model_name);
 
         if !whisper_model_path.exists() {
             return Err(format!(
