@@ -39,6 +39,7 @@ pub const BANSHEE_STATUS: &str = "banshee.status";
 pub const BANSHEE_CONFIGURE: &str = "banshee.configure";
 pub const BANSHEE_GET_TRANSCRIPTION: &str = "banshee.get_transcription";
 
+// Whisper model configuration
 pub struct WhisperConfig {
     pub model_name: String,
     pub download_url: String,
@@ -50,6 +51,24 @@ impl WhisperConfig {
             model_name: model_name.to_string(),
             download_url: format!(
                 "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+                model_name
+            ),
+        }
+    }
+}
+
+// Silero VAD configuration
+pub struct SileroVADConfig {
+    pub model_name: String,
+    pub download_url: String,
+}
+
+impl SileroVADConfig {
+    pub fn new(model_name: &str) -> Self {
+        Self {
+            model_name: model_name.to_string(),
+            download_url: format!(
+                "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/{}",
                 model_name
             ),
         }

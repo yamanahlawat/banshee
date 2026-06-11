@@ -8,9 +8,11 @@ use rdev::{EventType, Key, listen};
 use crate::audio::utils::resample_audio;
 use crate::dictation::type_text;
 use crate::speech_to_text::mailbox::TRANSCRIPTION_MAILBOX;
+use crate::speech_to_text::vad::VADEngine;
 use crate::speech_to_text::whisper::WhisperEngine;
 
 pub static IS_RECORDING: AtomicBool = AtomicBool::new(false);
+static TARGET_SAMPLE_RATE: u32 = 16000;
 
 pub enum HotKeyAction {
     Mailbox,
@@ -20,6 +22,7 @@ pub enum HotKeyAction {
 pub fn hotkey_listener(
     mut consumer: impl Consumer<Item = f32> + Send + 'static,
     speech_to_text_engine: WhisperEngine,
+    mut vad_engine: VADEngine,
     sample_rate: u32,
 ) {
     // Create a mail tube to send messages from rdev to tokio
@@ -83,7 +86,65 @@ pub fn hotkey_listener(
             println!("Downsampling audio from {sample_rate} Hz to 16000 Hz...");
 
             // Downsample the audio by taking every nth sample
-            let final_data = resample_audio(&audio_data, sample_rate, 16000);
+            let final_data = match resample_audio(&audio_data, sample_rate, TARGET_SAMPLE_RATE) {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    continue;
+                }
+            };
+
+            let max_amplitude = final_data.iter().cloned().fold(0.0f32, f32::max);
+            let min_amplitude = final_data.iter().cloned().fold(0.0f32, f32::min);
+            println!("Audio range: [{min_amplitude}, {max_amplitude}]");
+
+            println!("Total audio samples after resampling: {}", final_data.len());
+
+            // Chunk the audio into 512 sample frames and run VAD on each frame until we find speech or run out of audio
+            let mut speech_chunks = 0;
+            let mut total_chunks = 0;
+
+            // Reset the VAD state before processing new audio
+            vad_engine.reset_state();
+
+            for chunk in final_data.chunks(512) {
+                if chunk.len() < 512 {
+                    continue; // Ignore the last chunk if it's smaller than 512 samples
+                }
+                match vad_engine.check_speech(chunk, TARGET_SAMPLE_RATE) {
+                    Ok(probability) => {
+                        if probability > 0.5 {
+                            speech_chunks += 1;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("VAD error: {e}");
+                        continue;
+                    }
+                };
+                total_chunks += 1;
+            }
+
+            println!("VAD detected speech in {speech_chunks} out of {total_chunks} chunks.");
+
+            let speech_ratio = if total_chunks > 0 {
+                speech_chunks as f32 / total_chunks as f32
+            } else {
+                0.0
+            };
+
+            if speech_ratio < 0.1 {
+                println!(
+                    "Only detected speech in {:.2}% of the audio. Skipping transcription.",
+                    speech_ratio * 100.0
+                );
+                continue;
+            }
+
+            if speech_chunks < 2 {
+                println!("No speech detected in the audio. Skipping transcription.");
+                continue;
+            }
 
             // Resample the audio data if necessary
             println!("Transcribing...");

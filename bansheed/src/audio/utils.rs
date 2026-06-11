@@ -5,7 +5,7 @@ pub fn resample_audio(
     audio_data: &[f32],
     original_sample_rate: u32,
     target_sample_rate: u32,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let final_audio = if original_sample_rate == target_sample_rate {
         audio_data.to_vec()
     } else {
@@ -13,7 +13,8 @@ pub fn resample_audio(
         // Setup the input adapter (1 channel, so frames = length)
         let nbr_input_frames = audio_data.len();
 
-        let input_adapter = InterleavedSlice::new(&audio_data, 1, nbr_input_frames).unwrap();
+        let input_adapter = InterleavedSlice::new(&audio_data, 1, nbr_input_frames)
+            .map_err(|e| format!("Failed to create input adapter: {e}"))?;
 
         // Setup the output buffer and adapter
         // Calculate how big the output will be (e.g 1/3 the size), plus some padding
@@ -22,7 +23,8 @@ pub fn resample_audio(
             .ceil() as usize
             + 2048;
         let mut output = vec![0.0f32; out_capacity];
-        let mut output_adapter = InterleavedSlice::new_mut(&mut output, 1, out_capacity).unwrap();
+        let mut output_adapter = InterleavedSlice::new_mut(&mut output, 1, out_capacity)
+            .map_err(|e| format!("Failed to create output adapter: {e}"))?;
 
         // Create the FFT resampler
         let mut resampler = Fft::<f32>::new(
@@ -33,16 +35,16 @@ pub fn resample_audio(
             1,    // Channels (mono)
             FixedSync::Both,
         )
-        .expect("Failed to create resampler");
+        .map_err(|e| format!("Failed to create resampler: {e}"))?;
 
         // Process the entire audio in one go
         let (_frames_read, frames_written) = resampler
             .process_all_into_buffer(&input_adapter, &mut output_adapter, nbr_input_frames, None)
-            .expect("Resampling failed");
+            .map_err(|e| format!("Failed to resample audio: {e}"))?;
 
         // Truncate the output to the actual number of frames written
         output.truncate(frames_written);
         output
     };
-    final_audio
+    Ok(final_audio)
 }

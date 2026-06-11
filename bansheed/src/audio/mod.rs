@@ -35,12 +35,20 @@ pub fn start_audio_capture()
     println!("Default config {:?}", config);
 
     let sample_rate = config.sample_rate();
+    let channels = config.channels();
 
     let stream = device.build_input_stream(
         &config.into(),
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
             if IS_RECORDING.load(Ordering::Relaxed) {
-                producer.push_slice(data);
+                let mono_data: Vec<f32> = if channels > 1 {
+                    data.chunks(channels as usize)
+                        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+                        .collect()
+                } else {
+                    data.to_vec()
+                };
+                producer.push_slice(&mono_data);
             };
         },
         |error| eprintln!("Audio Error: {error}"),

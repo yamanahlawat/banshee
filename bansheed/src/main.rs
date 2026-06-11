@@ -9,13 +9,16 @@ mod speech_to_text;
 mod text_to_speech;
 
 use args::{Cli, CommandType};
-use banshee_common::WhisperConfig;
+use banshee_common::{SileroVADConfig, WhisperConfig};
 use clap::Parser;
+
+use crate::speech_to_text::{vad::VADEngine, whisper::WhisperEngine};
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
     let whisper_config = WhisperConfig::new("ggml-large-v3-turbo-q5_0.bin");
+    let silero_vad_config = SileroVADConfig::new("silero_vad.onnx");
 
     match cli.command {
         CommandType::Serve => {
@@ -24,20 +27,22 @@ async fn main() {
                 return;
             };
             println!("Loading Whisper AI...");
-            let Ok(speech_to_text_engine) =
-                speech_to_text::whisper::WhisperEngine::new(whisper_config)
-            else {
+            let Ok(speech_to_text_engine) = WhisperEngine::new(whisper_config) else {
                 eprintln!("Failed to initialize Whisper engine");
                 return;
             };
-            hotkey::hotkey_listener(consumer, speech_to_text_engine, sample_rate);
+            let Ok(vad_engine) = VADEngine::new(silero_vad_config) else {
+                eprintln!("Failed to initialize VAD engine");
+                return;
+            };
+            hotkey::hotkey_listener(consumer, speech_to_text_engine, vad_engine, sample_rate);
             if let Err(error) = daemon::run().await {
                 eprintln!("Daemon crashed {error}")
             }
         }
         CommandType::Setup => {
             println!("Download models offline!");
-            let _ = models::download::download_models(whisper_config).await;
+            let _ = models::download::download_models(whisper_config, silero_vad_config).await;
         }
         CommandType::Status => {
             println!("Querying the running daemon!");
