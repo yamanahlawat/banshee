@@ -1,5 +1,5 @@
 use ringbuf::traits::Consumer;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use tokio::sync::mpsc;
 
@@ -10,8 +10,8 @@ use crate::dictation::type_text;
 use crate::speech_to_text::mailbox::TRANSCRIPTION_MAILBOX;
 use crate::speech_to_text::vad::VADEngine;
 use crate::speech_to_text::whisper::WhisperEngine;
+use crate::state::DaemonState;
 
-pub static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 static TARGET_SAMPLE_RATE: u32 = 16000;
 
 pub enum HotKeyAction {
@@ -24,6 +24,7 @@ pub fn hotkey_listener(
     speech_to_text_engine: WhisperEngine,
     mut vad_engine: VADEngine,
     sample_rate: u32,
+    daemon_state: Arc<DaemonState>,
 ) {
     // Create a mail tube to send messages from rdev to tokio
     let (sender, mut receiver) = mpsc::channel::<HotKeyAction>(32);
@@ -48,18 +49,19 @@ pub fn hotkey_listener(
 
                 // Track F5
                 EventType::KeyPress(Key::F5) => {
-                    if !IS_RECORDING.swap(true, Ordering::Relaxed) {
+                    if !daemon_state.is_recording() {
                         current_action = if shift_key_pressed {
                             HotKeyAction::Dictate
                         } else {
                             HotKeyAction::Mailbox
                         };
+                        daemon_state.set_recording(true);
                         println!("F5 hotkey detected! Recording Audio...");
                     }
                 }
                 EventType::KeyRelease(Key::F5) => {
                     println!("F5 hotkey released");
-                    IS_RECORDING.store(false, Ordering::Relaxed);
+                    daemon_state.set_recording(false);
                     // Send whichever action we locked in when the key is pressed
                     let action_to_send = match current_action {
                         HotKeyAction::Mailbox => HotKeyAction::Mailbox,

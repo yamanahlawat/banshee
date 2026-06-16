@@ -1,10 +1,8 @@
 use banshee_common::{
-    BANSHEE_GET_TRANSCRIPTION, BANSHEE_SPEAK, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
+    BANSHEE_GET_TRANSCRIPTION, BANSHEE_SPEAK, JsonRpcError, JsonRpcRequest, JsonRpcResponse, utils,
 };
 use serde_json;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-pub mod utils;
 
 #[tokio::main]
 async fn main() {

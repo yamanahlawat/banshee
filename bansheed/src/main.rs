@@ -6,10 +6,13 @@ mod dictation;
 mod hotkey;
 mod models;
 mod speech_to_text;
+mod state;
 mod text_to_speech;
 
+use std::sync::Arc;
+
 use args::{Cli, CommandType};
-use banshee_common::{SileroVADConfig, WhisperConfig};
+use banshee_common::{SileroVADConfig, WhisperConfig, utils};
 use clap::Parser;
 
 use crate::speech_to_text::{vad::VADEngine, whisper::WhisperEngine};
@@ -19,10 +22,18 @@ async fn main() {
     let cli = Cli::parse();
     let whisper_config = WhisperConfig::new("ggml-large-v3-turbo-q5_0.bin");
     let silero_vad_config = SileroVADConfig::new("silero_vad.onnx");
-
+    let daemon_state = Arc::new(state::DaemonState::new(
+        env!("CARGO_PKG_VERSION"),
+        whisper_config.model_name.clone(),
+        silero_vad_config.model_name.clone(),
+        None,
+    ));
     match cli.command {
         CommandType::Serve => {
-            let Ok((_stream, consumer, sample_rate)) = audio::start_audio_capture() else {
+            let audio_capture_state = Arc::clone(&daemon_state);
+            let Ok((_stream, consumer, sample_rate)) =
+                audio::start_audio_capture(audio_capture_state)
+            else {
                 eprintln!("Failed to start audio capture");
                 return;
             };
@@ -35,8 +46,16 @@ async fn main() {
                 eprintln!("Failed to initialize VAD engine");
                 return;
             };
-            hotkey::hotkey_listener(consumer, speech_to_text_engine, vad_engine, sample_rate);
-            if let Err(error) = daemon::run().await {
+
+            let hotkey_listener_state = Arc::clone(&daemon_state);
+            hotkey::hotkey_listener(
+                consumer,
+                speech_to_text_engine,
+                vad_engine,
+                sample_rate,
+                hotkey_listener_state,
+            );
+            if let Err(error) = daemon::run(&daemon_state).await {
                 eprintln!("Daemon crashed {error}")
             }
         }
@@ -45,13 +64,32 @@ async fn main() {
             let _ = models::download::download_models(whisper_config, silero_vad_config).await;
         }
         CommandType::Status => {
-            println!("Querying the running daemon!");
+            match utils::call_daemon(banshee_common::BANSHEE_STATUS, serde_json::json!({})).await {
+                Ok(result) => println!("Daemon status: {result:?}"),
+                Err(error) => eprintln!("Failed to get daemon status: {error}"),
+            }
         }
         CommandType::Listen => {
-            println!("Getting latest transcription!");
+            match utils::call_daemon(
+                banshee_common::BANSHEE_GET_TRANSCRIPTION,
+                serde_json::json!({}),
+            )
+            .await
+            {
+                Ok(result) => println!("Transcription: {result:?}"),
+                Err(error) => eprintln!("Failed to get transcription: {error}"),
+            }
         }
         CommandType::Speak { text } => {
-            println!("Telling the daemon to speak {text}");
+            match utils::call_daemon(
+                banshee_common::BANSHEE_SPEAK,
+                serde_json::json!({ "text": text }),
+            )
+            .await
+            {
+                Ok(result) => println!("Speak command result: {result:?}"),
+                Err(error) => eprintln!("Failed to send speak command: {error}"),
+            }
         }
     }
 }
