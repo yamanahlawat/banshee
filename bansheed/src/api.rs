@@ -17,10 +17,9 @@ pub fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> Jso
                     let clean_text = sanitize(&raw_text);
                     println!("The sanitized text: {clean_text}");
 
-                    std::process::Command::new("say")
-                        .arg(&clean_text)
-                        .spawn()
-                        .expect("Failed to run 'say' command");
+                    if let Err(e) = std::process::Command::new("say").arg(&clean_text).spawn() {
+                        eprintln!("Failed to run 'say' command: {e}");
+                    }
                 }
             }
             JsonRpcResponse::Success {
@@ -30,7 +29,10 @@ pub fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> Jso
             }
         }
         BANSHEE_GET_TRANSCRIPTION => {
-            let transcription_text = TRANSCRIPTION_MAILBOX.lock().unwrap().take();
+            let transcription_text = TRANSCRIPTION_MAILBOX
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
             JsonRpcResponse::Success {
                 jsonrpc: "2.0".to_string(),
                 result: serde_json::json!({"ok": true, "transcription": transcription_text}),

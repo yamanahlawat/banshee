@@ -1,6 +1,7 @@
 mod api;
 mod args;
 mod audio;
+mod config;
 mod daemon;
 mod dictation;
 mod hotkey;
@@ -15,17 +16,27 @@ use args::{Cli, CommandType};
 use banshee_common::{SileroVADConfig, WhisperConfig, utils};
 use clap::Parser;
 
-use crate::speech_to_text::{vad::VADEngine, whisper::WhisperEngine};
+use crate::{
+    config::Config,
+    speech_to_text::{vad::VADEngine, whisper::WhisperEngine},
+};
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let whisper_config = WhisperConfig::new("ggml-large-v3-turbo-q5_0.bin");
-    let silero_vad_config = SileroVADConfig::new("silero_vad.onnx");
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Failed to load config: {error}");
+            return;
+        }
+    };
+    let whisper_config = WhisperConfig::new(&config.stt_model);
+    let silero_vad_config = SileroVADConfig::new(&config.vad_model);
     let daemon_state = Arc::new(state::DaemonState::new(
         env!("CARGO_PKG_VERSION"),
-        whisper_config.model_name.clone(),
-        silero_vad_config.model_name.clone(),
+        config.stt_model,
+        config.vad_model,
         None,
     ));
     match cli.command {
