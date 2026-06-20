@@ -1,9 +1,13 @@
-use std::{sync::atomic::AtomicBool, time::Instant};
+use std::{
+    sync::atomic::{AtomicBool, AtomicU32},
+    time::Instant,
+};
 
 pub struct DaemonState {
     version: &'static str,
     stt_model: String,
     vad_model: String,
+    vad_threshold: AtomicU32,
     audio_device: Option<String>,
     recording: AtomicBool,
     speaking: AtomicBool,
@@ -15,12 +19,14 @@ impl DaemonState {
         version: &'static str,
         stt_model: String,
         vad_model: String,
+        initial_vad_threshold: f32,
         audio_device: Option<String>,
     ) -> Self {
         Self {
             version,
             stt_model,
             vad_model,
+            vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
             audio_device,
             recording: AtomicBool::new(false),
             speaking: AtomicBool::new(false),
@@ -64,5 +70,17 @@ impl DaemonState {
 
     pub fn audio_device(&self) -> Option<&str> {
         self.audio_device.as_deref()
+    }
+
+    pub fn set_vad_threshold(&self, threshold: f32) {
+        self.vad_threshold
+            .store(threshold.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn vad_threshold(&self) -> f32 {
+        let bits = self
+            .vad_threshold
+            .load(std::sync::atomic::Ordering::Relaxed);
+        f32::from_bits(bits)
     }
 }

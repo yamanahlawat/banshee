@@ -1,7 +1,6 @@
 use banshee_common::{
     BANSHEE_GET_TRANSCRIPTION, BANSHEE_SPEAK, JsonRpcError, JsonRpcRequest, JsonRpcResponse, utils,
 };
-use serde_json;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::main]
@@ -130,7 +129,7 @@ async fn main() {
                 },
             };
             if let Ok(mut response_string) = serde_json::to_string(&response) {
-                response_string.push_str("\n");
+                response_string.push('\n');
                 let _ = stdout.write_all(response_string.as_bytes()).await;
             }
         }

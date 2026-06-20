@@ -1,6 +1,5 @@
 use banshee_common::utils::get_socket_path;
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
-use serde_json;
 use std::fs;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

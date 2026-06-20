@@ -8,26 +8,18 @@ use crate::error::BansheeError;
 use crate::{JsonRpcRequest, JsonRpcResponse};
 
 pub fn get_socket_path() -> Option<PathBuf> {
-    let Some(base_path) = dirs::home_dir() else {
-        return None;
-    };
-
+    let base_path = dirs::home_dir()?;
     Some(base_path.join(".banshee").join("banshee.sock"))
 }
 
 pub fn get_models_path() -> Option<PathBuf> {
-    let Some(base_path) = dirs::home_dir() else {
-        return None;
-    };
+    let base_path = dirs::home_dir()?;
 
     Some(base_path.join(".banshee").join("models"))
 }
 
 pub fn get_config_path() -> Option<PathBuf> {
-    let Some(base_path) = dirs::home_dir() else {
-        return None;
-    };
-
+    let base_path = dirs::home_dir()?;
     Some(base_path.join(".banshee").join("config.toml"))
 }
 

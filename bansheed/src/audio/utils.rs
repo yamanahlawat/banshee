@@ -13,7 +13,7 @@ pub fn resample_audio(
         // Setup the input adapter (1 channel, so frames = length)
         let nbr_input_frames = audio_data.len();
 
-        let input_adapter = InterleavedSlice::new(&audio_data, 1, nbr_input_frames)
+        let input_adapter = InterleavedSlice::new(audio_data, 1, nbr_input_frames)
             .map_err(|e| format!("Failed to create input adapter: {e}"))?;
 
         // Setup the output buffer and adapter

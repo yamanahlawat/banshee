@@ -5,7 +5,6 @@ use serde::Deserialize;
 #[serde(default)]
 pub struct Config {
     pub stt_model: String,
-    pub sample_rate: u32,
     pub vad_model: String,
     pub vad_threshold: f32,
 }
@@ -14,7 +13,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             stt_model: "ggml-large-v3-turbo-q5_0.bin".to_string(),
-            sample_rate: 16000,
             vad_model: "silero_vad.onnx".to_string(),
             vad_threshold: 0.5,
         }

@@ -37,6 +37,7 @@ async fn main() {
         env!("CARGO_PKG_VERSION"),
         config.stt_model,
         config.vad_model,
+        config.vad_threshold,
         None,
     ));
     match cli.command {

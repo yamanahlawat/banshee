@@ -12,12 +12,13 @@ use crate::speech_to_text::vad::VADEngine;
 use crate::speech_to_text::whisper::WhisperEngine;
 use crate::state::DaemonState;
 
-static TARGET_SAMPLE_RATE: u32 = 16000;
-
+#[derive(Clone, Copy)]
 pub enum HotKeyAction {
     Mailbox,
     Dictate,
 }
+
+const TARGET_SAMPLE_RATE: u32 = 16000;
 
 pub fn hotkey_listener(
     mut consumer: impl Consumer<Item = f32> + Send + 'static,
@@ -28,6 +29,8 @@ pub fn hotkey_listener(
 ) {
     // Create a mail tube to send messages from rdev to tokio
     let (sender, mut receiver) = mpsc::channel::<HotKeyAction>(32);
+
+    let task_state = Arc::clone(&daemon_state);
 
     // Spawn a heavy thread for the global hotkey listener
     thread::spawn(|| {
@@ -63,11 +66,7 @@ pub fn hotkey_listener(
                     println!("F5 hotkey released");
                     daemon_state.set_recording(false);
                     // Send whichever action we locked in when the key is pressed
-                    let action_to_send = match current_action {
-                        HotKeyAction::Mailbox => HotKeyAction::Mailbox,
-                        HotKeyAction::Dictate => HotKeyAction::Dictate,
-                    };
-                    let _ = sender.blocking_send(action_to_send);
+                    let _ = sender.blocking_send(current_action);
                 }
                 _ => (), // Ignore mouse movements
             }
@@ -85,7 +84,7 @@ pub fn hotkey_listener(
             let mut audio_data = Vec::new();
             audio_data.extend(consumer.pop_iter());
 
-            println!("Downsampling audio from {sample_rate} Hz to 16000 Hz...");
+            println!("Downsampling audio from {sample_rate} Hz to {TARGET_SAMPLE_RATE} Hz...");
 
             // Downsample the audio by taking every nth sample
             let final_data = match resample_audio(&audio_data, sample_rate, TARGET_SAMPLE_RATE) {
@@ -108,6 +107,7 @@ pub fn hotkey_listener(
 
             // Reset the VAD state before processing new audio
             vad_engine.reset_state();
+            let vad_threshold = task_state.vad_threshold();
 
             for chunk in final_data.chunks(512) {
                 if chunk.len() < 512 {
@@ -115,7 +115,7 @@ pub fn hotkey_listener(
                 }
                 match vad_engine.check_speech(chunk, TARGET_SAMPLE_RATE) {
                     Ok(probability) => {
-                        if probability > 0.5 {
+                        if probability > vad_threshold {
                             speech_chunks += 1;
                         }
                     }
