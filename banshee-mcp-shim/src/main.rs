@@ -1,5 +1,5 @@
 use banshee_common::{
-    BANSHEE_GET_TRANSCRIPTION, BANSHEE_SPEAK, JsonRpcError, JsonRpcRequest, JsonRpcResponse, utils,
+    BANSHEE_GET_TRANSCRIPTION, BANSHEE_SPEAK, JsonRpcRequest, JsonRpcResponse, utils,
 };
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -14,26 +14,21 @@ async fn main() {
     while let Ok(Some(line)) = reader.next_line().await {
         if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(&line) {
             let response = match request.method.as_str() {
-                "ping" => JsonRpcResponse::Success {
-                    jsonrpc: "2.0".to_string(),
-                    result: serde_json::json!({"pong": true}),
-                    id: request.id,
-                },
-                "initialize" => JsonRpcResponse::Success {
-                    jsonrpc: "2.0".to_string(),
-                    result: serde_json::json!({
+                "ping" => JsonRpcResponse::success(request.id, serde_json::json!({"pong": true})),
+                "initialize" => JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({
                         "protocolVersion": "2024-11-05",
                         "capabilities": {
                             "tools": {}
                         },
                         "serverInfo": {"name": "banshee", "version": "0.1.0"}
                     }),
-                    id: request.id,
-                },
+                ),
                 "notifications/initialized" => continue,
-                "tools/list" => JsonRpcResponse::Success {
-                    jsonrpc: "2.0".to_string(),
-                    result: serde_json::json!({
+                "tools/list" => JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({
                         "tools": [
                             {
                                 "name": "speak_status",
@@ -54,8 +49,7 @@ async fn main() {
                             }
                         ]
                     }),
-                    id: request.id,
-                },
+                ),
                 "tools/call" => {
                     let params = request.params.as_ref();
                     let tool_name = params.and_then(|p| p.get("name")).and_then(|n| n.as_str());
@@ -68,9 +62,9 @@ async fn main() {
                             let daemon_response =
                                 utils::call_daemon(BANSHEE_SPEAK, arguments).await;
                             match daemon_response {
-                                Ok(result) => JsonRpcResponse::Success {
-                                    jsonrpc: "2.0".to_string(),
-                                    result: serde_json::json!({
+                                Ok(result) => JsonRpcResponse::success(
+                                    request.id,
+                                    serde_json::json!({
                                         "content": [
                                             {
                                                 "type": "text",
@@ -78,25 +72,19 @@ async fn main() {
                                             }
                                         ]
                                     }),
-                                    id: request.id,
-                                },
-                                Err(error) => JsonRpcResponse::Error {
-                                    jsonrpc: "2.0".to_string(),
-                                    error: JsonRpcError {
-                                        code: -32603,
-                                        message: error.to_string(),
-                                    },
-                                    id: request.id,
-                                },
+                                ),
+                                Err(error) => {
+                                    JsonRpcResponse::error(request.id, -32603, error.to_string())
+                                }
                             }
                         }
                         Some(name) if name.ends_with("listen_for_prompt") => {
                             let daemon_response =
                                 utils::call_daemon(BANSHEE_GET_TRANSCRIPTION, arguments).await;
                             match daemon_response {
-                                Ok(result) => JsonRpcResponse::Success {
-                                    jsonrpc: "2.0".to_string(),
-                                    result: serde_json::json!({
+                                Ok(result) => JsonRpcResponse::success(
+                                    request.id,
+                                    serde_json::json!({
                                         "content": [
                                             {
                                                 "type": "text",
@@ -104,29 +92,17 @@ async fn main() {
                                             }
                                         ]
                                     }),
-                                    id: request.id,
-                                },
-                                Err(error) => JsonRpcResponse::Error {
-                                    jsonrpc: "2.0".to_string(),
-                                    error: JsonRpcError {
-                                        code: -32603,
-                                        message: error.to_string(),
-                                    },
-                                    id: request.id,
-                                },
+                                ),
+
+                                Err(error) => {
+                                    JsonRpcResponse::error(request.id, -32603, error.to_string())
+                                }
                             }
                         }
                         _ => continue,
                     }
                 }
-                _ => JsonRpcResponse::Error {
-                    jsonrpc: "2.0".to_string(),
-                    error: JsonRpcError {
-                        code: -32601,
-                        message: "Method not found!".to_string(),
-                    },
-                    id: request.id,
-                },
+                _ => JsonRpcResponse::error(request.id, -32601, "Method not found!"),
             };
             if let Ok(mut response_string) = serde_json::to_string(&response) {
                 response_string.push('\n');
