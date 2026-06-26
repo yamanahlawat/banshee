@@ -35,22 +35,29 @@ hands it off to an LLM. No cloud, no API keys, no audio leaving your laptop.
 
 ## Install
 
+Install Banshee onto your `PATH` so you can use the `banshee` command from
+anywhere:
+
 ```bash
-git clone https://github.com/<your-username>/banshee.git
+git clone https://github.com/yamanahlawat/banshee.git
 cd banshee
-cargo build --release --features apple
+cargo install --path bansheed --features apple   # installs the `banshee` command
+cargo install --path banshee-mcp-shim            # installs the MCP shim (optional)
 ```
 
-The `apple` feature turns on Metal and CoreML acceleration for Whisper. Your
-binary ends up at `target/release/bansheed` (or run
-`cargo install --path bansheed --features apple` if you'd rather install it).
+The `apple` feature turns on Metal and CoreML acceleration for Whisper. Both
+binaries land in `~/.cargo/bin` (which rustup already adds to your `PATH`), so
+from here on you can just run `banshee`.
+
+Prefer to build without installing? `cargo build --release --features apple`
+drops the binaries in `target/release/` instead.
 
 ## Setup
 
 **1. Download the models** (Whisper and Silero VAD) into `~/.banshee/models/`:
 
 ```bash
-bansheed setup
+banshee setup
 ```
 
 **2. Grant macOS permissions.** Banshee needs two of them, otherwise it quietly
@@ -61,7 +68,7 @@ fails to record or type:
   transcribed text.
 
 You'll find both under **System Settings > Privacy & Security**. Add your
-terminal (or the `bansheed` binary) to the *Microphone* and *Accessibility*
+terminal (or the `banshee` binary) to the *Microphone* and *Accessibility*
 lists.
 
 ## Usage
@@ -69,13 +76,13 @@ lists.
 Start the daemon:
 
 ```bash
-bansheed serve
+banshee serve
 ```
 
 With the daemon running, the global hotkeys are:
 
 - **Hold `F5`** to record. On release, the transcription is saved to the
-  mailbox, and you can grab it later with `bansheed listen`.
+  mailbox, and you can grab it later with `banshee listen`.
 - **Hold `Shift + F5`** to record. On release, the transcription is typed
   straight into the app you're focused on (this is dictation mode).
 
@@ -83,11 +90,11 @@ The CLI commands all talk to the running daemon over its socket:
 
 | Command | What it does |
 | --- | --- |
-| `bansheed serve` | Start the background daemon |
-| `bansheed setup` | Download the required models |
-| `bansheed status` | Show daemon health and state |
-| `bansheed listen` | Print the latest mailbox transcription |
-| `bansheed speak "<text>"` | Speak some text aloud |
+| `banshee serve` | Start the background daemon |
+| `banshee setup` | Download the required models |
+| `banshee status` | Show daemon health and state |
+| `banshee listen` | Print the latest mailbox transcription |
+| `banshee speak "<text>"` | Speak some text aloud |
 
 ## Configuration
 
@@ -108,24 +115,25 @@ RPC, no restart needed.
 `stt_model` can be any of the `ggml` Whisper models from the
 [whisper.cpp model repo](https://huggingface.co/ggerganov/whisper.cpp/tree/main).
 Browse the list there, pick the one that fits your accuracy and speed needs,
-set its filename as your `stt_model`, and run `bansheed setup` to download it.
+set its filename as your `stt_model`, and run `banshee setup` to download it.
 Smaller models (like `ggml-base.en.bin`) are faster and lighter; larger ones
 (like the default `ggml-large-v3-turbo-q5_0.bin`) are more accurate but heavier.
 
 ## MCP integration
 
 `banshee-mcp-shim` is an MCP stdio server that bridges LLM hosts to the daemon
-and exposes speak and listen tools. It needs `bansheed serve` to be running.
+and exposes speak and listen tools. It needs `banshee serve` to be running.
 
-The build step above also produces the shim at `target/release/banshee-mcp-shim`.
-It works with any MCP-capable tool, like Claude Code, OpenCode, Cursor, and
-others. Most of them use the same `mcpServers` config shape:
+If you installed it with `cargo install` above, the shim lives at
+`~/.cargo/bin/banshee-mcp-shim`. It works with any MCP-capable tool, like Claude
+Code, OpenCode, Cursor, and others. Most of them use the same `mcpServers`
+config shape:
 
 ```json
 {
   "mcpServers": {
     "banshee": {
-      "command": "/absolute/path/to/banshee/target/release/banshee-mcp-shim"
+      "command": "banshee-mcp-shim"
     }
   }
 }
@@ -133,8 +141,10 @@ others. Most of them use the same `mcpServers` config shape:
 
 Each tool keeps this config in its own spot (for example, Cursor uses
 `~/.cursor/mcp.json`, and Claude Code lets you add it with `claude mcp add`), so
-check your tool's docs for where the MCP config lives. Use the absolute path to
-the binary, restart the tool, and the speak and listen tools will show up.
+check your tool's docs for where the MCP config lives. If your tool doesn't pick
+up the binary from your `PATH`, use the full path
+(`~/.cargo/bin/banshee-mcp-shim`) instead. Restart the tool, and the speak and
+listen tools will show up.
 
 ## Architecture
 
