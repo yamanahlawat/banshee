@@ -3,7 +3,12 @@ name = "bansheed"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "banshee"
+path = "src/main.rs"
+
 [dependencies]
+anyhow = "1.0.102"
 arboard = "3.6.1"
 audioadapter-buffers = "3.0.0"
 banshee-common = { version = "0.1.0", path = "../banshee-common" }

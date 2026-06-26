@@ -10,13 +10,13 @@ use crate::text_to_speech::sanitizer::sanitize;
 pub fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     match request.method.as_str() {
         BANSHEE_SPEAK => {
-            daemon_state.set_speaking(true);
             if let Some(params) = &request.params
                 && let Some(raw_text) = params.get("text").and_then(|v| v.as_str())
             {
                 let clean_text = sanitize(raw_text);
                 println!("The sanitized text: {clean_text}");
 
+                // TODO: say is a temporary shim, replaced by a proper TTS engine in the future
                 if let Err(e) = std::process::Command::new("say").arg(&clean_text).spawn() {
                     eprintln!("Failed to run 'say' command: {e}");
                 }
@@ -70,7 +70,6 @@ pub fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> Jso
                 "vad_model": daemon_state.vad_model(),
                 "audio_device": daemon_state.audio_device(),
                 "recording": daemon_state.is_recording(),
-                "speaking": daemon_state.is_speaking(),
                 "uptime_seconds": &daemon_state.uptime().as_secs(),
                 "vad_threshold": daemon_state.vad_threshold(),
             }),

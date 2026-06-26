@@ -23,3 +23,17 @@ pub enum BansheeError {
     #[error("Internal error: {0}")]
     Other(String),
 }
+
+impl BansheeError {
+    pub fn rpc_code(&self) -> i32 {
+        match self {
+            BansheeError::NoAudioDevice => -32000,
+            BansheeError::Rpc { code, .. } => *code,
+            BansheeError::Transcription(_)
+            | BansheeError::Io(_)
+            | BansheeError::Serde(_)
+            | BansheeError::Toml(_)
+            | BansheeError::Other(_) => -32603,
+        }
+    }
+}
