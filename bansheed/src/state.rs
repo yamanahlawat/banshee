@@ -1,5 +1,8 @@
 use std::{
-    sync::atomic::{AtomicBool, AtomicU32},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, AtomicU32},
+    },
     time::Instant,
 };
 
@@ -8,9 +11,8 @@ pub struct DaemonState {
     stt_model: String,
     vad_model: String,
     vad_threshold: AtomicU32,
-    audio_device: Option<String>,
+    audio_device: OnceLock<String>,
     recording: AtomicBool,
-    speaking: AtomicBool,
     started_at: Instant,
 }
 
@@ -20,36 +22,25 @@ impl DaemonState {
         stt_model: String,
         vad_model: String,
         initial_vad_threshold: f32,
-        audio_device: Option<String>,
     ) -> Self {
         Self {
             version,
             stt_model,
             vad_model,
             vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
-            audio_device,
+            audio_device: OnceLock::new(),
             recording: AtomicBool::new(false),
-            speaking: AtomicBool::new(false),
             started_at: Instant::now(),
         }
     }
 
     pub fn is_recording(&self) -> bool {
-        self.recording.load(std::sync::atomic::Ordering::SeqCst)
+        self.recording.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn set_recording(&self, value: bool) {
         self.recording
-            .store(value, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn is_speaking(&self) -> bool {
-        self.speaking.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn set_speaking(&self, value: bool) {
-        self.speaking
-            .store(value, std::sync::atomic::Ordering::SeqCst);
+            .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn uptime(&self) -> std::time::Duration {
@@ -69,7 +60,11 @@ impl DaemonState {
     }
 
     pub fn audio_device(&self) -> Option<&str> {
-        self.audio_device.as_deref()
+        self.audio_device.get().map(String::as_str)
+    }
+
+    pub fn set_audio_device(&self, device_name: String) {
+        let _ = self.audio_device.set(device_name);
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {

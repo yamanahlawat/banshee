@@ -1,4 +1,4 @@
-use banshee_common::{SileroVADConfig, utils::get_models_path};
+use banshee_common::{SileroVADConfig, error::BansheeError, utils::get_models_path};
 use ort::session::{Session, builder::GraphOptimizationLevel};
 
 // Silero v5 expects each 512-sample chunk to be prefixed with the last 64
@@ -14,29 +14,37 @@ pub struct VADEngine {
 }
 
 impl VADEngine {
-    pub fn new(vad_config: SileroVADConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let model_path = get_models_path()
-            .ok_or("Could not find home directory. Cannot initialize VAD engine.")?;
+    pub fn new(vad_config: SileroVADConfig) -> Result<Self, BansheeError> {
+        let model_path = get_models_path().ok_or_else(|| {
+            BansheeError::Other(
+                "Could not find home directory. Cannot initialize VAD engine.".to_string(),
+            )
+        })?;
 
         let vad_model_path = model_path.join(&vad_config.model_name);
 
         if !vad_model_path.exists() {
-            return Err(format!(
+            return Err(BansheeError::Other(format!(
                 "VAD model not found at {:?}. Cannot initialize VAD engine.",
                 vad_model_path
-            )
-            .into());
+            )));
         }
 
-        let vad_model_path_str = vad_model_path.to_str().ok_or(format!(
-            "Failed to convert VAD model path {:?} to string.",
-            vad_model_path
-        ))?;
+        let vad_model_path_str = vad_model_path.to_str().ok_or_else(|| {
+            BansheeError::Other(format!(
+                "Failed to convert VAD model path {:?} to string.",
+                vad_model_path
+            ))
+        })?;
 
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::All)?
-            .with_intra_threads(4)?
-            .commit_from_file(vad_model_path_str)?;
+        let session = Session::builder()
+            .map_err(|e| BansheeError::Other(e.to_string()))?
+            .with_optimization_level(GraphOptimizationLevel::All)
+            .map_err(|e| BansheeError::Other(e.to_string()))?
+            .with_intra_threads(4)
+            .map_err(|e| BansheeError::Other(e.to_string()))?
+            .commit_from_file(vad_model_path_str)
+            .map_err(|e| BansheeError::Other(e.to_string()))?;
 
         let state = ndarray::Array3::<f32>::zeros((2, 1, 128));
         let context = vec![0.0f32; CONTEXT_SIZE];
@@ -51,20 +59,24 @@ impl VADEngine {
         &mut self,
         audio_data: &[f32],
         target_sample_rate: u32,
-    ) -> Result<f32, Box<dyn std::error::Error>> {
+    ) -> Result<f32, BansheeError> {
         let mut input = Vec::with_capacity(CONTEXT_SIZE + audio_data.len());
         input.extend_from_slice(&self.context);
         input.extend_from_slice(audio_data);
 
-        let input_tensor = ort::value::Tensor::from_array(ndarray::Array2::from_shape_vec(
-            (1, input.len()),
-            input,
-        )?)?;
+        let input_tensor = ort::value::Tensor::from_array(
+            ndarray::Array2::from_shape_vec((1, input.len()), input)
+                .map_err(|e| BansheeError::Other(e.to_string()))?,
+        )
+        .map_err(|e| BansheeError::Other(e.to_string()))?;
+
         let sample_rate_tensor = ort::value::Tensor::from_array(ndarray::Array1::from_vec(vec![
             target_sample_rate as i64,
-        ]))?;
+        ]))
+        .map_err(|e| BansheeError::Other(e.to_string()))?;
 
-        let state_tensor = ort::value::Tensor::from_array(self.state.clone())?;
+        let state_tensor = ort::value::Tensor::from_array(self.state.clone())
+            .map_err(|e| BansheeError::Other(e.to_string()))?;
 
         let inputs = ort::inputs![
             "input" => input_tensor,
@@ -72,14 +84,22 @@ impl VADEngine {
             "state" => state_tensor
         ];
 
-        let outputs = self.session.run(inputs)?;
-        let (_, probability_data) = outputs["output"].try_extract_tensor::<f32>()?;
+        let outputs = self
+            .session
+            .run(inputs)
+            .map_err(|e| BansheeError::Other(e.to_string()))?;
+        let (_, probability_data) = outputs["output"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| BansheeError::Other(e.to_string()))?;
 
         // Grab the raw float array for the new state
-        let (_, state_data) = outputs["stateN"].try_extract_tensor::<f32>()?;
+        let (_, state_data) = outputs["stateN"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| BansheeError::Other(e.to_string()))?;
 
         // Re-build our Array3 from the raw floats!
-        self.state = ndarray::Array3::from_shape_vec((2, 1, 128), state_data.to_vec())?;
+        self.state = ndarray::Array3::from_shape_vec((2, 1, 128), state_data.to_vec())
+            .map_err(|e| BansheeError::Other(e.to_string()))?;
 
         // Carry the tail of this chunk as context for the next one
         self.context = audio_data[audio_data.len() - CONTEXT_SIZE..].to_vec();

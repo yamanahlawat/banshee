@@ -1,4 +1,4 @@
-use banshee_common::{WhisperConfig, utils::get_models_path};
+use banshee_common::{WhisperConfig, error::BansheeError, utils::get_models_path};
 use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
 
 pub struct WhisperEngine {
@@ -6,37 +6,46 @@ pub struct WhisperEngine {
 }
 
 impl WhisperEngine {
-    pub fn new(whisper_config: WhisperConfig) -> Result<Self, String> {
-        let models_path = get_models_path().ok_or(
-            "Could not find home directory. Cannot initialize Whisper engine.".to_string(),
-        )?;
+    pub fn new(whisper_config: WhisperConfig) -> Result<Self, BansheeError> {
+        let models_path = get_models_path().ok_or_else(|| {
+            BansheeError::Other(
+                "Could not find home directory. Cannot initialize Whisper engine.".to_string(),
+            )
+        })?;
 
         let whisper_model_path = models_path.join(&whisper_config.model_name);
 
         if !whisper_model_path.exists() {
-            return Err(format!(
+            return Err(BansheeError::Other(format!(
                 "Whisper model not found at {:?}. Cannot initialize Whisper engine.",
-                whisper_model_path,
-            ));
+                whisper_model_path
+            )));
         }
 
-        let whisper_model_path_str = whisper_model_path.to_str().ok_or(format!(
-            "Failed to convert model path {:?} to string.",
-            whisper_model_path
-        ))?;
+        let whisper_model_path_str = whisper_model_path.to_str().ok_or_else(|| {
+            BansheeError::Other(format!(
+                "Failed to convert model path {:?} to string.",
+                whisper_model_path
+            ))
+        })?;
 
         let context = WhisperContext::new_with_params(
             whisper_model_path_str,
             WhisperContextParameters::default(),
         )
-        .map_err(|e| format!("Failed to initialize Whisper context: {:?}", e))?;
+        .map_err(|e| {
+            BansheeError::Other(format!("Failed to initialize Whisper context: {:?}", e))
+        })?;
 
         Ok(Self { context })
     }
 
-    pub fn transcribe(&self, audio_data: &[f32]) -> Result<String, String> {
+    pub fn transcribe(&self, audio_data: &[f32]) -> Result<String, BansheeError> {
         // Holds the temporary memory for a single transcription
-        let mut state = self.context.create_state().map_err(|e| e.to_string())?;
+        let mut state = self
+            .context
+            .create_state()
+            .map_err(|e| BansheeError::Transcription(e.to_string()))?;
 
         // Setup the inference parameters
         // Greedy Sampling is the fastest way to transcribe
@@ -49,7 +58,9 @@ impl WhisperEngine {
         params.set_no_context(true);
 
         // Run the inference
-        state.full(params, audio_data).map_err(|e| e.to_string())?;
+        state
+            .full(params, audio_data)
+            .map_err(|e| BansheeError::Transcription(e.to_string()))?;
 
         // Get the transcribed text
         let mut transcription = String::new();
@@ -68,6 +79,6 @@ impl WhisperEngine {
             transcription.push_str(&segment.to_string());
         }
 
-        Ok(transcription)
+        Ok(transcription.trim().to_string())
     }
 }

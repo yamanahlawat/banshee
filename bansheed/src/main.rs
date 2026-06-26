@@ -38,7 +38,6 @@ async fn main() {
         config.stt_model,
         config.vad_model,
         config.vad_threshold,
-        None,
     ));
     match cli.command {
         CommandType::Serve => {
@@ -77,7 +76,10 @@ async fn main() {
         }
         CommandType::Status => {
             match utils::call_daemon(banshee_common::BANSHEE_STATUS, serde_json::json!({})).await {
-                Ok(result) => println!("Daemon status: {result:?}"),
+                Ok(result) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+                ),
                 Err(error) => eprintln!("Failed to get daemon status: {error}"),
             }
         }
