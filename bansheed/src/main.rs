@@ -4,58 +4,88 @@ mod audio;
 mod config;
 mod daemon;
 mod dictation;
+mod history;
 mod hotkey;
 mod models;
 mod speech_to_text;
 mod state;
 mod text_to_speech;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use args::{Cli, CommandType};
-use banshee_common::{SileroVADConfig, WhisperConfig, utils};
+use banshee_common::{
+    SileroVADConfig, WhisperConfig,
+    error::BansheeError,
+    utils::{self, get_db_path},
+};
 use clap::Parser;
 
 use crate::{
     config::Config,
+    history::TranscriptionHistory,
     speech_to_text::{vad::VADEngine, whisper::WhisperEngine},
 };
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), BansheeError> {
     let cli = Cli::parse();
     let config = match Config::load() {
         Ok(config) => config,
         Err(error) => {
             eprintln!("Failed to load config: {error}");
-            return;
+            return Err(error);
         }
     };
     let whisper_config = WhisperConfig::new(&config.stt_model);
     let silero_vad_config = SileroVADConfig::new(&config.vad_model);
+
+    let db_connection = if config.save_history {
+        let db_path = get_db_path()
+            .ok_or_else(|| BansheeError::Other("Failed to get database path".to_string()))?;
+        let Ok(connection) = rusqlite::Connection::open(db_path) else {
+            eprintln!("Failed to open database");
+            return Err(BansheeError::Other("Failed to open database".to_string()));
+        };
+        if let Err(error) = TranscriptionHistory::create_table(&connection) {
+            eprintln!("Failed to initialize transcription history: {error}");
+            return Err(BansheeError::Other(
+                "Failed to initialize transcription history".to_string(),
+            ));
+        }
+        Some(Mutex::new(connection))
+    } else {
+        None
+    };
+
     let daemon_state = Arc::new(state::DaemonState::new(
         env!("CARGO_PKG_VERSION"),
         config.stt_model,
         config.vad_model,
         config.vad_threshold,
+        db_connection,
     ));
+
     match cli.command {
         CommandType::Serve => {
             let audio_capture_state = Arc::clone(&daemon_state);
             let Ok((_stream, consumer, sample_rate)) =
                 audio::start_audio_capture(audio_capture_state)
             else {
-                eprintln!("Failed to start audio capture");
-                return;
+                return Err(BansheeError::Other(
+                    "Failed to start audio capture".to_string(),
+                ));
             };
             println!("Loading Whisper AI...");
             let Ok(speech_to_text_engine) = WhisperEngine::new(whisper_config) else {
-                eprintln!("Failed to initialize Whisper engine");
-                return;
+                return Err(BansheeError::Other(
+                    "Failed to initialize Whisper engine".to_string(),
+                ));
             };
             let Ok(vad_engine) = VADEngine::new(silero_vad_config) else {
-                eprintln!("Failed to initialize VAD engine");
-                return;
+                return Err(BansheeError::Other(
+                    "Failed to initialize VAD engine".to_string(),
+                ));
             };
 
             let hotkey_listener_state = Arc::clone(&daemon_state);
@@ -106,4 +136,5 @@ async fn main() {
             }
         }
     }
+    Ok(())
 }

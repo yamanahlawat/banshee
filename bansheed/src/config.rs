@@ -7,6 +7,7 @@ pub struct Config {
     pub stt_model: String,
     pub vad_model: String,
     pub vad_threshold: f32,
+    pub save_history: bool,
 }
 
 impl Default for Config {
@@ -15,6 +16,7 @@ impl Default for Config {
             stt_model: "ggml-large-v3-turbo-q5_0.bin".to_string(),
             vad_model: "silero_vad.onnx".to_string(),
             vad_threshold: 0.5,
+            save_history: true,
         }
     }
 }
