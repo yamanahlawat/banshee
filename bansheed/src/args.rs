@@ -19,4 +19,8 @@ pub enum CommandType {
     Listen,
     /// Speaks a message via text-to-speech
     Speak { text: String },
+    /// List all transcriptions in the database
+    History,
+    /// Clears all transcriptions in the database
+    ClearHistory,
 }

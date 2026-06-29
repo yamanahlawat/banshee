@@ -153,6 +153,17 @@ pub fn hotkey_listener(
             match speech_to_text_engine.transcribe(&final_data) {
                 Ok(transcription) => {
                     println!("Transcription: {transcription}");
+                    if !transcription.is_empty()
+                        && let Some(db) = task_state.db_connection()
+                        && let Ok(connection) = db.lock()
+                        && let Err(e) = crate::history::TranscriptionHistory::insert(
+                            &connection,
+                            &transcription,
+                        )
+                    {
+                        eprintln!("Failed to insert transcription into database: {e}");
+                    }
+
                     match action {
                         HotKeyAction::Mailbox => {
                             if let Ok(mut mailbox) = TRANSCRIPTION_MAILBOX.lock() {

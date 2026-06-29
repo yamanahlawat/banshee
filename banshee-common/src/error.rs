@@ -5,6 +5,9 @@ pub enum BansheeError {
     #[error("Audio device not found!")]
     NoAudioDevice,
 
+    #[error("History is not enabled. Please enable it in the configuration.")]
+    HistoryNotEnabled,
+
     #[error("Transcription failed: {0}")]
     Transcription(String),
 
@@ -28,6 +31,7 @@ impl BansheeError {
     pub fn rpc_code(&self) -> i32 {
         match self {
             BansheeError::NoAudioDevice => -32000,
+            BansheeError::HistoryNotEnabled => -32003,
             BansheeError::Rpc { code, .. } => *code,
             BansheeError::Transcription(_)
             | BansheeError::Io(_)
