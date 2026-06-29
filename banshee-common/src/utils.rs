@@ -14,13 +14,17 @@ pub fn get_socket_path() -> Option<PathBuf> {
 
 pub fn get_models_path() -> Option<PathBuf> {
     let base_path = dirs::home_dir()?;
-
     Some(base_path.join(".banshee").join("models"))
 }
 
 pub fn get_config_path() -> Option<PathBuf> {
     let base_path = dirs::home_dir()?;
     Some(base_path.join(".banshee").join("config.toml"))
+}
+
+pub fn get_db_path() -> Option<PathBuf> {
+    let base_path = dirs::home_dir()?;
+    Some(base_path.join(".banshee").join("banshee.db"))
 }
 
 pub async fn call_daemon(method: &str, params: Value) -> Result<Value, BansheeError> {

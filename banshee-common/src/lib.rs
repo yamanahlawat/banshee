@@ -67,6 +67,8 @@ pub const BANSHEE_SPEAK: &str = "banshee.speak";
 pub const BANSHEE_STATUS: &str = "banshee.status";
 pub const BANSHEE_CONFIGURE: &str = "banshee.configure";
 pub const BANSHEE_GET_TRANSCRIPTION: &str = "banshee.get_transcription";
+pub const BANSHEE_HISTORY: &str = "banshee.history";
+pub const BANSHEE_CLEAR_HISTORY: &str = "banshee.clear_history";
 
 // Whisper model configuration
 pub struct WhisperConfig {

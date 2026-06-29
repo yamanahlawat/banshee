@@ -4,60 +4,69 @@ mod audio;
 mod config;
 mod daemon;
 mod dictation;
+mod history;
 mod hotkey;
 mod models;
 mod speech_to_text;
 mod state;
 mod text_to_speech;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use args::{Cli, CommandType};
-use banshee_common::{SileroVADConfig, WhisperConfig, utils};
+use banshee_common::{
+    SileroVADConfig, WhisperConfig,
+    error::BansheeError,
+    utils::{self, get_db_path},
+};
 use clap::Parser;
 
 use crate::{
     config::Config,
+    history::TranscriptionHistory,
     speech_to_text::{vad::VADEngine, whisper::WhisperEngine},
 };
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), BansheeError> {
     let cli = Cli::parse();
     let config = match Config::load() {
         Ok(config) => config,
         Err(error) => {
             eprintln!("Failed to load config: {error}");
-            return;
+            return Err(error);
         }
     };
     let whisper_config = WhisperConfig::new(&config.stt_model);
     let silero_vad_config = SileroVADConfig::new(&config.vad_model);
+
+    let db_connection = if config.save_history {
+        let db_path = get_db_path()
+            .ok_or_else(|| BansheeError::Other("Failed to get database path".to_string()))?;
+        let connection =
+            rusqlite::Connection::open(db_path).map_err(|e| BansheeError::Other(e.to_string()))?;
+        TranscriptionHistory::create_table(&connection)
+            .map_err(|e| BansheeError::Other(e.to_string()))?;
+        Some(Mutex::new(connection))
+    } else {
+        None
+    };
+
     let daemon_state = Arc::new(state::DaemonState::new(
         env!("CARGO_PKG_VERSION"),
         config.stt_model,
         config.vad_model,
         config.vad_threshold,
+        db_connection,
     ));
+
     match cli.command {
         CommandType::Serve => {
             let audio_capture_state = Arc::clone(&daemon_state);
-            let Ok((_stream, consumer, sample_rate)) =
-                audio::start_audio_capture(audio_capture_state)
-            else {
-                eprintln!("Failed to start audio capture");
-                return;
-            };
+            let (_stream, consumer, sample_rate) = audio::start_audio_capture(audio_capture_state)?;
             println!("Loading Whisper AI...");
-            let Ok(speech_to_text_engine) = WhisperEngine::new(whisper_config) else {
-                eprintln!("Failed to initialize Whisper engine");
-                return;
-            };
-            let Ok(vad_engine) = VADEngine::new(silero_vad_config) else {
-                eprintln!("Failed to initialize VAD engine");
-                return;
-            };
-
+            let speech_to_text_engine = WhisperEngine::new(whisper_config)?;
+            let vad_engine = VADEngine::new(silero_vad_config)?;
             let hotkey_listener_state = Arc::clone(&daemon_state);
             hotkey::hotkey_listener(
                 consumer,
@@ -105,5 +114,23 @@ async fn main() {
                 Err(error) => eprintln!("Failed to send speak command: {error}"),
             }
         }
+        CommandType::History => {
+            match utils::call_daemon(banshee_common::BANSHEE_HISTORY, serde_json::json!({})).await {
+                Ok(result) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+                ),
+                Err(error) => eprintln!("Failed to get history: {error}"),
+            }
+        }
+        CommandType::ClearHistory => {
+            match utils::call_daemon(banshee_common::BANSHEE_CLEAR_HISTORY, serde_json::json!({}))
+                .await
+            {
+                Ok(result) => println!("Clear history result: {result:?}"),
+                Err(error) => eprintln!("Failed to clear history: {error}"),
+            }
+        }
     }
+    Ok(())
 }

@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU32},
     },
     time::Instant,
@@ -14,6 +14,7 @@ pub struct DaemonState {
     audio_device: OnceLock<String>,
     recording: AtomicBool,
     started_at: Instant,
+    db_connection: Option<Mutex<rusqlite::Connection>>,
 }
 
 impl DaemonState {
@@ -22,6 +23,7 @@ impl DaemonState {
         stt_model: String,
         vad_model: String,
         initial_vad_threshold: f32,
+        db_connection: Option<Mutex<rusqlite::Connection>>,
     ) -> Self {
         Self {
             version,
@@ -31,6 +33,7 @@ impl DaemonState {
             audio_device: OnceLock::new(),
             recording: AtomicBool::new(false),
             started_at: Instant::now(),
+            db_connection,
         }
     }
 
@@ -77,5 +80,9 @@ impl DaemonState {
             .vad_threshold
             .load(std::sync::atomic::Ordering::Relaxed);
         f32::from_bits(bits)
+    }
+
+    pub fn db_connection(&self) -> Option<&Mutex<rusqlite::Connection>> {
+        self.db_connection.as_ref()
     }
 }
