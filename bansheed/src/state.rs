@@ -8,8 +8,8 @@ use std::{
 
 pub struct DaemonState {
     version: &'static str,
-    stt_model: String,
-    vad_model: String,
+    stt_model: &'static str,
+    vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: OnceLock<String>,
     recording: AtomicBool,
@@ -20,8 +20,8 @@ pub struct DaemonState {
 impl DaemonState {
     pub fn new(
         version: &'static str,
-        stt_model: String,
-        vad_model: String,
+        stt_model: &'static str,
+        vad_model: &'static str,
         initial_vad_threshold: f32,
         db_connection: Option<Mutex<rusqlite::Connection>>,
     ) -> Self {
@@ -55,11 +55,11 @@ impl DaemonState {
     }
 
     pub fn stt_model(&self) -> &str {
-        &self.stt_model
+        self.stt_model
     }
 
     pub fn vad_model(&self) -> &str {
-        &self.vad_model
+        self.vad_model
     }
 
     pub fn audio_device(&self) -> Option<&str> {

@@ -27,6 +27,8 @@ use crate::{
     speech_to_text::{vad::VADEngine, whisper::WhisperEngine},
 };
 
+const VAD_MODEL: &str = "silero_vad.onnx";
+
 #[tokio::main]
 async fn main() -> Result<(), BansheeError> {
     let cli = Cli::parse();
@@ -37,10 +39,10 @@ async fn main() -> Result<(), BansheeError> {
             return Err(error);
         }
     };
-    let whisper_config = WhisperConfig::new(&config.stt_model);
-    let silero_vad_config = SileroVADConfig::new(&config.vad_model);
+    let whisper_config = WhisperConfig::new(config.stt.preset.model_name());
+    let silero_vad_config = SileroVADConfig::new(VAD_MODEL);
 
-    let db_connection = if config.save_history {
+    let db_connection = if config.daemon.save_history {
         let db_path = get_db_path()
             .ok_or_else(|| BansheeError::Other("Failed to get database path".to_string()))?;
         let connection =
@@ -54,9 +56,9 @@ async fn main() -> Result<(), BansheeError> {
 
     let daemon_state = Arc::new(state::DaemonState::new(
         env!("CARGO_PKG_VERSION"),
-        config.stt_model,
-        config.vad_model,
-        config.vad_threshold,
+        config.stt.preset.model_name(),
+        VAD_MODEL,
+        config.stt.vad_threshold,
         db_connection,
     ));
 
@@ -99,7 +101,10 @@ async fn main() -> Result<(), BansheeError> {
             )
             .await
             {
-                Ok(result) => println!("Transcription: {result:?}"),
+                Ok(result) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+                ),
                 Err(error) => eprintln!("Failed to get transcription: {error}"),
             }
         }
@@ -110,7 +115,10 @@ async fn main() -> Result<(), BansheeError> {
             )
             .await
             {
-                Ok(result) => println!("Speak command result: {result:?}"),
+                Ok(result) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+                ),
                 Err(error) => eprintln!("Failed to send speak command: {error}"),
             }
         }
@@ -127,7 +135,10 @@ async fn main() -> Result<(), BansheeError> {
             match utils::call_daemon(banshee_common::BANSHEE_CLEAR_HISTORY, serde_json::json!({}))
                 .await
             {
-                Ok(result) => println!("Clear history result: {result:?}"),
+                Ok(result) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+                ),
                 Err(error) => eprintln!("Failed to clear history: {error}"),
             }
         }
