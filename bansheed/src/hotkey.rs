@@ -7,6 +7,7 @@ use rdev::{EventType, Key, listen};
 
 use crate::audio::cues::Cue;
 use crate::audio::utils::resample_audio;
+use crate::config::BargeInMode;
 use crate::dictation::type_text;
 use crate::speech_to_text::vad::VADEngine;
 use crate::speech_to_text::whisper::WhisperEngine;
@@ -27,6 +28,7 @@ pub fn hotkey_listener(
     sample_rate: u32,
     daemon_state: Arc<DaemonState>,
     cues: mpsc::Sender<Cue>,
+    barge_in: BargeInMode,
 ) {
     // Create a channel to communicate between the hotkey listener and the audio processing thread
     let (sender, receiver) = mpsc::channel();
@@ -35,7 +37,7 @@ pub fn hotkey_listener(
     let hotkey_cues = cues.clone();
 
     // Spawn a heavy thread for the global hotkey listener
-    thread::spawn(|| {
+    thread::spawn(move || {
         // Track the state of the shift key
         let mut shift_key_pressed = false;
 
@@ -55,6 +57,10 @@ pub fn hotkey_listener(
                 // Track F5
                 EventType::KeyPress(Key::F5) => {
                     if !daemon_state.is_recording() {
+                        // Silence the daemon's own voice before the mic opens
+                        if matches!(barge_in, BargeInMode::Stop) {
+                            daemon_state.speech().stop();
+                        }
                         current_action = if shift_key_pressed {
                             HotKeyAction::Dictate
                         } else {

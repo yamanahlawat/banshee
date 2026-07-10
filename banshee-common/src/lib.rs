@@ -64,6 +64,7 @@ impl JsonRpcResponse {
 }
 
 pub const BANSHEE_SPEAK: &str = "banshee.speak";
+pub const BANSHEE_STOP_SPEAKING: &str = "banshee.stop_speaking";
 pub const BANSHEE_STATUS: &str = "banshee.status";
 pub const BANSHEE_CONFIGURE: &str = "banshee.configure";
 pub const BANSHEE_GET_TRANSCRIPTION: &str = "banshee.get_transcription";

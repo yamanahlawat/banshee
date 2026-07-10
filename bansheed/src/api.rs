@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use banshee_common::{
     BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY,
-    BANSHEE_SPEAK, BANSHEE_STATUS,
+    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP_SPEAKING,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -15,19 +15,43 @@ const MAX_WAIT_MS: u64 = 30_000;
 pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     match request.method.as_str() {
         BANSHEE_SPEAK => {
-            if let Some(params) = &request.params
-                && let Some(raw_text) = params.get("text").and_then(|v| v.as_str())
-            {
-                let clean_text = sanitize(raw_text);
-                println!("The sanitized text: {clean_text}");
+            let Some(raw_text) = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("text"))
+                .and_then(|v| v.as_str())
+            else {
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32602,
+                    "'text' is required and must be a string.",
+                );
+            };
+            let interrupt = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("interrupt"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
-                // TODO: say is a temporary shim, replaced by a proper TTS engine in the future
-                if let Err(e) = std::process::Command::new("say").arg(&clean_text).spawn() {
-                    eprintln!("Failed to run 'say' command: {e}");
-                }
+            let clean_text = sanitize(raw_text);
+            println!("The sanitized text: {clean_text}");
+
+            match daemon_state.speech().speak(&clean_text, interrupt) {
+                Ok(utterance_id) => JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({"ok": true, "utterance_id": utterance_id}),
+                ),
+                Err(e) => JsonRpcResponse::error(
+                    request.id,
+                    -32603,
+                    format!("Failed to start speech playback: {e}"),
+                ),
             }
-
-            JsonRpcResponse::success(request.id, serde_json::json!({}))
+        }
+        BANSHEE_STOP_SPEAKING => {
+            daemon_state.speech().stop();
+            JsonRpcResponse::success(request.id, serde_json::json!({"ok": true}))
         }
         BANSHEE_GET_TRANSCRIPTION => {
             let mut since_id: u64 = 0;
@@ -116,6 +140,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 "vad_model": daemon_state.vad_model(),
                 "audio_device": daemon_state.audio_device(),
                 "recording": daemon_state.is_recording(),
+                "speaking": daemon_state.speech().is_speaking(),
                 "uptime_seconds": &daemon_state.uptime().as_secs(),
                 "vad_threshold": daemon_state.vad_threshold(),
                 "history_enabled": daemon_state.db_connection().is_some(),
