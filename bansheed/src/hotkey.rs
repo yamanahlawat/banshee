@@ -1,13 +1,12 @@
 use ringbuf::traits::Consumer;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread;
-use tokio::sync::mpsc;
+use std::time::Instant;
 
 use rdev::{EventType, Key, listen};
 
 use crate::audio::utils::resample_audio;
 use crate::dictation::type_text;
-use crate::speech_to_text::mailbox::TRANSCRIPTION_MAILBOX;
 use crate::speech_to_text::vad::VADEngine;
 use crate::speech_to_text::whisper::WhisperEngine;
 use crate::state::DaemonState;
@@ -27,8 +26,8 @@ pub fn hotkey_listener(
     sample_rate: u32,
     daemon_state: Arc<DaemonState>,
 ) {
-    // Create a mail tube to send messages from rdev to tokio
-    let (sender, mut receiver) = mpsc::channel::<HotKeyAction>(32);
+    // Create a channel to communicate between the hotkey listener and the audio processing thread
+    let (sender, receiver) = mpsc::channel();
 
     let task_state = Arc::clone(&daemon_state);
 
@@ -66,7 +65,7 @@ pub fn hotkey_listener(
                     println!("F5 hotkey released");
                     daemon_state.set_recording(false);
                     // Send whichever action we locked in when the key is pressed
-                    let _ = sender.blocking_send(current_action);
+                    let _ = sender.send(current_action);
                 }
                 _ => (), // Ignore mouse movements
             }
@@ -75,11 +74,9 @@ pub fn hotkey_listener(
         }
     });
 
-    // Spawn an async task that waits for the mail
-    tokio::spawn(async move {
-        while let Some(action) = receiver.recv().await {
-            println!("Tokio received the stop signal!");
-
+    // Spawn a thread to handle the audio processing and transcription
+    thread::spawn(move || {
+        while let Ok(action) = receiver.recv() {
             // pull all the floats out of the ring buffer into a standard Vec
             let mut audio_data = Vec::new();
             audio_data.extend(consumer.pop_iter());
@@ -148,13 +145,24 @@ pub fn hotkey_listener(
                 continue;
             }
 
-            // Resample the audio data if necessary
             println!("Transcribing...");
+            let transcribe_started = Instant::now();
             match speech_to_text_engine.transcribe(&final_data) {
                 Ok(transcription) => {
+                    println!(
+                        "Transcribed {:.1}s of audio in {:.2}s",
+                        final_data.len() as f32 / TARGET_SAMPLE_RATE as f32,
+                        transcribe_started.elapsed().as_secs_f32()
+                    );
                     println!("Transcription: {transcription}");
-                    if !transcription.is_empty()
-                        && let Some(db) = task_state.db_connection()
+
+                    // Whisper can return nothing for noise; skip before it reaches the ring or clipboard
+                    if transcription.is_empty() {
+                        println!("Empty transcription. Skipping.");
+                        continue;
+                    }
+
+                    if let Some(db) = task_state.db_connection()
                         && let Ok(connection) = db.lock()
                         && let Err(e) = crate::history::TranscriptionHistory::insert(
                             &connection,
@@ -166,9 +174,7 @@ pub fn hotkey_listener(
 
                     match action {
                         HotKeyAction::Mailbox => {
-                            if let Ok(mut mailbox) = TRANSCRIPTION_MAILBOX.lock() {
-                                *mailbox = Some(transcription);
-                            }
+                            task_state.push_transcription(transcription);
                         }
                         HotKeyAction::Dictate => {
                             println!("Dictating: {}", transcription);

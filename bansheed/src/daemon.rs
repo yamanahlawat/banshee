@@ -39,7 +39,7 @@ pub async fn run(daemon_state: &Arc<DaemonState>) -> Result<(), std::io::Error> 
                     while let Ok(Some(line)) = lines.next_line().await {
                         // Try to parse the incoming line as a JSON-RPC request
                         if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(&line) {
-                            let response: JsonRpcResponse = dispatch(request, &state);
+                            let response: JsonRpcResponse = dispatch(request, &state).await;
                             if let Ok(mut response_string) = serde_json::to_string(&response) {
                                 response_string.push('\n');
                                 let _ = writer.write_all(response_string.as_bytes()).await;

@@ -1,10 +1,26 @@
 use std::{
+    collections::VecDeque,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU32},
     },
     time::Instant,
 };
+
+use tokio::sync::watch;
+
+const TRANSCRIPTION_RING_CAPACITY: usize = 16;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TranscriptionEntry {
+    pub id: u64,
+    pub text: String,
+}
+
+struct TranscriptionRing {
+    next_id: u64,
+    entries: VecDeque<TranscriptionEntry>,
+}
 
 pub struct DaemonState {
     version: &'static str,
@@ -15,6 +31,8 @@ pub struct DaemonState {
     recording: AtomicBool,
     started_at: Instant,
     db_connection: Option<Mutex<rusqlite::Connection>>,
+    transcriptions: Mutex<TranscriptionRing>,
+    latest_transcription_id: watch::Sender<u64>,
 }
 
 impl DaemonState {
@@ -34,7 +52,44 @@ impl DaemonState {
             recording: AtomicBool::new(false),
             started_at: Instant::now(),
             db_connection,
+            transcriptions: Mutex::new(TranscriptionRing {
+                next_id: 0,
+                entries: VecDeque::with_capacity(TRANSCRIPTION_RING_CAPACITY),
+            }),
+            latest_transcription_id: watch::channel(0).0,
         }
+    }
+
+    pub fn push_transcription(&self, text: String) -> u64 {
+        let mut ring = self
+            .transcriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ring.next_id += 1;
+        let id = ring.next_id;
+        ring.entries.push_back(TranscriptionEntry { id, text });
+        if ring.entries.len() > TRANSCRIPTION_RING_CAPACITY {
+            ring.entries.pop_front();
+        }
+        drop(ring);
+        self.latest_transcription_id.send_replace(id);
+        id
+    }
+
+    pub fn transcriptions_since(&self, since_id: u64) -> Vec<TranscriptionEntry> {
+        let ring = self
+            .transcriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ring.entries
+            .iter()
+            .filter(|entry| entry.id > since_id)
+            .cloned()
+            .collect()
+    }
+
+    pub fn subscribe_transcriptions(&self) -> watch::Receiver<u64> {
+        self.latest_transcription_id.subscribe()
     }
 
     pub fn is_recording(&self) -> bool {
@@ -84,5 +139,30 @@ impl DaemonState {
 
     pub fn db_connection(&self) -> Option<&Mutex<rusqlite::Connection>> {
         self.db_connection.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_evicts_oldest_and_filters_by_cursor() {
+        let state = DaemonState::new("0.0.0", "stt", "vad", 0.5, None);
+        for i in 1..=20 {
+            state.push_transcription(format!("utterance {i}"));
+        }
+
+        let all = state.transcriptions_since(0);
+        assert_eq!(all.len(), TRANSCRIPTION_RING_CAPACITY);
+        assert_eq!(all.first().unwrap().id, 5);
+        assert_eq!(all.last().unwrap().id, 20);
+
+        let newer = state.transcriptions_since(18);
+        assert_eq!(newer.len(), 2);
+        assert_eq!(newer[0].text, "utterance 19");
+
+        assert!(state.transcriptions_since(20).is_empty());
+        assert_eq!(*state.subscribe_transcriptions().borrow(), 20);
     }
 }

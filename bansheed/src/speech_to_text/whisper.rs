@@ -48,7 +48,7 @@ impl WhisperEngine {
             .map_err(|e| BansheeError::Transcription(e.to_string()))?;
 
         // Setup the inference parameters
-        // Greedy Sampling is the fastest way to transcribe
+        // Beam search trades speed for accuracy
         let mut params = FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
             beam_size: 5,
             patience: -1.0,
