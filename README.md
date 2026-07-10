@@ -21,6 +21,9 @@ hands it off to an LLM. No cloud, no API keys, no audio leaving your laptop.
   detection. No network, no API keys.
 - **Text-to-speech.** Have Banshee read status updates aloud (currently via the
   macOS `say` command).
+- **Audio cues.** Short tones confirm recording start/stop, a successful
+  transcription, and errors, so you know what happened without looking at the
+  screen.
 - **JSON-RPC API** over a Unix socket, so it's easy to script from the CLI or
   any client you like.
 - **MCP server** that exposes speak and listen tools to LLM hosts (like Claude
@@ -89,8 +92,8 @@ banshee serve
 
 With the daemon running, the global hotkeys are:
 
-- **Hold `F5`** to record. On release, the transcription is saved to the
-  mailbox, and you can grab it later with `banshee listen`.
+- **Hold `F5`** to record. On release, the transcription is saved, and you can
+  grab it later with `banshee listen`.
 - **Hold `Shift + F5`** to record. On release, the transcription is typed
   straight into the app you're focused on (this is dictation mode).
 
@@ -101,8 +104,10 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee serve` | Start the background daemon |
 | `banshee setup` | Download the required models |
 | `banshee status` | Show daemon health and state |
-| `banshee listen` | Print the latest mailbox transcription |
+| `banshee listen` | Print recent transcriptions |
 | `banshee speak "<text>"` | Speak some text aloud |
+| `banshee history` | List all saved transcriptions |
+| `banshee clear-history` | Clear the saved transcriptions |
 
 ## Configuration
 
@@ -110,9 +115,15 @@ Configuration is optional. If you want to override the defaults, create
 `~/.banshee/config.toml` (defaults shown here):
 
 ```toml
-stt_model    = "ggml-large-v3-turbo-q5_0.bin"
-vad_model    = "silero_vad.onnx"
-vad_threshold = 0.5   # 0.0 to 1.0; higher means stricter speech detection
+[daemon]
+save_history = true    # keep transcriptions in ~/.banshee/banshee.db
+
+[stt]
+preset = "balanced"    # fast | balanced | quality (see below)
+vad_threshold = 0.5    # 0.0 to 1.0; higher means stricter speech detection
+
+[audio.cues]
+enabled = true         # tones on record start/stop, success, and errors
 ```
 
 You can also change `vad_threshold` at runtime through the `banshee.configure`
@@ -120,12 +131,16 @@ RPC, no restart needed.
 
 ### Picking a Whisper model
 
-`stt_model` can be any of the `ggml` Whisper models from the
-[whisper.cpp model repo](https://huggingface.co/ggerganov/whisper.cpp/tree/main).
-Browse the list there, pick the one that fits your accuracy and speed needs,
-set its filename as your `stt_model`, and run `banshee setup` to download it.
-Smaller models (like `ggml-base.en.bin`) are faster and lighter; larger ones
-(like the default `ggml-large-v3-turbo-q5_0.bin`) are more accurate but heavier.
+The `preset` picks which Whisper model Banshee uses:
+
+| Preset | Model | Trade-off |
+| --- | --- | --- |
+| `fast` | `ggml-base.en.bin` | Fastest and lightest, English only |
+| `balanced` | `ggml-large-v3-turbo-q5_0.bin` | The default; accurate and reasonably quick |
+| `quality` | `ggml-large-v3-q5_0.bin` | Most accurate, heaviest |
+
+After changing the preset, run `banshee setup` again to download the matching
+model into `~/.banshee/models/`.
 
 ## MCP integration
 

@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use rdev::{EventType, Key, listen};
 
+use crate::audio::cues::Cue;
 use crate::audio::utils::resample_audio;
 use crate::dictation::type_text;
 use crate::speech_to_text::vad::VADEngine;
@@ -25,11 +26,13 @@ pub fn hotkey_listener(
     mut vad_engine: VADEngine,
     sample_rate: u32,
     daemon_state: Arc<DaemonState>,
+    cues: mpsc::Sender<Cue>,
 ) {
     // Create a channel to communicate between the hotkey listener and the audio processing thread
     let (sender, receiver) = mpsc::channel();
 
     let task_state = Arc::clone(&daemon_state);
+    let hotkey_cues = cues.clone();
 
     // Spawn a heavy thread for the global hotkey listener
     thread::spawn(|| {
@@ -58,12 +61,14 @@ pub fn hotkey_listener(
                             HotKeyAction::Mailbox
                         };
                         daemon_state.set_recording(true);
+                        let _ = hotkey_cues.send(Cue::RecordStart);
                         println!("F5 hotkey detected! Recording Audio...");
                     }
                 }
                 EventType::KeyRelease(Key::F5) => {
                     println!("F5 hotkey released");
                     daemon_state.set_recording(false);
+                    let _ = hotkey_cues.send(Cue::RecordStop);
                     // Send whichever action we locked in when the key is pressed
                     let _ = sender.send(current_action);
                 }
@@ -88,6 +93,7 @@ pub fn hotkey_listener(
                 Ok(data) => data,
                 Err(e) => {
                     eprintln!("Error: {e}");
+                    let _ = cues.send(Cue::Error);
                     continue;
                 }
             };
@@ -137,11 +143,13 @@ pub fn hotkey_listener(
                     "Only detected speech in {:.2}% of the audio. Skipping transcription.",
                     speech_ratio * 100.0
                 );
+                let _ = cues.send(Cue::Error);
                 continue;
             }
 
             if speech_chunks < 2 {
                 println!("No speech detected in the audio. Skipping transcription.");
+                let _ = cues.send(Cue::Error);
                 continue;
             }
 
@@ -159,8 +167,11 @@ pub fn hotkey_listener(
                     // Whisper can return nothing for noise; skip before it reaches the ring or clipboard
                     if transcription.is_empty() {
                         println!("Empty transcription. Skipping.");
+                        let _ = cues.send(Cue::Error);
                         continue;
                     }
+
+                    let _ = cues.send(Cue::Ready);
 
                     if let Some(db) = task_state.db_connection()
                         && let Ok(connection) = db.lock()
@@ -184,7 +195,10 @@ pub fn hotkey_listener(
                         }
                     }
                 }
-                Err(error) => eprintln!("Transcription failed: {error}"),
+                Err(error) => {
+                    eprintln!("Transcription failed: {error}");
+                    let _ = cues.send(Cue::Error);
+                }
             }
         }
     });
