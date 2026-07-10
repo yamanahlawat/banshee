@@ -1,3 +1,4 @@
+pub mod cues;
 pub mod utils;
 use banshee_common::error::BansheeError;
 

@@ -69,6 +69,7 @@ async fn main() -> Result<(), BansheeError> {
             println!("Loading Whisper AI...");
             let speech_to_text_engine = WhisperEngine::new(whisper_config)?;
             let vad_engine = VADEngine::new(silero_vad_config)?;
+            let cue_sender = audio::cues::start_cue_player(config.audio.cues.enabled);
             let hotkey_listener_state = Arc::clone(&daemon_state);
             hotkey::hotkey_listener(
                 consumer,
@@ -76,6 +77,7 @@ async fn main() -> Result<(), BansheeError> {
                 vad_engine,
                 sample_rate,
                 hotkey_listener_state,
+                cue_sender,
             );
             if let Err(error) = daemon::run(&daemon_state).await {
                 eprintln!("Daemon crashed {error}")
