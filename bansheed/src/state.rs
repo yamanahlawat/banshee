@@ -1,13 +1,15 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU32},
     },
     time::Instant,
 };
 
 use tokio::sync::watch;
+
+use crate::text_to_speech::SpeechPlayer;
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
 
@@ -33,6 +35,7 @@ pub struct DaemonState {
     db_connection: Option<Mutex<rusqlite::Connection>>,
     transcriptions: Mutex<TranscriptionRing>,
     latest_transcription_id: watch::Sender<u64>,
+    speech: Arc<SpeechPlayer>,
 }
 
 impl DaemonState {
@@ -57,7 +60,12 @@ impl DaemonState {
                 entries: VecDeque::with_capacity(TRANSCRIPTION_RING_CAPACITY),
             }),
             latest_transcription_id: watch::channel(0).0,
+            speech: Arc::new(SpeechPlayer::new()),
         }
+    }
+
+    pub fn speech(&self) -> &Arc<SpeechPlayer> {
+        &self.speech
     }
 
     pub fn push_transcription(&self, text: String) -> u64 {

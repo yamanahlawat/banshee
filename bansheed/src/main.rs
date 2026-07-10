@@ -79,6 +79,7 @@ async fn main() -> Result<(), BansheeError> {
                 sample_rate,
                 hotkey_listener_state,
                 cue_sender,
+                config.audio.barge_in,
             );
             if let Err(error) = daemon::run(&daemon_state).await {
                 eprintln!("Daemon crashed {error}")

@@ -26,7 +26,7 @@ pub enum HotkeyMode {
     Toggle,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum BargeInMode {
     Stop,
