@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use banshee_common::{
     BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY,
@@ -6,11 +7,12 @@ use banshee_common::{
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
-use crate::speech_to_text::mailbox::TRANSCRIPTION_MAILBOX;
 use crate::state::DaemonState;
 use crate::text_to_speech::sanitizer::sanitize;
 
-pub fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+const MAX_WAIT_MS: u64 = 30_000;
+
+pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     match request.method.as_str() {
         BANSHEE_SPEAK => {
             if let Some(params) = &request.params
@@ -28,13 +30,54 @@ pub fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> Jso
             JsonRpcResponse::success(request.id, serde_json::json!({}))
         }
         BANSHEE_GET_TRANSCRIPTION => {
-            let transcription_text = TRANSCRIPTION_MAILBOX
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take();
+            let mut since_id: u64 = 0;
+            let mut wait_ms: u64 = 0;
+            if let Some(params) = &request.params {
+                if let Some(value) = params.get("since_id") {
+                    let Some(parsed) = value.as_u64() else {
+                        return JsonRpcResponse::error(
+                            request.id,
+                            -32602,
+                            "'since_id' must be a non-negative integer.",
+                        );
+                    };
+                    since_id = parsed;
+                }
+                if let Some(value) = params.get("wait_ms") {
+                    let Some(parsed) = value.as_u64() else {
+                        return JsonRpcResponse::error(
+                            request.id,
+                            -32602,
+                            "'wait_ms' must be a non-negative integer.",
+                        );
+                    };
+                    wait_ms = parsed.min(MAX_WAIT_MS);
+                }
+            }
+
+            // Subscribe before the first read so a push landing in between
+            // is still seen by wait_for
+            let mut latest_id = daemon_state.subscribe_transcriptions();
+
+            // since_id ahead of the newest id = stale cursor from an older daemon run
+            if since_id > *latest_id.borrow() {
+                since_id = 0;
+            }
+
+            let mut transcriptions = daemon_state.transcriptions_since(since_id);
+
+            if transcriptions.is_empty() && wait_ms > 0 {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(wait_ms),
+                    latest_id.wait_for(|id| *id > since_id),
+                )
+                .await;
+                transcriptions = daemon_state.transcriptions_since(since_id);
+            }
+
             JsonRpcResponse::success(
                 request.id,
-                serde_json::json!({"transcription": transcription_text}),
+                serde_json::json!({ "transcriptions": transcriptions }),
             )
         }
         BANSHEE_CONFIGURE => {
@@ -132,5 +175,49 @@ pub fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> Jso
             -32601,
             format!("Method '{}' not found!", request.method),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_transcription_request(params: serde_json::Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: BANSHEE_GET_TRANSCRIPTION.to_string(),
+            params: Some(params),
+            id: Some(serde_json::json!(1)),
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_cursor_is_clamped_to_zero() {
+        let state = Arc::new(DaemonState::new("0.0.0", "stt", "vad", 0.5, None));
+        state.push_transcription("hello".to_string());
+
+        let request = get_transcription_request(serde_json::json!({"since_id": 999}));
+        let response = dispatch(request, &state).await;
+
+        let JsonRpcResponse::Success { result, .. } = response else {
+            panic!("expected success response");
+        };
+        let transcriptions = result["transcriptions"].as_array().unwrap();
+        assert_eq!(transcriptions.len(), 1);
+        assert_eq!(transcriptions[0]["text"], "hello");
+    }
+
+    #[tokio::test]
+    async fn caught_up_cursor_returns_empty() {
+        let state = Arc::new(DaemonState::new("0.0.0", "stt", "vad", 0.5, None));
+        state.push_transcription("hello".to_string());
+
+        let request = get_transcription_request(serde_json::json!({"since_id": 1}));
+        let response = dispatch(request, &state).await;
+
+        let JsonRpcResponse::Success { result, .. } = response else {
+            panic!("expected success response");
+        };
+        assert!(result["transcriptions"].as_array().unwrap().is_empty());
     }
 }

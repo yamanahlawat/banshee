@@ -9,6 +9,9 @@ async fn main() {
     let mut stdout = io::stdout();
     let mut reader = BufReader::new(stdin).lines();
 
+    // Cursor into the daemon's transcription ring
+    let mut last_seen_id: u64 = 0;
+
     eprintln!("Banshee MCP Shim started.");
 
     while let Ok(Some(line)) = reader.next_line().await {
@@ -41,10 +44,10 @@ async fn main() {
                             },
                             {
                                 "name": "listen_for_prompt",
-                                "description": "Read the user's latest voice transcription",
+                                "description": "Read the user's voice transcriptions since your last call. Pass timeout_ms to wait for the user to finish speaking.",
                                 "inputSchema": {
                                     "type": "object",
-                                    "properties": {}
+                                    "properties": {"timeout_ms": {"type": "number", "description": "Wait up to this many milliseconds for new speech before returning"}}
                                 }
                             }
                         ]
@@ -79,20 +82,46 @@ async fn main() {
                             }
                         }
                         Some(name) if name.ends_with("listen_for_prompt") => {
-                            let daemon_response =
-                                utils::call_daemon(BANSHEE_GET_TRANSCRIPTION, arguments).await;
+                            let wait_ms = arguments
+                                .get("timeout_ms")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let daemon_response = utils::call_daemon(
+                                BANSHEE_GET_TRANSCRIPTION,
+                                serde_json::json!({"since_id": last_seen_id, "wait_ms": wait_ms}),
+                            )
+                            .await;
                             match daemon_response {
-                                Ok(result) => JsonRpcResponse::success(
-                                    request.id,
-                                    serde_json::json!({
-                                        "content": [
-                                            {
-                                                "type": "text",
-                                                "text": result.get("transcription").and_then(|v| v.as_str()).unwrap_or("")
-                                            }
-                                        ]
-                                    }),
-                                ),
+                                Ok(result) => {
+                                    let transcriptions = result
+                                        .get("transcriptions")
+                                        .and_then(|v| v.as_array())
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    for item in &transcriptions {
+                                        if let Some(id) = item.get("id").and_then(|v| v.as_u64()) {
+                                            last_seen_id = last_seen_id.max(id);
+                                        }
+                                    }
+                                    let text = transcriptions
+                                        .iter()
+                                        .filter_map(|item| {
+                                            item.get("text").and_then(|v| v.as_str())
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    JsonRpcResponse::success(
+                                        request.id,
+                                        serde_json::json!({
+                                            "content": [
+                                                {
+                                                    "type": "text",
+                                                    "text": text
+                                                }
+                                            ]
+                                        }),
+                                    )
+                                }
 
                                 Err(error) => {
                                     JsonRpcResponse::error(request.id, -32603, error.to_string())

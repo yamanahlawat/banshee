@@ -14,14 +14,13 @@ use ringbuf::{
 
 use crate::state::DaemonState;
 
+const RING_SECS: usize = 120; // 120 seconds of audio in the ring buffer
+
 pub fn start_audio_capture(
     daemon_state: Arc<DaemonState>,
 ) -> Result<(Stream, impl Consumer<Item = f32>, u32), BansheeError> {
     // Ask cpal to give us the default OS audio API
     let host = cpal::default_host();
-
-    // Create a ring buffer with 30 sec capacity
-    let (mut producer, consumer) = HeapRb::<f32>::new(48000 * 30).split();
 
     // Find the default microphone
     let device = host
@@ -42,6 +41,10 @@ pub fn start_audio_capture(
 
     let sample_rate = config.sample_rate();
     let channels = config.channels();
+
+    // Create a ring buffer with 120 sec capacity
+    let ring_capacity = sample_rate as usize * RING_SECS;
+    let (mut producer, consumer) = HeapRb::<f32>::new(ring_capacity).split();
 
     let stream = device
         .build_input_stream(
