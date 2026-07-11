@@ -25,7 +25,7 @@ async fn main() {
                         "capabilities": {
                             "tools": {}
                         },
-                        "serverInfo": {"name": "banshee", "version": "0.1.0"}
+                        "serverInfo": {"name": "banshee", "version": env!("CARGO_PKG_VERSION")}
                     }),
                 ),
                 "notifications/initialized" => continue,

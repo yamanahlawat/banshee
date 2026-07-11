@@ -1,6 +1,6 @@
 [package]
 name = "bansheed"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [[bin]]
@@ -11,7 +11,7 @@ path = "src/main.rs"
 anyhow = "1.0.102"
 arboard = "3.6.1"
 audioadapter-buffers = "3.0.0"
-banshee-common = { version = "0.1.0", path = "../banshee-common" }
+banshee-common = { version = "0.2.0", path = "../banshee-common" }
 clap = { version = "4.6.1", features = ["derive"] }
 cpal = "0.17.3"
 crossbeam-channel = "0.5.15"
