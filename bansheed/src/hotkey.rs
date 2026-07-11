@@ -104,8 +104,11 @@ pub fn hotkey_listener(
                 }
             };
 
-            let max_amplitude = final_data.iter().cloned().fold(0.0f32, f32::max);
-            let min_amplitude = final_data.iter().cloned().fold(0.0f32, f32::min);
+            let (min_amplitude, max_amplitude) = final_data
+                .iter()
+                .fold((0.0f32, 0.0f32), |(min, max), &sample| {
+                    (min.min(sample), max.max(sample))
+                });
             println!("Audio range: [{min_amplitude}, {max_amplitude}]");
 
             println!("Total audio samples after resampling: {}", final_data.len());
@@ -177,8 +180,6 @@ pub fn hotkey_listener(
                         continue;
                     }
 
-                    let _ = cues.send(Cue::Ready);
-
                     if let Some(db) = task_state.db_connection()
                         && let Ok(connection) = db.lock()
                         && let Err(e) = crate::history::TranscriptionHistory::insert(
@@ -189,14 +190,22 @@ pub fn hotkey_listener(
                         eprintln!("Failed to insert transcription into database: {e}");
                     }
 
+                    // Ready only after the utterance is actually delivered
                     match action {
                         HotKeyAction::Mailbox => {
                             task_state.push_transcription(transcription);
+                            let _ = cues.send(Cue::Ready);
                         }
                         HotKeyAction::Dictate => {
                             println!("Dictating: {}", transcription);
-                            if let Err(e) = type_text(&transcription) {
-                                eprintln!("Failed to type text: {:?}", e);
+                            match type_text(&transcription) {
+                                Ok(_) => {
+                                    let _ = cues.send(Cue::Ready);
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to type text: {:?}", e);
+                                    let _ = cues.send(Cue::Error);
+                                }
                             }
                         }
                     }

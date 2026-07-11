@@ -68,11 +68,14 @@ impl DaemonState {
         &self.speech
     }
 
-    pub fn push_transcription(&self, text: String) -> u64 {
-        let mut ring = self
-            .transcriptions
+    fn ring(&self) -> std::sync::MutexGuard<'_, TranscriptionRing> {
+        self.transcriptions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn push_transcription(&self, text: String) -> u64 {
+        let mut ring = self.ring();
         ring.next_id += 1;
         let id = ring.next_id;
         ring.entries.push_back(TranscriptionEntry { id, text });
@@ -85,10 +88,7 @@ impl DaemonState {
     }
 
     pub fn transcriptions_since(&self, since_id: u64) -> Vec<TranscriptionEntry> {
-        let ring = self
-            .transcriptions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let ring = self.ring();
         ring.entries
             .iter()
             .filter(|entry| entry.id > since_id)

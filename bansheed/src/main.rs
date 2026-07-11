@@ -81,9 +81,7 @@ async fn main() -> Result<(), BansheeError> {
                 cue_sender,
                 config.audio.barge_in,
             );
-            if let Err(error) = daemon::run(&daemon_state).await {
-                eprintln!("Daemon crashed {error}")
-            }
+            daemon::run(&daemon_state).await?;
         }
         CommandType::Setup => {
             println!("Download models offline!");

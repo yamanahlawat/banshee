@@ -12,6 +12,25 @@ use crate::text_to_speech::sanitizer::sanitize;
 
 const MAX_WAIT_MS: u64 = 30_000;
 
+// absent → default; present but not a u64 → -32602 naming the field
+fn u64_param(
+    params: Option<&serde_json::Value>,
+    key: &str,
+    default: u64,
+    id: &Option<serde_json::Value>,
+) -> Result<u64, Box<JsonRpcResponse>> {
+    match params.and_then(|p| p.get(key)) {
+        None => Ok(default),
+        Some(value) => value.as_u64().ok_or_else(|| {
+            Box::new(JsonRpcResponse::error(
+                id.clone(),
+                -32602,
+                format!("'{key}' must be a non-negative integer."),
+            ))
+        }),
+    }
+}
+
 pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     match request.method.as_str() {
         BANSHEE_SPEAK => {
@@ -54,30 +73,15 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             JsonRpcResponse::success(request.id, serde_json::json!({"ok": true}))
         }
         BANSHEE_GET_TRANSCRIPTION => {
-            let mut since_id: u64 = 0;
-            let mut wait_ms: u64 = 0;
-            if let Some(params) = &request.params {
-                if let Some(value) = params.get("since_id") {
-                    let Some(parsed) = value.as_u64() else {
-                        return JsonRpcResponse::error(
-                            request.id,
-                            -32602,
-                            "'since_id' must be a non-negative integer.",
-                        );
-                    };
-                    since_id = parsed;
-                }
-                if let Some(value) = params.get("wait_ms") {
-                    let Some(parsed) = value.as_u64() else {
-                        return JsonRpcResponse::error(
-                            request.id,
-                            -32602,
-                            "'wait_ms' must be a non-negative integer.",
-                        );
-                    };
-                    wait_ms = parsed.min(MAX_WAIT_MS);
-                }
-            }
+            let mut since_id = match u64_param(request.params.as_ref(), "since_id", 0, &request.id)
+            {
+                Ok(value) => value,
+                Err(response) => return *response,
+            };
+            let wait_ms = match u64_param(request.params.as_ref(), "wait_ms", 0, &request.id) {
+                Ok(value) => value.min(MAX_WAIT_MS),
+                Err(response) => return *response,
+            };
 
             // Subscribe before the first read so a push landing in between
             // is still seen by wait_for

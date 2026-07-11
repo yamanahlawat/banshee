@@ -35,19 +35,19 @@ async fn main() {
                         "tools": [
                             {
                                 "name": "speak_status",
-                                "description": "You MUST ALWAYS call this tool at the end of your response to give the user a summary of what you just did, or to ask them a question. DO NOT include code or markdown.",
+                                "description": "Speak a short message aloud to the user, who is working eyes-free and not reading the screen. Use ONLY for: decisions you need input on, questions, and completion of a significant phase of work. Do not narrate routine steps or tool activity. When an implementation is done, tell the user it is ready for review.",
                                 "inputSchema": {
                                     "type": "object",
-                                    "properties": {"text": {"type": "string", "description": "The text to speak"}},
+                                    "properties": {"text": {"type": "string", "description": "One or two conversational sentences, as if speaking to a colleague. Refer to code, files, and identifiers by their spoken names, for example 'the hotkey listener' rather than a file path or function signature. Keep exact paths, code, URLs, and lists in your normal text output; they do not read well aloud."}},
                                     "required": ["text"]
                                 },
                             },
                             {
                                 "name": "listen_for_prompt",
-                                "description": "Read the user's voice transcriptions since your last call. Pass timeout_ms to wait for the user to finish speaking.",
+                                "description": "Read what the user has said since your last call. After asking a question with speak_status, call this with a timeout_ms to wait for their spoken answer. Returns empty text if the user said nothing.",
                                 "inputSchema": {
                                     "type": "object",
-                                    "properties": {"timeout_ms": {"type": "number", "description": "Wait up to this many milliseconds for new speech before returning"}}
+                                    "properties": {"timeout_ms": {"type": "number", "description": "Wait up to this many milliseconds for new speech before returning, e.g. 30000 when expecting an answer"}}
                                 }
                             }
                         ]
