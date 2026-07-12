@@ -54,7 +54,6 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 .unwrap_or(false);
 
             let clean_text = sanitize(raw_text);
-            println!("The sanitized text: {clean_text}");
 
             match daemon_state.speech().speak(&clean_text, interrupt) {
                 Ok(utterance_id) => JsonRpcResponse::success(
