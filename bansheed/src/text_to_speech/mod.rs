@@ -1,4 +1,5 @@
 pub mod kokoro;
+pub mod pronunciation;
 pub mod sanitizer;
 pub mod say;
 
@@ -77,6 +78,8 @@ impl SpeechPlayer {
 
     // Utterances play one at a time, in order; interrupt jumps the queue
     pub fn speak(self: &Arc<Self>, text: &str, interrupt: bool) -> Result<u64, std::io::Error> {
+        let normalized = pronunciation::normalize(text);
+        let text = normalized.as_str();
         let mut playback = self.lock();
         if interrupt {
             playback.queue.clear();
@@ -85,6 +88,16 @@ impl SpeechPlayer {
 
         playback.utterance_id += 1;
         let utterance_id = playback.utterance_id;
+
+        // normalize can leave nothing speakable (e.g. input was only underscores);
+        // keep the id sequence but start no playback
+        if text.is_empty() {
+            drop(playback);
+            if interrupt {
+                self.speaking.send_replace(false);
+            }
+            return Ok(utterance_id);
+        }
 
         if playback.active.is_some() {
             playback.queue.push_back(text.to_string());
