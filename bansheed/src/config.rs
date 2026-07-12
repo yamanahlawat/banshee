@@ -128,7 +128,6 @@ pub enum TTSFallback {
 #[derive(Deserialize)]
 #[serde(default)]
 pub struct TTSConfig {
-    pub model: String,
     pub voice: String,
     pub speed: f32,
     pub fallback: TTSFallback,
@@ -137,7 +136,6 @@ pub struct TTSConfig {
 impl Default for TTSConfig {
     fn default() -> Self {
         Self {
-            model: "~/.banshee/models/kokoro-v1.0.onnx".to_string(),
             voice: "af_heart".to_string(),
             speed: 1.0,
             fallback: TTSFallback::System,

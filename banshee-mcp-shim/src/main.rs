@@ -35,7 +35,7 @@ async fn main() {
                         "tools": [
                             {
                                 "name": "speak_status",
-                                "description": "Speak a short message aloud to the user, who is working eyes-free and not reading the screen. Use ONLY for: decisions you need input on, questions, and completion of a significant phase of work. Do not narrate routine steps or tool activity. When an implementation is done, tell the user it is ready for review.",
+                                "description": "Speak a short message aloud to the user, who is working eyes-free and not reading the screen. Use it for: decisions you need input on, questions, and telling the user you are done. ALWAYS call this when you finish the task and stop working: say what got done, mention any work still pending, and that you are awaiting instructions. When an implementation is done, tell the user it is ready for review. Do not narrate routine steps or tool activity in between.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {"text": {"type": "string", "description": "One or two conversational sentences, as if speaking to a colleague. Refer to code, files, and identifiers by their spoken names, for example 'the hotkey listener' rather than a file path or function signature. Keep exact paths, code, URLs, and lists in your normal text output; they do not read well aloud."}},

@@ -19,8 +19,9 @@ hands it off to an LLM. No cloud, no API keys, no audio leaving your laptop.
   whatever app is focused.
 - **Offline STT.** Whisper (`whisper-rs`) gated by Silero voice-activity
   detection. No network, no API keys.
-- **Text-to-speech.** Have Banshee read status updates aloud (currently via the
-  macOS `say` command).
+- **Offline TTS.** Banshee speaks with the Kokoro neural voice, synthesized
+  locally via ONNX. If the model isn't downloaded, it falls back to the macOS
+  `say` command.
 - **Audio cues.** Short tones confirm recording start/stop, a successful
   transcription, and errors, so you know what happened without looking at the
   screen.
@@ -31,10 +32,10 @@ hands it off to an LLM. No cloud, no API keys, no audio leaving your laptop.
 
 ## Requirements
 
-- **macOS** (Apple Silicon or Intel). The TTS uses the macOS `say` command, and
-  capture plus hotkeys are macOS-only for now.
+- **macOS** (Apple Silicon or Intel). Audio capture and hotkeys are macOS-only
+  for now.
 - **Rust** (stable, edition 2024). Grab it from [rustup](https://rustup.rs).
-- **Around 1.5 GB** of free disk for the default Whisper model.
+- **Around 1 GB** of free disk for the default models (see the table below).
 
 ## Install
 
@@ -65,11 +66,23 @@ drops the binaries in `target/release/` instead.
 
 ## Setup
 
-**1. Download the models** (Whisper and Silero VAD) into `~/.banshee/models/`:
+**1. Download the models** into `~/.banshee/models/`:
 
 ```bash
 banshee setup
 ```
+
+This fetches everything Banshee needs to work offline:
+
+| File | Size | What it is | Downloaded from |
+| --- | --- | --- | --- |
+| `ggml-large-v3-turbo-q5_0.bin` | ~547 MB | Whisper STT model (default `balanced` preset) | [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) on Hugging Face |
+| `silero_vad.onnx` | ~2 MB | Silero voice-activity detection | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) on GitHub |
+| `kokoro-v1.0.onnx` | ~310 MB | Kokoro TTS model | [onnx-community/Kokoro-82M-v1.0-ONNX](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) on Hugging Face (pinned revision) |
+| `af_heart.bin` | ~512 KB | Kokoro voice style (the configured `voice`) | same Kokoro repo, `voices/` directory |
+
+Files that already exist are skipped, so re-running `banshee setup` after
+changing the STT preset or the TTS voice only downloads what's missing.
 
 **2. Grant macOS permissions.** Banshee needs two of them, otherwise it quietly
 fails to record or type:
@@ -121,13 +134,27 @@ save_history = true    # keep transcriptions in ~/.banshee/banshee.db
 [stt]
 preset = "balanced"    # fast | balanced | quality (see below)
 vad_threshold = 0.5    # 0.0 to 1.0; higher means stricter speech detection
+vocabulary = []        # words Whisper keeps mangling, e.g. ["banshee", "clippy", "tokio"]
+
+[tts]
+voice = "af_heart"     # any voice from the Kokoro voices directory
+speed = 1.0            # playback speed multiplier
+fallback = "system"    # system = use `say` when Kokoro is unavailable | none
 
 [audio.cues]
 enabled = true         # tones on record start/stop, success, and errors
 ```
 
 You can also change `vad_threshold` at runtime through the `banshee.configure`
-RPC, no restart needed.
+RPC, no restart needed. `vocabulary` biases Whisper toward project jargon and
+proper nouns it would otherwise misspell; it is read once at startup, so
+restart the daemon after changing it.
+
+For `voice`, any file in the
+[Kokoro voices directory](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/voices)
+works, e.g. `af_bella`, `am_michael`, or `bf_emma` (the prefix is
+accent/gender: `a`merican/`b`ritish, `f`emale/`m`ale). After changing it, run
+`banshee setup` to download the new voice, then restart the daemon.
 
 ### Picking a Whisper model
 

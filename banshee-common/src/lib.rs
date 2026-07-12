@@ -106,3 +106,24 @@ impl SileroVADConfig {
         }
     }
 }
+
+// Kokoro TTS configuration: the model plus one style file per voice,
+// pinned to a revision so a repo update can't silently change the model
+pub struct KokoroTTSConfig {
+    pub model_name: String,
+    pub model_url: String,
+    pub voice_name: String,
+    pub voice_url: String,
+}
+
+impl KokoroTTSConfig {
+    pub fn new(voice: &str) -> Self {
+        const KOKORO_REPO: &str = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231";
+        Self {
+            model_name: "kokoro-v1.0.onnx".to_string(),
+            model_url: format!("{KOKORO_REPO}/onnx/model.onnx"),
+            voice_name: format!("{voice}.bin"),
+            voice_url: format!("{KOKORO_REPO}/voices/{voice}.bin"),
+        }
+    }
+}

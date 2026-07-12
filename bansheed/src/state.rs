@@ -45,6 +45,7 @@ impl DaemonState {
         vad_model: &'static str,
         initial_vad_threshold: f32,
         db_connection: Option<Mutex<rusqlite::Connection>>,
+        speech: SpeechPlayer,
     ) -> Self {
         Self {
             version,
@@ -60,7 +61,7 @@ impl DaemonState {
                 entries: VecDeque::with_capacity(TRANSCRIPTION_RING_CAPACITY),
             }),
             latest_transcription_id: watch::channel(0).0,
-            speech: Arc::new(SpeechPlayer::new()),
+            speech: Arc::new(speech),
         }
     }
 
@@ -156,7 +157,7 @@ mod tests {
 
     #[test]
     fn ring_evicts_oldest_and_filters_by_cursor() {
-        let state = DaemonState::new("0.0.0", "stt", "vad", 0.5, None);
+        let state = DaemonState::new("0.0.0", "stt", "vad", 0.5, None, crate::text_to_speech::SpeechPlayer::default());
         for i in 1..=20 {
             state.push_transcription(format!("utterance {i}"));
         }
