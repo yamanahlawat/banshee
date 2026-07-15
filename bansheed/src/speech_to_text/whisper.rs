@@ -22,10 +22,7 @@ pub struct WhisperEngine {
 }
 
 impl WhisperEngine {
-    pub fn new(
-        whisper_config: WhisperConfig,
-        vocabulary: &[String],
-    ) -> Result<Self, BansheeError> {
+    pub fn new(whisper_config: WhisperConfig, vocabulary: &[String]) -> Result<Self, BansheeError> {
         let models_path = get_models_path().ok_or_else(|| {
             BansheeError::Other(
                 "Could not find home directory. Cannot initialize Whisper engine.".to_string(),
@@ -152,6 +149,9 @@ mod tests {
     fn vocabulary_becomes_prompt() {
         assert_eq!(build_initial_prompt(&[]), None);
         let vocabulary = ["banshee".to_string(), "tokio".to_string()];
-        assert_eq!(build_initial_prompt(&vocabulary).as_deref(), Some("banshee, tokio"));
+        assert_eq!(
+            build_initial_prompt(&vocabulary).as_deref(),
+            Some("banshee, tokio")
+        );
     }
 }

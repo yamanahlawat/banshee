@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use regex::{NoExpand, Regex};
 
-// Terms the neural voice mispronounces (spells "JSON", says "makos"). All are
+// Terms the neural voice mispronounces (spells "macOS", says "makos"). All are
 // alphanumeric-bounded, so a plain \bWORD\b match is enough.
 static FIXUPS: LazyLock<Vec<(Regex, &str)>> = LazyLock::new(|| {
     [
@@ -10,6 +10,14 @@ static FIXUPS: LazyLock<Vec<(Regex, &str)>> = LazyLock::new(|| {
         ("iOS", "I O S"),
         ("JSON-RPC", "Jason RPC"),
         ("JSON", "Jason"),
+        ("fastapi", "fast API"),
+        ("lockfile", "lock file"),
+        ("frontend", "front end"),
+        ("figma", "fig ma"),
+        ("webhook", "web hook"),
+        ("webhooks", "web hooks"),
+        ("websocket", "web socket"),
+        ("websockets", "web sockets"),
     ]
     .into_iter()
     .map(|(written, spoken)| {
@@ -21,7 +29,8 @@ static FIXUPS: LazyLock<Vec<(Regex, &str)>> = LazyLock::new(|| {
     .collect()
 });
 
-static LOWER_TO_UPPER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([a-z0-9])([A-Z])").unwrap());
+static LOWER_TO_UPPER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([a-z0-9])([A-Z])").unwrap());
 static ACRONYM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([A-Z])([A-Z][a-z])").unwrap());
 static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 

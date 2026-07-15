@@ -3,14 +3,32 @@ use banshee_common::{
 };
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+// Highest transcription id in a get_transcription result, if any
+fn latest_id(result: &serde_json::Value) -> Option<u64> {
+    result
+        .get("transcriptions")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("id").and_then(|v| v.as_u64()))
+        .max()
+}
+
 #[tokio::main]
 async fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = BufReader::new(stdin).lines();
 
-    // Cursor into the daemon's transcription ring
-    let mut last_seen_id: u64 = 0;
+    // Ring cursor, primed so the first poll skips pre-session speech.
+    // On error the daemon is down and its ring will start empty, so 0 is right.
+    let mut last_seen_id: u64 = utils::call_daemon(
+        BANSHEE_GET_TRANSCRIPTION,
+        serde_json::json!({"since_id": 0, "wait_ms": 0}),
+    )
+    .await
+    .ok()
+    .and_then(|result| latest_id(&result))
+    .unwrap_or(0);
 
     eprintln!("Banshee MCP Shim started.");
 
@@ -93,16 +111,14 @@ async fn main() {
                             .await;
                             match daemon_response {
                                 Ok(result) => {
+                                    if let Some(id) = latest_id(&result) {
+                                        last_seen_id = last_seen_id.max(id);
+                                    }
                                     let transcriptions = result
                                         .get("transcriptions")
                                         .and_then(|v| v.as_array())
                                         .cloned()
                                         .unwrap_or_default();
-                                    for item in &transcriptions {
-                                        if let Some(id) = item.get("id").and_then(|v| v.as_u64()) {
-                                            last_seen_id = last_seen_id.max(id);
-                                        }
-                                    }
                                     let text = transcriptions
                                         .iter()
                                         .filter_map(|item| {

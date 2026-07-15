@@ -46,7 +46,9 @@ pub fn select_backend(tts_config: &TTSConfig) -> Result<Box<dyn TtsBackend>, Ban
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 struct Playback {

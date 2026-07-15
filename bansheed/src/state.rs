@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU32},
+        atomic::{AtomicU8, AtomicU32},
     },
     time::Instant,
 };
@@ -12,6 +12,26 @@ use tokio::sync::watch;
 use crate::text_to_speech::SpeechPlayer;
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
+
+// Stored in an AtomicU8: the audio callback reads it and must not lock
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RecordingMode {
+    Idle = 0,
+    PushToTalk = 1,
+    Armed = 2,
+}
+
+impl RecordingMode {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Idle,
+            1 => Self::PushToTalk,
+            2 => Self::Armed,
+            _ => unreachable!("invalid recording mode {value}"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TranscriptionEntry {
@@ -30,7 +50,7 @@ pub struct DaemonState {
     vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: OnceLock<String>,
-    recording: AtomicBool,
+    recording: AtomicU8,
     started_at: Instant,
     db_connection: Option<Mutex<rusqlite::Connection>>,
     transcriptions: Mutex<TranscriptionRing>,
@@ -53,7 +73,7 @@ impl DaemonState {
             vad_model,
             vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
             audio_device: OnceLock::new(),
-            recording: AtomicBool::new(false),
+            recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
             db_connection,
             transcriptions: Mutex::new(TranscriptionRing {
@@ -101,13 +121,17 @@ impl DaemonState {
         self.latest_transcription_id.subscribe()
     }
 
-    pub fn is_recording(&self) -> bool {
-        self.recording.load(std::sync::atomic::Ordering::Relaxed)
+    pub fn recording_mode(&self) -> RecordingMode {
+        RecordingMode::from_u8(self.recording.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    pub fn set_recording(&self, value: bool) {
+    pub fn set_recording_mode(&self, mode: RecordingMode) {
         self.recording
-            .store(value, std::sync::atomic::Ordering::Relaxed);
+            .store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recording_mode() != RecordingMode::Idle
     }
 
     pub fn uptime(&self) -> std::time::Duration {
@@ -156,8 +180,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recording_mode_roundtrips_and_derives_is_recording() {
+        let state = DaemonState::new(
+            "0.0.0",
+            "stt",
+            "vad",
+            0.5,
+            None,
+            crate::text_to_speech::SpeechPlayer::default(),
+        );
+        assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        assert!(!state.is_recording());
+        for mode in [RecordingMode::PushToTalk, RecordingMode::Armed] {
+            state.set_recording_mode(mode);
+            assert_eq!(state.recording_mode(), mode);
+            assert!(state.is_recording());
+        }
+    }
+
+    #[test]
     fn ring_evicts_oldest_and_filters_by_cursor() {
-        let state = DaemonState::new("0.0.0", "stt", "vad", 0.5, None, crate::text_to_speech::SpeechPlayer::default());
+        let state = DaemonState::new(
+            "0.0.0",
+            "stt",
+            "vad",
+            0.5,
+            None,
+            crate::text_to_speech::SpeechPlayer::default(),
+        );
         for i in 1..=20 {
             state.push_transcription(format!("utterance {i}"));
         }
