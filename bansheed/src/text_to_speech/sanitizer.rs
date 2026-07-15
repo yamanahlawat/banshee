@@ -78,12 +78,21 @@ mod tests {
         // Identifiers survive; commands and punctuation salad are dropped
         assert_eq!(sanitize("Run `rm -rf /` now"), "Run now");
         assert_eq!(sanitize("Send `{\"a\":1}` please"), "Send please");
-        assert_eq!(sanitize("Call `get_models_path` here"), "Call get_models_path here");
+        assert_eq!(
+            sanitize("Call `get_models_path` here"),
+            "Call get_models_path here"
+        );
     }
 
     #[test]
     fn url_host_does_not_swallow_adjacent_words() {
-        assert_eq!(sanitize("See (https://example.com) here"), "See (example dot com) here");
-        assert_eq!(sanitize("Go to https://example.com/a/b then"), "Go to example dot com then");
+        assert_eq!(
+            sanitize("See (https://example.com) here"),
+            "See (example dot com) here"
+        );
+        assert_eq!(
+            sanitize("Go to https://example.com/a/b then"),
+            "Go to example dot com then"
+        );
     }
 }

@@ -70,8 +70,7 @@ async fn main() -> Result<(), BansheeError> {
             let audio_capture_state = Arc::clone(&daemon_state);
             let (_stream, consumer, sample_rate) = audio::start_audio_capture(audio_capture_state)?;
             println!("Loading Whisper AI...");
-            let speech_to_text_engine =
-                WhisperEngine::new(whisper_config, &config.stt.vocabulary)?;
+            let speech_to_text_engine = WhisperEngine::new(whisper_config, &config.stt.vocabulary)?;
             let vad_engine = VADEngine::new(silero_vad_config)?;
             let cue_sender = audio::cues::start_cue_player(config.audio.cues.enabled);
             let hotkey_listener_state = Arc::clone(&daemon_state);

@@ -11,7 +11,7 @@ use crate::config::BargeInMode;
 use crate::dictation::type_text;
 use crate::speech_to_text::vad::VADEngine;
 use crate::speech_to_text::whisper::WhisperEngine;
-use crate::state::DaemonState;
+use crate::state::{DaemonState, RecordingMode};
 
 #[derive(Clone, Copy)]
 pub enum HotKeyAction {
@@ -66,14 +66,14 @@ pub fn hotkey_listener(
                         } else {
                             HotKeyAction::Mailbox
                         };
-                        daemon_state.set_recording(true);
+                        daemon_state.set_recording_mode(RecordingMode::PushToTalk);
                         let _ = hotkey_cues.send(Cue::RecordStart);
                         println!("F5 hotkey detected! Recording Audio...");
                     }
                 }
                 EventType::KeyRelease(Key::F5) => {
                     println!("F5 hotkey released");
-                    daemon_state.set_recording(false);
+                    daemon_state.set_recording_mode(RecordingMode::Idle);
                     let _ = hotkey_cues.send(Cue::RecordStop);
                     // Send whichever action we locked in when the key is pressed
                     let _ = sender.send(current_action);

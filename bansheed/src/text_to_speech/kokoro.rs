@@ -378,8 +378,9 @@ mod tests {
             chunks,
             vec!["Done with the build.", "Tests pass!", "Ready?"]
         );
-        assert_eq!(sentences("no terminator").collect::<Vec<_>>(), vec![
-            "no terminator"
-        ]);
+        assert_eq!(
+            sentences("no terminator").collect::<Vec<_>>(),
+            vec!["no terminator"]
+        );
     }
 }

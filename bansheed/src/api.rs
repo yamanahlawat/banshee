@@ -221,7 +221,14 @@ mod tests {
 
     #[tokio::test]
     async fn stale_cursor_is_clamped_to_zero() {
-        let state = Arc::new(DaemonState::new("0.0.0", "stt", "vad", 0.5, None, crate::text_to_speech::SpeechPlayer::default()));
+        let state = Arc::new(DaemonState::new(
+            "0.0.0",
+            "stt",
+            "vad",
+            0.5,
+            None,
+            crate::text_to_speech::SpeechPlayer::default(),
+        ));
         state.push_transcription("hello".to_string());
 
         let request = get_transcription_request(serde_json::json!({"since_id": 999}));
@@ -237,7 +244,14 @@ mod tests {
 
     #[tokio::test]
     async fn caught_up_cursor_returns_empty() {
-        let state = Arc::new(DaemonState::new("0.0.0", "stt", "vad", 0.5, None, crate::text_to_speech::SpeechPlayer::default()));
+        let state = Arc::new(DaemonState::new(
+            "0.0.0",
+            "stt",
+            "vad",
+            0.5,
+            None,
+            crate::text_to_speech::SpeechPlayer::default(),
+        ));
         state.push_transcription("hello".to_string());
 
         let request = get_transcription_request(serde_json::json!({"since_id": 1}));
