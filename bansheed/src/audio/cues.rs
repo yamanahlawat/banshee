@@ -11,6 +11,9 @@ pub enum Cue {
     RecordStop,
     Ready,
     Error,
+    // The only signal that an armed mic went hot or shut
+    Arm,
+    Disarm,
 }
 
 impl Cue {
@@ -21,6 +24,8 @@ impl Cue {
             Cue::RecordStop => &[(880.0, 70), (660.0, 90)],
             Cue::Ready => &[(523.0, 90), (784.0, 140)],
             Cue::Error => &[(220.0, 120), (196.0, 160)],
+            Cue::Arm => &[(523.0, 70), (1046.0, 120)],
+            Cue::Disarm => &[(1046.0, 70), (523.0, 120)],
         }
     }
 }
@@ -67,7 +72,14 @@ mod tests {
 
     #[test]
     fn every_cue_has_audible_tones() {
-        for cue in [Cue::RecordStart, Cue::RecordStop, Cue::Ready, Cue::Error] {
+        for cue in [
+            Cue::RecordStart,
+            Cue::RecordStop,
+            Cue::Ready,
+            Cue::Error,
+            Cue::Arm,
+            Cue::Disarm,
+        ] {
             for &(frequency, ms) in cue.tones() {
                 assert!((100.0..=2000.0).contains(&frequency));
                 assert!((30..=500).contains(&ms));

@@ -58,6 +58,7 @@ async fn main() -> Result<(), BansheeError> {
             };
 
             let speech_backend = text_to_speech::select_backend(&config.tts)?;
+            let (commands, command_receiver) = std::sync::mpsc::channel();
             let daemon_state = Arc::new(state::DaemonState::new(
                 env!("CARGO_PKG_VERSION"),
                 config.stt.preset.model_name(),
@@ -65,6 +66,7 @@ async fn main() -> Result<(), BansheeError> {
                 config.stt.vad_threshold,
                 db_connection,
                 text_to_speech::SpeechPlayer::new(speech_backend),
+                commands,
             ));
 
             let audio_capture_state = Arc::clone(&daemon_state);
@@ -73,15 +75,18 @@ async fn main() -> Result<(), BansheeError> {
             let speech_to_text_engine = WhisperEngine::new(whisper_config, &config.stt.vocabulary)?;
             let vad_engine = VADEngine::new(silero_vad_config)?;
             let cue_sender = audio::cues::start_cue_player(config.audio.cues.enabled);
-            let hotkey_listener_state = Arc::clone(&daemon_state);
             hotkey::hotkey_listener(
-                consumer,
-                speech_to_text_engine,
-                vad_engine,
-                sample_rate,
-                hotkey_listener_state,
-                cue_sender,
+                hotkey::Pipeline {
+                    consumer,
+                    speech_to_text: speech_to_text_engine,
+                    vad: vad_engine,
+                    sample_rate,
+                    state: Arc::clone(&daemon_state),
+                    cues: cue_sender,
+                    endpoint_silence_ms: config.stt.endpoint_silence_ms,
+                },
                 config.audio.barge_in,
+                command_receiver,
             );
             daemon::run(&daemon_state).await?;
         }

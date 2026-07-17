@@ -4,7 +4,7 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU8, AtomicU32},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use tokio::sync::watch;
@@ -13,6 +13,23 @@ use crate::text_to_speech::SpeechPlayer;
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
 
+#[derive(Clone, Copy)]
+pub enum HotKeyAction {
+    Mailbox,
+    Dictate,
+}
+
+pub struct AskCommand {
+    pub reply: tokio::sync::oneshot::Sender<String>,
+    pub timeout: Duration,
+}
+
+// Work items for the audio consumer thread
+pub enum ConsumerCommand {
+    Transcribe(HotKeyAction),
+    Ask(AskCommand),
+}
+
 // Stored in an AtomicU8: the audio callback reads it and must not lock
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -20,6 +37,8 @@ pub enum RecordingMode {
     Idle = 0,
     PushToTalk = 1,
     Armed = 2,
+    // Armed, but the user is holding F5 to answer manually
+    ArmedHold = 3,
 }
 
 impl RecordingMode {
@@ -28,6 +47,7 @@ impl RecordingMode {
             0 => Self::Idle,
             1 => Self::PushToTalk,
             2 => Self::Armed,
+            3 => Self::ArmedHold,
             _ => unreachable!("invalid recording mode {value}"),
         }
     }
@@ -56,6 +76,7 @@ pub struct DaemonState {
     transcriptions: Mutex<TranscriptionRing>,
     latest_transcription_id: watch::Sender<u64>,
     speech: Arc<SpeechPlayer>,
+    commands: std::sync::mpsc::Sender<ConsumerCommand>,
 }
 
 impl DaemonState {
@@ -66,6 +87,7 @@ impl DaemonState {
         initial_vad_threshold: f32,
         db_connection: Option<Mutex<rusqlite::Connection>>,
         speech: SpeechPlayer,
+        commands: std::sync::mpsc::Sender<ConsumerCommand>,
     ) -> Self {
         Self {
             version,
@@ -82,11 +104,16 @@ impl DaemonState {
             }),
             latest_transcription_id: watch::channel(0).0,
             speech: Arc::new(speech),
+            commands,
         }
     }
 
     pub fn speech(&self) -> &Arc<SpeechPlayer> {
         &self.speech
+    }
+
+    pub fn commands(&self) -> &std::sync::mpsc::Sender<ConsumerCommand> {
+        &self.commands
     }
 
     fn ring(&self) -> std::sync::MutexGuard<'_, TranscriptionRing> {
@@ -128,6 +155,19 @@ impl DaemonState {
     pub fn set_recording_mode(&self, mode: RecordingMode) {
         self.recording
             .store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // Concurrent transitions race (RPC arm vs hotkey vs session end);
+    // compare_exchange makes losing a race a no-op instead of a stuck mode
+    pub fn try_transition(&self, from: RecordingMode, to: RecordingMode) -> bool {
+        self.recording
+            .compare_exchange(
+                from as u8,
+                to as u8,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
     }
 
     pub fn is_recording(&self) -> bool {
@@ -188,6 +228,7 @@ mod tests {
             0.5,
             None,
             crate::text_to_speech::SpeechPlayer::default(),
+            std::sync::mpsc::channel().0,
         );
         assert_eq!(state.recording_mode(), RecordingMode::Idle);
         assert!(!state.is_recording());
@@ -207,6 +248,7 @@ mod tests {
             0.5,
             None,
             crate::text_to_speech::SpeechPlayer::default(),
+            std::sync::mpsc::channel().0,
         );
         for i in 1..=20 {
             state.push_transcription(format!("utterance {i}"));

@@ -2,15 +2,35 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use banshee_common::{
-    BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY,
-    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP_SPEAKING,
+    BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION,
+    BANSHEE_HISTORY, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP_SPEAKING,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
-use crate::state::DaemonState;
+use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode};
 use crate::text_to_speech::sanitizer::sanitize;
 
 const MAX_WAIT_MS: u64 = 30_000;
+const DEFAULT_ASK_WAIT_MS: u64 = 30_000;
+const MAX_ASK_WAIT_MS: u64 = 120_000;
+const MAX_PLAYBACK_WAIT_MS: u64 = 60_000;
+
+fn str_param<'a>(
+    params: Option<&'a serde_json::Value>,
+    key: &str,
+    id: &Option<serde_json::Value>,
+) -> Result<&'a str, Box<JsonRpcResponse>> {
+    params
+        .and_then(|p| p.get(key))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            Box::new(JsonRpcResponse::error(
+                id.clone(),
+                -32602,
+                format!("'{key}' is required and must be a string."),
+            ))
+        })
+}
 
 // absent → default; present but not a u64 → -32602 naming the field
 fn u64_param(
@@ -34,17 +54,9 @@ fn u64_param(
 pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     match request.method.as_str() {
         BANSHEE_SPEAK => {
-            let Some(raw_text) = request
-                .params
-                .as_ref()
-                .and_then(|p| p.get("text"))
-                .and_then(|v| v.as_str())
-            else {
-                return JsonRpcResponse::error(
-                    request.id,
-                    -32602,
-                    "'text' is required and must be a string.",
-                );
+            let raw_text = match str_param(request.params.as_ref(), "text", &request.id) {
+                Ok(value) => value,
+                Err(response) => return *response,
             };
             let interrupt = request
                 .params
@@ -70,6 +82,88 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_STOP_SPEAKING => {
             daemon_state.speech().stop();
             JsonRpcResponse::success(request.id, serde_json::json!({"ok": true}))
+        }
+        BANSHEE_ASK_USER => {
+            let question = match str_param(request.params.as_ref(), "question", &request.id) {
+                Ok(value) => value,
+                Err(response) => return *response,
+            };
+            let timeout_ms = match u64_param(
+                request.params.as_ref(),
+                "timeout_ms",
+                DEFAULT_ASK_WAIT_MS,
+                &request.id,
+            ) {
+                Ok(value) => value.min(MAX_ASK_WAIT_MS),
+                Err(response) => return *response,
+            };
+
+            // One armed session at a time; the mode is the lock
+            if !daemon_state.try_transition(RecordingMode::Idle, RecordingMode::Armed) {
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32004,
+                    "Microphone is busy with another recording or listening session.",
+                );
+            }
+
+            // Interrupt: the question must not queue behind stale status speech
+            let clean_question = sanitize(question);
+            if let Err(e) = daemon_state.speech().speak(&clean_question, true) {
+                daemon_state.set_recording_mode(RecordingMode::Idle);
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32603,
+                    format!("Failed to speak question: {e}"),
+                );
+            }
+
+            // Echo avoidance by ordering: listen only after playback ends.
+            // Bounded so a stalled backend cannot hold the mic armed forever
+            let mut speaking = daemon_state.speech().subscribe_speaking();
+            if tokio::time::timeout(
+                Duration::from_millis(MAX_PLAYBACK_WAIT_MS),
+                speaking.wait_for(|s| !s),
+            )
+            .await
+            .is_err()
+            {
+                daemon_state.speech().stop();
+                daemon_state.set_recording_mode(RecordingMode::Idle);
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32603,
+                    "Question playback did not finish.",
+                );
+            }
+
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            let command = ConsumerCommand::Ask(AskCommand {
+                reply,
+                timeout: Duration::from_millis(timeout_ms),
+            });
+            if daemon_state.commands().send(command).is_err() {
+                daemon_state.set_recording_mode(RecordingMode::Idle);
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32603,
+                    "Audio pipeline is not running.",
+                );
+            }
+
+            match answer.await {
+                Ok(text) => {
+                    JsonRpcResponse::success(request.id, serde_json::json!({ "text": text }))
+                }
+                Err(_) => {
+                    daemon_state.set_recording_mode(RecordingMode::Idle);
+                    JsonRpcResponse::error(
+                        request.id,
+                        -32603,
+                        "Listening session ended unexpectedly.",
+                    )
+                }
+            }
         }
         BANSHEE_GET_TRANSCRIPTION => {
             let mut since_id = match u64_param(request.params.as_ref(), "since_id", 0, &request.id)
@@ -209,6 +303,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text_to_speech::{ActiveUtterance, SpeechPlayer, TtsBackend};
 
     fn get_transcription_request(params: serde_json::Value) -> JsonRpcRequest {
         JsonRpcRequest {
@@ -217,6 +312,88 @@ mod tests {
             params: Some(params),
             id: Some(serde_json::json!(1)),
         }
+    }
+
+    // Silent backend so tests never spawn a real `say` process
+    struct NullBackend;
+    struct Done;
+    impl ActiveUtterance for Done {
+        fn is_finished(&mut self) -> bool {
+            true
+        }
+        fn stop(&mut self) {}
+    }
+    impl TtsBackend for NullBackend {
+        fn start(&self, _text: &str) -> std::io::Result<Box<dyn ActiveUtterance>> {
+            Ok(Box::new(Done))
+        }
+    }
+
+    fn ask_user_request(params: serde_json::Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: BANSHEE_ASK_USER.to_string(),
+            params: Some(params),
+            id: Some(serde_json::json!(1)),
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_user_returns_the_scoped_answer() {
+        let (commands, command_receiver) = std::sync::mpsc::channel();
+        let state = Arc::new(DaemonState::new(
+            "0.0.0",
+            "stt",
+            "vad",
+            0.5,
+            None,
+            SpeechPlayer::new(Box::new(NullBackend)),
+            commands,
+        ));
+
+        // Stand-in for the consumer thread: answer and disarm like a session
+        let session_state = Arc::clone(&state);
+        std::thread::spawn(move || {
+            let Ok(ConsumerCommand::Ask(ask)) = command_receiver.recv() else {
+                return;
+            };
+            assert_eq!(session_state.recording_mode(), RecordingMode::Armed);
+            session_state.set_recording_mode(RecordingMode::Idle);
+            let _ = ask.reply.send("yes, ship it".to_string());
+        });
+
+        let request = ask_user_request(serde_json::json!({"question": "Ready to ship?"}));
+        let response = dispatch(request, &state).await;
+
+        let JsonRpcResponse::Success { result, .. } = response else {
+            panic!("expected success response");
+        };
+        assert_eq!(result["text"], "yes, ship it");
+        assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    }
+
+    #[tokio::test]
+    async fn concurrent_ask_user_is_refused_while_armed() {
+        let state = Arc::new(DaemonState::new(
+            "0.0.0",
+            "stt",
+            "vad",
+            0.5,
+            None,
+            SpeechPlayer::new(Box::new(NullBackend)),
+            std::sync::mpsc::channel().0,
+        ));
+        state.set_recording_mode(RecordingMode::Armed);
+
+        let request = ask_user_request(serde_json::json!({"question": "Also ready?"}));
+        let response = dispatch(request, &state).await;
+
+        let JsonRpcResponse::Error { error, .. } = response else {
+            panic!("expected error response");
+        };
+        assert_eq!(error.code, -32004);
+        // The refused call must not disturb the session that owns the mic
+        assert_eq!(state.recording_mode(), RecordingMode::Armed);
     }
 
     #[tokio::test]
@@ -228,6 +405,7 @@ mod tests {
             0.5,
             None,
             crate::text_to_speech::SpeechPlayer::default(),
+            std::sync::mpsc::channel().0,
         ));
         state.push_transcription("hello".to_string());
 
@@ -251,6 +429,7 @@ mod tests {
             0.5,
             None,
             crate::text_to_speech::SpeechPlayer::default(),
+            std::sync::mpsc::channel().0,
         ));
         state.push_transcription("hello".to_string());
 
