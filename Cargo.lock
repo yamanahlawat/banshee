@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "banshee-common"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dirs",
  "serde",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "banshee-mcp-shim"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "banshee-common",
  "serde_json",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "bansheed"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",

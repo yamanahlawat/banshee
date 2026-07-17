@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-17
+
+The hands-free release: the daemon speaks with its own offline voice, and an
+agent can ask a question aloud and hear the answer without a single keypress.
+
+### Added
+
+- Kokoro TTS: offline neural speech synthesis with a pure-Rust G2P (no
+  espeak dependency), streamed sentence by sentence so long messages start
+  playing immediately. Pick a voice with `[tts] voice`; when the model is not
+  on disk, `[tts] fallback` selects the system voice or refuses to start.
+  `banshee setup` downloads the model and voice data.
+- `ask_user` MCP tool and `banshee.ask_user` RPC: one complete voice turn.
+  The question is spoken aloud, the microphone arms once playback ends, and
+  online voice-activity endpointing captures the answer, with trailing
+  silence ending it (`[stt] endpoint_silence_ms`, default 1000). The
+  transcript returns scoped to the calling agent; staying silent returns
+  empty text after `timeout_ms`.
+- Manual override while armed: hold `F5` to answer on your own terms; the
+  transcript captured during the hold becomes the answer.
+- Arm and disarm earcons mark exactly when the hands-free microphone goes
+  hot and shuts. A concurrent `ask_user` is refused with
+  `-32004 MICROPHONE_BUSY` instead of stealing the microphone.
+- Identifier verbalization for spoken text: snake_case and camelCase names
+  are split into words, and common developer terms get pronunciation fixes.
+
+### Changed
+
+- An `ask_user` question interrupts queued status speech instead of waiting
+  behind it.
+
+### Fixed
+
+- A freshly started MCP shim no longer replays speech from before its
+  session; its cursor is primed to the newest transcription at startup.
+- An armed listening session always ends: hard ceilings on answer length and
+  question playback mean continuous background noise or stalled speech can
+  no longer hold the microphone open.
+
 ## [0.2.0] - 2026-07-11
 
 The conversation loop release: transcriptions are never lost, agents can wait
