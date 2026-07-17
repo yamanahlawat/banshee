@@ -104,6 +104,8 @@ pub struct STTConfig {
     pub translate: bool,
     pub vad_threshold: f32,
     pub vocabulary: Vec<String>,
+    // Trailing silence that ends an armed-listening answer
+    pub endpoint_silence_ms: u64,
 }
 
 impl Default for STTConfig {
@@ -114,6 +116,7 @@ impl Default for STTConfig {
             translate: false,
             vad_threshold: 0.5,
             vocabulary: vec!["banshee".to_string()],
+            endpoint_silence_ms: 1000,
         }
     }
 }

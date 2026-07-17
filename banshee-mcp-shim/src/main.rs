@@ -1,7 +1,16 @@
 use banshee_common::{
-    BANSHEE_GET_TRANSCRIPTION, BANSHEE_SPEAK, JsonRpcRequest, JsonRpcResponse, utils,
+    BANSHEE_ASK_USER, BANSHEE_GET_TRANSCRIPTION, BANSHEE_SPEAK, JsonRpcRequest, JsonRpcResponse,
+    utils,
 };
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+// MCP tool result: a single text content block
+fn tool_text(id: Option<serde_json::Value>, text: &str) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({"content": [{"type": "text", "text": text}]}),
+    )
+}
 
 // Highest transcription id in a get_transcription result, if any
 fn latest_id(result: &serde_json::Value) -> Option<u64> {
@@ -61,6 +70,18 @@ async fn main() {
                                 },
                             },
                             {
+                                "name": "ask_user",
+                                "description": "Ask the user a question aloud and wait for their spoken answer. Use it when you need a decision or clarification: the question is spoken, the microphone opens once it finishes playing, and the transcribed reply comes back scoped to you. Returns empty text if the user stayed silent.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "question": {"type": "string", "description": "One or two conversational sentences, as if asking a colleague. Refer to code, files, and identifiers by their spoken names rather than paths or signatures."},
+                                        "timeout_ms": {"type": "number", "description": "How long to wait for the user to start answering, in milliseconds. Defaults to 30000."}
+                                    },
+                                    "required": ["question"]
+                                }
+                            },
+                            {
                                 "name": "listen_for_prompt",
                                 "description": "Read what the user has said since your last call. After asking a question with speak_status, call this with a timeout_ms to wait for their spoken answer. Returns empty text if the user said nothing.",
                                 "inputSchema": {
@@ -80,20 +101,22 @@ async fn main() {
                         .unwrap_or_else(|| serde_json::json!({}));
                     match tool_name {
                         Some(name) if name.ends_with("speak_status") => {
-                            let daemon_response =
-                                utils::call_daemon(BANSHEE_SPEAK, arguments).await;
-                            match daemon_response {
-                                Ok(result) => JsonRpcResponse::success(
-                                    request.id,
-                                    serde_json::json!({
-                                        "content": [
-                                            {
-                                                "type": "text",
-                                                "text": result.to_string()
-                                            }
-                                        ]
-                                    }),
-                                ),
+                            match utils::call_daemon(BANSHEE_SPEAK, arguments).await {
+                                Ok(result) => tool_text(request.id, &result.to_string()),
+                                Err(error) => {
+                                    JsonRpcResponse::error(request.id, -32603, error.to_string())
+                                }
+                            }
+                        }
+                        Some(name) if name.ends_with("ask_user") => {
+                            match utils::call_daemon(BANSHEE_ASK_USER, arguments).await {
+                                Ok(result) => {
+                                    let text = result
+                                        .get("text")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default();
+                                    tool_text(request.id, text)
+                                }
                                 Err(error) => {
                                     JsonRpcResponse::error(request.id, -32603, error.to_string())
                                 }
@@ -126,19 +149,8 @@ async fn main() {
                                         })
                                         .collect::<Vec<_>>()
                                         .join("\n");
-                                    JsonRpcResponse::success(
-                                        request.id,
-                                        serde_json::json!({
-                                            "content": [
-                                                {
-                                                    "type": "text",
-                                                    "text": text
-                                                }
-                                            ]
-                                        }),
-                                    )
+                                    tool_text(request.id, &text)
                                 }
-
                                 Err(error) => {
                                     JsonRpcResponse::error(request.id, -32603, error.to_string())
                                 }
