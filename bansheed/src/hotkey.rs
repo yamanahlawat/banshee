@@ -7,11 +7,10 @@ use rdev::{EventType, Key, listen};
 
 use crate::audio::cues::Cue;
 use crate::audio::utils::{StreamingResampler, resample_audio};
-use crate::config::BargeInMode;
 use crate::dictation::type_text;
 use crate::speech_to_text::vad::VADEngine;
 use crate::speech_to_text::whisper::WhisperEngine;
-use crate::state::{AskCommand, ConsumerCommand, DaemonState, HotKeyAction, RecordingMode};
+use crate::state::{AskCommand, ConsumerCommand, DaemonState, TranscribeTarget, RecordingMode};
 
 const TARGET_SAMPLE_RATE: u32 = 16000;
 const VAD_CHUNK: usize = 512;
@@ -44,22 +43,17 @@ enum Phase {
 
 pub fn hotkey_listener<C>(
     pipeline: Pipeline<C>,
-    barge_in: BargeInMode,
     commands: mpsc::Receiver<ConsumerCommand>,
 ) -> thread::JoinHandle<()>
 where
     C: Consumer<Item = f32> + Send + 'static,
 {
     let key_state = Arc::clone(&pipeline.state);
-    let key_cues = pipeline.cues.clone();
 
     // Spawn a heavy thread for the global hotkey listener
     thread::spawn(move || {
         // Track the state of the shift key
         let mut shift_key_pressed = false;
-
-        // Track what action are we recording for
-        let mut current_action = HotKeyAction::Mailbox;
 
         if let Err(error) = listen(move |event| {
             match event.event_type {
@@ -71,43 +65,16 @@ where
                     shift_key_pressed = false;
                 }
 
-                // Track F5
+                // Press and release share their logic with the record RPC
                 EventType::KeyPress(Key::F5) => {
-                    if key_state.try_transition(RecordingMode::Armed, RecordingMode::ArmedHold) {
-                        // Manual override of an armed session: hold to answer
-                        if matches!(barge_in, BargeInMode::Stop) {
-                            key_state.speech().stop();
-                        }
-                        let _ = key_cues.send(Cue::RecordStart);
-                    } else if key_state
-                        .try_transition(RecordingMode::Idle, RecordingMode::PushToTalk)
-                    {
-                        // Silence the daemon's own voice before the mic opens
-                        if matches!(barge_in, BargeInMode::Stop) {
-                            key_state.speech().stop();
-                        }
-                        current_action = if shift_key_pressed {
-                            HotKeyAction::Dictate
-                        } else {
-                            HotKeyAction::Mailbox
-                        };
-                        let _ = key_cues.send(Cue::RecordStart);
-                        println!("F5 hotkey detected! Recording Audio...");
-                    }
+                    key_state.record_start(if shift_key_pressed {
+                        TranscribeTarget::Dictate
+                    } else {
+                        TranscribeTarget::Mailbox
+                    });
                 }
                 EventType::KeyRelease(Key::F5) => {
-                    if key_state.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
-                        println!("F5 hotkey released");
-                        let _ = key_cues.send(Cue::RecordStop);
-                        // Send whichever action we locked in when the key is pressed
-                        let _ = key_state
-                            .commands()
-                            .send(ConsumerCommand::Transcribe(current_action));
-                    } else if key_state
-                        .try_transition(RecordingMode::ArmedHold, RecordingMode::Armed)
-                    {
-                        let _ = key_cues.send(Cue::RecordStop);
-                    }
+                    key_state.record_stop();
                 }
                 _ => (), // Ignore mouse movements
             }
@@ -132,7 +99,7 @@ where
 
 impl<C: Consumer<Item = f32>> Pipeline<C> {
     // Push-to-talk: F5 was released, the ring holds the whole utterance
-    fn transcribe_utterance(&mut self, action: HotKeyAction) {
+    fn transcribe_utterance(&mut self, action: TranscribeTarget) {
         // pull all the floats out of the ring buffer into a standard Vec
         let mut audio_data = Vec::new();
         audio_data.extend(self.consumer.pop_iter());
@@ -232,11 +199,11 @@ impl<C: Consumer<Item = f32>> Pipeline<C> {
 
                 // Ready only after the utterance is actually delivered
                 match action {
-                    HotKeyAction::Mailbox => {
+                    TranscribeTarget::Mailbox => {
                         self.state.push_transcription(transcription);
                         let _ = self.cues.send(Cue::Ready);
                     }
-                    HotKeyAction::Dictate => {
+                    TranscribeTarget::Dictate => {
                         println!("Dictating: {}", transcription);
                         match type_text(&transcription) {
                             Ok(_) => {

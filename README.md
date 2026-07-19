@@ -136,6 +136,7 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee serve` | Run the daemon in the foreground |
 | `banshee service uninstall` | Remove the start-at-login launch agent |
 | `banshee listen` | Print recent transcriptions |
+| `banshee record start` / `stop` | Push-to-talk without the hotkey (for keybinds and scripts) |
 | `banshee speak "<text>"` | Speak some text aloud |
 | `banshee history` | List all saved transcriptions |
 | `banshee clear-history` | Clear the saved transcriptions |

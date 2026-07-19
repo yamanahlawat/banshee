@@ -2,19 +2,22 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU8, AtomicU32},
+        atomic::{AtomicBool, AtomicU8, AtomicU32},
     },
     time::{Duration, Instant},
 };
 
 use tokio::sync::watch;
 
+use crate::audio::cues::Cue;
+use crate::config::BargeInMode;
 use crate::text_to_speech::SpeechPlayer;
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
 
+// Where a finished transcription is delivered
 #[derive(Clone, Copy)]
-pub enum HotKeyAction {
+pub enum TranscribeTarget {
     Mailbox,
     Dictate,
 }
@@ -26,7 +29,7 @@ pub struct AskCommand {
 
 // Work items for the audio consumer thread
 pub enum ConsumerCommand {
-    Transcribe(HotKeyAction),
+    Transcribe(TranscribeTarget),
     Ask(AskCommand),
     Shutdown,
 }
@@ -78,10 +81,16 @@ pub struct DaemonState {
     latest_transcription_id: watch::Sender<u64>,
     speech: Arc<SpeechPlayer>,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
+    cues: std::sync::mpsc::Sender<Cue>,
+    barge_in: BargeInMode,
+    // Locked in at record start, consumed at stop; start and stop can be
+    // separate RPC calls, so the choice cannot live on a caller's stack
+    pending_dictate: AtomicBool,
     shutdown: tokio::sync::Notify,
 }
 
 impl DaemonState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         version: &'static str,
         stt_model: &'static str,
@@ -90,6 +99,8 @@ impl DaemonState {
         db_connection: Option<Mutex<rusqlite::Connection>>,
         speech: SpeechPlayer,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
+        cues: std::sync::mpsc::Sender<Cue>,
+        barge_in: BargeInMode,
     ) -> Self {
         Self {
             version,
@@ -107,7 +118,54 @@ impl DaemonState {
             latest_transcription_id: watch::channel(0).0,
             speech: Arc::new(speech),
             commands,
+            cues,
+            barge_in,
+            pending_dictate: AtomicBool::new(false),
             shutdown: tokio::sync::Notify::new(),
+        }
+    }
+
+    // Push-to-talk press, shared by the hotkey listener and the record RPC.
+    // Returns false when another session already owns the microphone.
+    pub fn record_start(&self, action: TranscribeTarget) -> bool {
+        if self.try_transition(RecordingMode::Armed, RecordingMode::ArmedHold) {
+            // Manual override of an armed session: hold to answer
+            if matches!(self.barge_in, BargeInMode::Stop) {
+                self.speech.stop();
+            }
+            let _ = self.cues.send(Cue::RecordStart);
+            true
+        } else if self.try_transition(RecordingMode::Idle, RecordingMode::PushToTalk) {
+            // Silence the daemon's own voice before the mic opens
+            if matches!(self.barge_in, BargeInMode::Stop) {
+                self.speech.stop();
+            }
+            self.pending_dictate.store(
+                matches!(action, TranscribeTarget::Dictate),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            let _ = self.cues.send(Cue::RecordStart);
+            println!("Recording started...");
+            true
+        } else {
+            false
+        }
+    }
+
+    // Push-to-talk release. A stop with nothing in flight is a no-op so
+    // release keybinds can fire unconditionally.
+    pub fn record_stop(&self) {
+        if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
+            println!("Recording stopped");
+            let _ = self.cues.send(Cue::RecordStop);
+            let action = if self.pending_dictate.load(std::sync::atomic::Ordering::Relaxed) {
+                TranscribeTarget::Dictate
+            } else {
+                TranscribeTarget::Mailbox
+            };
+            let _ = self.commands.send(ConsumerCommand::Transcribe(action));
+        } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
+            let _ = self.cues.send(Cue::RecordStop);
         }
     }
 
@@ -226,9 +284,8 @@ impl DaemonState {
 mod tests {
     use super::*;
 
-    #[test]
-    fn recording_mode_roundtrips_and_derives_is_recording() {
-        let state = DaemonState::new(
+    fn test_state() -> DaemonState {
+        DaemonState::new(
             "0.0.0",
             "stt",
             "vad",
@@ -236,7 +293,14 @@ mod tests {
             None,
             crate::text_to_speech::SpeechPlayer::default(),
             std::sync::mpsc::channel().0,
-        );
+            std::sync::mpsc::channel().0,
+            BargeInMode::Stop,
+        )
+    }
+
+    #[test]
+    fn recording_mode_roundtrips_and_derives_is_recording() {
+        let state = test_state();
         assert_eq!(state.recording_mode(), RecordingMode::Idle);
         assert!(!state.is_recording());
         for mode in [RecordingMode::PushToTalk, RecordingMode::Armed] {
@@ -248,15 +312,7 @@ mod tests {
 
     #[test]
     fn ring_evicts_oldest_and_filters_by_cursor() {
-        let state = DaemonState::new(
-            "0.0.0",
-            "stt",
-            "vad",
-            0.5,
-            None,
-            crate::text_to_speech::SpeechPlayer::default(),
-            std::sync::mpsc::channel().0,
-        );
+        let state = test_state();
         for i in 1..=20 {
             state.push_transcription(format!("utterance {i}"));
         }
