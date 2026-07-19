@@ -18,6 +18,8 @@ static FIXUPS: LazyLock<Vec<(Regex, &str)>> = LazyLock::new(|| {
         ("webhooks", "web hooks"),
         ("websocket", "web socket"),
         ("websockets", "web sockets"),
+        ("earcon", "ear con"),
+        ("earcons", "ear cons"),
     ]
     .into_iter()
     .map(|(written, spoken)| {

@@ -84,24 +84,38 @@ This fetches everything Banshee needs to work offline:
 Files that already exist are skipped, so re-running `banshee setup` after
 changing the STT preset or the TTS voice only downloads what's missing.
 
-**2. Grant macOS permissions.** Banshee needs two of them, otherwise it quietly
-fails to record or type:
+**2. Grant macOS permissions.** Banshee needs three of them, otherwise it
+quietly fails to record or type:
 
 - **Microphone**, so it can capture audio.
-- **Accessibility**, so it can listen for the global hotkey and type out your
-  transcribed text.
+- **Input Monitoring**, so it can listen for the global hotkey.
+- **Accessibility**, so it can type out your transcribed text.
 
-You'll find both under **System Settings > Privacy & Security**. Add your
-terminal (or the `banshee` binary) to the *Microphone* and *Accessibility*
-lists.
+You'll find all three under **System Settings > Privacy & Security**. macOS
+prompts for each one the first time Banshee needs it; approve the prompts, then
+restart the daemon (permissions don't apply to an already-running process).
+
+**3. Check your setup:**
+
+```bash
+banshee doctor
+```
+
+It reports on models, config, microphone, permissions, and daemon health, and
+prints a fix for anything that's off. It never changes anything itself.
 
 ## Usage
 
 Start the daemon:
 
 ```bash
-banshee serve
+banshee start
 ```
+
+It runs at every login, restarts if it crashes, and logs to
+`~/.banshee/daemon.log`. `banshee stop` pauses it until the next login or the
+next `banshee start`. To run the daemon in the foreground instead (say, to
+watch the logs while debugging), use `banshee serve`.
 
 With the daemon running, the global hotkeys are:
 
@@ -114,9 +128,13 @@ The CLI commands all talk to the running daemon over its socket:
 
 | Command | What it does |
 | --- | --- |
-| `banshee serve` | Start the background daemon |
+| `banshee start` | Start the daemon, now and at every login |
+| `banshee stop` | Stop the running daemon |
 | `banshee setup` | Download the required models |
 | `banshee status` | Show daemon health and state |
+| `banshee doctor` | Diagnose setup problems and report fixes |
+| `banshee serve` | Run the daemon in the foreground |
+| `banshee service uninstall` | Remove the start-at-login launch agent |
 | `banshee listen` | Print recent transcriptions |
 | `banshee speak "<text>"` | Speak some text aloud |
 | `banshee history` | List all saved transcriptions |
@@ -172,7 +190,7 @@ model into `~/.banshee/models/`.
 ## MCP integration
 
 `banshee-mcp-shim` is an MCP stdio server that bridges LLM hosts to the daemon
-and exposes speak and listen tools. It needs `banshee serve` to be running.
+and exposes speak and listen tools. It needs the daemon to be running.
 
 If you installed it with `cargo install` above, the shim lives at
 `~/.cargo/bin/banshee-mcp-shim`. It works with any MCP-capable tool, like Claude
@@ -195,6 +213,25 @@ check your tool's docs for where the MCP config lives. If your tool doesn't pick
 up the binary from your `PATH`, use the full path
 (`~/.cargo/bin/banshee-mcp-shim`) instead. Restart the tool, and the speak and
 listen tools will show up.
+
+## Troubleshooting
+
+Start with `banshee doctor`; it catches most setup problems and tells you the
+fix. Beyond that:
+
+- **Audio sounds muffled on Bluetooth earbuds while Banshee runs.** Banshee
+  keeps the microphone open so the hotkey can start recording instantly, and
+  macOS switches Bluetooth earbuds to their low-quality telephony profile
+  whenever any app holds their mic. The fix: in **System Settings > Sound**, set
+  *Input* to your Mac's built-in microphone and leave *Output* on the earbuds.
+  Playback quality comes back, and the built-in mic transcribes better anyway.
+  For a one-off (say, a movie), `banshee stop` releases the mic entirely.
+- **Hotkeys or typing stopped working, but no error appears.** macOS withholds
+  input events silently when an Input Monitoring or Accessibility grant is
+  stale. Remove the Banshee entries from both lists in **System Settings >
+  Privacy & Security**, restart the daemon, and approve the fresh prompts.
+- **Permissions granted, but Banshee keeps asking.** Grants only apply to newly
+  started processes. Restart the daemon with `banshee start`.
 
 ## Architecture
 

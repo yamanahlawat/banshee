@@ -46,7 +46,8 @@ pub fn hotkey_listener<C>(
     pipeline: Pipeline<C>,
     barge_in: BargeInMode,
     commands: mpsc::Receiver<ConsumerCommand>,
-) where
+) -> thread::JoinHandle<()>
+where
     C: Consumer<Item = f32> + Send + 'static,
 {
     let key_state = Arc::clone(&pipeline.state);
@@ -115,16 +116,18 @@ pub fn hotkey_listener<C>(
         }
     });
 
-    // Spawn a thread to handle the audio processing and transcription
+    // Spawn a thread to handle the audio processing and transcription.
+    // The handle lets shutdown join it, dropping the Whisper context before atexit
     thread::spawn(move || {
         let mut pipeline = pipeline;
         while let Ok(command) = commands.recv() {
             match command {
                 ConsumerCommand::Transcribe(action) => pipeline.transcribe_utterance(action),
                 ConsumerCommand::Ask(ask) => pipeline.ask(ask),
+                ConsumerCommand::Shutdown => break,
             }
         }
-    });
+    })
 }
 
 impl<C: Consumer<Item = f32>> Pipeline<C> {

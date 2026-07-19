@@ -12,9 +12,9 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::api::dispatch;
 use crate::state::DaemonState;
 
-pub async fn run(daemon_state: &Arc<DaemonState>) -> Result<(), std::io::Error> {
-    println!("Starting unix socket listener...");
-
+// Claimed before model loading: losing the single-instance race must stay cheap,
+// a supervised restart loop would otherwise load Whisper on every attempt
+pub fn claim() -> Result<(std::path::PathBuf, UnixListener), io::Error> {
     let socket_path = get_socket_path()
         .ok_or_else(|| io::Error::other("could not find home directory for the socket path"))?;
 
@@ -25,6 +25,14 @@ pub async fn run(daemon_state: &Arc<DaemonState>) -> Result<(), std::io::Error> 
     let listener = claim_socket(&socket_path)?;
     // owner-only: the socket is a command channel into the mic and speakers
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
+    Ok((socket_path, listener))
+}
+
+pub async fn run(
+    daemon_state: &Arc<DaemonState>,
+    socket_path: std::path::PathBuf,
+    listener: UnixListener,
+) -> Result<(), std::io::Error> {
     println!("Listening on {}", socket_path.display());
 
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -34,6 +42,11 @@ pub async fn run(daemon_state: &Arc<DaemonState>) -> Result<(), std::io::Error> 
         tokio::select! {
             _ = sigint.recv() => break,
             _ = sigterm.recv() => break,
+            // Stop RPC: wait a beat so the client task can flush its response
+            _ = daemon_state.shutdown().notified() => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                break;
+            }
             accepted = listener.accept() => match accepted {
                 Ok((mut stream, _addr)) => {
                     println!("New client connected!");
@@ -67,24 +80,24 @@ pub async fn run(daemon_state: &Arc<DaemonState>) -> Result<(), std::io::Error> 
     Ok(())
 }
 
-// The socket file doubles as the single-instance lock.
 // Probe with std's blocking connect: tokio's nonblocking UDS connect on
 // macOS reports success against a dead socket
+pub fn socket_answers(socket_path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+}
+
+// The socket file doubles as the single-instance lock
 fn claim_socket(socket_path: &Path) -> io::Result<UnixListener> {
     if socket_path.exists() {
-        match std::os::unix::net::UnixStream::connect(socket_path) {
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    "another banshee daemon is already running",
-                ));
-            }
-            Err(_) => {
-                // nobody answered: stale socket left by an unclean exit
-                println!("Removing stale socket at {}", socket_path.display());
-                fs::remove_file(socket_path)?;
-            }
+        if socket_answers(socket_path) {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "another banshee daemon is already running",
+            ));
         }
+        // nobody answered: stale socket left by an unclean exit
+        println!("Removing stale socket at {}", socket_path.display());
+        fs::remove_file(socket_path)?;
     }
     UnixListener::bind(socket_path)
 }
