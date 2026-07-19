@@ -21,6 +21,11 @@ pub enum CommandType {
     Doctor,
     /// Gets latest transcription
     Listen,
+    /// Start or stop push-to-talk recording (for compositor keybinds and scripts)
+    Record {
+        #[clap(subcommand)]
+        action: RecordAction,
+    },
     /// Speaks a message via text-to-speech
     Speak { text: String },
     /// List all transcriptions in the database
@@ -40,4 +45,16 @@ pub enum CommandType {
 pub enum ServiceAction {
     /// Stop and remove the launch agent
     Uninstall,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RecordAction {
+    /// Begin recording (like pressing the hotkey)
+    Start {
+        /// Type the transcription into the focused app instead of saving it
+        #[clap(long)]
+        dictate: bool,
+    },
+    /// Stop recording and transcribe (like releasing the hotkey)
+    Stop,
 }

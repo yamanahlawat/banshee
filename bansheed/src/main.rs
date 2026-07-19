@@ -58,6 +58,7 @@ async fn main() -> Result<(), BansheeError> {
 
             let speech_backend = text_to_speech::select_backend(&config.tts)?;
             let (commands, command_receiver) = std::sync::mpsc::channel();
+            let cue_sender = audio::cues::start_cue_player(config.audio.cues.enabled);
             let daemon_state = Arc::new(state::DaemonState::new(
                 env!("CARGO_PKG_VERSION"),
                 config.stt.preset.model_name(),
@@ -66,6 +67,8 @@ async fn main() -> Result<(), BansheeError> {
                 db_connection,
                 text_to_speech::SpeechPlayer::new(speech_backend),
                 commands,
+                cue_sender.clone(),
+                config.audio.barge_in,
             ));
 
             let audio_capture_state = Arc::clone(&daemon_state);
@@ -76,7 +79,6 @@ async fn main() -> Result<(), BansheeError> {
                 &config.stt.vocabulary,
             )?;
             let vad_engine = VADEngine::new(SileroVADConfig::new(VAD_MODEL))?;
-            let cue_sender = audio::cues::start_cue_player(config.audio.cues.enabled);
             let consumer_thread = hotkey::hotkey_listener(
                 hotkey::Pipeline {
                     consumer,
@@ -87,7 +89,6 @@ async fn main() -> Result<(), BansheeError> {
                     cues: cue_sender,
                     endpoint_silence_ms: config.stt.endpoint_silence_ms,
                 },
-                config.audio.barge_in,
                 command_receiver,
             );
             let result = daemon::run(&daemon_state, socket_path, listener).await;
@@ -182,6 +183,20 @@ async fn main() -> Result<(), BansheeError> {
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
                 ),
                 Err(error) => eprintln!("Failed to clear history: {error}"),
+            }
+        }
+        CommandType::Record { action } => {
+            let (method, params) = match action {
+                args::RecordAction::Start { dictate } => (
+                    banshee_common::BANSHEE_RECORD_START,
+                    serde_json::json!({ "dictate": dictate }),
+                ),
+                args::RecordAction::Stop => {
+                    (banshee_common::BANSHEE_RECORD_STOP, serde_json::json!({}))
+                }
+            };
+            if let Err(error) = utils::call_daemon(method, params).await {
+                eprintln!("Failed to send record command: {error}");
             }
         }
         CommandType::Start => service::install()?,

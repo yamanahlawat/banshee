@@ -136,6 +136,7 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee serve` | Run the daemon in the foreground |
 | `banshee service uninstall` | Remove the start-at-login launch agent |
 | `banshee listen` | Print recent transcriptions |
+| `banshee record start` / `stop` | Push-to-talk without the hotkey (for keybinds and scripts) |
 | `banshee speak "<text>"` | Speak some text aloud |
 | `banshee history` | List all saved transcriptions |
 | `banshee clear-history` | Clear the saved transcriptions |
@@ -243,6 +244,11 @@ fix. Beyond that:
 
 The daemon exposes a JSON-RPC 2.0 API over a Unix socket at
 `~/.banshee/banshee.sock`. The CLI and the MCP shim are both just clients of it.
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev
+setup, including how to keep macOS permissions across rebuilds.
 
 ## License
 
