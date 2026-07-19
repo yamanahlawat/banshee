@@ -9,12 +9,16 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum CommandType {
-    /// Starts the background daemon
-    Serve,
+    /// Starts the daemon now and at every login
+    Start,
+    /// Stops the running daemon
+    Stop,
     /// Download required models locally
     Setup,
     /// Checks the health of the running daemon
     Status,
+    /// Diagnose setup problems and report fixes
+    Doctor,
     /// Gets latest transcription
     Listen,
     /// Speaks a message via text-to-speech
@@ -23,4 +27,17 @@ pub enum CommandType {
     History,
     /// Clears all transcriptions in the database
     ClearHistory,
+    /// Runs the daemon in the foreground (what the launch agent executes)
+    Serve,
+    /// Manage the start-at-login service (macOS launchd)
+    Service {
+        #[clap(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServiceAction {
+    /// Stop and remove the launch agent
+    Uninstall,
 }

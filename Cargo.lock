@@ -219,6 +219,7 @@ dependencies = [
  "clap",
  "cpal",
  "crossbeam-channel",
+ "dirs",
  "enigo",
  "hound",
  "misaki-rs",

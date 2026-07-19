@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use banshee_common::{
     BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION,
-    BANSHEE_HISTORY, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP_SPEAKING,
+    BANSHEE_HISTORY, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -81,6 +81,10 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         }
         BANSHEE_STOP_SPEAKING => {
             daemon_state.speech().stop();
+            JsonRpcResponse::success(request.id, serde_json::json!({"ok": true}))
+        }
+        BANSHEE_STOP => {
+            daemon_state.shutdown().notify_one();
             JsonRpcResponse::success(request.id, serde_json::json!({"ok": true}))
         }
         BANSHEE_ASK_USER => {
@@ -394,6 +398,36 @@ mod tests {
         assert_eq!(error.code, -32004);
         // The refused call must not disturb the session that owns the mic
         assert_eq!(state.recording_mode(), RecordingMode::Armed);
+    }
+
+    #[tokio::test]
+    async fn stop_replies_ok_and_signals_shutdown() {
+        let state = Arc::new(DaemonState::new(
+            "0.0.0",
+            "stt",
+            "vad",
+            0.5,
+            None,
+            SpeechPlayer::new(Box::new(NullBackend)),
+            std::sync::mpsc::channel().0,
+        ));
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: BANSHEE_STOP.to_string(),
+            params: None,
+            id: Some(serde_json::json!(1)),
+        };
+        let response = dispatch(request, &state).await;
+
+        let JsonRpcResponse::Success { result, .. } = response else {
+            panic!("expected success response");
+        };
+        assert_eq!(result["ok"], true);
+        // notify_one stores a permit, so a later notified() must resolve
+        tokio::time::timeout(Duration::from_millis(100), state.shutdown().notified())
+            .await
+            .expect("shutdown was not signaled");
     }
 
     #[tokio::test]

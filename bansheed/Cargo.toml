@@ -15,6 +15,7 @@ banshee-common = { version = "0.3.0", path = "../banshee-common" }
 clap = { version = "4.6.1", features = ["derive"] }
 cpal = "0.17.3"
 crossbeam-channel = "0.5.16"
+dirs = "6.0.0"
 enigo = "0.6.1"
 misaki-rs = { version = "0.3.0", default-features = false }
 ndarray = "0.17.2"

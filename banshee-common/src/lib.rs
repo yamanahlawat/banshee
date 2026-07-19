@@ -71,6 +71,7 @@ pub const BANSHEE_GET_TRANSCRIPTION: &str = "banshee.get_transcription";
 pub const BANSHEE_HISTORY: &str = "banshee.history";
 pub const BANSHEE_CLEAR_HISTORY: &str = "banshee.clear_history";
 pub const BANSHEE_ASK_USER: &str = "banshee.ask_user";
+pub const BANSHEE_STOP: &str = "banshee.stop";
 
 // Whisper model configuration
 pub struct WhisperConfig {

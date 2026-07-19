@@ -28,6 +28,7 @@ pub struct AskCommand {
 pub enum ConsumerCommand {
     Transcribe(HotKeyAction),
     Ask(AskCommand),
+    Shutdown,
 }
 
 // Stored in an AtomicU8: the audio callback reads it and must not lock
@@ -77,6 +78,7 @@ pub struct DaemonState {
     latest_transcription_id: watch::Sender<u64>,
     speech: Arc<SpeechPlayer>,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
+    shutdown: tokio::sync::Notify,
 }
 
 impl DaemonState {
@@ -105,6 +107,7 @@ impl DaemonState {
             latest_transcription_id: watch::channel(0).0,
             speech: Arc::new(speech),
             commands,
+            shutdown: tokio::sync::Notify::new(),
         }
     }
 
@@ -114,6 +117,10 @@ impl DaemonState {
 
     pub fn commands(&self) -> &std::sync::mpsc::Sender<ConsumerCommand> {
         &self.commands
+    }
+
+    pub fn shutdown(&self) -> &tokio::sync::Notify {
+        &self.shutdown
     }
 
     fn ring(&self) -> std::sync::MutexGuard<'_, TranscriptionRing> {
