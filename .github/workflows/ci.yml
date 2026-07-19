@@ -11,15 +11,22 @@ env:
 jobs:
   macos:
     runs-on: macos-latest
+    # Same-repo PRs are already tested by the push event; run PR builds only for forks
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
+      # The VAD tests exercise the real Silero model (2 MB), same source as banshee setup
+      - run: |
+          mkdir -p ~/.banshee/models
+          curl -fsSL -o ~/.banshee/models/silero_vad.onnx https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
       - run: cargo test
 
   linux:
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
     steps:
       - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxtst-dev libxi-dev libxdo-dev
