@@ -1,5 +1,6 @@
 // Start-at-login service management behind a platform-neutral surface:
-// launchd today, systemd with the Linux port, a service wrapper on Windows
+// launchd on macOS, systemd user units on Linux, a service wrapper on
+// Windows someday
 
 #[cfg(target_os = "macos")]
 mod launchd {
@@ -10,7 +11,7 @@ mod launchd {
 
     const LABEL: &str = "com.banshee.daemon";
 
-    pub fn plist_path() -> Option<PathBuf> {
+    pub fn service_file_path() -> Option<PathBuf> {
         Some(agent_path(&dirs::home_dir()?))
     }
 
@@ -121,9 +122,88 @@ mod launchd {
 }
 
 #[cfg(target_os = "macos")]
-pub use launchd::{install, plist_path, uninstall};
+pub use launchd::{install, service_file_path, uninstall};
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod systemd {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use banshee_common::error::BansheeError;
+
+    const UNIT: &str = "banshee.service";
+
+    pub fn service_file_path() -> Option<PathBuf> {
+        Some(dirs::config_dir()?.join("systemd/user").join(UNIT))
+    }
+
+    pub fn install() -> Result<(), BansheeError> {
+        let unit = service_file_path()
+            .ok_or_else(|| BansheeError::Other("config dir not found".into()))?;
+        let binary = std::env::current_exe()?;
+        if let Some(dir) = unit.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+
+        // No log paths: systemd captures stdout/stderr into the journal.
+        // After=pipewire.service so the mic exists before the daemon opens it
+        let content = format!(
+            r#"[Unit]
+Description=Banshee voice daemon
+After=pipewire.service
+
+[Service]
+ExecStart="{}" serve
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+"#,
+            binary.display()
+        );
+
+        std::fs::write(&unit, content)?;
+        systemctl(&["daemon-reload"])?;
+        systemctl(&["enable", UNIT])?;
+        // restart, not start: a reinstall must hand over to the new binary
+        systemctl(&["restart", UNIT])?;
+        println!("Started {UNIT}: the daemon runs at login and restarts on crash.");
+        println!("Logs: journalctl --user -u banshee -f");
+        println!("A daemon already running in a terminal keeps the socket; stop it to hand over.");
+        Ok(())
+    }
+
+    pub fn uninstall() -> Result<(), BansheeError> {
+        let _ = systemctl(&["disable", "--now", UNIT]);
+        match service_file_path() {
+            Some(unit) if unit.exists() => {
+                std::fs::remove_file(&unit)?;
+                let _ = systemctl(&["daemon-reload"]);
+                println!("Removed {UNIT}.");
+            }
+            _ => println!("No service installed."),
+        }
+        Ok(())
+    }
+
+    fn systemctl(args: &[&str]) -> Result<(), BansheeError> {
+        let output = Command::new("systemctl").arg("--user").args(args).output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(BansheeError::Other(format!(
+                "systemctl --user {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub use systemd::{install, service_file_path, uninstall};
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod unsupported {
     use std::path::PathBuf;
 
@@ -133,7 +213,7 @@ mod unsupported {
         BansheeError::Other("service management is not supported on this platform yet".into())
     }
 
-    pub fn plist_path() -> Option<PathBuf> {
+    pub fn service_file_path() -> Option<PathBuf> {
         None
     }
 
@@ -146,5 +226,5 @@ mod unsupported {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub use unsupported::{install, plist_path, uninstall};
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub use unsupported::{install, service_file_path, uninstall};

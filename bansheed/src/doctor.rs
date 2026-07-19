@@ -98,11 +98,11 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         _ => note("daemon not running (start with: banshee start)"),
     }
 
-    if let Some(plist) = crate::service::plist_path() {
-        if plist.exists() {
-            note("launch agent installed; daemon starts at login");
+    if let Some(service) = crate::service::service_file_path() {
+        if service.exists() {
+            note("start-at-login service installed");
         } else {
-            note("no launch agent (start at login with: banshee start)");
+            note("no start-at-login service (install with: banshee start)");
         }
     }
 
