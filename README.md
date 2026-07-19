@@ -244,6 +244,11 @@ fix. Beyond that:
 The daemon exposes a JSON-RPC 2.0 API over a Unix socket at
 `~/.banshee/banshee.sock`. The CLI and the MCP shim are both just clients of it.
 
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev
+setup, including how to keep macOS permissions across rebuilds.
+
 ## License
 
 Licensed under the [MIT License](LICENSE).
