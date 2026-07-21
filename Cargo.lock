@@ -188,29 +188,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "banshee-common"
-version = "0.3.0"
-dependencies = [
- "dirs",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "banshee-mcp-shim"
-version = "0.3.0"
-dependencies = [
- "banshee-common",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "bansheed"
-version = "0.3.0"
+name = "banshee"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -239,6 +218,27 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "whisper-rs",
+]
+
+[[package]]
+name = "banshee-common"
+version = "0.4.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "banshee-mcp-shim"
+version = "0.4.0"
+dependencies = [
+ "banshee-common",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

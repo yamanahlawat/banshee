@@ -45,12 +45,12 @@ anywhere:
 ```bash
 git clone https://github.com/yamanahlawat/banshee.git
 cd banshee
-cargo install --path bansheed --features apple   # installs the `banshee` command
-cargo install --path banshee-mcp-shim            # installs the MCP shim (optional)
+cargo install --path bansheed          # installs the `banshee` command
+cargo install --path banshee-mcp-shim  # installs the MCP shim (optional)
 ```
 
-The `apple` feature turns on Metal and CoreML acceleration for Whisper. Both
-binaries land in `~/.cargo/bin`, so from here on you can just run `banshee`.
+On macOS, Metal and CoreML acceleration for Whisper are enabled automatically.
+Both binaries land in `~/.cargo/bin`, so from here on you can just run `banshee`.
 
 If `banshee` comes back as "command not found", `~/.cargo/bin` isn't on your
 `PATH` yet (common if you installed Rust via Homebrew rather than rustup). Add
@@ -61,8 +61,8 @@ echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-Prefer to build without installing? `cargo build --release --features apple`
-drops the binaries in `target/release/` instead.
+Prefer to build without installing? `cargo build --release` drops the binaries
+in `target/release/` instead.
 
 ## Setup
 
@@ -238,7 +238,7 @@ fix. Beyond that:
 
 | Crate | Role |
 | --- | --- |
-| `bansheed` | The daemon: audio capture, VAD, STT, hotkeys, JSON-RPC API |
+| `banshee` (in `bansheed/`) | The daemon: audio capture, VAD, STT, hotkeys, JSON-RPC API |
 | `banshee-mcp-shim` | MCP stdio to daemon bridge |
 | `banshee-common` | Shared protocol types (JSON-RPC, errors, config) |
 
@@ -252,4 +252,5 @@ setup, including how to keep macOS permissions across rebuilds.
 
 ## License
 
-Licensed under the [MIT License](LICENSE).
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT License](LICENSE-MIT) at your option.

@@ -1,7 +1,15 @@
 [package]
 name = "banshee-common"
-version = "0.3.0"
-edition = "2024"
+description = "Shared JSON-RPC protocol types, method constants, and path helpers for Banshee daemon clients"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 dirs = "6.0.0"

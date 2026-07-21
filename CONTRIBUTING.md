@@ -11,7 +11,7 @@ You need stable Rust ([rustup](https://rustup.rs)) and, for now, macOS.
 ```bash
 git clone https://github.com/yamanahlawat/banshee.git
 cd banshee
-cargo build --features apple    # Metal + CoreML acceleration for Whisper
+cargo build    # Metal + CoreML acceleration for Whisper enabled automatically on macOS
 ```
 
 Before opening a PR, make sure both of these pass:
@@ -23,11 +23,11 @@ cargo clippy --all-targets -- -D warnings
 
 ## Running your build
 
-Download the models once with `cargo run -p bansheed --features apple -- setup`
+Download the models once with `cargo run -p banshee -- setup`
 (about 1 GB into `~/.banshee/models/`), then run the daemon in the foreground:
 
 ```bash
-cargo run -p bansheed --features apple -- serve
+cargo run -p banshee -- serve
 ```
 
 ## Keeping macOS permissions across rebuilds

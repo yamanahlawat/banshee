@@ -27,6 +27,11 @@ pub fn get_db_path() -> Option<PathBuf> {
     Some(base_path.join(".banshee").join("banshee.db"))
 }
 
+pub fn get_oov_log_path() -> Option<PathBuf> {
+    let base_path = dirs::home_dir()?;
+    Some(base_path.join(".banshee").join("oov-words.log"))
+}
+
 pub async fn call_daemon(method: &str, params: Value) -> Result<Value, BansheeError> {
     let socket_path = get_socket_path()
         .ok_or_else(|| BansheeError::Other("Could not find home directory".to_string()))?;

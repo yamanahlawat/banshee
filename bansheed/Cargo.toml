@@ -1,7 +1,15 @@
 [package]
-name = "bansheed"
-version = "0.3.0"
-edition = "2024"
+name = "banshee"
+description = "Offline local voice daemon: push-to-talk dictation and spoken status feedback for AI coding agents"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "banshee"
@@ -11,7 +19,7 @@ path = "src/main.rs"
 anyhow = "1.0.103"
 arboard = "3.6.1"
 audioadapter-buffers = "3.0.0"
-banshee-common = { version = "0.3.0", path = "../banshee-common" }
+banshee-common = { version = "0.4.0", path = "../banshee-common" }
 clap = { version = "4.6.1", features = ["derive"] }
 cpal = "0.17.3"
 crossbeam-channel = "0.5.16"
@@ -35,16 +43,16 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 whisper-rs = "0.16.0"
 
+# Metal + CoreML are always on for macOS (including prebuilt release binaries);
+# whisper.cpp falls back to CPU at runtime if the GPU path is unavailable.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16.0", features = ["metal", "coreml"] }
 
 [dev-dependencies]
 hound = "3.5"
 
 [features]
-# By default compile the the CPU version
 default = []
 
-# Mac
-apple = ["whisper-rs/metal", "whisper-rs/coreml"]
-
-# Linux/Windows
+# NVIDIA GPUs on Linux/Windows; opt-in because CUDA needs the toolkit installed.
 nvidia = ["whisper-rs/cuda"]
