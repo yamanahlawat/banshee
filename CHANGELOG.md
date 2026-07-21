@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-21
+
+The install release: prebuilt binaries you can install with one command,
+start-at-login on macOS and Linux, and a doctor that finds setup problems
+before they turn into bug reports.
+
+### Added
+
+- Prebuilt binaries and installers (via cargo-dist): every release now carries
+  macOS (Apple Silicon and Intel) and Linux binaries with a shell installer and
+  a Homebrew tap, so `brew install yamanahlawat/banshee/banshee` or a single
+  `curl` command gets you running. macOS binaries build with Metal and CoreML
+  acceleration automatically; installing from source still works with
+  `cargo install`.
+- `banshee doctor`: read-only diagnostics for config parsing, model presence,
+  the microphone device, macOS Accessibility permission, and the daemon socket,
+  exiting nonzero when something is wrong.
+- Start-at-login service management: `banshee start` and `banshee stop` install
+  a launchd agent (macOS) or a systemd user unit (Linux) so the daemon runs at
+  login and restarts on crash.
+- `banshee.record_start` and `banshee.record_stop` RPCs drive push-to-talk from
+  a script or client without touching the physical hotkey.
+- Pronunciation fixes for more developer terms, plus a passive log of words the
+  voice spelled out letter by letter so the fixup list can grow from real use.
+
+### Changed
+
+- `banshee.history` returns transcriptions oldest first, so a terminal shows the
+  newest entry at the bottom next to your prompt.
+- Now dual-licensed under MIT OR Apache-2.0 (previously MIT only).
+
 ## [0.3.0] - 2026-07-17
 
 The hands-free release: the daemon speaks with its own offline voice, and an
