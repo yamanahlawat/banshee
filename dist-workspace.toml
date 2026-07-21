@@ -23,6 +23,11 @@ hosting = "github"
 # Whether to install an updater program
 install-updater = false
 
-# cpal/rodio need ALSA headers on Linux; dist apt-installs this on the runner.
+# Linux system deps: ALSA for cpal/rodio, X11 libs for enigo/rdev. Same set as
+# ci.yml. dist apt-installs these on the runner before building.
 [dist.dependencies.apt]
 libasound2-dev = '*'
+libx11-dev = '*'
+libxtst-dev = '*'
+libxi-dev = '*'
+libxdo-dev = '*'
