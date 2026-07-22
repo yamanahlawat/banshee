@@ -38,7 +38,7 @@ impl TranscriptionHistory {
 
     pub fn list(conn: &Connection) -> Result<Vec<TranscriptionHistory>> {
         let mut stmt =
-            conn.prepare("SELECT id, text, timestamp FROM transcriptions ORDER BY id DESC")?;
+            conn.prepare("SELECT id, text, timestamp FROM transcriptions ORDER BY id ASC")?;
         let transcription_iter = stmt.query_map([], |row| {
             Ok(TranscriptionHistory::new(
                 row.get(0)?,

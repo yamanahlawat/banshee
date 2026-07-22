@@ -4,6 +4,17 @@ Thanks for helping out! Banshee values simplicity: the smallest change that
 works, no speculative abstractions, no new dependencies for what a few lines
 can do.
 
+## Architecture
+
+| Crate | Role |
+| --- | --- |
+| `banshee` (in `bansheed/`) | The daemon: audio capture, VAD, STT, hotkeys, JSON-RPC API |
+| `banshee-mcp-shim` | MCP stdio to daemon bridge |
+| `banshee-common` | Shared protocol types (JSON-RPC, errors, config) |
+
+The daemon exposes a JSON-RPC 2.0 API over a Unix socket at
+`~/.banshee/banshee.sock`. The CLI and the MCP shim are both just clients of it.
+
 ## Building
 
 You need stable Rust ([rustup](https://rustup.rs)) and, for now, macOS.
@@ -11,7 +22,7 @@ You need stable Rust ([rustup](https://rustup.rs)) and, for now, macOS.
 ```bash
 git clone https://github.com/yamanahlawat/banshee.git
 cd banshee
-cargo build --features apple    # Metal + CoreML acceleration for Whisper
+cargo build    # Metal + CoreML acceleration for Whisper enabled automatically on macOS
 ```
 
 Before opening a PR, make sure both of these pass:
@@ -23,11 +34,11 @@ cargo clippy --all-targets -- -D warnings
 
 ## Running your build
 
-Download the models once with `cargo run -p bansheed --features apple -- setup`
+Download the models once with `cargo run -p banshee -- setup`
 (about 1 GB into `~/.banshee/models/`), then run the daemon in the foreground:
 
 ```bash
-cargo run -p bansheed --features apple -- serve
+cargo run -p banshee -- serve
 ```
 
 ## Keeping macOS permissions across rebuilds

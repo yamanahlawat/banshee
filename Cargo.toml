@@ -1,3 +1,19 @@
 [workspace]
 members = ["bansheed", "banshee-mcp-shim", "banshee-common"]
 resolver = "2"
+
+[workspace.package]
+version = "0.4.0"
+edition = "2024"
+authors = ["Yaman Ahlawat"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yamanahlawat/banshee"
+homepage = "https://github.com/yamanahlawat/banshee"
+readme = "README.md"
+keywords = ["voice", "dictation", "mcp", "whisper", "tts"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

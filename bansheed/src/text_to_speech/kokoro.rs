@@ -1,9 +1,14 @@
+use std::collections::HashSet;
 use std::fs;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use banshee_common::{KokoroTTSConfig, error::BansheeError, utils::get_models_path};
-use misaki_rs::{G2P, Language};
+use banshee_common::{
+    KokoroTTSConfig,
+    error::BansheeError,
+    utils::{get_models_path, get_oov_log_path},
+};
+use misaki_rs::{G2P, Language, MToken};
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use rodio::buffer::SamplesBuffer;
 use rodio::{DeviceSinkBuilder, Player};
@@ -153,6 +158,7 @@ pub struct KokoroEngine {
     g2p: G2P,
     voice: Vec<f32>,
     speed: f32,
+    logged_oov: HashSet<String>,
 }
 
 impl KokoroEngine {
@@ -199,15 +205,18 @@ impl KokoroEngine {
             g2p: G2P::new(Language::EnglishUS),
             voice,
             speed,
+            logged_oov: HashSet::new(),
         })
     }
 
     // Text in, 24kHz mono samples out; empty when nothing is speakable
     pub fn synthesize(&mut self, text: &str) -> Result<Vec<f32>, BansheeError> {
-        let (phonemes, _) = self
+        let (phonemes, tokens) = self
             .g2p
             .g2p(text)
             .map_err(|e| BansheeError::Other(format!("G2P failed: {e}")))?;
+
+        self.note_letter_spelled(&tokens);
 
         // Unknown phonemes (e.g. the OOV marker) simply drop out here
         let ids: Vec<i64> = phonemes.chars().filter_map(token_id).collect();
@@ -219,6 +228,16 @@ impl KokoroEngine {
             samples.extend(self.synthesize_window(window)?);
         }
         Ok(samples)
+    }
+
+    // Record any word misaki spelled out letter-by-letter so it can be added to
+    // the pronunciation FIXUPS table. Passive: it never changes what is spoken.
+    fn note_letter_spelled(&mut self, tokens: &[MToken]) {
+        for tk in tokens {
+            if is_letter_spelled(tk) && self.logged_oov.insert(tk.text.to_lowercase()) {
+                append_oov(&tk.text);
+            }
+        }
     }
 
     fn synthesize_window(&mut self, ids: &[i64]) -> Result<Vec<f32>, BansheeError> {
@@ -344,9 +363,43 @@ impl ActiveUtterance for KokoroUtterance {
     }
 }
 
+// A word misaki can't resolve is spelled letter-by-letter, giving one all-alphabetic
+// token whose phonemes are the per-letter names joined by spaces. Resolved words are a
+// single contiguous group; hyphenated/numeric tokens aren't all-alphabetic.
+fn is_letter_spelled(tk: &MToken) -> bool {
+    let w = tk.text.trim();
+    let is_word = w.chars().count() > 1 && w.chars().all(|c| c.is_alphabetic());
+    is_word && tk.phonemes.as_deref().is_some_and(|p| p.contains(' '))
+}
+
+// In-memory dedup resets on restart, so a word may be appended once per run;
+// dedup at read time with `sort -u`. Add a persistent index only if that matters.
+fn append_oov(word: &str) {
+    let Some(path) = get_oov_log_path() else { return };
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{word}"); // logging must never break playback
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flags_letter_spelled_words_only() {
+        let mut spelled = MToken::new("nginx".into(), "NN".into(), " ".into());
+        spelled.phonemes = Some("ˈɛn dʒˈiː ˈaɪ ɛn ɛks".into());
+        assert!(is_letter_spelled(&spelled));
+
+        let mut resolved = MToken::new("build".into(), "NN".into(), " ".into());
+        resolved.phonemes = Some("bˈɪld".into());
+        assert!(!is_letter_spelled(&resolved));
+
+        let mut hyphenated = MToken::new("twenty-one".into(), "CD".into(), " ".into());
+        hyphenated.phonemes = Some("twˈɛnti wˈʌn".into());
+        assert!(!is_letter_spelled(&hyphenated));
+    }
 
     #[test]
     fn g2p_output_maps_into_vocab() {
