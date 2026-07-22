@@ -23,8 +23,11 @@ hosting = "github"
 # Whether to install an updater program
 install-updater = false
 
-# Linux system deps: ALSA for cpal/rodio, X11 libs for enigo/rdev. Same set as
-# ci.yml. dist apt-installs these on the runner before building.
+# Pin Linux runners to 24.04; the ORT prebuilt needs glibc 2.38+.
+[dist.github-custom-runners]
+x86_64-unknown-linux-gnu = "ubuntu-24.04"
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+
 [dist.dependencies.apt]
 libasound2-dev = '*'
 libx11-dev = '*'
