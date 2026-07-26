@@ -16,7 +16,8 @@ mod launchd {
     }
 
     fn agent_path(home: &Path) -> PathBuf {
-        home.join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
+        home.join("Library/LaunchAgents")
+            .join(format!("{LABEL}.plist"))
     }
 
     fn home_dir() -> Result<PathBuf, BansheeError> {
@@ -187,7 +188,10 @@ WantedBy=default.target
     }
 
     fn systemctl(args: &[&str]) -> Result<(), BansheeError> {
-        let output = Command::new("systemctl").arg("--user").args(args).output()?;
+        let output = Command::new("systemctl")
+            .arg("--user")
+            .args(args)
+            .output()?;
         if output.status.success() {
             Ok(())
         } else {

@@ -47,9 +47,9 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
                 config.tts.voice
             ));
         }
-        (false, TTSFallback::System) => note(
-            "kokoro tts model missing, will fall back to system voice (run: banshee setup)",
-        ),
+        (false, TTSFallback::System) => {
+            note("kokoro tts model missing, will fall back to system voice (run: banshee setup)")
+        }
         (false, TTSFallback::None) => {
             healthy &= fail(
                 "kokoro tts model missing and [tts] fallback = \"none\"",
@@ -57,6 +57,8 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             );
         }
     }
+
+    check_espeak();
 
     // Device presence only; a real TCC mic-permission check needs AVFoundation
     match cpal::default_host().default_input_device() {
@@ -112,6 +114,43 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         println!("Problems found, fixes listed above.");
     }
     healthy
+}
+
+// Optional dependency, so it reports but never fails the health check.
+fn check_espeak() {
+    if crate::text_to_speech::oov::OovFallback::available() {
+        pass("espeak-ng present (pronounces unknown words)");
+    } else {
+        note(&format!(
+            "espeak-ng not installed; unknown words are spelled out. install: {}",
+            espeak_install_hint()
+        ));
+    }
+}
+
+fn espeak_install_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        return "brew install espeak-ng";
+    }
+    for (mgr, cmd) in [
+        ("apt", "sudo apt install espeak-ng"),
+        ("dnf", "sudo dnf install espeak-ng"),
+        ("pacman", "sudo pacman -S espeak-ng"),
+        ("zypper", "sudo zypper install espeak-ng"),
+        ("apk", "sudo apk add espeak-ng"),
+    ] {
+        if runs(mgr) {
+            return cmd;
+        }
+    }
+    "your package manager's espeak-ng package"
+}
+
+fn runs(bin: &str) -> bool {
+    std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 fn check_model(models_dir: &Path, name: &str) -> bool {

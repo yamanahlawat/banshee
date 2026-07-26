@@ -1,4 +1,5 @@
 pub mod kokoro;
+pub mod oov;
 pub mod pronunciation;
 pub mod sanitizer;
 pub mod say;

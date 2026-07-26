@@ -95,7 +95,9 @@ async fn main() -> Result<(), BansheeError> {
             // Drop the Whisper context before atexit runs, on error paths too:
             // ggml's Metal cleanup asserts if buffers are still resident. Waits
             // for an in-flight transcription or ask session, both hard-bounded
-            let _ = daemon_state.commands().send(state::ConsumerCommand::Shutdown);
+            let _ = daemon_state
+                .commands()
+                .send(state::ConsumerCommand::Shutdown);
             let _ = consumer_thread.join();
             result?;
         }

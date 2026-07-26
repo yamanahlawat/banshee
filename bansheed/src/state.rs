@@ -158,7 +158,10 @@ impl DaemonState {
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             println!("Recording stopped");
             let _ = self.cues.send(Cue::RecordStop);
-            let action = if self.pending_dictate.load(std::sync::atomic::Ordering::Relaxed) {
+            let action = if self
+                .pending_dictate
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 TranscribeTarget::Dictate
             } else {
                 TranscribeTarget::Mailbox
