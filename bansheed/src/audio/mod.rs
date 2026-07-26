@@ -15,18 +15,62 @@ use ringbuf::{
 
 use crate::state::DaemonState;
 
-const RING_SECS: usize = 120; // 120 seconds of audio in the ring buffer
+pub const RING_SECS: usize = 120; // 120 seconds of audio in the ring buffer
 
-pub fn start_audio_capture(
-    daemon_state: Arc<DaemonState>,
-) -> Result<(Stream, impl Consumer<Item = f32>, u32), BansheeError> {
+// The name [audio] input_device carries to mean "whatever the OS is set to"
+pub const DEFAULT_INPUT_DEVICE: &str = "default";
+
+// Case-insensitive substring match, so a config can say "yeti" instead of the
+// full "Blue Yeti Stereo Microphone" that the host reports.
+fn find_input_device(host: &cpal::Host, wanted: &str) -> Result<cpal::Device, BansheeError> {
+    let wanted_lower = wanted.to_lowercase();
+    let mut available = Vec::new();
+    for device in host
+        .input_devices()
+        .map_err(|e| BansheeError::Other(e.to_string()))?
+    {
+        let Ok(description) = device.description() else {
+            continue;
+        };
+        let name = description.name().to_string();
+        if name.to_lowercase().contains(&wanted_lower) {
+            return Ok(device);
+        }
+        available.push(name);
+    }
+    let available = if available.is_empty() {
+        "none".to_string()
+    } else {
+        available.join(", ")
+    };
+    Err(BansheeError::Other(format!(
+        "no input device matching \"{wanted}\"; available: {available}"
+    )))
+}
+
+// Anything other than "default" is an explicit choice from [audio]
+// input_device and must fail loudly rather than silently fall back to the
+// wrong microphone. Shared with doctor so it diagnoses the device that
+// capture would actually open.
+pub fn resolve_input_device(input_device: &str) -> Result<cpal::Device, BansheeError> {
     // Ask cpal to give us the default OS audio API
     let host = cpal::default_host();
+    if input_device == DEFAULT_INPUT_DEVICE {
+        host.default_input_device()
+            .ok_or(BansheeError::NoAudioDevice)
+    } else {
+        find_input_device(&host, input_device)
+    }
+}
 
-    // Find the default microphone
-    let device = host
-        .default_input_device()
-        .ok_or(BansheeError::NoAudioDevice)?;
+// `use<>`: the returned consumer borrows nothing, but edition 2024 would
+// otherwise capture input_device's lifetime and stop it crossing into the
+// audio thread, which needs 'static.
+pub fn start_audio_capture(
+    daemon_state: Arc<DaemonState>,
+    input_device: &str,
+) -> Result<(Stream, impl Consumer<Item = f32> + use<>, u32), BansheeError> {
+    let device = resolve_input_device(input_device)?;
 
     if let Ok(description) = device.description() {
         let name = description.name();

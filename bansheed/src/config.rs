@@ -69,7 +69,7 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            input_device: "default".to_string(),
+            input_device: crate::audio::DEFAULT_INPUT_DEVICE.to_string(),
             hotkey: "F5".to_string(),
             hotkey_mode: HotkeyMode::Hold,
             barge_in: BargeInMode::Stop,

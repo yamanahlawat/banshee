@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU8, AtomicU32},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64},
     },
     time::{Duration, Instant},
 };
@@ -14,6 +14,11 @@ use crate::config::BargeInMode;
 use crate::text_to_speech::SpeechPlayer;
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
+
+// A push-to-talk start with no matching stop otherwise holds the microphone
+// for the life of the daemon, and every later start is refused as busy. The
+// ring only holds RING_SECS anyway, so nothing is lost by capping it there.
+pub const MAX_PUSH_TO_TALK: Duration = Duration::from_secs(crate::audio::RING_SECS as u64);
 
 // Where a finished transcription is delivered
 #[derive(Clone, Copy)]
@@ -86,6 +91,11 @@ pub struct DaemonState {
     // Locked in at record start, consumed at stop; start and stop can be
     // separate RPC calls, so the choice cannot live on a caller's stack
     pending_dictate: AtomicBool,
+    // Milliseconds since `started_at` at which an open push-to-talk becomes
+    // stuck. Storing the deadline rather than the start keeps the watchdog to
+    // one load and one compare; an Instant is not atomic, and the watchdog
+    // must not contend with the RPC path.
+    push_to_talk_deadline: AtomicU64,
     shutdown: tokio::sync::Notify,
 }
 
@@ -121,6 +131,7 @@ impl DaemonState {
             cues,
             barge_in,
             pending_dictate: AtomicBool::new(false),
+            push_to_talk_deadline: AtomicU64::new(0),
             shutdown: tokio::sync::Notify::new(),
         }
     }
@@ -140,6 +151,10 @@ impl DaemonState {
             if matches!(self.barge_in, BargeInMode::Stop) {
                 self.speech.stop();
             }
+            self.push_to_talk_deadline.store(
+                (self.started_at.elapsed() + MAX_PUSH_TO_TALK).as_millis() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             self.pending_dictate.store(
                 matches!(action, TranscribeTarget::Dictate),
                 std::sync::atomic::Ordering::Relaxed,
@@ -170,6 +185,28 @@ impl DaemonState {
         } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
             let _ = self.cues.send(Cue::RecordStop);
         }
+    }
+
+    // Releases a push-to-talk session that never got its stop, so a dropped
+    // key release or a script that died mid-recording cannot wedge the
+    // microphone. Stops rather than discards: the ring holds real audio, and
+    // record_stop is what routes it to the mailbox or to dictation.
+    pub fn expire_stuck_recording(&self) -> bool {
+        if self.recording_mode() != RecordingMode::PushToTalk {
+            return false;
+        }
+        let deadline = self
+            .push_to_talk_deadline
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if (self.started_at.elapsed().as_millis() as u64) < deadline {
+            return false;
+        }
+        eprintln!(
+            "Push-to-talk ran past {}s with no stop; releasing the microphone.",
+            MAX_PUSH_TO_TALK.as_secs()
+        );
+        self.record_stop();
+        true
     }
 
     pub fn speech(&self) -> &Arc<SpeechPlayer> {
@@ -287,18 +324,68 @@ impl DaemonState {
 mod tests {
     use super::*;
 
-    fn test_state() -> DaemonState {
-        DaemonState::new(
+    // Hands back the commands receiver too: dropping it silently discards
+    // whatever record_stop queues, which would make those assertions pass for
+    // the wrong reason.
+    fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<ConsumerCommand>) {
+        let (commands, requests) = std::sync::mpsc::channel();
+        let state = DaemonState::new(
             "0.0.0",
             "stt",
             "vad",
             0.5,
             None,
             crate::text_to_speech::SpeechPlayer::default(),
-            std::sync::mpsc::channel().0,
+            commands,
             std::sync::mpsc::channel().0,
             BargeInMode::Stop,
-        )
+        );
+        (state, requests)
+    }
+
+    fn test_state() -> DaemonState {
+        test_state_with_commands().0
+    }
+
+    #[test]
+    fn watchdog_releases_a_push_to_talk_that_never_stopped() {
+        let (state, transcribe_requests) = test_state_with_commands();
+
+        assert!(state.record_start(TranscribeTarget::Mailbox));
+        assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+
+        // Nowhere near the ceiling yet: the mic stays open
+        assert!(!state.expire_stuck_recording());
+        assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+
+        // Bring the deadline forward instead of waiting out MAX_PUSH_TO_TALK
+        state
+            .push_to_talk_deadline
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
+        // Past it, the mic comes back and the utterance is still transcribed
+        assert!(state.expire_stuck_recording());
+        assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        assert!(matches!(
+            transcribe_requests.try_recv(),
+            Ok(ConsumerCommand::Transcribe(TranscribeTarget::Mailbox))
+        ));
+
+        // And a fresh start is accepted rather than refused as busy
+        assert!(state.record_start(TranscribeTarget::Mailbox));
+    }
+
+    #[test]
+    fn watchdog_leaves_armed_listening_alone() {
+        let state = test_state();
+        // ask_user sessions run their own timeouts; the watchdog must not
+        // yank the microphone out from under one
+        state.set_recording_mode(RecordingMode::Armed);
+        state
+            .push_to_talk_deadline
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(!state.expire_stuck_recording());
+        assert_eq!(state.recording_mode(), RecordingMode::Armed);
     }
 
     #[test]

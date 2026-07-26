@@ -37,11 +37,17 @@ pub async fn run(
 
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
+    // Coarse tick: the ceiling it enforces is measured in minutes, so waking
+    // more often than this would only add idle wakeups
+    let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(30));
 
     loop {
         tokio::select! {
             _ = sigint.recv() => break,
             _ = sigterm.recv() => break,
+            _ = watchdog.tick() => {
+                daemon_state.expire_stuck_recording();
+            }
             // Stop RPC: wait a beat so the client task can flush its response
             _ = daemon_state.shutdown().notified() => {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;

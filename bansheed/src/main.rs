@@ -74,7 +74,8 @@ async fn main() -> Result<(), BansheeError> {
             ));
 
             let audio_capture_state = Arc::clone(&daemon_state);
-            let (_stream, consumer, sample_rate) = audio::start_audio_capture(audio_capture_state)?;
+            let (_stream, consumer, sample_rate) =
+                audio::start_audio_capture(audio_capture_state, &config.audio.input_device)?;
             println!("Loading Whisper AI...");
             let speech_to_text_engine = WhisperEngine::new(
                 WhisperConfig::new(config.stt.preset.model_name()),

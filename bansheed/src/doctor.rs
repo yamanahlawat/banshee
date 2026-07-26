@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use banshee_common::{KokoroTTSConfig, error::BansheeError, utils};
-use cpal::traits::{DeviceTrait, HostTrait};
+use cpal::traits::DeviceTrait;
 
 use crate::config::{Config, TTSFallback};
 
@@ -61,18 +61,18 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     check_espeak();
 
     // Device presence only; a real TCC mic-permission check needs AVFoundation
-    match cpal::default_host().default_input_device() {
-        Some(device) => {
+    match crate::audio::resolve_input_device(&config.audio.input_device) {
+        Ok(device) => {
             let name = device
                 .description()
                 .map(|d| d.name().to_string())
                 .unwrap_or_else(|_| "default".to_string());
             pass(&format!("microphone: {name}"));
         }
-        None => {
+        Err(e) => {
             healthy &= fail(
-                "no input device found",
-                "connect a microphone or check sound settings",
+                &format!("input device unavailable: {e}"),
+                "connect a microphone, or fix [audio] input_device in config.toml",
             );
         }
     }
@@ -89,20 +89,35 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         };
     }
 
-    // rdev's listen and enigo both go through X11, so a wayland session gets
-    // neither the hotkey nor synthetic typing.
-    #[cfg(target_os = "linux")]
-    match std::env::var("XDG_SESSION_TYPE").as_deref() {
-        Ok("wayland") => {
-            healthy &= fail(
-                "wayland session (hotkey and dictation will not work)",
-                "log in to an X11/Xorg session; wayland input is not supported yet",
-            );
+    // Two separate capabilities, and wayland only restores one of them:
+    // wtype/ydotool cover typing the transcription, but nothing covers rdev's
+    // global hotkey, which needs X11's XRecord extension.
+    // Same cfg as `is_wayland` itself, so no unix target can disable its hotkey
+    // without this block compiled in to explain why.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if crate::dictation::is_wayland() {
+        // Reads the table dictation actually runs, so doctor cannot name a tool
+        // the typing path would not reach for.
+        let typer = crate::dictation::WAYLAND_TYPERS
+            .into_iter()
+            .map(|(binary, _)| binary)
+            .find(|binary| on_path(binary));
+        match typer {
+            Some(tool) => {
+                pass(&format!("wayland session: dictation types via {tool}"));
+            }
+            None => note(
+                "wayland session: install 'wtype' (or 'ydotool') or dictation cannot type anywhere",
+            ),
         }
-        Ok(session) => {
-            pass(&format!("session type: {session}"));
+        note(&format!("wayland: {}", crate::hotkey::WAYLAND_HOTKEY_HINT));
+    } else {
+        match std::env::var("XDG_SESSION_TYPE").as_deref() {
+            Ok(session) => {
+                pass(&format!("session type: {session}"));
+            }
+            Err(_) => note("XDG_SESSION_TYPE unset; the global hotkey needs X11"),
         }
-        Err(_) => note("XDG_SESSION_TYPE unset; hotkey and dictation need X11"),
     }
 
     match utils::get_socket_path() {
@@ -167,6 +182,14 @@ fn runs(bin: &str) -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+// Walks $PATH directly: `which` is a package of its own on minimal systems,
+// and spawning a process to answer a filesystem question is wasteful anyway.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn on_path(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()))
 }
 
 fn check_model(models_dir: &Path, name: &str) -> bool {

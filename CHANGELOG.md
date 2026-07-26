@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-26
+
+The Wayland release: dictation types into your focused window on Hyprland and
+Sway, you can name the microphone you actually want, and a push-to-talk that
+never got its release no longer holds the mic hostage.
+
+### Added
+
+- Dictation types under Wayland via `wtype` (wlroots compositors) or `ydotool`,
+  where the X11 path could not. With neither installed it reports an error
+  instead of silently dropping the text, which stays in `banshee history`.
+- `[audio] input_device` picks the microphone by a case-insensitive substring of
+  its name, so `"yeti"` matches `Blue Yeti Stereo Microphone`. A name that
+  matches nothing refuses to start and lists the devices it found, rather than
+  quietly recording from the wrong microphone.
+- Push-to-talk watchdog: a `record start` with no matching `stop` releases the
+  microphone after two minutes and transcribes what it captured, so a dropped
+  key release or a script that died mid-recording no longer wedges the daemon
+  into refusing every later start as busy.
+- Transcription warns when it runs more than 2x slower than realtime and names
+  the fix (`[stt] preset = "fast"`). On a slow CPU the default model can take
+  minutes, which is indistinguishable from a microphone that never captured
+  anything.
+- README section on binding push-to-talk in your compositor, with the Hyprland
+  `bind`/`bindr` snippet that gives you hold-to-talk without the global hotkey.
+- Issue templates for bug reports and feature requests.
+
+### Changed
+
+- Default voice is now `af_sky` at 1.2x speed. Upgrading users who never set
+  `tts.voice` should re-run `banshee setup` to fetch the new voice file;
+  without it Kokoro falls back to system TTS.
+- `banshee doctor` reports what a Wayland session actually supports (which
+  typing tool it found, and the compositor bind to use for the hotkey) instead
+  of failing the session and telling you to log in to X11.
+- The daemon says at startup that the global hotkey needs X11 rather than
+  leaving a Wayland user with a hotkey that looks broken for no visible reason,
+  and a listener that dies names the commands that still work.
+
 ## [0.5.0] - 2026-07-26
 
 The vocabulary release: the voice pronounces your jargon instead of reciting it
@@ -188,7 +227,8 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/yamanahlawat/banshee/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/yamanahlawat/banshee/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/yamanahlawat/banshee/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/yamanahlawat/banshee/compare/v0.2.0...v0.3.0
