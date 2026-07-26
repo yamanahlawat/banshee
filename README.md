@@ -45,10 +45,12 @@ the other half of the conversation.
 Runs on **macOS (Apple Silicon)** and **Linux** (x86_64 / aarch64); Intel Macs
 aren't supported. Needs ~1 GB of disk for the models.
 
-On Linux, the hotkey and dictation go through **X11**; the input libraries
-Banshee uses have no Wayland path. Under Wayland, expect them not to work. The
-agent voice (`speak_status`, `ask_user`) is unaffected either way, and
-`banshee doctor` reports which session you're in.
+On Linux, the **global hotkey** goes through X11; the library Banshee listens
+with has no Wayland path, so under Wayland `F5` does nothing. Bind
+`banshee record start` / `stop` in your compositor instead (see
+[Wayland](#wayland)). Dictation typing does work under Wayland if `wtype` or
+`ydotool` is installed. The agent voice (`speak_status`, `ask_user`) is
+unaffected either way, and `banshee doctor` reports what your session supports.
 
 ### Homebrew
 
@@ -87,7 +89,7 @@ banshee setup
 | `ggml-large-v3-turbo-q5_0.bin` | ~547 MB | Whisper STT model (default `balanced` preset) |
 | `silero_vad.onnx` | ~2 MB | Silero voice-activity detection |
 | `kokoro-v1.0.onnx` | ~310 MB | Kokoro TTS model |
-| `af_heart.bin` | ~512 KB | Kokoro voice style (the configured `voice`) |
+| `af_sky.bin` | ~512 KB | Kokoro voice style (the configured `voice`) |
 
 Files that already exist are skipped, so re-running `banshee setup` after
 changing the STT preset or the TTS voice only downloads what's missing.
@@ -136,6 +138,29 @@ With the daemon running, the global hotkeys are:
   grab it later with `banshee listen`.
 - **Hold `Shift + F5`** to record. On release, the transcription is typed
   straight into the app you're focused on (this is dictation mode).
+
+### Wayland
+
+The global hotkey needs X11, so on a Wayland session (Hyprland, Sway, GNOME)
+bind the record commands in your compositor instead. For push-to-talk on `F5`,
+put these in `~/.config/hypr/hyprland.conf` (or `bindings.conf` on Omarchy),
+then run `hyprctl reload`:
+
+```conf
+bind  = , F5, exec, banshee record start
+bindr = , F5, exec, banshee record stop           # bindr fires on release
+bind  = SHIFT, F5, exec, banshee record start --dictate
+bindr = SHIFT, F5, exec, banshee record stop
+```
+
+Both release binds are there on purpose. Hyprland matches modifiers exactly, so
+letting go of `Shift` before `F5` means only the unmodified release matches.
+
+Typing the transcription into the focused app needs **`wtype`** (wlroots
+compositors such as Hyprland and Sway) or **`ydotool`** (anywhere, but it needs
+its own daemon and uinput access). Without one of them, dictation has no way to
+type and reports an error; the transcription is still kept in
+`banshee history`. `banshee doctor` tells you which one it found.
 
 The CLI commands all talk to the running daemon over its socket:
 
@@ -215,16 +240,23 @@ vocabulary = ["banshee"] # words Whisper keeps mangling, e.g. ["clippy", "tokio"
 endpoint_silence_ms = 2500  # trailing silence that ends a spoken answer
 
 [tts]
-voice = "af_heart"     # any voice from the Kokoro voices directory
-speed = 1.0            # playback speed multiplier
+voice = "af_sky"       # any voice from the Kokoro voices directory
+speed = 1.2            # playback speed multiplier
 fallback = "system"    # system = use `say` when Kokoro is unavailable | none
 
 [audio]
+input_device = "default"  # "default" = follow the OS; otherwise match a device name
 barge_in = "stop"      # stop = the record hotkey cuts off whatever Banshee is saying | none
 
 [audio.cues]
 enabled = true         # tones on record start/stop, success, and errors
 ```
+
+`input_device` is a case-insensitive substring of the microphone name, so
+`"yeti"` matches `Blue Yeti Stereo Microphone`. Leave it as `"default"` to
+follow whatever the OS is set to. If the name matches nothing, the daemon
+refuses to start and lists the devices it did find, rather than quietly
+recording from the wrong microphone.
 
 You can also change `vad_threshold` at runtime through the `banshee.configure`
 RPC, no restart needed. `vocabulary` biases Whisper toward project jargon and
@@ -256,6 +288,18 @@ the daemon.
 Start with `banshee doctor`; it catches most setup problems and tells you the
 fix. Beyond that:
 
+- **The microphone looks dead: you record, and nothing ever comes back.**
+  Usually the machine is just slow, not broken. On an older CPU the default
+  `balanced` model can take minutes on a few seconds of speech, which is
+  indistinguishable from a mic that never captured anything. Run the daemon in
+  the foreground with `banshee serve` and watch for the `Transcribed Ns of
+  audio in Ms` line; if it warns that transcription ran slower than realtime,
+  set `preset = "fast"` in `config.toml` and run `banshee setup`. On a 2014
+  dual-core laptop that took one clip from 104s to 4.8s.
+- **`banshee record start` says the microphone is busy.** A previous
+  push-to-talk never got its matching `stop` (a dropped key release, or a
+  script that died mid-recording). `banshee record stop` clears it; the daemon
+  also releases the mic on its own after two minutes.
 - **Audio sounds muffled on Bluetooth earbuds while Banshee runs.** Banshee
   keeps the microphone open so the hotkey can start recording instantly, and
   macOS switches Bluetooth earbuds to their low-quality telephony profile

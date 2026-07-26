@@ -22,6 +22,9 @@ const ARMED_POLL: Duration = Duration::from_millis(30);
 const CUE_SETTLE: Duration = Duration::from_millis(250);
 // Ceiling on one answer past the onset timeout; nothing may hang the session
 const MAX_ANSWER: Duration = Duration::from_secs(60);
+// Past this ratio of wall time to audio length, the model is too heavy for the
+// machine and push-to-talk stops feeling like it responded at all
+const SLOW_TRANSCRIBE_FACTOR: f32 = 2.0;
 
 // Everything the audio consumer thread owns
 pub struct Pipeline<C: Consumer<Item = f32>> {
@@ -48,7 +51,40 @@ pub fn hotkey_listener<C>(
 where
     C: Consumer<Item = f32> + Send + 'static,
 {
-    let key_state = Arc::clone(&pipeline.state);
+    start_global_hotkey(Arc::clone(&pipeline.state));
+
+    // Spawn a thread to handle the audio processing and transcription.
+    // The handle lets shutdown join it, dropping the Whisper context before atexit
+    thread::spawn(move || {
+        let mut pipeline = pipeline;
+        while let Ok(command) = commands.recv() {
+            match command {
+                ConsumerCommand::Transcribe(action) => pipeline.transcribe_utterance(action),
+                ConsumerCommand::Ask(ask) => pipeline.ask(ask),
+                ConsumerCommand::Shutdown => break,
+            }
+        }
+    })
+}
+
+// Said by the daemon at startup and by doctor, so the two cannot drift apart.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const WAYLAND_HOTKEY_HINT: &str = "the global hotkey needs X11. Bind \
+     `banshee record start` on press and `banshee record stop` on release in \
+     your compositor instead";
+
+// rdev watches the keyboard through X11's XRecord extension, which a wayland
+// session does not serve. It fails one of two ways there, and the quiet one is
+// worse: either listen returns KeyboardError, or it attaches to Xwayland and
+// never sees a key, because XRecord only reports events delivered to X11
+// clients. Saying so at startup beats a hotkey that looks broken for no
+// visible reason.
+fn start_global_hotkey(key_state: Arc<DaemonState>) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if crate::dictation::is_wayland() {
+        println!("Wayland session: {WAYLAND_HOTKEY_HINT}.");
+        return;
+    }
 
     // Spawn a heavy thread for the global hotkey listener
     thread::spawn(move || {
@@ -79,22 +115,13 @@ where
                 _ => (), // Ignore mouse movements
             }
         }) {
-            println!("Error: {:?}", error);
+            // Names the capability that is gone, not just the error type
+            eprintln!(
+                "Global hotkey listener stopped: {error:?}. `banshee record start` \
+                 and `banshee record stop` still work."
+            );
         }
     });
-
-    // Spawn a thread to handle the audio processing and transcription.
-    // The handle lets shutdown join it, dropping the Whisper context before atexit
-    thread::spawn(move || {
-        let mut pipeline = pipeline;
-        while let Ok(command) = commands.recv() {
-            match command {
-                ConsumerCommand::Transcribe(action) => pipeline.transcribe_utterance(action),
-                ConsumerCommand::Ask(ask) => pipeline.ask(ask),
-                ConsumerCommand::Shutdown => break,
-            }
-        }
-    })
 }
 
 impl<C: Consumer<Item = f32>> Pipeline<C> {
@@ -181,11 +208,19 @@ impl<C: Consumer<Item = f32>> Pipeline<C> {
         let transcribe_started = Instant::now();
         match self.speech_to_text.transcribe(&final_data) {
             Ok(transcription) => {
-                println!(
-                    "Transcribed {:.1}s of audio in {:.2}s",
-                    final_data.len() as f32 / TARGET_SAMPLE_RATE as f32,
-                    transcribe_started.elapsed().as_secs_f32()
-                );
+                let audio_secs = final_data.len() as f32 / TARGET_SAMPLE_RATE as f32;
+                let elapsed = transcribe_started.elapsed().as_secs_f32();
+                println!("Transcribed {audio_secs:.1}s of audio in {elapsed:.2}s");
+                // On a slow CPU the default model can take minutes, which reads
+                // as a dead microphone rather than as a slow one. Say so.
+                let slowdown = elapsed / audio_secs.max(0.001);
+                if slowdown > SLOW_TRANSCRIBE_FACTOR {
+                    println!(
+                        "Transcription ran {slowdown:.0}x slower than realtime on this \
+                         machine. Set [stt] preset = \"fast\" in config.toml, then run \
+                         banshee setup."
+                    );
+                }
                 println!("Transcription: {transcription}");
 
                 // Whisper can return nothing for noise; skip before it reaches the ring or clipboard

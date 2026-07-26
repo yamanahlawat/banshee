@@ -9,7 +9,21 @@ use std::{error::Error, thread, time::Duration};
 // this is also what gives the owner thread time to publish.
 const PASTE_SETTLE: Duration = Duration::from_millis(50);
 
+// enigo pastes through X11, so a wayland session has to shell out instead.
+// Checked at call time rather than at startup: the daemon can be launched
+// from a session manager that sets neither variable until later.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn is_wayland() -> bool {
+    std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+        || std::env::var("WAYLAND_DISPLAY").is_ok()
+}
+
 pub fn type_text(text: &str) -> Result<(), Box<dyn Error>> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if is_wayland() {
+        return type_text_wayland(text);
+    }
+
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
         format!(
             "Accessibility permissions missing, Please grant them in settings! {}",
@@ -40,6 +54,48 @@ pub fn type_text(text: &str) -> Result<(), Box<dyn Error>> {
     enigo.key(modifier, Release)?;
 
     Ok(())
+}
+
+// wtype drives the wlroots virtual-keyboard protocol (Hyprland, Sway); ydotool
+// goes through uinput and needs its daemon, so it is only the second choice.
+// There is no clipboard-and-paste fallback: synthesising Ctrl+V would need one
+// of these same two tools, so it could never work when both are missing.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const WAYLAND_TYPERS: [(&str, &[&str]); 2] = [("wtype", &["--"]), ("ydotool", &["type", "--"])];
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn type_text_wayland(text: &str) -> Result<(), Box<dyn Error>> {
+    use std::process::Command;
+
+    let mut attempts = Vec::new();
+    for (binary, args) in WAYLAND_TYPERS {
+        // `--` keeps a transcription that opens with a dash from being read as
+        // a flag; without it wtype exits 1 on "Missing argument to -foo".
+        match Command::new(binary).args(args).arg(text).output() {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                attempts.push(format!(
+                    "{binary} exited with {}: {}",
+                    output.status,
+                    stderr.trim()
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                attempts.push(format!("{binary} is not installed"));
+            }
+            Err(e) => attempts.push(format!("{binary} failed to start: {e}")),
+        }
+    }
+
+    // Never report success here: the caller plays the ready cue on Ok, which
+    // would claim the text landed in an app that never received it.
+    Err(format!(
+        "could not type into the focused window on wayland ({}); \
+         install wtype or ydotool. the transcription is still in `banshee history`",
+        attempts.join("; ")
+    )
+    .into())
 }
 
 // Put the dictated text on the clipboard and arrange to put the old text back.
@@ -74,6 +130,43 @@ fn stage(mut clipboard: Clipboard, text: &str, old: Option<String>) -> Result<()
     }
 
     Ok(())
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    // Both tools take the text after `--`. Without it, wtype reads a leading
+    // dash as a flag and fails with "Missing argument to -foo", losing any
+    // transcription that happens to start with one.
+    #[test]
+    fn every_wayland_typer_terminates_its_options() {
+        for (binary, args) in WAYLAND_TYPERS {
+            assert_eq!(
+                args.last(),
+                Some(&"--"),
+                "{binary} must take the text after `--`"
+            );
+        }
+    }
+
+    #[test]
+    fn failing_to_type_is_reported_as_an_error() {
+        // No wayland typer resolves under a scrubbed PATH, so this exercises
+        // the both-missing path without depending on the host's tools
+        let path = std::env::var_os("PATH");
+        // SAFETY: single-threaded test, restored before returning
+        unsafe { std::env::set_var("PATH", "") };
+        let result = type_text_wayland("hello");
+        if let Some(path) = path {
+            unsafe { std::env::set_var("PATH", path) };
+        }
+
+        let error = result.expect_err("missing typers must not report success");
+        let message = error.to_string();
+        assert!(message.contains("wtype"), "unhelpful error: {message}");
+        assert!(message.contains("ydotool"), "unhelpful error: {message}");
+    }
 }
 
 // The caller's handle only ever read; ownership belongs to the thread below.

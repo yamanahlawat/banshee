@@ -490,7 +490,7 @@ mod tests {
     #[test]
     #[ignore]
     fn kokoro_synthesizes_audible_speech() {
-        let config = KokoroTTSConfig::new("af_heart");
+        let config = KokoroTTSConfig::new("af_sky");
         let mut engine = KokoroEngine::new(&config, 1.0).unwrap();
         let samples = engine.synthesize("Kokoro is alive.").unwrap();
         // ~1s of speech at 24kHz, with actual signal in it
