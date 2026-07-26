@@ -89,6 +89,22 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         };
     }
 
+    // rdev's listen and enigo both go through X11, so a wayland session gets
+    // neither the hotkey nor synthetic typing.
+    #[cfg(target_os = "linux")]
+    match std::env::var("XDG_SESSION_TYPE").as_deref() {
+        Ok("wayland") => {
+            healthy &= fail(
+                "wayland session (hotkey and dictation will not work)",
+                "log in to an X11/Xorg session; wayland input is not supported yet",
+            );
+        }
+        Ok(session) => {
+            pass(&format!("session type: {session}"));
+        }
+        Err(_) => note("XDG_SESSION_TYPE unset; hotkey and dictation need X11"),
+    }
+
     match utils::get_socket_path() {
         Some(socket) if socket.exists() => {
             if crate::daemon::socket_answers(&socket) {

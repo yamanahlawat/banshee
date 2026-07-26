@@ -45,6 +45,11 @@ the other half of the conversation.
 Runs on **macOS (Apple Silicon)** and **Linux** (x86_64 / aarch64); Intel Macs
 aren't supported. Needs ~1 GB of disk for the models.
 
+On Linux, the hotkey and dictation go through **X11**; the input libraries
+Banshee uses have no Wayland path. Under Wayland, expect them not to work. The
+agent voice (`speak_status`, `ask_user`) is unaffected either way, and
+`banshee doctor` reports which session you're in.
+
 ### Homebrew
 
 ```bash
