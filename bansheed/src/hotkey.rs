@@ -10,7 +10,7 @@ use crate::audio::utils::{StreamingResampler, resample_audio};
 use crate::dictation::type_text;
 use crate::speech_to_text::vad::VADEngine;
 use crate::speech_to_text::whisper::WhisperEngine;
-use crate::state::{AskCommand, ConsumerCommand, DaemonState, TranscribeTarget, RecordingMode};
+use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode, TranscribeTarget};
 
 const TARGET_SAMPLE_RATE: u32 = 16000;
 const VAD_CHUNK: usize = 512;

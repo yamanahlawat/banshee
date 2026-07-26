@@ -8,11 +8,13 @@ use banshee_common::{
     error::BansheeError,
     utils::{get_models_path, get_oov_log_path},
 };
+use misaki_rs::lexicon::PhonemeEntry;
 use misaki_rs::{G2P, Language, MToken};
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use rodio::buffer::SamplesBuffer;
 use rodio::{DeviceSinkBuilder, Player};
 
+use super::oov::OovFallback;
 use super::{ActiveUtterance, TtsBackend, lock};
 
 const SAMPLE_RATE: std::num::NonZero<u32> = std::num::NonZero::new(24_000).unwrap();
@@ -158,6 +160,7 @@ pub struct KokoroEngine {
     g2p: G2P,
     voice: Vec<f32>,
     speed: f32,
+    oov: Option<OovFallback>,
     logged_oov: HashSet<String>,
 }
 
@@ -200,21 +203,42 @@ impl KokoroEngine {
             )));
         }
 
+        let mut g2p = G2P::new(Language::EnglishUS);
+        super::pronunciation::install_dictionary(&mut g2p);
+
+        let oov = OovFallback::detect();
+        if oov.is_none() {
+            tracing::info!(
+                "espeak-ng not found; unknown words will be spelled out. \
+                 Install espeak-ng for better pronunciation (run 'banshee doctor')."
+            );
+        }
+
         Ok(Self {
             session,
-            g2p: G2P::new(Language::EnglishUS),
+            g2p,
             voice,
             speed,
+            oov,
             logged_oov: HashSet::new(),
         })
     }
 
     // Text in, 24kHz mono samples out; empty when nothing is speakable
     pub fn synthesize(&mut self, text: &str) -> Result<Vec<f32>, BansheeError> {
-        let (phonemes, tokens) = self
+        let mut out = self
             .g2p
             .g2p(text)
             .map_err(|e| BansheeError::Other(format!("G2P failed: {e}")))?;
+
+        // Re-run g2p so misaki reassembles with the inserted pronunciations.
+        if self.resolve_oov(&out.1) {
+            out = self
+                .g2p
+                .g2p(text)
+                .map_err(|e| BansheeError::Other(format!("G2P failed: {e}")))?;
+        }
+        let (phonemes, tokens) = out;
 
         self.note_letter_spelled(&tokens);
 
@@ -230,8 +254,30 @@ impl KokoroEngine {
         Ok(samples)
     }
 
-    // Record any word misaki spelled out letter-by-letter so it can be added to
-    // the pronunciation FIXUPS table. Passive: it never changes what is spoken.
+    // Insert espeak phonemes for each letter-spelled word into misaki's lexicon
+    fn resolve_oov(&mut self, tokens: &[MToken]) -> bool {
+        let Some(oov) = &self.oov else { return false };
+        let mut resolved = Vec::new();
+        for tk in tokens {
+            // Skip words with a curated gold entry so espeak never overrides it.
+            if is_letter_spelled(tk)
+                && !self.g2p.lexicon.golds.contains_key(&tk.text)
+                && let Some(phonemes) = oov.phonemize(&tk.text)
+            {
+                // Exact surface: misaki looks up by case.
+                resolved.push((tk.text.clone(), phonemes));
+            }
+        }
+        for (word, phonemes) in &resolved {
+            self.g2p
+                .lexicon
+                .golds
+                .insert(word.clone(), PhonemeEntry::Simple(phonemes.clone()));
+        }
+        !resolved.is_empty()
+    }
+
+    // Log words still spelled out as table candidates; never changes audio.
     fn note_letter_spelled(&mut self, tokens: &[MToken]) {
         for tk in tokens {
             if is_letter_spelled(tk) && self.logged_oov.insert(tk.text.to_lowercase()) {
@@ -375,7 +421,9 @@ fn is_letter_spelled(tk: &MToken) -> bool {
 // In-memory dedup resets on restart, so a word may be appended once per run;
 // dedup at read time with `sort -u`. Add a persistent index only if that matters.
 fn append_oov(word: &str) {
-    let Some(path) = get_oov_log_path() else { return };
+    let Some(path) = get_oov_log_path() else {
+        return;
+    };
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
         let _ = writeln!(f, "{word}"); // logging must never break playback
@@ -399,6 +447,33 @@ mod tests {
         let mut hyphenated = MToken::new("twenty-one".into(), "CD".into(), " ".into());
         hyphenated.phonemes = Some("twˈɛnti wˈʌn".into());
         assert!(!is_letter_spelled(&hyphenated));
+    }
+
+    // Skips unless espeak-ng is installed.
+    #[test]
+    fn espeak_resolves_a_letter_spelled_word() {
+        let Some(oov) = OovFallback::detect() else {
+            eprintln!("espeak-ng not installed; skipping");
+            return;
+        };
+        let word = "kustomize"; // not in misaki gold or our tables
+        let mut g2p = G2P::new(Language::EnglishUS);
+        let spelled = g2p.g2p(word).unwrap().1;
+        assert!(
+            spelled.iter().any(is_letter_spelled),
+            "expected {word} to start out letter-spelled"
+        );
+
+        let phonemes = oov.phonemize(word).expect("espeak should phonemize");
+        g2p.lexicon
+            .golds
+            .insert(word.to_string(), PhonemeEntry::Simple(phonemes));
+
+        let after = g2p.g2p(word).unwrap().1;
+        assert!(
+            !after.iter().any(is_letter_spelled),
+            "espeak phonemes should have resolved {word}"
+        );
     }
 
     #[test]

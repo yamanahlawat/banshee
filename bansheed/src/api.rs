@@ -8,13 +8,17 @@ use banshee_common::{
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
-use crate::state::{AskCommand, ConsumerCommand, DaemonState, TranscribeTarget, RecordingMode};
+use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode, TranscribeTarget};
 use crate::text_to_speech::sanitizer::sanitize;
 
 const MAX_WAIT_MS: u64 = 30_000;
 const DEFAULT_ASK_WAIT_MS: u64 = 30_000;
 const MAX_ASK_WAIT_MS: u64 = 120_000;
-const MAX_PLAYBACK_WAIT_MS: u64 = 60_000;
+// Budget scales with question length; the per-word figure is a speech-rate
+// estimate, not real audio duration.
+const PLAYBACK_BASE_MS: u64 = 15_000;
+const PLAYBACK_PER_WORD_MS: u64 = 700;
+const MAX_PLAYBACK_WAIT_MS: u64 = 120_000;
 
 fn str_param<'a>(
     params: Option<&'a serde_json::Value>,
@@ -151,13 +155,14 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
 
             // Echo avoidance by ordering: listen only after playback ends.
             // Bounded so a stalled backend cannot hold the mic armed forever
+            let words = clean_question.split_whitespace().count() as u64;
+            let playback_budget = Duration::from_millis(
+                (PLAYBACK_BASE_MS + words * PLAYBACK_PER_WORD_MS).min(MAX_PLAYBACK_WAIT_MS),
+            );
             let mut speaking = daemon_state.speech().subscribe_speaking();
-            if tokio::time::timeout(
-                Duration::from_millis(MAX_PLAYBACK_WAIT_MS),
-                speaking.wait_for(|s| !s),
-            )
-            .await
-            .is_err()
+            if tokio::time::timeout(playback_budget, speaking.wait_for(|s| !s))
+                .await
+                .is_err()
             {
                 daemon_state.speech().stop();
                 daemon_state.set_recording_mode(RecordingMode::Idle);
@@ -463,7 +468,10 @@ mod tests {
         let (commands, command_receiver) = std::sync::mpsc::channel();
         let state = test_state(commands);
 
-        let start = record_request(BANSHEE_RECORD_START, Some(serde_json::json!({"dictate": true})));
+        let start = record_request(
+            BANSHEE_RECORD_START,
+            Some(serde_json::json!({"dictate": true})),
+        );
         let JsonRpcResponse::Success { .. } = dispatch(start, &state).await else {
             panic!("expected success response");
         };
@@ -483,7 +491,8 @@ mod tests {
         };
         assert_eq!(state.recording_mode(), RecordingMode::Idle);
         // The dictate choice from start must reach the consumer command
-        let Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate)) = command_receiver.try_recv()
+        let Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate)) =
+            command_receiver.try_recv()
         else {
             panic!("expected a dictate transcribe command");
         };

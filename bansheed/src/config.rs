@@ -116,7 +116,7 @@ impl Default for STTConfig {
             translate: false,
             vad_threshold: 0.5,
             vocabulary: vec!["banshee".to_string()],
-            endpoint_silence_ms: 1000,
+            endpoint_silence_ms: 2500,
         }
     }
 }

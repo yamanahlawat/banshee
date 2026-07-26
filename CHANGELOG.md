@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-26
+
+The vocabulary release: the voice pronounces your jargon instead of reciting it
+letter by letter, and dictation stops eating the clipboard on Linux.
+
+### Added
+
+- espeak-ng fallback pronounces unknown words instead of spelling them out.
+  Optional; `banshee doctor` reports it and prints the install command.
+- Pronunciation dictionary for terms the voice got wrong, including `yaml`,
+  `toml`, `kubernetes`, `webhook`, and `symlink`.
+- Pi coding agent extension (`integrations/pi/banshee.ts`), talking to the
+  daemon directly since Pi has its own extension API rather than MCP.
+
+### Changed
+
+- `[stt] endpoint_silence_ms` defaults to 2500 (was 1000), so pausing to think
+  no longer cuts your answer short.
+- `ask_user` scales its playback wait with the length of the question.
+- `speak_status` and `ask_user` descriptions steer the agent to treat speech as
+  its reply, and to ask one question per call.
+- Dictated text is kept out of clipboard manager history on Linux.
+
+### Fixed
+
+- Dictation no longer destroys the clipboard on Linux, where clipboard contents
+  live in a process rather than a system service.
+- All-caps terms such as `YAML` are pronounced rather than spelled out.
+- The clipboard restore no longer delays the ready cue.
+- The Pi extension no longer hangs if the daemon closes the connection mid-call.
+
 ## [0.4.0] - 2026-07-21
 
 The install release: prebuilt binaries you can install with one command,
@@ -157,6 +188,9 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/yamanahlawat/banshee/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/yamanahlawat/banshee/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/yamanahlawat/banshee/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yamanahlawat/banshee/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yamanahlawat/banshee/releases/tag/v0.1.0

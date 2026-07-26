@@ -62,7 +62,7 @@ async fn main() {
                         "tools": [
                             {
                                 "name": "speak_status",
-                                "description": "Speak a short message aloud to the user, who is working eyes-free and not reading the screen. Use it for: decisions you need input on, questions, and telling the user you are done. ALWAYS call this when you finish the task and stop working: say what got done, mention any work still pending, and that you are awaiting instructions. When an implementation is done, tell the user it is ready for review. Do not narrate routine steps or tool activity in between.",
+                                "description": "Speak a short message aloud to the user, who is working eyes-free and not reading the screen. This spoken message is your reply to them, so do not also repeat it as written text; reserve written output for what must be read on screen, such as code, file paths, commands, URLs, and lists. Use it for decisions you need input on, questions, and letting the user know you have finished. Talk like a colleague in the room: natural, warm, and varied, never scripted. When you finish, say what got done and flag anything still pending, then hand back to the user in your own words each time. When an implementation is done, mention it is ready for review. Do not narrate routine steps or tool activity in between.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {"text": {"type": "string", "description": "One or two conversational sentences, as if speaking to a colleague. Refer to code, files, and identifiers by their spoken names, for example 'the hotkey listener' rather than a file path or function signature. Keep exact paths, code, URLs, and lists in your normal text output; they do not read well aloud."}},
@@ -71,7 +71,7 @@ async fn main() {
                             },
                             {
                                 "name": "ask_user",
-                                "description": "Ask the user a question aloud and wait for their spoken answer. Use it when you need a decision or clarification: the question is spoken, the microphone opens once it finishes playing, and the transcribed reply comes back scoped to you. Returns empty text if the user stayed silent.",
+                                "description": "Ask the user a question aloud and wait for their spoken answer. Use it when you need a decision or clarification: the question is spoken, the microphone opens once it finishes playing, and the transcribed reply comes back scoped to you. Ask one focused question per call; when you have several, ask the most important first and wait for the answer before asking the next, so the user is never holding multiple questions in their head. Returns empty text if the user stayed silent.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {

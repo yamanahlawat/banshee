@@ -1,13 +1,44 @@
 # Banshee
 
-Banshee is an offline, always-on voice daemon for macOS and Linux. It does local
-speech-to-text dictation and text-to-speech, and exposes everything over a
-JSON-RPC API plus an MCP server so your favorite LLM host can talk and listen
-through it. It's pure Rust, and nothing ever leaves your machine.
+Banshee gives your AI coding agent a voice. Your agent - Claude Code, Cursor,
+or any MCP host - speaks its decisions and questions out loud, and you answer
+back by talking, hands-free, while it works. It runs entirely on your machine:
+local Whisper for listening, a local neural voice for speaking, no cloud, no
+API keys, no audio ever leaving your laptop.
 
-You hold a hotkey, say what you're thinking, and Banshee transcribes it locally
-with Whisper. It either types the text straight into whatever app you're in, or
-hands it off to an LLM. No cloud, no API keys, no audio leaving your laptop.
+It's also a straight-up local dictation tool: hold a hotkey, speak, and the
+text lands in whatever app you're focused on. Pure Rust, offline, always on.
+
+## Demo
+
+https://github.com/user-attachments/assets/006132bd-9710-4322-a35a-4a5e5004371c
+
+The daemon running with the Pi coding agent. It asks which language to use,
+hears "let's go with python", and writes the file. Nothing was typed.
+
+## Why Banshee
+
+Plenty of tools will transcribe your voice into an editor. Banshee is built for
+the other half of the conversation.
+
+- **Your agent asks, you answer.** `ask_user` speaks a question, waits for
+  playback to finish, opens the microphone, and returns what you said, all in
+  one call. Most voice tooling is one-directional dictation; this is a loop.
+- **It never hears itself.** The microphone opens only after the question has
+  finished playing, so the daemon can't transcribe its own voice. That's why
+  Banshee works on laptop speakers without a headset.
+- **Nothing leaves your machine.** Whisper, Silero VAD, and Kokoro all run
+  locally. No API keys, no cloud tier, no audio uploaded, works on a plane.
+- **It waits while you think.** Answers end on 2.5s of silence rather than the
+  usual few hundred milliseconds, so pausing mid-sentence to think doesn't cut
+  you off.
+- **It handles your jargon in both directions.** `vocabulary` biases Whisper
+  toward project words it would otherwise mangle, and the espeak-ng fallback
+  pronounces unfamiliar terms instead of spelling them out letter by letter.
+- **Not tied to one vendor.** It's an MCP server, so Claude Code, Cursor,
+  OpenCode, and anything else that speaks MCP all work.
+- **One daemon, both jobs.** Agent voice and system-wide dictation share the
+  same process, models, and microphone.
 
 ## Install
 
@@ -55,6 +86,11 @@ banshee setup
 
 Files that already exist are skipped, so re-running `banshee setup` after
 changing the STT preset or the TTS voice only downloads what's missing.
+
+**Optional: better pronunciation.** Install `espeak-ng` and Banshee pronounces
+unfamiliar words (tech jargon, proper nouns) instead of spelling them out. On
+macOS it's `brew install espeak-ng`; `banshee doctor` prints the command for
+your system.
 
 **2. Grant macOS permissions.** Banshee needs three of them, otherwise it
 quietly fails to record or type:
@@ -113,55 +149,17 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee history` | List all saved transcriptions |
 | `banshee clear-history` | Clear the saved transcriptions |
 
----
+## Connect your coding agent (MCP)
 
-## Configuration
+`banshee-mcp-shim` is an MCP stdio server that bridges your coding agent to the
+running daemon. This is what turns Banshee into a voice for the agent. It
+exposes three tools:
 
-Configuration is optional. If you want to override the defaults, create
-`~/.banshee/config.toml` (defaults shown here):
-
-```toml
-[daemon]
-save_history = true    # keep transcriptions in ~/.banshee/banshee.db
-
-[stt]
-preset = "balanced"    # fast | balanced | quality (see below)
-vad_threshold = 0.5    # 0.0 to 1.0; higher means stricter speech detection
-vocabulary = []        # words Whisper keeps mangling, e.g. ["banshee", "clippy", "tokio"]
-
-[tts]
-voice = "af_heart"     # any voice from the Kokoro voices directory
-speed = 1.0            # playback speed multiplier
-fallback = "system"    # system = use `say` when Kokoro is unavailable | none
-
-[audio.cues]
-enabled = true         # tones on record start/stop, success, and errors
-```
-
-You can also change `vad_threshold` at runtime through the `banshee.configure`
-RPC, no restart needed. `vocabulary` biases Whisper toward project jargon and
-proper nouns it would otherwise misspell; it is read once at startup, so
-restart the daemon after changing it.
-
-The `preset` picks which Whisper model Banshee uses:
-
-| Preset | Model | Trade-off |
-| --- | --- | --- |
-| `fast` | `ggml-base.en.bin` | Fastest and lightest, English only |
-| `balanced` | `ggml-large-v3-turbo-q5_0.bin` | The default; accurate and reasonably quick |
-| `quality` | `ggml-large-v3-q5_0.bin` | Most accurate, heaviest |
-
-For `voice`, any file in the
-[Kokoro voices directory](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/voices)
-works, e.g. `af_bella`, `am_michael`, or `bf_emma` (the prefix is
-accent/gender: `a`merican/`b`ritish, `f`emale/`m`ale). After changing the
-`preset` or `voice`, run `banshee setup` to download the new files, then restart
-the daemon.
-
-## MCP integration
-
-`banshee-mcp-shim` is an MCP stdio server that bridges LLM hosts to the daemon
-and exposes speak and listen tools. It needs the daemon to be running.
+| Tool | What the agent does with it |
+| --- | --- |
+| `speak_status` | Say something aloud, for decisions made and work finished |
+| `ask_user` | Ask a question aloud, then wait for and return your spoken answer |
+| `listen_for_prompt` | Pick up anything you've said since it last checked |
 
 It works with any MCP-capable tool, like Claude Code, OpenCode, Cursor, and
 others. Most of them use the same `mcpServers` config shape:
@@ -180,7 +178,73 @@ Each tool keeps this config in its own spot (for example, Cursor uses
 `~/.cursor/mcp.json`, and Claude Code lets you add it with `claude mcp add`), so
 check your tool's docs for where the MCP config lives. If your tool doesn't pick
 up the binary from your `PATH`, use its full path instead. Restart the tool, and
-the speak and listen tools will show up.
+the three tools will show up.
+
+### Pi coding agent
+
+Pi has its own extension API instead of MCP, so it gets a native extension that
+talks to the daemon directly. Copy it in and restart Pi:
+
+```bash
+cp integrations/pi/banshee.ts ~/.pi/agent/extensions/
+```
+
+That's the whole setup; see [integrations/pi](integrations/pi) for details.
+This is what the demo at the top is running.
+
+---
+
+## Configuration
+
+Configuration is optional. If you want to override the defaults, create
+`~/.banshee/config.toml` (defaults shown here):
+
+```toml
+[daemon]
+save_history = true    # keep transcriptions in ~/.banshee/banshee.db
+
+[stt]
+preset = "balanced"      # fast | balanced | quality (see below)
+vad_threshold = 0.5      # 0.0 to 1.0; higher means stricter speech detection
+vocabulary = ["banshee"] # words Whisper keeps mangling, e.g. ["clippy", "tokio"]
+endpoint_silence_ms = 2500  # trailing silence that ends a spoken answer
+
+[tts]
+voice = "af_heart"     # any voice from the Kokoro voices directory
+speed = 1.0            # playback speed multiplier
+fallback = "system"    # system = use `say` when Kokoro is unavailable | none
+
+[audio]
+barge_in = "stop"      # stop = the record hotkey cuts off whatever Banshee is saying | none
+
+[audio.cues]
+enabled = true         # tones on record start/stop, success, and errors
+```
+
+You can also change `vad_threshold` at runtime through the `banshee.configure`
+RPC, no restart needed. `vocabulary` biases Whisper toward project jargon and
+proper nouns it would otherwise misspell; it is read once at startup, so
+restart the daemon after changing it.
+
+`endpoint_silence_ms` is how long you can go quiet mid-answer before Banshee
+decides you're done. The default is deliberately generous so that thinking out
+loud doesn't truncate your answer. Lower it if replies feel sluggish, raise it
+if you keep getting cut off.
+
+The `preset` picks which Whisper model Banshee uses:
+
+| Preset | Model | Trade-off |
+| --- | --- | --- |
+| `fast` | `ggml-base.en.bin` | Fastest and lightest, English only |
+| `balanced` | `ggml-large-v3-turbo-q5_0.bin` | The default; accurate and reasonably quick |
+| `quality` | `ggml-large-v3-q5_0.bin` | Most accurate, heaviest |
+
+For `voice`, any file in the
+[Kokoro voices directory](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/voices)
+works, e.g. `af_bella`, `am_michael`, or `bf_emma` (the prefix is
+accent/gender: `a`merican/`b`ritish, `f`emale/`m`ale). After changing the
+`preset` or `voice`, run `banshee setup` to download the new files, then restart
+the daemon.
 
 ## Troubleshooting
 
