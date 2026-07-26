@@ -8,6 +8,7 @@ mod doctor;
 mod history;
 mod hotkey;
 mod models;
+mod permissions;
 mod service;
 mod speech_to_text;
 mod state;
@@ -43,6 +44,7 @@ async fn main() -> Result<(), BansheeError> {
         CommandType::Serve => {
             let config = config_result?;
             let (socket_path, listener) = daemon::claim()?;
+            permissions::restart_when_granted();
             let db_connection = if config.daemon.save_history {
                 let db_path = get_db_path().ok_or_else(|| {
                     BansheeError::Other("Failed to get database path".to_string())
@@ -201,7 +203,17 @@ async fn main() -> Result<(), BansheeError> {
                 eprintln!("Failed to send record command: {error}");
             }
         }
-        CommandType::Start => service::install()?,
+        CommandType::Start => {
+            service::install()?;
+            if !permissions::input_granted() {
+                println!();
+                println!(
+                    "Accessibility is not granted: the hotkey and dictation stay inert until it is."
+                );
+                println!("Opening System Settings. Grant it and the daemon picks it up by itself.");
+                permissions::open_settings();
+            }
+        }
         CommandType::Service { action } => match action {
             args::ServiceAction::Uninstall => service::uninstall()?,
         },

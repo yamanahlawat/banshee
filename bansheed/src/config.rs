@@ -139,8 +139,8 @@ pub struct TTSConfig {
 impl Default for TTSConfig {
     fn default() -> Self {
         Self {
-            voice: "af_heart".to_string(),
-            speed: 1.0,
+            voice: "af_sky".to_string(),
+            speed: 1.2,
             fallback: TTSFallback::System,
         }
     }

@@ -87,7 +87,7 @@ banshee setup
 | `ggml-large-v3-turbo-q5_0.bin` | ~547 MB | Whisper STT model (default `balanced` preset) |
 | `silero_vad.onnx` | ~2 MB | Silero voice-activity detection |
 | `kokoro-v1.0.onnx` | ~310 MB | Kokoro TTS model |
-| `af_heart.bin` | ~512 KB | Kokoro voice style (the configured `voice`) |
+| `af_sky.bin` | ~512 KB | Kokoro voice style (the configured `voice`) |
 
 Files that already exist are skipped, so re-running `banshee setup` after
 changing the STT preset or the TTS voice only downloads what's missing.
@@ -215,8 +215,8 @@ vocabulary = ["banshee"] # words Whisper keeps mangling, e.g. ["clippy", "tokio"
 endpoint_silence_ms = 2500  # trailing silence that ends a spoken answer
 
 [tts]
-voice = "af_heart"     # any voice from the Kokoro voices directory
-speed = 1.0            # playback speed multiplier
+voice = "af_sky"       # any voice from the Kokoro voices directory
+speed = 1.2            # playback speed multiplier
 fallback = "system"    # system = use `say` when Kokoro is unavailable | none
 
 [audio]

@@ -79,12 +79,12 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 
     #[cfg(target_os = "macos")]
     {
-        healthy &= if accessibility_trusted() {
+        healthy &= if crate::permissions::input_granted() {
             pass("accessibility permission granted")
         } else {
             fail(
                 "accessibility permission missing (hotkey and dictation will not work)",
-                "grant it in System Settings > Privacy & Security > Accessibility; unsigned debug builds lose the grant on every rebuild",
+                "grant it in System Settings > Privacy & Security > Accessibility; the daemon restarts itself once it lands. unsigned debug builds lose the grant on every rebuild",
             )
         };
     }
@@ -208,16 +208,6 @@ async fn check_daemon_version() -> bool {
             "restart it: banshee start",
         ),
     }
-}
-
-#[cfg(target_os = "macos")]
-fn accessibility_trusted() -> bool {
-    // Boolean in C is an unsigned char, so u8 instead of bool keeps the call sound
-    #[link(name = "ApplicationServices", kind = "framework")]
-    unsafe extern "C" {
-        fn AXIsProcessTrusted() -> u8;
-    }
-    unsafe { AXIsProcessTrusted() != 0 }
 }
 
 fn pass(msg: &str) -> bool {
