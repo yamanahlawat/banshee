@@ -1,0 +1,53 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly
+labels: ["bug"]
+body:
+  - type: textarea
+    id: doctor
+    attributes:
+      label: banshee doctor output
+      description: Paste the full output. It reports models, config, microphone, permissions, session type, and daemon health, and answers most of what we'd ask next.
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple Silicon)
+        - Linux (X11 session)
+        - Linux (Wayland session)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: What's affected
+      options:
+        - Dictation hotkey
+        - Agent voice (MCP or Pi extension)
+        - Install or setup
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: From ~/.banshee/daemon.log, if anything looks related. Optional.
+      render: shell
+    validations:
+      required: false

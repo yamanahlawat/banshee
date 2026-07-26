@@ -1,0 +1,18 @@
+name: Feature request
+description: Suggest something Banshee should do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: request
+    attributes:
+      label: What would you like Banshee to do
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: What are you doing today instead
+      description: The workaround you're using, or why there isn't one. This is usually what decides whether it gets built.
+    validations:
+      required: false
