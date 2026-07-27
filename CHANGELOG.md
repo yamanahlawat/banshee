@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-27
+
+The one-install release: connecting a coding agent no longer needs a second
+package.
+
+### Changed
+
+- `banshee-mcp-shim` now ships alongside `banshee` in the same release archive,
+  Homebrew formula, and shell installer. It used to be published as its own
+  formula, so `brew install banshee` left you without the MCP server and
+  `claude mcp add banshee -- banshee-mcp-shim` failed with command not found.
+
 ## [0.6.0] - 2026-07-26
 
 The Wayland release: dictation types into your focused window on Hyprland and
@@ -33,6 +45,10 @@ never got its release no longer holds the mic hostage.
 - README section on binding push-to-talk in your compositor, with the Hyprland
   `bind`/`bindr` snippet that gives you hold-to-talk without the global hotkey.
 - Issue templates for bug reports and feature requests.
+- `banshee start` says when macOS Accessibility is missing and opens the
+  settings pane for it, instead of leaving you with a hotkey that does nothing.
+- The daemon restarts itself the moment that grant lands, so you no longer have
+  to know that a restart was needed for a permission to take effect.
 
 ### Changed
 
@@ -227,7 +243,8 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/yamanahlawat/banshee/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/yamanahlawat/banshee/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/yamanahlawat/banshee/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/yamanahlawat/banshee/compare/v0.3.0...v0.4.0
