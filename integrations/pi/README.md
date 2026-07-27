@@ -53,5 +53,5 @@ question Banshee asked and the answer it heard, not just a tool name.
 ## Keeping it in sync
 
 Tool descriptions are duplicated between this file and
-`banshee-mcp-shim/src/main.rs`. They steer how the agent splits speech from
+`bansheed/src/bin/banshee-mcp-shim.rs`. They steer how the agent splits speech from
 written output, so if you change one, change the other.

@@ -72,8 +72,7 @@ Needs Rust (stable, edition 2024):
 ```bash
 git clone https://github.com/yamanahlawat/banshee.git
 cd banshee
-cargo install --path bansheed          # the `banshee` command
-cargo install --path banshee-mcp-shim  # the MCP shim (optional)
+cargo install --path bansheed  # the `banshee` command and `banshee-mcp-shim`
 ```
 
 ## Setup

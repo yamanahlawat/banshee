@@ -8,8 +8,7 @@ can do.
 
 | Crate | Role |
 | --- | --- |
-| `banshee` (in `bansheed/`) | The daemon: audio capture, VAD, STT, hotkeys, JSON-RPC API |
-| `banshee-mcp-shim` | MCP stdio to daemon bridge |
+| `banshee` (in `bansheed/`) | The daemon: audio capture, VAD, STT, hotkeys, JSON-RPC API. Also builds `banshee-mcp-shim` (`src/bin/`), the MCP stdio to daemon bridge |
 | `banshee-common` | Shared protocol types (JSON-RPC, errors, config) |
 
 The daemon exposes a JSON-RPC 2.0 API over a Unix socket at

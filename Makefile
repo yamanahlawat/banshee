@@ -8,7 +8,6 @@ BANSHEE := $(CARGO_INSTALL_ROOT)/bin/banshee
 .PHONY: install
 install:
 	cargo install --path bansheed --force --root "$(CARGO_INSTALL_ROOT)"
-	cargo install --path banshee-mcp-shim --force --root "$(CARGO_INSTALL_ROOT)"
 	codesign --force --sign "$(IDENTITY)" "$(BANSHEE)"
 	codesign --verify --strict --verbose=2 "$(BANSHEE)"
 	
