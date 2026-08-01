@@ -20,8 +20,7 @@ pub const RING_SECS: usize = 120; // 120 seconds of audio in the ring buffer
 // The name [audio] input_device carries to mean "whatever the OS is set to"
 pub const DEFAULT_INPUT_DEVICE: &str = "default";
 
-// Case-insensitive substring match, so a config can say "yeti" instead of the
-// full "Blue Yeti Stereo Microphone" that the host reports.
+// Substring match, so a config can say "yeti" not "Blue Yeti Stereo Microphone"
 fn find_input_device(host: &cpal::Host, wanted: &str) -> Result<cpal::Device, BansheeError> {
     let wanted_lower = wanted.to_lowercase();
     let mut available = Vec::new();
@@ -48,10 +47,8 @@ fn find_input_device(host: &cpal::Host, wanted: &str) -> Result<cpal::Device, Ba
     )))
 }
 
-// Anything other than "default" is an explicit choice from [audio]
-// input_device and must fail loudly rather than silently fall back to the
-// wrong microphone. Shared with doctor so it diagnoses the device that
-// capture would actually open.
+// Anything but "default" is explicit and must fail loudly rather than fall back
+// to the wrong microphone. Shared with doctor so it sees what capture opens.
 pub fn resolve_input_device(input_device: &str) -> Result<cpal::Device, BansheeError> {
     // Ask cpal to give us the default OS audio API
     let host = cpal::default_host();
@@ -63,9 +60,8 @@ pub fn resolve_input_device(input_device: &str) -> Result<cpal::Device, BansheeE
     }
 }
 
-// `use<>`: the returned consumer borrows nothing, but edition 2024 would
-// otherwise capture input_device's lifetime and stop it crossing into the
-// audio thread, which needs 'static.
+// `use<>`: edition 2024 would otherwise capture input_device's lifetime and
+// stop the consumer crossing into the audio thread, which needs 'static.
 pub fn start_audio_capture(
     daemon_state: Arc<DaemonState>,
     input_device: &str,

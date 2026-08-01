@@ -1,10 +1,8 @@
 use banshee_common::{SileroVADConfig, error::BansheeError, utils::get_models_path};
 use ort::session::{Session, builder::GraphOptimizationLevel};
 
-// Silero v5 expects each 512-sample chunk to be prefixed with the last 64
-// samples of the previous chunk (the official wrapper concatenates this
-// "context" outside the ONNX graph). Without it the model returns ~0 speech
-// probability for everything.
+// Silero v5 expects each 512-sample chunk prefixed with the previous chunk's
+// last 64 samples. Without it the model returns ~0 probability for everything.
 const CONTEXT_SIZE: usize = 64;
 
 pub struct VADEngine {
@@ -118,8 +116,7 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    // 3.2s of 16kHz mono 16-bit speech, embedded in the test binary so the
-    // tests run on any OS without external files or tools.
+    // 3.2s of 16kHz mono 16-bit speech, embedded so tests need no external files
     const TEST_WAV: &[u8] = include_bytes!("../../tests/data/vad_speech_16k.wav");
 
     fn load_test_audio() -> Vec<f32> {

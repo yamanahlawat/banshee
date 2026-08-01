@@ -3,8 +3,11 @@ use std::path::PathBuf;
 use banshee_common::{error::BansheeError, utils::get_config_path};
 use serde::Deserialize;
 
+// Every section denies unknown fields: TOML binds a key to whatever table
+// precedes it, so a misplaced setting parses fine and silently does nothing.
+
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
     pub always_on: bool,
     pub save_history: bool,
@@ -19,7 +22,7 @@ impl Default for DaemonConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum HotkeyMode {
     Hold,
@@ -35,7 +38,7 @@ pub enum BargeInMode {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AudioCuesConfig {
     pub enabled: bool,
     pub start: Option<PathBuf>,
@@ -57,7 +60,7 @@ impl Default for AudioCuesConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
     pub input_device: String,
     pub hotkey: String,
@@ -97,7 +100,7 @@ impl STTPreset {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct STTConfig {
     pub preset: STTPreset,
     pub language: String,
@@ -129,7 +132,7 @@ pub enum TTSFallback {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TTSConfig {
     pub voice: String,
     pub speed: f32,
@@ -147,7 +150,7 @@ impl Default for TTSConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     pub level: String,
 }
@@ -161,7 +164,7 @@ impl Default for LoggingConfig {
 }
 
 #[derive(Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub daemon: DaemonConfig,
     pub audio: AudioConfig,
@@ -180,5 +183,30 @@ impl Config {
         let config_content = std::fs::read_to_string(&config_path)?;
         let config: Config = toml::from_str(&config_content)?;
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `hotkey_mode` under `[tts]` is valid TOML: it used to parse and leave
+    // `audio.hotkey_mode` at its default with nothing reported.
+    #[test]
+    fn a_key_under_the_wrong_section_is_rejected() {
+        let misplaced = "[tts]\nvoice = \"af_sky\"\nhotkey_mode = \"toggle\"\n";
+        // Matched rather than expect_err: Config has no Debug
+        let error = match toml::from_str::<Config>(misplaced) {
+            Ok(_) => panic!("a key in the wrong section must not parse"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("hotkey_mode"),
+            "the error must name the offending key: {error}"
+        );
+
+        let placed = "[audio]\nhotkey_mode = \"toggle\"\n\n[tts]\nvoice = \"af_sky\"\n";
+        let config: Config = toml::from_str(placed).expect("the same key parses under [audio]");
+        assert!(matches!(config.audio.hotkey_mode, HotkeyMode::Toggle));
     }
 }

@@ -15,9 +15,8 @@ use crate::text_to_speech::SpeechPlayer;
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
 
-// A push-to-talk start with no matching stop otherwise holds the microphone
-// for the life of the daemon, and every later start is refused as busy. The
-// ring only holds RING_SECS anyway, so nothing is lost by capping it there.
+// A start with no stop otherwise holds the mic for the life of the daemon.
+// The ring only holds RING_SECS, so nothing is lost by capping it there.
 pub const MAX_PUSH_TO_TALK: Duration = Duration::from_secs(crate::audio::RING_SECS as u64);
 
 // Where a finished transcription is delivered
@@ -88,13 +87,10 @@ pub struct DaemonState {
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
     cues: std::sync::mpsc::Sender<Cue>,
     barge_in: BargeInMode,
-    // Locked in at record start, consumed at stop; start and stop can be
-    // separate RPC calls, so the choice cannot live on a caller's stack
+    // Start and stop can be separate RPC calls, so this cannot live on a stack
     pending_dictate: AtomicBool,
-    // Milliseconds since `started_at` at which an open push-to-talk becomes
-    // stuck. Storing the deadline rather than the start keeps the watchdog to
-    // one load and one compare; an Instant is not atomic, and the watchdog
-    // must not contend with the RPC path.
+    // Milliseconds since `started_at` at which an open push-to-talk is stuck.
+    // A deadline rather than a start keeps the watchdog to one load and compare.
     push_to_talk_deadline: AtomicU64,
     shutdown: tokio::sync::Notify,
 }
@@ -167,8 +163,8 @@ impl DaemonState {
         }
     }
 
-    // Push-to-talk release. A stop with nothing in flight is a no-op so
-    // release keybinds can fire unconditionally.
+    // A stop with nothing in flight is a no-op, so release keybinds can fire
+    // unconditionally.
     pub fn record_stop(&self) {
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             println!("Recording stopped");
@@ -187,10 +183,8 @@ impl DaemonState {
         }
     }
 
-    // Releases a push-to-talk session that never got its stop, so a dropped
-    // key release or a script that died mid-recording cannot wedge the
-    // microphone. Stops rather than discards: the ring holds real audio, and
-    // record_stop is what routes it to the mailbox or to dictation.
+    // Releases a session that never got its stop. Stops rather than discards:
+    // the ring holds real audio and record_stop is what routes it.
     pub fn expire_stuck_recording(&self) -> bool {
         if self.recording_mode() != RecordingMode::PushToTalk {
             return false;
@@ -324,9 +318,7 @@ impl DaemonState {
 mod tests {
     use super::*;
 
-    // Hands back the commands receiver too: dropping it silently discards
-    // whatever record_stop queues, which would make those assertions pass for
-    // the wrong reason.
+    // Hands back the receiver: dropping it discards whatever record_stop queues
     fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<ConsumerCommand>) {
         let (commands, requests) = std::sync::mpsc::channel();
         let state = DaemonState::new(

@@ -1,6 +1,5 @@
-// macOS gates the hotkey and dictation behind Accessibility, and the grant only
-// applies to processes started after it. Other platforms have no equivalent, so
-// the check is vacuously true there.
+// macOS gates the hotkey and dictation behind Accessibility; the grant applies
+// only to processes started after it. No equivalent elsewhere, so always true.
 
 use std::thread;
 use std::time::Duration;

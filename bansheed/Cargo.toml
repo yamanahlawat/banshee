@@ -19,7 +19,7 @@ path = "src/main.rs"
 anyhow = "1.0.103"
 arboard = "3.6.1"
 audioadapter-buffers = "3.0.0"
-banshee-common = { version = "0.6.1", path = "../banshee-common" }
+banshee-common = { version = "0.7.0", path = "../banshee-common" }
 clap = { version = "4.6.1", features = ["derive"] }
 cpal = "0.17.3"
 crossbeam-channel = "0.5.16"

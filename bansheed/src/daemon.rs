@@ -12,8 +12,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::api::dispatch;
 use crate::state::DaemonState;
 
-// Claimed before model loading: losing the single-instance race must stay cheap,
-// a supervised restart loop would otherwise load Whisper on every attempt
+// Claimed before model loading, so a lost single-instance race stays cheap
 pub fn claim() -> Result<(std::path::PathBuf, UnixListener), io::Error> {
     let socket_path = get_socket_path()
         .ok_or_else(|| io::Error::other("could not find home directory for the socket path"))?;
@@ -37,8 +36,7 @@ pub async fn run(
 
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
-    // Coarse tick: the ceiling it enforces is measured in minutes, so waking
-    // more often than this would only add idle wakeups
+    // Coarse tick: the ceiling it enforces is measured in minutes
     let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(30));
 
     loop {
@@ -123,9 +121,8 @@ mod tests {
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
         assert!(path.exists());
 
-        // parallel tests fork `say`; between fork and exec the child briefly
-        // holds a copy of the dead listener fd, so the probe can transiently
-        // see the socket as alive: retry past the window
+        // Between fork and exec a `say` child holds a copy of the dead listener
+        // fd, so the probe can transiently see the socket as alive
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let listener = loop {
             match claim_socket(&path) {
