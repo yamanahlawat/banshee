@@ -35,8 +35,8 @@ const VAD_MODEL: &str = "silero_vad.onnx";
 #[tokio::main]
 async fn main() -> Result<(), BansheeError> {
     let cli = Cli::parse();
-    // Only unwrapped by the arms that read it: RPC commands work without a
-    // parseable config, and doctor diagnoses a broken one
+    // Unwrapped only by the arms that read it: RPC works without a parseable
+    // config, and doctor diagnoses a broken one
     let config_result =
         Config::load().inspect_err(|error| eprintln!("Failed to load config: {error}"));
 
@@ -93,11 +93,11 @@ async fn main() -> Result<(), BansheeError> {
                     endpoint_silence_ms: config.stt.endpoint_silence_ms,
                 },
                 command_receiver,
+                config.audio.hotkey_mode,
             );
             let result = daemon::run(&daemon_state, socket_path, listener).await;
-            // Drop the Whisper context before atexit runs, on error paths too:
-            // ggml's Metal cleanup asserts if buffers are still resident. Waits
-            // for an in-flight transcription or ask session, both hard-bounded
+            // Drop the Whisper context before atexit: ggml's Metal cleanup
+            // asserts if buffers are still resident
             let _ = daemon_state
                 .commands()
                 .send(state::ConsumerCommand::Shutdown);

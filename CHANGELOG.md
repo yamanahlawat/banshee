@@ -5,7 +5,51 @@ All notable changes to Banshee are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-08-01
+
+The no-silent-failures release: dictation no longer kills the daemon, the hotkey
+no longer sends your words to the wrong place without saying so, and a config
+key written under the wrong section now fails at startup instead of quietly
+doing nothing.
+
+Two changes affect existing setups. `F5` and `Shift + F5` have swapped meaning,
+and a config file with a misplaced or stale key will now refuse to start until
+you fix it; `banshee doctor` names the offending key.
+
+### Added
+
+- `hotkey_mode = "toggle"` under `[audio]` now works: tap the hotkey to start
+  recording and tap it again to stop, instead of holding it down. The field has
+  been parsed since the config landed but was never read. Holding a key through
+  a long dictation couples your pace to your finger; the existing push-to-talk
+  watchdog still releases a session you walk away from.
+
+- `banshee doctor` now prints the settings actually in effect (hotkey mode,
+  barge-in, cues, STT preset, VAD threshold, endpoint, vocabulary size, voice,
+  speed, history) instead of only reporting that the file parsed.
+
+### Changed
+
+- Unknown config keys are now an error instead of being ignored. TOML binds a
+  key to whatever table precedes it, so `hotkey_mode` written under `[tts]`
+  parsed cleanly and left `audio.hotkey_mode` at its default with nothing
+  reported anywhere. A stale key from an older version now fails startup and
+  names itself rather than silently doing nothing.
+
+- `F5` alone now dictates into the focused app, and `Shift + F5` captures to the
+  mailbox for `banshee listen`. Dictation is the common case, so it no longer
+  carries the modifier. The shift state was sampled at the instant `F5` went
+  down, so pressing the two keys near-simultaneously sent the utterance to the
+  mailbox instead, and both targets play the same ready cue, which made the
+  misroute silent.
+
+### Fixed
+
+- Dictation no longer aborts the daemon. Pasting resolved `v` through
+  `Key::Unicode`, which reaches Text Input Services on macOS; TIS is
+  main-thread-only and intermittently called `abort()` from the transcription
+  thread, killing the daemon after the transcription was saved but before the
+  paste. macOS now uses the raw `kVK_ANSI_V` keycode, which needs no lookup.
 
 ## [0.6.1] - 2026-07-27
 
@@ -243,7 +287,8 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/yamanahlawat/banshee/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/yamanahlawat/banshee/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/yamanahlawat/banshee/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/yamanahlawat/banshee/compare/v0.4.0...v0.5.0

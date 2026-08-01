@@ -11,7 +11,7 @@ text lands in whatever app you're focused on. Pure Rust, offline, always on.
 
 ## Demo
 
-https://github.com/user-attachments/assets/006132bd-9710-4322-a35a-4a5e5004371c
+<https://github.com/user-attachments/assets/006132bd-9710-4322-a35a-4a5e5004371c>
 
 The daemon running with the Pi coding agent. It asks which language to use,
 hears "let's go with python", and writes the file. Nothing was typed.
@@ -83,12 +83,12 @@ cargo install --path bansheed  # the `banshee` command and `banshee-mcp-shim`
 banshee setup
 ```
 
-| File | Size | What it is |
-| --- | --- | --- |
+| File                           | Size    | What it is                                    |
+| ------------------------------ | ------- | --------------------------------------------- |
 | `ggml-large-v3-turbo-q5_0.bin` | ~547 MB | Whisper STT model (default `balanced` preset) |
-| `silero_vad.onnx` | ~2 MB | Silero voice-activity detection |
-| `kokoro-v1.0.onnx` | ~310 MB | Kokoro TTS model |
-| `af_sky.bin` | ~512 KB | Kokoro voice style (the configured `voice`) |
+| `silero_vad.onnx`              | ~2 MB   | Silero voice-activity detection               |
+| `kokoro-v1.0.onnx`             | ~310 MB | Kokoro TTS model                              |
+| `af_sky.bin`                   | ~512 KB | Kokoro voice style (the configured `voice`)   |
 
 Files that already exist are skipped, so re-running `banshee setup` after
 changing the STT preset or the TTS voice only downloads what's missing.
@@ -133,10 +133,26 @@ watch the logs while debugging), use `banshee serve`.
 
 With the daemon running, the global hotkeys are:
 
-- **Hold `F5`** to record. On release, the transcription is saved, and you can
-  grab it later with `banshee listen`.
-- **Hold `Shift + F5`** to record. On release, the transcription is typed
-  straight into the app you're focused on (this is dictation mode).
+- **Hold `F5`** to record. On release, the transcription is typed straight into
+  the app you're focused on (this is dictation mode).
+- **Hold `Shift + F5`** to record. On release, the transcription is saved, and
+  you can grab it later with `banshee listen`.
+
+To tap once to start and once to stop instead of holding, set
+`hotkey_mode = "toggle"` under `[audio]`. Long dictations are easier that way,
+and a session you forget about is still released by the push-to-talk watchdog.
+
+#### On a Mac, `F5` means `Fn + F5`
+
+macOS ships the top row as media keys, so plain `F5` is the microphone key and
+starts Apple's own Dictation. The daemon never sees it: rdev watches key and
+modifier events, and media keys are not among them. `Fn` is what turns it into
+the keycode banshee can read.
+
+Turning on _Settings → Keyboard → "Use F1, F2, etc. keys as standard function
+keys"_ makes `F5` a single press, on the key that already has a microphone
+printed on it. The trade is that brightness, volume, and the rest then need
+`Fn`, so it is only worth it if you use those less than you dictate.
 
 ### Wayland
 
@@ -146,9 +162,9 @@ put these in `~/.config/hypr/hyprland.conf` (or `bindings.conf` on Omarchy),
 then run `hyprctl reload`:
 
 ```conf
-bind  = , F5, exec, banshee record start
+bind  = , F5, exec, banshee record start --dictate
 bindr = , F5, exec, banshee record stop           # bindr fires on release
-bind  = SHIFT, F5, exec, banshee record start --dictate
+bind  = SHIFT, F5, exec, banshee record start
 bindr = SHIFT, F5, exec, banshee record stop
 ```
 
@@ -163,20 +179,20 @@ type and reports an error; the transcription is still kept in
 
 The CLI commands all talk to the running daemon over its socket:
 
-| Command | What it does |
-| --- | --- |
-| `banshee start` | Start the daemon, now and at every login |
-| `banshee stop` | Stop the running daemon |
-| `banshee setup` | Download the required models |
-| `banshee status` | Show daemon health and state |
-| `banshee doctor` | Diagnose setup problems and report fixes |
-| `banshee serve` | Run the daemon in the foreground |
-| `banshee service uninstall` | Remove the start-at-login launch agent |
-| `banshee listen` | Print recent transcriptions |
+| Command                         | What it does                                               |
+| ------------------------------- | ---------------------------------------------------------- |
+| `banshee start`                 | Start the daemon, now and at every login                   |
+| `banshee stop`                  | Stop the running daemon                                    |
+| `banshee setup`                 | Download the required models                               |
+| `banshee status`                | Show daemon health and state                               |
+| `banshee doctor`                | Diagnose setup problems and report fixes                   |
+| `banshee serve`                 | Run the daemon in the foreground                           |
+| `banshee service uninstall`     | Remove the start-at-login launch agent                     |
+| `banshee listen`                | Print recent transcriptions                                |
 | `banshee record start` / `stop` | Push-to-talk without the hotkey (for keybinds and scripts) |
-| `banshee speak "<text>"` | Speak some text aloud |
-| `banshee history` | List all saved transcriptions |
-| `banshee clear-history` | Clear the saved transcriptions |
+| `banshee speak "<text>"`        | Speak some text aloud                                      |
+| `banshee history`               | List all saved transcriptions                              |
+| `banshee clear-history`         | Clear the saved transcriptions                             |
 
 ## Connect your coding agent (MCP)
 
@@ -184,11 +200,11 @@ The CLI commands all talk to the running daemon over its socket:
 running daemon. This is what turns Banshee into a voice for the agent. It
 exposes three tools:
 
-| Tool | What the agent does with it |
-| --- | --- |
-| `speak_status` | Say something aloud, for decisions made and work finished |
-| `ask_user` | Ask a question aloud, then wait for and return your spoken answer |
-| `listen_for_prompt` | Pick up anything you've said since it last checked |
+| Tool                | What the agent does with it                                       |
+| ------------------- | ----------------------------------------------------------------- |
+| `speak_status`      | Say something aloud, for decisions made and work finished         |
+| `ask_user`          | Ask a question aloud, then wait for and return your spoken answer |
+| `listen_for_prompt` | Pick up anything you've said since it last checked                |
 
 It works with any MCP-capable tool, like Claude Code, OpenCode, Cursor, and
 others. Most of them use the same `mcpServers` config shape:
@@ -245,6 +261,7 @@ fallback = "system"    # system = use `say` when Kokoro is unavailable | none
 
 [audio]
 input_device = "default"  # "default" = follow the OS; otherwise match a device name
+hotkey_mode = "hold"   # hold = record while F5 is down | toggle = tap to start, tap to stop
 barge_in = "stop"      # stop = the record hotkey cuts off whatever Banshee is saying | none
 
 [audio.cues]
@@ -269,11 +286,11 @@ if you keep getting cut off.
 
 The `preset` picks which Whisper model Banshee uses:
 
-| Preset | Model | Trade-off |
-| --- | --- | --- |
-| `fast` | `ggml-base.en.bin` | Fastest and lightest, English only |
+| Preset     | Model                          | Trade-off                                  |
+| ---------- | ------------------------------ | ------------------------------------------ |
+| `fast`     | `ggml-base.en.bin`             | Fastest and lightest, English only         |
 | `balanced` | `ggml-large-v3-turbo-q5_0.bin` | The default; accurate and reasonably quick |
-| `quality` | `ggml-large-v3-q5_0.bin` | Most accurate, heaviest |
+| `quality`  | `ggml-large-v3-q5_0.bin`       | Most accurate, heaviest                    |
 
 For `voice`, any file in the
 [Kokoro voices directory](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/voices)
@@ -292,7 +309,7 @@ fix. Beyond that:
   `balanced` model can take minutes on a few seconds of speech, which is
   indistinguishable from a mic that never captured anything. Run the daemon in
   the foreground with `banshee serve` and watch for the `Transcribed Ns of
-  audio in Ms` line; if it warns that transcription ran slower than realtime,
+audio in Ms` line; if it warns that transcription ran slower than realtime,
   set `preset = "fast"` in `config.toml` and run `banshee setup`. On a 2014
   dual-core laptop that took one clip from 104s to 4.8s.
 - **`banshee record start` says the microphone is busy.** A previous
@@ -303,7 +320,7 @@ fix. Beyond that:
   keeps the microphone open so the hotkey can start recording instantly, and
   macOS switches Bluetooth earbuds to their low-quality telephony profile
   whenever any app holds their mic. The fix: in **System Settings > Sound**, set
-  *Input* to your Mac's built-in microphone and leave *Output* on the earbuds.
+  _Input_ to your Mac's built-in microphone and leave _Output_ on the earbuds.
   Playback quality comes back, and the built-in mic transcribes better anyway.
   For a one-off (say, a movie), `banshee stop` releases the mic entirely.
 - **Hotkeys or typing stopped working, but no error appears.** macOS withholds

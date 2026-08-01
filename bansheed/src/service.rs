@@ -1,6 +1,4 @@
-// Start-at-login service management behind a platform-neutral surface:
-// launchd on macOS, systemd user units on Linux, a service wrapper on
-// Windows someday
+// Start-at-login behind a neutral surface: launchd on macOS, systemd on Linux.
 
 #[cfg(target_os = "macos")]
 mod launchd {

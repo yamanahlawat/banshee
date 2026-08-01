@@ -4,7 +4,7 @@ use std::time::Duration;
 use banshee_common::{KokoroTTSConfig, error::BansheeError, utils};
 use cpal::traits::DeviceTrait;
 
-use crate::config::{Config, TTSFallback};
+use crate::config::{BargeInMode, Config, HotkeyMode, STTPreset, TTSFallback};
 
 // Read-only diagnosis: doctor never mutates, it reports and names the fix.
 // Returns true when every required check passed.
@@ -29,6 +29,8 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             Config::default()
         }
     };
+
+    report_settings(&config);
 
     let Some(models_dir) = utils::get_models_path() else {
         fail("home directory not found", "set $HOME");
@@ -89,15 +91,11 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         };
     }
 
-    // Two separate capabilities, and wayland only restores one of them:
-    // wtype/ydotool cover typing the transcription, but nothing covers rdev's
-    // global hotkey, which needs X11's XRecord extension.
-    // Same cfg as `is_wayland` itself, so no unix target can disable its hotkey
-    // without this block compiled in to explain why.
+    // wtype/ydotool restore typing, but nothing restores rdev's global hotkey.
+    // Same cfg as `is_wayland`, so every unix target that loses it explains why.
     #[cfg(all(unix, not(target_os = "macos")))]
     if crate::dictation::is_wayland() {
-        // Reads the table dictation actually runs, so doctor cannot name a tool
-        // the typing path would not reach for.
+        // The table dictation actually runs, so doctor cannot name a stale tool
         let typer = crate::dictation::WAYLAND_TYPERS
             .into_iter()
             .map(|(binary, _)| binary)
@@ -184,8 +182,7 @@ fn runs(bin: &str) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-// Walks $PATH directly: `which` is a package of its own on minimal systems,
-// and spawning a process to answer a filesystem question is wasteful anyway.
+// Walks $PATH directly: `which` is its own package on minimal systems.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
@@ -231,6 +228,42 @@ async fn check_daemon_version() -> bool {
             "restart it: banshee start",
         ),
     }
+}
+
+// Only fields the daemon reads, so a printed value is one in use.
+fn report_settings(config: &Config) {
+    let hotkey_mode = match config.audio.hotkey_mode {
+        HotkeyMode::Hold => "hold",
+        HotkeyMode::Toggle => "toggle",
+    };
+    let barge_in = match config.audio.barge_in {
+        BargeInMode::Stop => "stop",
+        BargeInMode::Duck => "duck",
+        BargeInMode::None => "none",
+    };
+    let preset = match config.stt.preset {
+        STTPreset::Fast => "fast",
+        STTPreset::Balanced => "balanced",
+        STTPreset::Quality => "quality",
+    };
+    let on_off = |enabled: bool| if enabled { "on" } else { "off" };
+
+    note(&format!(
+        "hotkey {hotkey_mode}, barge-in {barge_in}, cues {}",
+        on_off(config.audio.cues.enabled)
+    ));
+    note(&format!(
+        "stt {preset}, vad {}, endpoint {} ms, {} vocabulary terms",
+        config.stt.vad_threshold,
+        config.stt.endpoint_silence_ms,
+        config.stt.vocabulary.len()
+    ));
+    note(&format!(
+        "tts {} at {}x, history {}",
+        config.tts.voice,
+        config.tts.speed,
+        on_off(config.daemon.save_history)
+    ));
 }
 
 fn pass(msg: &str) -> bool {
