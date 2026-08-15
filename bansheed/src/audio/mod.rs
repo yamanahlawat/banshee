@@ -75,16 +75,20 @@ fn open_input(
     Ok((device, name, config))
 }
 
-/// Open capture the way the daemon does, then drop it. Enumeration is not
-/// proof: a device can list itself and still fail `hw_params` when opened, so
-/// the only honest check is to try. Returns the microphone it opened.
-pub fn probe_input_device(input_device: &str) -> Result<Option<String>, BansheeError> {
-    let (device, name, config) = open_input(input_device)?;
+// Opens the stream and starts it. Shared so the probe fails wherever capture
+// would, down to the sample format and the error text.
+fn build_and_play<D>(
+    device: &cpal::Device,
+    config: cpal::SupportedStreamConfig,
+    data: D,
+) -> Result<Stream, BansheeError>
+where
+    D: FnMut(&[f32], &cpal::InputCallbackInfo) + Send + 'static,
+{
     let stream = device
         .build_input_stream(
             &config.into(),
-            // Same f32 assumption capture makes, so the probe fails where it would
-            |_: &[f32], _: &cpal::InputCallbackInfo| {},
+            data,
             |error| eprintln!("Audio Error: {error}"),
             None,
         )
@@ -92,6 +96,16 @@ pub fn probe_input_device(input_device: &str) -> Result<Option<String>, BansheeE
     stream
         .play()
         .map_err(|e| BansheeError::Other(e.to_string()))?;
+    Ok(stream)
+}
+
+/// Open capture the way the daemon does, then drop it. Enumeration is not
+/// proof: a device can list itself and still fail `hw_params` when opened, so
+/// the only honest check is to try. Returns the microphone it opened.
+pub fn probe_input_device(input_device: &str) -> Result<Option<String>, BansheeError> {
+    let (device, name, config) = open_input(input_device)?;
+    // Dropped at once: opening and starting it is the whole proof
+    drop(build_and_play(&device, config, |_, _| {})?);
     Ok(name)
 }
 
@@ -102,10 +116,6 @@ pub fn start_audio_capture(
     input_device: &str,
 ) -> Result<(Stream, impl Consumer<Item = f32> + use<>, u32), BansheeError> {
     let (device, name, config) = open_input(input_device)?;
-    if let Some(name) = name {
-        daemon_state.set_audio_device(name.clone());
-        println!("Using microphone {name}");
-    }
     println!("Default config {:?}", config);
 
     let sample_rate = config.sample_rate();
@@ -115,27 +125,27 @@ pub fn start_audio_capture(
     let ring_capacity = sample_rate as usize * RING_SECS;
     let (mut producer, consumer) = HeapRb::<f32>::new(ring_capacity).split();
 
-    let stream = device
-        .build_input_stream(
-            &config.into(),
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if daemon_state.is_recording() {
-                    let mono_data: Vec<f32> = if channels > 1 {
-                        data.chunks(channels as usize)
-                            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-                            .collect()
-                    } else {
-                        data.to_vec()
-                    };
-                    producer.push_slice(&mono_data);
-                };
-            },
-            |error| eprintln!("Audio Error: {error}"),
-            None,
-        )
-        .map_err(|e| BansheeError::Other(e.to_string()))?;
-    stream
-        .play()
-        .map_err(|e| BansheeError::Other(e.to_string()))?;
+    let capture_state = Arc::clone(&daemon_state);
+    // Runs on the real-time audio thread, so it must not allocate: downmixing
+    // through an iterator keeps the mono copy out of the heap
+    let stream = build_and_play(&device, config, move |data: &[f32], _| {
+        if capture_state.is_recording() {
+            if channels > 1 {
+                producer.push_iter(
+                    data.chunks(channels as usize)
+                        .map(|frame| frame.iter().sum::<f32>() / channels as f32),
+                );
+            } else {
+                producer.push_slice(data);
+            }
+        }
+    })?;
+
+    // Only a stream that opened and played proves the mic works, so status
+    // never names a device beside a recording_error that says it failed
+    if let Some(name) = name {
+        println!("Using microphone {name}");
+        daemon_state.set_audio_device(name);
+    }
     Ok((stream, consumer, sample_rate))
 }
