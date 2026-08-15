@@ -245,14 +245,14 @@ async fn main() -> Result<(), BansheeError> {
         }
         CommandType::Start => {
             service::install()?;
-            if !permissions::input_granted() {
-                println!();
-                println!(
-                    "Accessibility is not granted: the hotkey and dictation stay inert until it is."
-                );
-                println!("Opening System Settings. Grant it and the daemon picks it up by itself.");
-                permissions::open_settings();
+            if let Ok(config) = &config_result {
+                let missing = models::missing(config);
+                if !missing.is_empty() {
+                    println!("Models not downloaded yet: {}.", missing.join(", "));
+                    println!("The daemon runs without them, but cannot record. Run: banshee setup");
+                }
             }
+            permissions::guide_missing();
         }
         CommandType::Service { action } => match action {
             args::ServiceAction::Uninstall => service::uninstall()?,

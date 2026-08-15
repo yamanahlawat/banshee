@@ -35,7 +35,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         fail("home directory not found", "set $HOME");
         return false;
     };
-    for name in [config.stt.preset.model_name(), crate::VAD_MODEL] {
+    for name in crate::models::required(&config) {
         healthy &= check_model(&models_dir, name);
     }
     let kokoro = KokoroTTSConfig::new(&config.tts.voice);
@@ -65,27 +65,22 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     let daemon = probe_daemon().await;
     healthy &= check_recording(&daemon, &config.audio.input_device);
 
+    // TCC answers for the responsible process, so a doctor run from a granted
+    // terminal cannot speak for a launchd-started daemon
     #[cfg(target_os = "macos")]
-    {
-        healthy &= if crate::permissions::input_granted() {
-            pass("accessibility permission granted")
-        } else {
-            fail(
-                "accessibility permission missing (hotkey and dictation will not work)",
-                "grant it in System Settings > Privacy & Security > Accessibility; the daemon restarts itself once it lands. unsigned debug builds lose the grant on every rebuild",
-            )
-        };
-
-        // TCC answers for the responsible process, so a doctor run from a
-        // granted terminal cannot speak for a launchd-started daemon
-        healthy &= match crate::permissions::hotkey_events_granted() {
-            crate::permissions::Access::Granted => pass("input monitoring granted to this process"),
-            crate::permissions::Access::Denied => fail(
-                "input monitoring permission missing (the hotkey gets no events, silently)",
-                "grant it in System Settings > Privacy & Security > Input Monitoring, then restart the daemon",
+    for grant in crate::permissions::Grant::REQUIRED {
+        use crate::permissions::Access;
+        healthy &= match grant.access() {
+            Access::Granted => pass(&format!("{} granted to this process", grant.name())),
+            Access::Denied => fail(
+                &format!("{} missing: {}", grant.name(), grant.consequence()),
+                grant.fix(),
             ),
-            crate::permissions::Access::Undetermined => {
-                note("input monitoring not decided yet; macOS asks the first time the daemon runs");
+            Access::Undetermined => {
+                note(&format!(
+                    "{} not decided yet; macOS asks the first time the daemon runs",
+                    grant.name()
+                ));
                 true
             }
         };
