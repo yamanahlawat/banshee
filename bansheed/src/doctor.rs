@@ -2,7 +2,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use banshee_common::{KokoroTTSConfig, error::BansheeError, utils};
-use cpal::traits::DeviceTrait;
 
 use crate::config::{BargeInMode, Config, HotkeyMode, STTPreset, TTSFallback};
 
@@ -62,19 +61,17 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 
     check_espeak();
 
-    // Device presence only; a real TCC mic-permission check needs AVFoundation
-    match crate::audio::resolve_input_device(&config.audio.input_device) {
-        Ok(device) => {
-            let name = device
-                .description()
-                .map(|d| d.name().to_string())
-                .unwrap_or_else(|_| "default".to_string());
-            pass(&format!("microphone: {name}"));
+    // Opens capture rather than listing devices: a device that enumerates can
+    // still fail on open, and the daemon exits at startup when it does
+    match crate::audio::probe_input_device(&config.audio.input_device) {
+        Ok(name) => {
+            let name = name.unwrap_or_else(|| "unnamed device".to_string());
+            pass(&format!("microphone opens for capture: {name}"));
         }
         Err(e) => {
             healthy &= fail(
-                &format!("input device unavailable: {e}"),
-                "connect a microphone, or fix [audio] input_device in config.toml",
+                &format!("microphone will not open: {e}"),
+                "connect a microphone, or fix [audio] input_device in config.toml. another program holding the device exclusively (including a running banshee) shows up the same way",
             );
         }
     }
@@ -88,6 +85,19 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
                 "accessibility permission missing (hotkey and dictation will not work)",
                 "grant it in System Settings > Privacy & Security > Accessibility; the daemon restarts itself once it lands. unsigned debug builds lose the grant on every rebuild",
             )
+        };
+
+        // Reports this process, like the Accessibility check above it
+        healthy &= match crate::permissions::hotkey_events_granted() {
+            crate::permissions::Access::Granted => pass("input monitoring permission granted"),
+            crate::permissions::Access::Denied => fail(
+                "input monitoring permission missing (the hotkey gets no events, silently)",
+                "grant it in System Settings > Privacy & Security > Input Monitoring, then restart the daemon",
+            ),
+            crate::permissions::Access::Undetermined => {
+                note("input monitoring not decided yet; macOS asks the first time the daemon runs");
+                true
+            }
         };
     }
 

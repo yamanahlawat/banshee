@@ -60,24 +60,52 @@ pub fn resolve_input_device(input_device: &str) -> Result<cpal::Device, BansheeE
     }
 }
 
+// The device, its name, and the config capture opens it with. Doctor probes
+// through the same three, so a green check and a working daemon cannot drift.
+// The name stays optional: a device that will not describe itself is unknown,
+// not "default", and `banshee status` reports the mic it really has.
+fn open_input(
+    input_device: &str,
+) -> Result<(cpal::Device, Option<String>, cpal::SupportedStreamConfig), BansheeError> {
+    let device = resolve_input_device(input_device)?;
+    let name = device.description().map(|d| d.name().to_string()).ok();
+    let config = device
+        .default_input_config()
+        .map_err(|e| BansheeError::Other(e.to_string()))?;
+    Ok((device, name, config))
+}
+
+/// Open capture the way the daemon does, then drop it. Enumeration is not
+/// proof: a device can list itself and still fail `hw_params` when opened, so
+/// the only honest check is to try. Returns the microphone it opened.
+pub fn probe_input_device(input_device: &str) -> Result<Option<String>, BansheeError> {
+    let (device, name, config) = open_input(input_device)?;
+    let stream = device
+        .build_input_stream(
+            &config.into(),
+            // Same f32 assumption capture makes, so the probe fails where it would
+            |_: &[f32], _: &cpal::InputCallbackInfo| {},
+            |error| eprintln!("Audio Error: {error}"),
+            None,
+        )
+        .map_err(|e| BansheeError::Other(e.to_string()))?;
+    stream
+        .play()
+        .map_err(|e| BansheeError::Other(e.to_string()))?;
+    Ok(name)
+}
+
 // `use<>`: edition 2024 would otherwise capture input_device's lifetime and
 // stop the consumer crossing into the audio thread, which needs 'static.
 pub fn start_audio_capture(
     daemon_state: Arc<DaemonState>,
     input_device: &str,
 ) -> Result<(Stream, impl Consumer<Item = f32> + use<>, u32), BansheeError> {
-    let device = resolve_input_device(input_device)?;
-
-    if let Ok(description) = device.description() {
-        let name = description.name();
-        daemon_state.set_audio_device(name.to_string());
+    let (device, name, config) = open_input(input_device)?;
+    if let Some(name) = name {
+        daemon_state.set_audio_device(name.clone());
         println!("Using microphone {name}");
     }
-
-    // Get the default config
-    let config = device
-        .default_input_config()
-        .map_err(|e| BansheeError::Other(e.to_string()))?;
     println!("Default config {:?}", config);
 
     let sample_rate = config.sample_rate();

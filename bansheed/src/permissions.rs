@@ -22,6 +22,35 @@ pub fn input_granted() -> bool {
     true
 }
 
+/// What macOS reports for a grant it has been asked about.
+#[cfg(target_os = "macos")]
+pub enum Access {
+    Granted,
+    Denied,
+    /// Never decided. The first event tap turns this into granted or denied.
+    Undetermined,
+}
+
+/// Input Monitoring, which `rdev`'s event tap needs on top of Accessibility.
+/// Its absence is the only one that leaves no trace: events are withheld, so
+/// there is no hotkey, no earcon, no error, and nothing in the log.
+#[cfg(target_os = "macos")]
+pub fn hotkey_events_granted() -> Access {
+    // IOHIDRequestType, in header order: PostEvent is 0, ListenEvent is 1
+    const LISTEN_EVENT: i32 = 1;
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOHIDCheckAccess(request: i32) -> i32;
+    }
+    // IOHIDAccessType, in header order
+    match unsafe { IOHIDCheckAccess(LISTEN_EVENT) } {
+        0 => Access::Granted,
+        1 => Access::Denied,
+        _ => Access::Undetermined,
+    }
+}
+
 // Straight to the pane, rather than describing where it lives.
 #[cfg(target_os = "macos")]
 pub fn open_settings() {
