@@ -28,9 +28,47 @@ use crate::{
     config::Config,
     history::TranscriptionHistory,
     speech_to_text::{vad::VADEngine, whisper::WhisperEngine},
+    state::RecordingError,
 };
 
 const VAD_MODEL: &str = "silero_vad.onnx";
+
+/// Capture, the models, and the thread that turns audio into text. All of it or
+/// none: with any piece missing the daemon cannot transcribe, so they share one
+/// error path and one reason for `banshee status` to report.
+fn start_recording(
+    daemon_state: &Arc<state::DaemonState>,
+    config: &Config,
+    command_receiver: std::sync::mpsc::Receiver<state::ConsumerCommand>,
+    cues: std::sync::mpsc::Sender<audio::cues::Cue>,
+) -> Result<(cpal::Stream, std::thread::JoinHandle<()>), RecordingError> {
+    // Both failures stringify to BansheeError::Other, so the stage that failed
+    // is only knowable here, at the call
+    let (stream, consumer, sample_rate) =
+        audio::start_audio_capture(Arc::clone(daemon_state), &config.audio.input_device)
+            .map_err(|e| RecordingError::Microphone(e.to_string()))?;
+    println!("Loading Whisper AI...");
+    let speech_to_text = WhisperEngine::new(
+        WhisperConfig::new(config.stt.preset.model_name()),
+        &config.stt.vocabulary,
+    )
+    .map_err(|e| RecordingError::Model(e.to_string()))?;
+    let vad = VADEngine::new(SileroVADConfig::new(VAD_MODEL))
+        .map_err(|e| RecordingError::Model(e.to_string()))?;
+    let thread = hotkey::hotkey_listener(
+        hotkey::Pipeline {
+            consumer,
+            speech_to_text,
+            vad,
+            sample_rate,
+            state: Arc::clone(daemon_state),
+            cues,
+            endpoint_silence_ms: config.stt.endpoint_silence_ms,
+        },
+        command_receiver,
+    );
+    Ok((stream, thread))
+}
 
 #[tokio::main]
 async fn main() -> Result<(), BansheeError> {
@@ -73,35 +111,36 @@ async fn main() -> Result<(), BansheeError> {
                 config.audio.barge_in,
             ));
 
-            let audio_capture_state = Arc::clone(&daemon_state);
-            let (_stream, consumer, sample_rate) =
-                audio::start_audio_capture(audio_capture_state, &config.audio.input_device)?;
-            println!("Loading Whisper AI...");
-            let speech_to_text_engine = WhisperEngine::new(
-                WhisperConfig::new(config.stt.preset.model_name()),
-                &config.stt.vocabulary,
-            )?;
-            let vad_engine = VADEngine::new(SileroVADConfig::new(VAD_MODEL))?;
-            let consumer_thread = hotkey::hotkey_listener(
-                hotkey::Pipeline {
-                    consumer,
-                    speech_to_text: speech_to_text_engine,
-                    vad: vad_engine,
-                    sample_rate,
-                    state: Arc::clone(&daemon_state),
-                    cues: cue_sender,
-                    endpoint_silence_ms: config.stt.endpoint_silence_ms,
-                },
-                command_receiver,
-                config.audio.hotkey_mode,
-            );
+            // Held as one binding, and past daemon::run: dropping the stream
+            // stops capture, and the thread is the only thing left to join
+            let recording =
+                match start_recording(&daemon_state, &config, command_receiver, cue_sender) {
+                    Ok(pair) => Some(pair),
+                    // A missing mic or model leaves the daemon useful rather than
+                    // exiting, which the supervisor reads as a crash and retries
+                    Err(error) => {
+                        eprintln!("Recording is unavailable: {error}");
+                        eprintln!(
+                            "The daemon is up: speak, status, and history still work. \
+                             Recording, dictation, and ask_user do not."
+                        );
+                        eprintln!("Run `banshee doctor` for the fix.");
+                        daemon_state.set_recording_error(error);
+                        None
+                    }
+                };
+            // After the pipeline, so a press always reaches record_start: with
+            // no pipeline it answers with the error cue rather than nothing
+            hotkey::start_global_hotkey(Arc::clone(&daemon_state), config.audio.hotkey_mode);
             let result = daemon::run(&daemon_state, socket_path, listener).await;
             // Drop the Whisper context before atexit: ggml's Metal cleanup
             // asserts if buffers are still resident
             let _ = daemon_state
                 .commands()
                 .send(state::ConsumerCommand::Shutdown);
-            let _ = consumer_thread.join();
+            if let Some((_stream, consumer_thread)) = recording {
+                let _ = consumer_thread.join();
+            }
             result?;
         }
         CommandType::Stop => {

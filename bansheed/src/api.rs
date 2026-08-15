@@ -8,7 +8,9 @@ use banshee_common::{
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
-use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode, TranscribeTarget};
+use crate::state::{
+    AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, TranscribeTarget,
+};
 use crate::text_to_speech::sanitizer::sanitize;
 
 const MAX_WAIT_MS: u64 = 30_000;
@@ -54,6 +56,16 @@ fn u64_param(
             ))
         }),
     }
+}
+
+// The daemon started without a pipeline. The code says which fix applies, so a
+// client can prompt for a microphone or re-run setup instead of retrying.
+fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpcResponse {
+    let code = match error {
+        RecordingError::Microphone(_) => -32000,
+        RecordingError::Model(_) => -32002,
+    };
+    JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
 }
 
 pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
@@ -104,6 +116,10 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             } else {
                 TranscribeTarget::Mailbox
             };
+            // Checked before the transition, so -32004 keeps meaning "busy"
+            if let Some(reason) = daemon_state.recording_error() {
+                return unavailable(request.id, reason);
+            }
             if daemon_state.record_start(action) {
                 JsonRpcResponse::success(request.id, serde_json::json!({"ok": true}))
             } else {
@@ -133,8 +149,12 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 Err(response) => return *response,
             };
 
+            if let Some(reason) = daemon_state.recording_error() {
+                return unavailable(request.id, reason);
+            }
+
             // One armed session at a time; the mode is the lock
-            if !daemon_state.try_transition(RecordingMode::Idle, RecordingMode::Armed) {
+            if !daemon_state.arm_for_ask() {
                 return JsonRpcResponse::error(
                     request.id,
                     -32004,
@@ -273,6 +293,8 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 "vad_model": daemon_state.vad_model(),
                 "audio_device": daemon_state.audio_device(),
                 "recording": daemon_state.is_recording(),
+                // null when recording works, so one field cannot contradict another
+                "recording_error": daemon_state.recording_error().map(|e| e.to_string()),
                 "speaking": daemon_state.speech().is_speaking(),
                 "uptime_seconds": &daemon_state.uptime().as_secs(),
                 "vad_threshold": daemon_state.vad_threshold(),
@@ -460,6 +482,34 @@ mod tests {
             method: method.to_string(),
             params,
             id: Some(serde_json::json!(1)),
+        }
+    }
+
+    // "No microphone" and "busy" send the caller to different fixes, so the
+    // codes must not collapse into one another.
+    #[tokio::test]
+    async fn recording_rpcs_report_the_cause_not_a_busy_mic() {
+        for (cause, expected) in [
+            (RecordingError::Microphone("no device".to_string()), -32000),
+            (RecordingError::Model("missing file".to_string()), -32002),
+        ] {
+            let state = test_state(std::sync::mpsc::channel().0);
+            state.set_recording_error(cause);
+
+            let start = record_request(BANSHEE_RECORD_START, None);
+            let JsonRpcResponse::Error { error, .. } = dispatch(start, &state).await else {
+                panic!("expected error response");
+            };
+            assert_eq!(error.code, expected);
+            assert_eq!(state.recording_mode(), RecordingMode::Idle);
+
+            let ask = ask_user_request(serde_json::json!({"question": "ready?"}));
+            let JsonRpcResponse::Error { error, .. } = dispatch(ask, &state).await else {
+                panic!("expected error response");
+            };
+            assert_eq!(error.code, expected);
+            // The armed lock must not be taken by a refused question
+            assert_eq!(state.recording_mode(), RecordingMode::Idle);
         }
     }
 

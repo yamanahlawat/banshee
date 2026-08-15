@@ -72,12 +72,31 @@ struct TranscriptionRing {
     entries: VecDeque<TranscriptionEntry>,
 }
 
+/// Why the recording pipeline did not start. A missing mic and a missing model
+/// need different fixes, so they stay distinct out to the RPC error code.
+pub enum RecordingError {
+    Microphone(String),
+    Model(String),
+}
+
+impl std::fmt::Display for RecordingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecordingError::Microphone(e) => write!(f, "the microphone would not open: {e}"),
+            RecordingError::Model(e) => write!(f, "a model would not load: {e}"),
+        }
+    }
+}
+
 pub struct DaemonState {
     version: &'static str,
     stt_model: &'static str,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: OnceLock<String>,
+    // Why recording is off, when it is. Set once at startup, because the mic
+    // and the models are opened there and neither returns without a restart.
+    recording_error: OnceLock<RecordingError>,
     recording: AtomicU8,
     started_at: Instant,
     db_connection: Option<Mutex<rusqlite::Connection>>,
@@ -114,6 +133,7 @@ impl DaemonState {
             vad_model,
             vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
             audio_device: OnceLock::new(),
+            recording_error: OnceLock::new(),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
             db_connection,
@@ -135,6 +155,12 @@ impl DaemonState {
     // Push-to-talk press, shared by the hotkey listener and the record RPC.
     // Returns false when another session already owns the microphone.
     pub fn record_start(&self, action: TranscribeTarget) -> bool {
+        // The hotkey arrives here too, so a deaf daemon answers a press with the
+        // error cue. Arming a session nothing can transcribe would be silent.
+        if self.recording_error.get().is_some() {
+            let _ = self.cues.send(Cue::Error);
+            return false;
+        }
         if self.try_transition(RecordingMode::Armed, RecordingMode::ArmedHold) {
             // Manual override of an armed session: hold to answer
             if matches!(self.barge_in, BargeInMode::Stop) {
@@ -293,6 +319,22 @@ impl DaemonState {
         self.audio_device.get().map(String::as_str)
     }
 
+    /// Why recording is unavailable, or `None` when it works.
+    pub fn recording_error(&self) -> Option<&RecordingError> {
+        self.recording_error.get()
+    }
+
+    pub fn set_recording_error(&self, reason: RecordingError) {
+        let _ = self.recording_error.set(reason);
+    }
+
+    /// Takes the armed-listening lock for `ask_user`. Shares the availability
+    /// gate with `record_start`, so no caller can arm a mic that cannot record.
+    pub fn arm_for_ask(&self) -> bool {
+        self.recording_error.get().is_none()
+            && self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
+    }
+
     pub fn set_audio_device(&self, device_name: String) {
         let _ = self.audio_device.set(device_name);
     }
@@ -337,6 +379,41 @@ mod tests {
 
     fn test_state() -> DaemonState {
         test_state_with_commands().0
+    }
+
+    // A deaf daemon must refuse the press rather than open a session that no
+    // consumer thread exists to drain.
+    #[test]
+    fn record_start_is_refused_without_a_pipeline() {
+        let (state, transcribe_requests) = test_state_with_commands();
+        state.set_recording_error(RecordingError::Microphone("no device".to_string()));
+
+        assert!(!state.record_start(TranscribeTarget::Mailbox));
+        assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        // Nothing may reach the consumer: there is nothing on the other end
+        assert!(transcribe_requests.try_recv().is_err());
+
+        // record_stop stays a no-op, so a release keybind cannot wedge the mode
+        state.record_stop();
+        assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    }
+
+    #[test]
+    fn recording_error_keeps_the_cause_it_was_given() {
+        let state = test_state();
+        assert!(state.recording_error().is_none());
+        // An armed session is available while nothing is wrong
+        assert!(state.arm_for_ask());
+        state.set_recording_mode(RecordingMode::Idle);
+
+        state.set_recording_error(RecordingError::Model("missing file".to_string()));
+        assert!(matches!(
+            state.recording_error(),
+            Some(RecordingError::Model(_))
+        ));
+        // The same gate record_start uses, so ask_user cannot arm a deaf mic
+        assert!(!state.arm_for_ask());
+        assert_eq!(state.recording_mode(), RecordingMode::Idle);
     }
 
     #[test]
