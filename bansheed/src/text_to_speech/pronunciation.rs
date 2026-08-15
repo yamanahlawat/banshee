@@ -106,7 +106,9 @@ pub fn install_dictionary(g2p: &mut G2P) {
 
 static LOWER_TO_UPPER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([a-z0-9])([A-Z])").unwrap());
-static ACRONYM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([A-Z])([A-Z][a-z])").unwrap());
+// Two lowercase minimum: a plural acronym ends in the same shape a new word
+// starts with, so `[a-z]` alone split `APIs` into "AP Is".
+static ACRONYM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([A-Z])([A-Z][a-z]{2,})").unwrap());
 static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
 /// Turns identifier punctuation and casing into speakable words and fixes terms
@@ -147,6 +149,19 @@ mod tests {
         assert_eq!(
             normalize("macOS sends JSON via parseJSONResponse"),
             "Mac O S sends Jason via parse Jason Response"
+        );
+    }
+
+    // A plural acronym must survive whole; splitting it strands fragments that
+    // misaki then letter-spells.
+    #[test]
+    fn keeps_plural_acronyms_intact() {
+        for word in ["IDs", "APIs", "URLs", "PRs", "IDEs", "SDKs", "CLIs"] {
+            assert_eq!(normalize(word), word);
+        }
+        assert_eq!(
+            normalize("the request IDs are stale"),
+            "the request IDs are stale"
         );
     }
 
