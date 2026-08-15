@@ -61,20 +61,9 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 
     check_espeak();
 
-    // Opens capture rather than listing devices: a device that enumerates can
-    // still fail on open, and the daemon exits at startup when it does
-    match crate::audio::probe_input_device(&config.audio.input_device) {
-        Ok(name) => {
-            let name = name.unwrap_or_else(|| "unnamed device".to_string());
-            pass(&format!("microphone opens for capture: {name}"));
-        }
-        Err(e) => {
-            healthy &= fail(
-                &format!("microphone will not open: {e}"),
-                "connect a microphone, or fix [audio] input_device in config.toml. another program holding the device exclusively (including a running banshee) shows up the same way",
-            );
-        }
-    }
+    // Fetched once: the microphone check and the version check both read it
+    let daemon = probe_daemon().await;
+    healthy &= check_recording(&daemon, &config.audio.input_device);
 
     #[cfg(target_os = "macos")]
     {
@@ -87,9 +76,10 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             )
         };
 
-        // Reports this process, like the Accessibility check above it
+        // TCC answers for the responsible process, so a doctor run from a
+        // granted terminal cannot speak for a launchd-started daemon
         healthy &= match crate::permissions::hotkey_events_granted() {
-            crate::permissions::Access::Granted => pass("input monitoring permission granted"),
+            crate::permissions::Access::Granted => pass("input monitoring granted to this process"),
             crate::permissions::Access::Denied => fail(
                 "input monitoring permission missing (the hotkey gets no events, silently)",
                 "grant it in System Settings > Privacy & Security > Input Monitoring, then restart the daemon",
@@ -128,16 +118,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         }
     }
 
-    match utils::get_socket_path() {
-        Some(socket) if socket.exists() => {
-            if crate::daemon::socket_answers(&socket) {
-                healthy &= check_daemon_version().await;
-            } else {
-                note("stale socket from a crash; banshee start cleans it up");
-            }
-        }
-        _ => note("daemon not running (start with: banshee start)"),
-    }
+    healthy &= report_daemon(&daemon);
 
     if let Some(service) = crate::service::service_file_path() {
         if service.exists() {
@@ -207,18 +188,79 @@ fn check_model(models_dir: &Path, name: &str) -> bool {
     }
 }
 
-async fn check_daemon_version() -> bool {
-    let status = tokio::time::timeout(
-        Duration::from_secs(2),
-        utils::call_daemon(banshee_common::BANSHEE_STATUS, serde_json::json!({})),
-    )
-    .await;
-    match status {
-        Ok(Ok(status)) => {
-            let version = status
-                .get("version")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+// What the socket says about a daemon. Read once, because the microphone check
+// and the version check both depend on it.
+enum Daemon {
+    Running(serde_json::Value),
+    Silent(String),
+    Stale,
+    Missing,
+}
+
+// status fields are optional by protocol, so every read needs a fallback
+fn field<'a>(status: &'a serde_json::Value, key: &str, fallback: &'a str) -> &'a str {
+    status.get(key).and_then(|v| v.as_str()).unwrap_or(fallback)
+}
+
+async fn probe_daemon() -> Daemon {
+    match utils::get_socket_path() {
+        Some(socket) if socket.exists() => {
+            if !crate::daemon::socket_answers(&socket) {
+                return Daemon::Stale;
+            }
+            match tokio::time::timeout(
+                Duration::from_secs(2),
+                utils::call_daemon(banshee_common::BANSHEE_STATUS, serde_json::json!({})),
+            )
+            .await
+            {
+                Ok(Ok(status)) => Daemon::Running(status),
+                Ok(Err(e)) => Daemon::Silent(e.to_string()),
+                Err(_) => Daemon::Silent("no answer within 2s".to_string()),
+            }
+        }
+        _ => Daemon::Missing,
+    }
+}
+
+// A live daemon holds the device and already knows whether capture works, so
+// ask it. Opening a second stream fails on backends that allow only one, which
+// would report a broken microphone on a healthy machine. `Silent` counts as
+// live: something answered the socket, so something owns the device.
+fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
+    match daemon {
+        Daemon::Running(status) => match status.get("recording_error").and_then(|v| v.as_str()) {
+            None => pass(&format!(
+                "recording works, daemon has the microphone: {}",
+                field(status, "audio_device", "unnamed device")
+            )),
+            Some(reason) => fail(
+                &format!("the daemon cannot record: {reason}"),
+                "fix the cause named above, then restart: banshee start",
+            ),
+        },
+        Daemon::Silent(_) => {
+            note("microphone unchecked: a daemon holds it but did not answer status");
+            true
+        }
+        // Nothing holds the device, so open it here: enumeration is not proof
+        Daemon::Stale | Daemon::Missing => match crate::audio::probe_input_device(input_device) {
+            Ok(name) => {
+                let name = name.unwrap_or_else(|| "unnamed device".to_string());
+                pass(&format!("microphone opens for capture: {name}"))
+            }
+            Err(e) => fail(
+                &format!("microphone will not open: {e}"),
+                "connect a microphone, or fix [audio] input_device in config.toml",
+            ),
+        },
+    }
+}
+
+fn report_daemon(daemon: &Daemon) -> bool {
+    match daemon {
+        Daemon::Running(status) => {
+            let version = field(status, "version", "unknown");
             pass(&format!("daemon running (version {version})"));
             if version != env!("CARGO_PKG_VERSION") {
                 note(&format!(
@@ -229,14 +271,18 @@ async fn check_daemon_version() -> bool {
             }
             true
         }
-        Ok(Err(e)) => fail(
+        Daemon::Silent(e) => fail(
             &format!("daemon answered the socket but status failed: {e}"),
             "restart it: banshee start",
         ),
-        Err(_) => fail(
-            "daemon did not answer status within 2s",
-            "restart it: banshee start",
-        ),
+        Daemon::Stale => {
+            note("stale socket from a crash; banshee start cleans it up");
+            true
+        }
+        Daemon::Missing => {
+            note("daemon not running (start with: banshee start)");
+            true
+        }
     }
 }
 
