@@ -45,13 +45,14 @@ impl WhisperEngine {
             ))
         })?;
 
-        let context = WhisperContext::new_with_params(
-            whisper_model_path_str,
-            WhisperContextParameters::default(),
-        )
-        .map_err(|e| {
-            BansheeError::Other(format!("Failed to initialize Whisper context: {:?}", e))
-        })?;
+        // Enable flash attention for faster inference if supported by the hardware
+        let mut context_params = WhisperContextParameters::default();
+        context_params.flash_attn(true);
+
+        let context = WhisperContext::new_with_params(whisper_model_path_str, context_params)
+            .map_err(|e| {
+                BansheeError::Other(format!("Failed to initialize Whisper context: {:?}", e))
+            })?;
 
         Ok(Self {
             context,

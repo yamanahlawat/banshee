@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use misaki_rs::G2P;
 use misaki_rs::lexicon::PhonemeEntry;
-use regex::{NoExpand, Regex};
+use regex::{Captures, NoExpand, Regex};
 
 // Terms the voice mispronounces, respelled into words it says right. Regex-based
 // and case-insensitive, so it also catches embedded forms (parseJSONResponse).
@@ -106,7 +106,9 @@ pub fn install_dictionary(g2p: &mut G2P) {
 
 static LOWER_TO_UPPER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([a-z0-9])([A-Z])").unwrap());
-static ACRONYM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([A-Z])([A-Z][a-z])").unwrap());
+// An acronym running into a new word: `XMLId` -> "XML Id". A plural acronym
+// ends in that same shape, so the split itself skips the lone trailing `s`.
+static ACRONYM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([A-Z])([A-Z][a-z]+)").unwrap());
 static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
 /// Turns identifier punctuation and casing into speakable words and fixes terms
@@ -117,7 +119,16 @@ pub fn normalize(input: &str) -> String {
     let mut text = apply_fixups(input.to_string());
     text = text.replace('_', " ");
     text = LOWER_TO_UPPER.replace_all(&text, "$1 $2").into_owned();
-    text = ACRONYM.replace_all(&text, "$1 $2").into_owned();
+    text = ACRONYM
+        .replace_all(&text, |caps: &Captures| {
+            // `APIs` is one word, `XMLId` is two, and both look alike here
+            if &caps[2][1..] == "s" {
+                caps[0].to_string()
+            } else {
+                format!("{} {}", &caps[1], &caps[2])
+            }
+        })
+        .into_owned();
     // Second pass catches terms exposed by the split
     text = apply_fixups(text);
     WHITESPACE.replace_all(&text, " ").trim().to_string()
@@ -148,6 +159,28 @@ mod tests {
             normalize("macOS sends JSON via parseJSONResponse"),
             "Mac O S sends Jason via parse Jason Response"
         );
+    }
+
+    // A plural acronym must survive whole; splitting it strands fragments that
+    // misaki then letter-spells.
+    #[test]
+    fn keeps_plural_acronyms_intact() {
+        for word in ["IDs", "APIs", "URLs", "PRs", "IDEs", "SDKs", "CLIs"] {
+            assert_eq!(normalize(word), word);
+        }
+        assert_eq!(
+            normalize("the request IDs are stale"),
+            "the request IDs are stale"
+        );
+    }
+
+    // The other half: a short word after an acronym is still its own word, and
+    // fusing them strands the same letter-spelled fragment the plural fix avoids.
+    #[test]
+    fn splits_an_acronym_from_a_short_following_word() {
+        assert_eq!(normalize("convertJSONToXML"), "convert Jason To XML");
+        assert_eq!(normalize("parseXMLId"), "parse XML Id");
+        assert_eq!(normalize("loadCSVIn"), "load CSV In");
     }
 
     #[test]

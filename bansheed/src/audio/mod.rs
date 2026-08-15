@@ -60,24 +60,62 @@ pub fn resolve_input_device(input_device: &str) -> Result<cpal::Device, BansheeE
     }
 }
 
+// The device, its name, and the config capture opens it with. Doctor probes
+// through the same three, so a green check and a working daemon cannot drift.
+// The name stays optional: a device that will not describe itself is unknown,
+// not "default", and `banshee status` reports the mic it really has.
+fn open_input(
+    input_device: &str,
+) -> Result<(cpal::Device, Option<String>, cpal::SupportedStreamConfig), BansheeError> {
+    let device = resolve_input_device(input_device)?;
+    let name = device.description().map(|d| d.name().to_string()).ok();
+    let config = device
+        .default_input_config()
+        .map_err(|e| BansheeError::Other(e.to_string()))?;
+    Ok((device, name, config))
+}
+
+// Opens the stream and starts it. Shared so the probe fails wherever capture
+// would, down to the sample format and the error text.
+fn build_and_play<D>(
+    device: &cpal::Device,
+    config: cpal::SupportedStreamConfig,
+    data: D,
+) -> Result<Stream, BansheeError>
+where
+    D: FnMut(&[f32], &cpal::InputCallbackInfo) + Send + 'static,
+{
+    let stream = device
+        .build_input_stream(
+            &config.into(),
+            data,
+            |error| eprintln!("Audio Error: {error}"),
+            None,
+        )
+        .map_err(|e| BansheeError::Other(e.to_string()))?;
+    stream
+        .play()
+        .map_err(|e| BansheeError::Other(e.to_string()))?;
+    Ok(stream)
+}
+
+/// Open capture the way the daemon does, then drop it. Enumeration is not
+/// proof: a device can list itself and still fail `hw_params` when opened, so
+/// the only honest check is to try. Returns the microphone it opened.
+pub fn probe_input_device(input_device: &str) -> Result<Option<String>, BansheeError> {
+    let (device, name, config) = open_input(input_device)?;
+    // Dropped at once: opening and starting it is the whole proof
+    drop(build_and_play(&device, config, |_, _| {})?);
+    Ok(name)
+}
+
 // `use<>`: edition 2024 would otherwise capture input_device's lifetime and
 // stop the consumer crossing into the audio thread, which needs 'static.
 pub fn start_audio_capture(
     daemon_state: Arc<DaemonState>,
     input_device: &str,
 ) -> Result<(Stream, impl Consumer<Item = f32> + use<>, u32), BansheeError> {
-    let device = resolve_input_device(input_device)?;
-
-    if let Ok(description) = device.description() {
-        let name = description.name();
-        daemon_state.set_audio_device(name.to_string());
-        println!("Using microphone {name}");
-    }
-
-    // Get the default config
-    let config = device
-        .default_input_config()
-        .map_err(|e| BansheeError::Other(e.to_string()))?;
+    let (device, name, config) = open_input(input_device)?;
     println!("Default config {:?}", config);
 
     let sample_rate = config.sample_rate();
@@ -87,27 +125,27 @@ pub fn start_audio_capture(
     let ring_capacity = sample_rate as usize * RING_SECS;
     let (mut producer, consumer) = HeapRb::<f32>::new(ring_capacity).split();
 
-    let stream = device
-        .build_input_stream(
-            &config.into(),
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if daemon_state.is_recording() {
-                    let mono_data: Vec<f32> = if channels > 1 {
-                        data.chunks(channels as usize)
-                            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-                            .collect()
-                    } else {
-                        data.to_vec()
-                    };
-                    producer.push_slice(&mono_data);
-                };
-            },
-            |error| eprintln!("Audio Error: {error}"),
-            None,
-        )
-        .map_err(|e| BansheeError::Other(e.to_string()))?;
-    stream
-        .play()
-        .map_err(|e| BansheeError::Other(e.to_string()))?;
+    let capture_state = Arc::clone(&daemon_state);
+    // Runs on the real-time audio thread, so it must not allocate: downmixing
+    // through an iterator keeps the mono copy out of the heap
+    let stream = build_and_play(&device, config, move |data: &[f32], _| {
+        if capture_state.is_recording() {
+            if channels > 1 {
+                producer.push_iter(
+                    data.chunks(channels as usize)
+                        .map(|frame| frame.iter().sum::<f32>() / channels as f32),
+                );
+            } else {
+                producer.push_slice(data);
+            }
+        }
+    })?;
+
+    // Only a stream that opened and played proves the mic works, so status
+    // never names a device beside a recording_error that says it failed
+    if let Some(name) = name {
+        println!("Using microphone {name}");
+        daemon_state.set_audio_device(name);
+    }
     Ok((stream, consumer, sample_rate))
 }

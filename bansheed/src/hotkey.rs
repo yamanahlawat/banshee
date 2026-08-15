@@ -47,13 +47,10 @@ enum Phase {
 pub fn hotkey_listener<C>(
     pipeline: Pipeline<C>,
     commands: mpsc::Receiver<ConsumerCommand>,
-    hotkey_mode: HotkeyMode,
 ) -> thread::JoinHandle<()>
 where
     C: Consumer<Item = f32> + Send + 'static,
 {
-    start_global_hotkey(Arc::clone(&pipeline.state), hotkey_mode);
-
     // The handle lets shutdown join it, dropping the Whisper context before atexit
     thread::spawn(move || {
         let mut pipeline = pipeline;
@@ -83,7 +80,9 @@ fn recording(state: &DaemonState) -> bool {
 
 // rdev needs X11's XRecord, which wayland does not serve: listen either errors
 // or attaches to Xwayland and never sees a key. Say so instead of looking broken.
-fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey_mode: HotkeyMode) {
+// Registered by the daemon, not by the pipeline: a press must still reach
+// record_start when recording is unavailable, or it answers with silence.
+pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey_mode: HotkeyMode) {
     #[cfg(all(unix, not(target_os = "macos")))]
     if crate::dictation::is_wayland() {
         println!("Wayland session: {WAYLAND_HOTKEY_HINT}.");
