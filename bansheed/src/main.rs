@@ -244,15 +244,39 @@ async fn main() -> Result<(), BansheeError> {
             }
         }
         CommandType::Start => {
-            service::install()?;
-            if let Ok(config) = &config_result {
-                let missing = models::missing(config);
-                if !missing.is_empty() {
-                    println!("Models not downloaded yet: {}.", missing.join(", "));
-                    println!("The daemon runs without them, but cannot record. Run: banshee setup");
+            let log = service::install()?;
+            println!("Banshee is running, and starts again at login.");
+
+            // The daemon reports these to its log, which nobody reads on a first run
+            let mut blocked = false;
+            let hotkey_mode = match &config_result {
+                Ok(config) => {
+                    let missing = models::missing(config);
+                    if !missing.is_empty() {
+                        blocked = true;
+                        println!();
+                        println!("Models not downloaded yet: {}.", missing.join(", "));
+                        println!("It runs without them, but cannot record. Run: banshee setup");
+                    }
+                    Some(config.audio.hotkey_mode)
                 }
+                // main already printed why the config would not load
+                Err(_) => {
+                    blocked = true;
+                    None
+                }
+            };
+
+            // Opens System Settings, so it goes last: read here, then switch
+            blocked |= permissions::guide_missing();
+
+            match hotkey_mode {
+                Some(mode) if !blocked => {
+                    println!();
+                    println!("{}", hotkey::usage_hint(mode));
+                }
+                _ => println!("Logs: {log}"),
             }
-            permissions::guide_missing();
         }
         CommandType::Service { action } => match action {
             args::ServiceAction::Uninstall => service::uninstall()?,

@@ -40,6 +40,9 @@ Download the models once with `cargo run -p banshee -- setup`
 cargo run -p banshee -- serve
 ```
 
+Only one daemon can hold the socket. A copy already running in a terminal keeps
+it, so an installed service cannot take over until you stop that copy.
+
 ## Keeping macOS permissions across rebuilds
 
 Banshee needs Microphone, Input Monitoring, and Accessibility grants, and
