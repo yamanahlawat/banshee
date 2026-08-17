@@ -55,14 +55,12 @@ pub async fn run(
                 Ok((mut stream, _addr)) => {
                     println!("New client connected!");
                     let state = Arc::clone(daemon_state);
-                    // Spawn a new task to handle the client connection
                     tokio::spawn(async move {
                         let (reader, mut writer) = stream.split();
                         let reader = BufReader::new(reader);
                         let mut lines = reader.lines();
 
                         while let Ok(Some(line)) = lines.next_line().await {
-                            // Try to parse the incoming line as a JSON-RPC request
                             if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(&line) {
                                 let response: JsonRpcResponse = dispatch(request, &state).await;
                                 if let Ok(mut response_string) = serde_json::to_string(&response) {
