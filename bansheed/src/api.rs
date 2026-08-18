@@ -3,11 +3,12 @@ use std::time::Duration;
 
 use banshee_common::{
     BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION,
-    BANSHEE_HISTORY, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_SPEAK, BANSHEE_STATUS,
-    BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
+    BANSHEE_HISTORY, BANSHEE_READINESS, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_SPEAK,
+    BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
+use crate::readiness;
 use crate::state::{
     AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, TranscribeTarget,
 };
@@ -283,6 +284,13 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             }
 
             JsonRpcResponse::success(request.id, serde_json::json!({}))
+        }
+        BANSHEE_READINESS => {
+            let blockers = readiness::blockers(daemon_state);
+            JsonRpcResponse::success(
+                request.id,
+                serde_json::json!({ "ready": blockers.is_empty(), "blockers": blockers }),
+            )
         }
         BANSHEE_STATUS => JsonRpcResponse::success(
             request.id,

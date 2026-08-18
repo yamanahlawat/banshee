@@ -19,6 +19,8 @@ pub enum CommandType {
     Status,
     /// Diagnose setup problems and report fixes
     Doctor,
+    /// Lists what still blocks recording, as the running daemon sees it
+    Readiness,
     /// Gets latest transcription
     Listen,
     /// Start or stop push-to-talk recording (for compositor keybinds and scripts)

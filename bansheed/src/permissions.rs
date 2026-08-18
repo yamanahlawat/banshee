@@ -1,6 +1,10 @@
 // A TCC grant applies only to processes started after it lands, so the daemon
 // has to restart to pick one up. No equivalent outside macOS.
 
+use banshee_common::Blocker;
+#[cfg(target_os = "macos")]
+use banshee_common::BlockerKind;
+
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, PartialEq)]
 pub enum Access {
@@ -25,6 +29,14 @@ impl Grant {
         match self {
             Grant::Accessibility => "Accessibility",
             Grant::InputMonitoring => "Input Monitoring",
+        }
+    }
+
+    /// Stable across renames of `name`, so a client can switch on it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Grant::Accessibility => "accessibility",
+            Grant::InputMonitoring => "input_monitoring",
         }
     }
 
@@ -99,6 +111,24 @@ impl Grant {
             .filter(|grant| grant.access() != Access::Granted)
             .collect()
     }
+}
+
+pub fn blockers() -> Vec<Blocker> {
+    #[cfg(target_os = "macos")]
+    {
+        Grant::missing()
+            .into_iter()
+            .map(|grant| Blocker {
+                kind: BlockerKind::Permission,
+                id: grant.id().to_string(),
+                name: grant.name().to_string(),
+                consequence: grant.consequence().to_string(),
+                fix: grant.fix().to_string(),
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
 }
 
 /// Names what is missing and opens the pane for the first one. True when a

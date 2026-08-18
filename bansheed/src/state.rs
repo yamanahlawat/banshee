@@ -88,6 +88,24 @@ impl std::fmt::Display for RecordingError {
     }
 }
 
+impl RecordingError {
+    /// Trimmed at the source, not in each renderer: the wrapped error ends in a
+    /// period and the other blocker prose does not.
+    pub fn consequence(&self) -> String {
+        self.to_string().trim_end_matches('.').to_string()
+    }
+
+    pub fn fix(&self) -> &'static str {
+        match self {
+            RecordingError::Microphone(_) => {
+                "connect the microphone, grant it in Privacy & Security, or fix \
+                 [audio] input_device, then restart: banshee start"
+            }
+            RecordingError::Model(_) => "restart it: banshee start",
+        }
+    }
+}
+
 pub struct DaemonState {
     version: &'static str,
     stt_model: &'static str,

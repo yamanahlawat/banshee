@@ -74,6 +74,24 @@ pub const BANSHEE_ASK_USER: &str = "banshee.ask_user";
 pub const BANSHEE_STOP: &str = "banshee.stop";
 pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
+pub const BANSHEE_READINESS: &str = "banshee.readiness";
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerKind {
+    Permission,
+    Model,
+    Pipeline,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Blocker {
+    pub kind: BlockerKind,
+    pub id: String,
+    pub name: String,
+    pub consequence: String,
+    pub fix: String,
+}
 
 // Whisper model configuration
 pub struct WhisperConfig {
@@ -129,5 +147,38 @@ impl KokoroTTSConfig {
             voice_name: format!("{voice}.bin"),
             voice_url: format!("{KOKORO_REPO}/voices/{voice}.bin"),
         }
+    }
+}
+
+#[cfg(test)]
+mod blocker_wire_tests {
+    use super::{Blocker, BlockerKind};
+
+    #[test]
+    fn a_blocker_serializes_with_the_keys_clients_read() {
+        let blocker = Blocker {
+            kind: BlockerKind::Permission,
+            id: "input_monitoring".to_string(),
+            name: "Input Monitoring".to_string(),
+            consequence: "the hotkey receives no key presses".to_string(),
+            fix: "grant it in System Settings".to_string(),
+        };
+        let wire = serde_json::to_value(&blocker).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "kind": "permission",
+                "id": "input_monitoring",
+                "name": "Input Monitoring",
+                "consequence": "the hotkey receives no key presses",
+                "fix": "grant it in System Settings",
+            })
+        );
+    }
+
+    #[test]
+    fn the_model_kind_is_snake_case_too() {
+        let wire = serde_json::to_value(BlockerKind::Model).unwrap();
+        assert_eq!(wire, serde_json::json!("model"));
     }
 }

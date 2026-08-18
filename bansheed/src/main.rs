@@ -9,6 +9,7 @@ mod history;
 mod hotkey;
 mod models;
 mod permissions;
+mod readiness;
 mod service;
 mod speech_to_text;
 mod state;
@@ -68,6 +69,21 @@ fn start_recording(
         command_receiver,
     );
     Ok((stream, thread))
+}
+
+fn daemon_is_down(error: &BansheeError) -> bool {
+    match error {
+        BansheeError::Io(io) => matches!(
+            io.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        ),
+        // A socket orphaned by an unclean exit accepts the connection then
+        // closes it. tokio's nonblocking connect cannot tell; a blocking one can.
+        BansheeError::Serde(_) => {
+            utils::get_socket_path().is_some_and(|path| !daemon::socket_answers(&path))
+        }
+        _ => false,
+    }
 }
 
 #[tokio::main]
@@ -146,14 +162,7 @@ async fn main() -> Result<(), BansheeError> {
         CommandType::Stop => {
             match utils::call_daemon(banshee_common::BANSHEE_STOP, serde_json::json!({})).await {
                 Ok(_) => println!("Daemon stopped."),
-                Err(BansheeError::Io(error))
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                    ) =>
-                {
-                    println!("Daemon is not running.")
-                }
+                Err(error) if daemon_is_down(&error) => println!("Daemon is not running."),
                 Err(error) => eprintln!("Failed to stop daemon: {error}"),
             }
         }
@@ -161,6 +170,40 @@ async fn main() -> Result<(), BansheeError> {
             if !doctor::run(config_result).await {
                 std::process::exit(1);
             }
+        }
+        CommandType::Readiness => {
+            let reply =
+                match utils::call_daemon(banshee_common::BANSHEE_READINESS, serde_json::json!({}))
+                    .await
+                {
+                    Ok(reply) => reply,
+                    Err(error) if daemon_is_down(&error) => {
+                        eprintln!("The daemon is not running. Start it with: banshee start");
+                        std::process::exit(1);
+                    }
+                    Err(error) => {
+                        eprintln!("Could not reach the daemon: {error}");
+                        std::process::exit(1);
+                    }
+                };
+            let listed = reply.get("blockers").cloned().unwrap_or_default();
+            let blockers: Vec<banshee_common::Blocker> = match serde_json::from_value(listed) {
+                Ok(blockers) => blockers,
+                Err(error) => {
+                    eprintln!("The daemon sent a reply this build cannot read: {error}");
+                    std::process::exit(1);
+                }
+            };
+            if blockers.is_empty() {
+                println!("Nothing is blocking recording.");
+                return Ok(());
+            }
+            for blocker in &blockers {
+                println!();
+                println!("{} is not ready: {}.", blocker.name, blocker.consequence);
+                println!("  Fix: {}", blocker.fix);
+            }
+            std::process::exit(1);
         }
         CommandType::Setup => {
             let config = config_result?;
@@ -251,7 +294,7 @@ async fn main() -> Result<(), BansheeError> {
             let mut blocked = false;
             let hotkey_mode = match &config_result {
                 Ok(config) => {
-                    let missing = models::missing(config);
+                    let missing = models::missing(&models::required(config));
                     if !missing.is_empty() {
                         blocked = true;
                         println!();
