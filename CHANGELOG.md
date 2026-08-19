@@ -5,6 +5,37 @@ All notable changes to Banshee are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `banshee readiness` lists what still blocks recording: a missing permission, a
+  model that is not on disk, or a recording pipeline that died at startup. Each
+  entry says what breaks and how to fix it. The daemon answers the same question
+  over `banshee.readiness`, so a future GUI shows a checklist rather than
+  inventing its own.
+
+- `banshee config set <key> <value>` writes one setting to `config.toml`. The key
+  is the section and the field, as in `stt.language`. Comments and layout
+  survive, because the file is edited rather than rewritten. A value the field
+  does not accept is refused, and the message lists the ones it does.
+  `vad_threshold` takes effect at once; everything else needs a restart, and the
+  command says so.
+
+### Changed
+
+- **Breaking.** `banshee.configure` now takes `{"settings": {"stt.language":
+  "de"}, "persist": false}` instead of a flat `{"vad_threshold": 0.6}`. Keys are
+  dotted, so every setting in `config.toml` is reachable through one call rather
+  than one field at a time, and an unknown key returns `-32602` instead of
+  succeeding silently. `persist` writes the value to the file as well as
+  applying it, and is required for any setting the daemon reads only at startup,
+  which is all of them except `vad_threshold`. The reply says which keys landed
+  and which need a restart.
+
+- A `vad_threshold` outside 0.0 to 1.0 is now refused wherever it arrives. The
+  daemon used to start with a hand-edited `5.0` and never detect speech again.
+
 ## [0.7.0] - 2026-08-01
 
 The no-silent-failures release: dictation no longer kills the daemon, the hotkey

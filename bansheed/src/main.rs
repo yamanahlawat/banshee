@@ -11,6 +11,7 @@ mod models;
 mod permissions;
 mod readiness;
 mod service;
+mod settings;
 mod speech_to_text;
 mod state;
 mod text_to_speech;
@@ -204,6 +205,44 @@ async fn main() -> Result<(), BansheeError> {
                 println!("  Fix: {}", blocker.fix);
             }
             std::process::exit(1);
+        }
+        CommandType::Config {
+            action: args::ConfigAction::Set { key, value },
+        } => {
+            // So `0.6` arrives as a number and `de` as a string
+            let value: serde_json::Value = serde_json::from_str(&value)
+                .unwrap_or_else(|_| serde_json::Value::String(value.clone()));
+            let assignments = settings::Assignments::from([(key.clone(), value)]);
+
+            let outcome = match utils::call_daemon(
+                banshee_common::BANSHEE_CONFIGURE,
+                serde_json::json!({ "settings": &assignments, "persist": true }),
+            )
+            .await
+            {
+                Ok(reply) => Ok(reply
+                    .get("restart_required")
+                    .and_then(|keys| keys.as_array())
+                    .is_some_and(|keys| !keys.is_empty())),
+                // A daemon that is down never writes, so the CLI can be the one writer
+                Err(error) if daemon_is_down(&error) => {
+                    settings::configure(None, &assignments, true).map(|_| true)
+                }
+                Err(error) => Err(error),
+            };
+
+            match outcome {
+                Ok(restart_required) => {
+                    println!("Set {key} in config.toml.");
+                    if restart_required {
+                        println!("Restart to use it: banshee start");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("{}", error.rpc_message());
+                    std::process::exit(1);
+                }
+            }
         }
         CommandType::Setup => {
             let config = config_result?;

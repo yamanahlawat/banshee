@@ -8,11 +8,11 @@ use banshee_common::{
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
-use crate::readiness;
 use crate::state::{
     AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, TranscribeTarget,
 };
 use crate::text_to_speech::sanitizer::sanitize;
+use crate::{readiness, settings};
 
 const MAX_WAIT_MS: u64 = 30_000;
 const DEFAULT_ASK_WAIT_MS: u64 = 30_000;
@@ -259,31 +259,44 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             )
         }
         BANSHEE_CONFIGURE => {
-            if let Some(params) = &request.params
-                && let Some(threshold_val) = params.get("vad_threshold")
+            let Some(requested) = request.params.as_ref().and_then(|p| p.get("settings")) else {
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32602,
+                    "'settings' is required, as in {\"stt.language\": \"de\"}.",
+                );
+            };
+            let assignments: settings::Assignments = match serde_json::from_value(requested.clone())
             {
-                let Some(vad_threshold) = threshold_val.as_f64() else {
+                Ok(assignments) => assignments,
+                Err(error) => {
                     return JsonRpcResponse::error(
                         request.id,
                         -32602,
-                        "'vad_threshold' must be a numeric float.",
-                    );
-                };
-
-                if !(0.0..=1.0).contains(&vad_threshold) {
-                    return JsonRpcResponse::error(
-                        request.id,
-                        -32602,
-                        format!(
-                            "Invalid VAD threshold: {}. Must be between 0.0 and 1.0",
-                            vad_threshold
-                        ),
+                        format!("'settings' must map dotted keys to values: {error}"),
                     );
                 }
-                daemon_state.set_vad_threshold(vad_threshold as f32);
-            }
+            };
+            let persist = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("persist"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
-            JsonRpcResponse::success(request.id, serde_json::json!({}))
+            match settings::configure(Some(daemon_state), &assignments, persist) {
+                Ok(outcome) => JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({
+                        "ok": true,
+                        "applied": outcome.applied,
+                        "restart_required": outcome.restart_required,
+                    }),
+                ),
+                Err(error) => {
+                    JsonRpcResponse::error(request.id, error.rpc_code(), error.rpc_message())
+                }
+            }
         }
         BANSHEE_READINESS => {
             let blockers = readiness::blockers(daemon_state);

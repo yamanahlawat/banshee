@@ -186,6 +186,8 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee setup`                 | Download the required models                               |
 | `banshee status`                | Show daemon health and state                               |
 | `banshee doctor`                | Diagnose setup problems and report fixes                   |
+| `banshee readiness`             | List what still blocks recording                           |
+| `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee serve`                 | Run the daemon in the foreground                           |
 | `banshee service uninstall`     | Remove the start-at-login launch agent                     |
 | `banshee listen`                | Print recent transcriptions                                |
@@ -274,10 +276,40 @@ follow whatever the OS is set to. If the name matches nothing, the daemon
 refuses to start and lists the devices it did find, rather than quietly
 recording from the wrong microphone.
 
-You can also change `vad_threshold` at runtime through the `banshee.configure`
-RPC, no restart needed. `vocabulary` biases Whisper toward project jargon and
-proper nouns it would otherwise misspell; it is read once at startup, so
-restart the daemon after changing it.
+`vocabulary` biases Whisper toward project jargon and proper nouns it would
+otherwise misspell; it is read once at startup, so restart the daemon after
+changing it.
+
+### Changing a setting without an editor
+
+`banshee config set` writes one key and keeps your comments and layout:
+
+```bash
+banshee config set stt.language de
+banshee config set stt.vad_threshold 0.7
+banshee config set stt.vocabulary '["tokio", "clippy"]'
+banshee config set audio.cues.enabled false
+```
+
+The key is the section and the field, as they appear in the file. A number, a
+`true`, or a `[list]` is read as that type; anything else is read as text. Quote
+twice to force text, as in `banshee config set audio.input_device '"12"'`.
+
+A value that the field does not accept is refused, and the message lists the
+ones it does:
+
+```
+$ banshee config set audio.hotkey_mode sideways
+TOML parse error at line 5, column 15
+  |
+5 | hotkey_mode = "sideways"
+  |               ^^^^^^^^^^
+unknown variant `sideways`, expected `hold` or `toggle`
+```
+
+`vad_threshold` takes effect immediately. Everything else is read once at
+startup, so the command tells you to restart. This works whether or not the
+daemon is running.
 
 `endpoint_silence_ms` is how long you can go quiet mid-answer before Banshee
 decides you're done. The default is deliberately generous so that thinking out

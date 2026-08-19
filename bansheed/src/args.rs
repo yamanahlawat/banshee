@@ -21,6 +21,11 @@ pub enum CommandType {
     Doctor,
     /// Lists what still blocks recording, as the running daemon sees it
     Readiness,
+    /// Change a setting in config.toml
+    Config {
+        #[clap(subcommand)]
+        action: ConfigAction,
+    },
     /// Gets latest transcription
     Listen,
     /// Start or stop push-to-talk recording (for compositor keybinds and scripts)
@@ -40,6 +45,16 @@ pub enum CommandType {
     Service {
         #[clap(subcommand)]
         action: ServiceAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// Write one setting, as in: banshee config set stt.language de
+    Set {
+        /// A section and a field from config.toml, as in stt.vad_threshold
+        key: String,
+        value: String,
     },
 }
 

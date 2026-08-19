@@ -17,7 +17,8 @@ pub enum BansheeError {
     #[error("JSON serialization/deserialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
-    #[error("TOML serialization/deserialization error: {0}")]
+    // toml's own message names itself and points at the offending line
+    #[error(transparent)]
     Toml(#[from] toml::de::Error),
 
     #[error("RPC error: {code}: {message}")]
@@ -28,6 +29,14 @@ pub enum BansheeError {
 }
 
 impl BansheeError {
+    /// The text a client should show, without the code in front of it.
+    pub fn rpc_message(&self) -> String {
+        match self {
+            BansheeError::Rpc { message, .. } => message.clone(),
+            other => other.to_string(),
+        }
+    }
+
     pub fn rpc_code(&self) -> i32 {
         match self {
             BansheeError::NoAudioDevice => -32000,
