@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `banshee devices` lists the microphones and marks which one the daemon opened,
+  so `audio.input_device` can be set to a name you have seen rather than one you
+  guessed. The daemon answers the same question over
+  `banshee.list_input_devices`. Enumeration needs no daemon, which matters
+  because you need the names before you can start one on the right microphone.
+  The list does not say whether each device opens: probing them all would steal
+  the microphone from the running daemon.
+
 - `banshee readiness` lists what still blocks recording: a missing permission, a
   model that is not on disk, or a recording pipeline that died at startup. Each
   entry says what breaks and how to fix it. The daemon answers the same question

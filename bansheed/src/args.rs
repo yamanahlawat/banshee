@@ -21,6 +21,8 @@ pub enum CommandType {
     Doctor,
     /// Lists what still blocks recording, as the running daemon sees it
     Readiness,
+    /// List the microphones Banshee can record from
+    Devices,
     /// Change a setting in config.toml
     Config {
         #[clap(subcommand)]

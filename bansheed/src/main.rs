@@ -72,6 +72,18 @@ fn start_recording(
     Ok((stream, thread))
 }
 
+/// A device can be both, and hiding either label would read as its being false.
+fn device_labels(device: &banshee_common::InputDevice, current: Option<&str>) -> String {
+    let mut labels = Vec::new();
+    if device.default {
+        labels.push("system default");
+    }
+    if current == Some(device.name.as_str()) {
+        labels.push("in use");
+    }
+    labels.join(", ")
+}
+
 fn daemon_is_down(error: &BansheeError) -> bool {
     match error {
         BansheeError::Io(io) => matches!(
@@ -205,6 +217,53 @@ async fn main() -> Result<(), BansheeError> {
                 println!("  Fix: {}", blocker.fix);
             }
             std::process::exit(1);
+        }
+        CommandType::Devices => {
+            let (devices, current) = match utils::call_daemon(
+                banshee_common::BANSHEE_LIST_INPUT_DEVICES,
+                serde_json::json!({}),
+            )
+            .await
+            {
+                Ok(reply) => {
+                    let listed = reply.get("devices").cloned().unwrap_or_default();
+                    let devices: Vec<banshee_common::InputDevice> =
+                        match serde_json::from_value(listed) {
+                            Ok(devices) => devices,
+                            Err(error) => {
+                                eprintln!(
+                                    "The daemon sent a reply this build cannot read: {error}"
+                                );
+                                std::process::exit(1);
+                            }
+                        };
+                    let current = reply
+                        .get("current")
+                        .and_then(|name| name.as_str())
+                        .map(str::to_string);
+                    (devices, current)
+                }
+                // You need the names before you can start a daemon on the right one
+                Err(error) if daemon_is_down(&error) => (audio::input_devices(), None),
+                Err(error) => {
+                    eprintln!("{}", error.rpc_message());
+                    std::process::exit(1);
+                }
+            };
+
+            if devices.is_empty() {
+                println!("No microphones found.");
+                return Ok(());
+            }
+            let width = devices.iter().map(|d| d.name.len()).max().unwrap_or(0);
+            for device in &devices {
+                match device_labels(device, current.as_deref()) {
+                    labels if labels.is_empty() => println!("  {}", device.name),
+                    labels => println!("  {:width$}  {labels}", device.name),
+                }
+            }
+            println!();
+            println!("Record from one with: banshee config set audio.input_device \"<name>\"");
         }
         CommandType::Config {
             action: args::ConfigAction::Set { key, value },
@@ -365,4 +424,50 @@ async fn main() -> Result<(), BansheeError> {
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use banshee_common::InputDevice;
+
+    fn device(name: &str, default: bool) -> InputDevice {
+        InputDevice {
+            name: name.to_string(),
+            default,
+        }
+    }
+
+    #[test]
+    fn the_recording_device_carries_both_labels_when_it_is_also_the_preference() {
+        assert_eq!(
+            super::device_labels(&device("Blue Yeti", true), Some("Blue Yeti")),
+            "system default, in use"
+        );
+    }
+
+    #[test]
+    fn a_device_the_daemon_passed_over_keeps_its_preference_label() {
+        assert_eq!(
+            super::device_labels(&device("Built-in", true), Some("Blue Yeti")),
+            "system default"
+        );
+        assert_eq!(
+            super::device_labels(&device("Blue Yeti", false), Some("Blue Yeti")),
+            "in use"
+        );
+    }
+
+    #[test]
+    fn a_device_nothing_points_at_carries_no_label() {
+        assert_eq!(super::device_labels(&device("BlackHole", false), None), "");
+    }
+
+    #[test]
+    fn no_daemon_means_no_in_use_label_even_for_the_preference() {
+        assert_eq!(
+            super::device_labels(&device("Built-in", true), None),
+            "system default",
+            "a device nobody opened must not read as recording"
+        );
+    }
 }

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use banshee_common::{
     BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION,
-    BANSHEE_HISTORY, BANSHEE_READINESS, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_SPEAK,
-    BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
+    BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_READINESS, BANSHEE_RECORD_START,
+    BANSHEE_RECORD_STOP, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -298,6 +298,13 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 }
             }
         }
+        BANSHEE_LIST_INPUT_DEVICES => JsonRpcResponse::success(
+            request.id,
+            serde_json::json!({
+                "devices": crate::audio::input_devices(),
+                "current": daemon_state.audio_device(),
+            }),
+        ),
         BANSHEE_READINESS => {
             let blockers = readiness::blockers(daemon_state);
             JsonRpcResponse::success(

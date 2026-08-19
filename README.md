@@ -187,6 +187,7 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee status`                | Show daemon health and state                               |
 | `banshee doctor`                | Diagnose setup problems and report fixes                   |
 | `banshee readiness`             | List what still blocks recording                           |
+| `banshee devices`               | List the microphones, and mark the one in use              |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee serve`                 | Run the daemon in the foreground                           |
 | `banshee service uninstall`     | Remove the start-at-login launch agent                     |
@@ -275,6 +276,19 @@ enabled = true         # tones on record start/stop, success, and errors
 follow whatever the OS is set to. If the name matches nothing, the daemon
 refuses to start and lists the devices it did find, rather than quietly
 recording from the wrong microphone.
+
+`banshee devices` shows the names to choose from:
+
+```
+$ banshee devices
+  Blue Yeti               system default, in use
+  BlackHole 2ch
+  MacBook Pro Microphone
+```
+
+It reads the microphones fresh each time, so unplugging one changes the list.
+The command works whether or not the daemon is running; `in use` only appears
+when a daemon has actually opened that device.
 
 `vocabulary` biases Whisper toward project jargon and proper nouns it would
 otherwise misspell; it is read once at startup, so restart the daemon after

@@ -75,6 +75,13 @@ pub const BANSHEE_STOP: &str = "banshee.stop";
 pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
 pub const BANSHEE_READINESS: &str = "banshee.readiness";
+pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InputDevice {
+    pub name: String,
+    pub default: bool,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -151,8 +158,8 @@ impl KokoroTTSConfig {
 }
 
 #[cfg(test)]
-mod blocker_wire_tests {
-    use super::{Blocker, BlockerKind};
+mod wire_tests {
+    use super::{Blocker, BlockerKind, InputDevice};
 
     #[test]
     fn a_blocker_serializes_with_the_keys_clients_read() {
@@ -180,5 +187,18 @@ mod blocker_wire_tests {
     fn the_model_kind_is_snake_case_too() {
         let wire = serde_json::to_value(BlockerKind::Model).unwrap();
         assert_eq!(wire, serde_json::json!("model"));
+    }
+
+    #[test]
+    fn a_device_serializes_with_the_keys_clients_read() {
+        let wire = serde_json::to_value(InputDevice {
+            name: "Blue Yeti".to_string(),
+            default: true,
+        })
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"name": "Blue Yeti", "default": true})
+        );
     }
 }
