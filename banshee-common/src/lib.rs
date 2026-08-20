@@ -74,7 +74,6 @@ pub const BANSHEE_ASK_USER: &str = "banshee.ask_user";
 pub const BANSHEE_STOP: &str = "banshee.stop";
 pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
-pub const BANSHEE_READINESS: &str = "banshee.readiness";
 pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

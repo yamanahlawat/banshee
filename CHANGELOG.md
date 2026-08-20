@@ -17,12 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The list does not say whether each device opens: probing them all would steal
   the microphone from the running daemon.
 
-- `banshee readiness` lists what still blocks recording: a missing permission, a
-  model that is not on disk, or a recording pipeline that died at startup. Each
-  entry says what breaks and how to fix it. The daemon answers the same question
-  over `banshee.readiness`, so a future GUI shows a checklist rather than
-  inventing its own.
-
 - `banshee config set <key> <value>` writes one setting to `config.toml`. The key
   is the section and the field, as in `stt.language`. Comments and layout
   survive, because the file is edited rather than rewritten. A value the field
@@ -31,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command says so.
 
 ### Changed
+
+- **`banshee status`, `banshee doctor` and `banshee readiness` are now one
+  command.** All three answered overlapping versions of "is it working", and
+  `readiness` reported nothing `doctor` did not. `banshee status` is the
+  checklist, and `banshee status --json` is the machine-readable state. The
+  daemon's `banshee.readiness` method is gone the same way: `banshee.status` now
+  carries `ready` and `blockers`, and no longer carries `recording_error`, which
+  was the same failure in a second wire shape without a fix attached.
+
+- **The checklist now asks the daemon whether its permissions are granted.** It
+  used to check the process it was running in, which cannot speak for a daemon
+  launchd started; the code said as much in a comment and did it anyway. Grant a
+  permission while the daemon runs and the old output showed a green tick for a
+  daemon that was still blind.
 
 - **Breaking.** `banshee.configure` now takes `{"settings": {"stt.language":
   "de"}, "persist": false}` instead of a flat `{"vad_threshold": 0.6}`. Keys are

@@ -50,7 +50,7 @@ with has no Wayland path, so under Wayland `F5` does nothing. Bind
 `banshee record start` / `stop` in your compositor instead (see
 [Wayland](#wayland)). Dictation typing does work under Wayland if `wtype` or
 `ydotool` is installed. The agent voice (`speak_status`, `ask_user`) is
-unaffected either way, and `banshee doctor` reports what your session supports.
+unaffected either way, and `banshee status` reports what your session supports.
 
 ### Homebrew
 
@@ -95,7 +95,7 @@ changing the STT preset or the TTS voice only downloads what's missing.
 
 **Optional: better pronunciation.** Install `espeak-ng` and Banshee pronounces
 unfamiliar words (tech jargon, proper nouns) instead of spelling them out. On
-macOS it's `brew install espeak-ng`; `banshee doctor` prints the command for
+macOS it's `brew install espeak-ng`; `banshee status` prints the command for
 your system.
 
 **2. Grant macOS permissions.** Banshee needs three of them, otherwise it
@@ -112,7 +112,7 @@ restart the daemon (permissions don't apply to an already-running process).
 **3. Check your setup:**
 
 ```bash
-banshee doctor
+banshee status
 ```
 
 It reports on models, config, microphone, permissions, and daemon health, and
@@ -175,7 +175,7 @@ Typing the transcription into the focused app needs **`wtype`** (wlroots
 compositors such as Hyprland and Sway) or **`ydotool`** (anywhere, but it needs
 its own daemon and uinput access). Without one of them, dictation has no way to
 type and reports an error; the transcription is still kept in
-`banshee history`. `banshee doctor` tells you which one it found.
+`banshee history`. `banshee status` tells you which one it found.
 
 The CLI commands all talk to the running daemon over its socket:
 
@@ -184,9 +184,8 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee start`                 | Start the daemon, now and at every login                   |
 | `banshee stop`                  | Stop the running daemon                                    |
 | `banshee setup`                 | Download the required models                               |
-| `banshee status`                | Show daemon health and state                               |
-| `banshee doctor`                | Diagnose setup problems and report fixes                   |
-| `banshee readiness`             | List what still blocks recording                           |
+| `banshee status`                | What Banshee is doing, and what stops it working           |
+| `banshee status --json`         | The same as machine-readable state and blockers            |
 | `banshee devices`               | List the microphones, and mark the one in use              |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee serve`                 | Run the daemon in the foreground                           |
@@ -347,7 +346,7 @@ the daemon.
 
 ## Troubleshooting
 
-Start with `banshee doctor`; it catches most setup problems and tells you the
+Start with `banshee status`; it catches most setup problems and tells you the
 fix. Beyond that:
 
 - **The microphone looks dead: you record, and nothing ever comes back.**

@@ -64,7 +64,7 @@ where
     })
 }
 
-// Said by the daemon at startup and by doctor, so the two cannot drift apart.
+// Said by the daemon at startup and by the checklist, so the two cannot drift apart.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub const WAYLAND_HOTKEY_HINT: &str = "the global hotkey needs X11. Bind \
      `banshee record start` on press and `banshee record stop` on release in \

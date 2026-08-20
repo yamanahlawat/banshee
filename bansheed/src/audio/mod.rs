@@ -69,7 +69,7 @@ fn find_input_device(host: &cpal::Host, wanted: &str) -> Result<cpal::Device, Ba
 }
 
 // Anything but "default" is explicit and must fail loudly rather than fall back
-// to the wrong microphone. Shared with doctor so it sees what capture opens.
+// to the wrong microphone. Shared with the checklist, so it sees what capture opens.
 pub fn resolve_input_device(input_device: &str) -> Result<cpal::Device, BansheeError> {
     let host = cpal::default_host();
     if input_device == DEFAULT_INPUT_DEVICE {
@@ -80,8 +80,8 @@ pub fn resolve_input_device(input_device: &str) -> Result<cpal::Device, BansheeE
     }
 }
 
-// Doctor opens through this too, so a green check and a working daemon cannot
-// drift. A device that will not describe itself stays unknown, not "default".
+// The checklist opens through this too, so a green tick and a working daemon
+// cannot drift. A device that will not describe itself stays unknown.
 fn open_input(
     input_device: &str,
 ) -> Result<(cpal::Device, Option<String>, cpal::SupportedStreamConfig), BansheeError> {

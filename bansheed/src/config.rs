@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use banshee_common::{error::BansheeError, utils::get_config_path};
 use serde::{Deserialize, Deserializer};
@@ -186,15 +186,24 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load() -> Result<Self, BansheeError> {
-        let config_path = get_config_path()
-            .ok_or_else(|| BansheeError::Other("Failed to get config path".to_string()))?;
-        if !config_path.exists() {
-            return Ok(Config::default());
+    pub fn path() -> Result<PathBuf, BansheeError> {
+        get_config_path()
+            .ok_or_else(|| BansheeError::Other("Failed to get config path".to_string()))
+    }
+
+    /// Empty rather than an error when the file is absent, because no file means
+    /// every default.
+    pub fn read(path: &Path) -> Result<String, BansheeError> {
+        if path.exists() {
+            Ok(std::fs::read_to_string(path)?)
+        } else {
+            Ok(String::new())
         }
-        let config_content = std::fs::read_to_string(&config_path)?;
-        let config: Config = toml::from_str(&config_content)?;
-        Ok(config)
+    }
+
+    pub fn load() -> Result<Self, BansheeError> {
+        let contents = Config::read(&Config::path()?)?;
+        Ok(toml::from_str(&contents)?)
     }
 }
 

@@ -1,11 +1,11 @@
 use std::path::Path;
 use std::time::Duration;
 
-use banshee_common::{KokoroTTSConfig, error::BansheeError, utils};
+use banshee_common::{Blocker, BlockerKind, KokoroTTSConfig, error::BansheeError, utils};
 
 use crate::config::{BargeInMode, Config, HotkeyMode, STTPreset, TTSFallback};
 
-// Read-only diagnosis: doctor never mutates, it reports and names the fix.
+// Read-only diagnosis: it reports and names the fix, and never mutates.
 // Returns true when every required check passed.
 pub async fn run(config: Result<Config, BansheeError>) -> bool {
     let mut healthy = true;
@@ -29,7 +29,9 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         }
     };
 
-    report_settings(&config);
+    // Probed first: a live daemon knows a vad_threshold that was never written
+    let daemon = probe_daemon().await;
+    report_settings(&config, &daemon);
 
     let Some(models_dir) = utils::get_models_path() else {
         fail("home directory not found", "set $HOME");
@@ -61,36 +63,18 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 
     check_espeak();
 
-    // Fetched once: the microphone check and the version check both read it
-    let daemon = probe_daemon().await;
     healthy &= check_recording(&daemon, &config.audio.input_device);
 
-    // TCC answers for the responsible process, so a doctor run from a granted
-    // terminal cannot speak for a launchd-started daemon
     #[cfg(target_os = "macos")]
-    for grant in crate::permissions::Grant::REQUIRED {
-        use crate::permissions::Access;
-        healthy &= match grant.access() {
-            Access::Granted => pass(&format!("{} granted to this process", grant.name())),
-            Access::Denied => fail(
-                &format!("{} missing: {}", grant.name(), grant.consequence()),
-                grant.fix(),
-            ),
-            Access::Undetermined => {
-                note(&format!(
-                    "{} not decided yet; macOS asks the first time the daemon runs",
-                    grant.name()
-                ));
-                true
-            }
-        };
+    {
+        healthy &= check_permissions(&daemon);
     }
 
     // wtype/ydotool restore typing, but nothing restores rdev's global hotkey.
     // Same cfg as `is_wayland`, so every unix target that loses it explains why.
     #[cfg(all(unix, not(target_os = "macos")))]
     if crate::dictation::is_wayland() {
-        // The table dictation actually runs, so doctor cannot name a stale tool
+        // The table dictation actually runs, so the checklist cannot name a stale tool
         let typer = crate::dictation::WAYLAND_TYPERS
             .into_iter()
             .map(|(binary, _)| binary)
@@ -185,11 +169,91 @@ fn check_model(models_dir: &Path, name: &str) -> bool {
 
 // What the socket says about a daemon. Read once, because the microphone check
 // and the version check both depend on it.
-enum Daemon {
-    Running(serde_json::Value),
+pub enum Daemon {
+    Running {
+        status: serde_json::Value,
+        blockers: Vec<Blocker>,
+    },
+    /// Answered, but from a build before it reported blockers
+    Legacy(serde_json::Value),
     Silent(String),
     Stale,
     Missing,
+}
+
+/// An absent blockers field is an older daemon; one that will not decode is a
+/// daemon this build cannot read, which is not the same answer.
+fn classify(status: serde_json::Value) -> Daemon {
+    let Some(listed) = status.get("blockers") else {
+        return Daemon::Legacy(status);
+    };
+    match serde_json::from_value::<Vec<Blocker>>(listed.clone()) {
+        Ok(blockers) => Daemon::Running { status, blockers },
+        Err(error) => Daemon::Silent(format!("its blockers could not be read: {error}")),
+    }
+}
+
+fn unreported(what: &str) -> bool {
+    note(&format!(
+        "{what} unchecked: this daemon predates blocker reporting"
+    ));
+    true
+}
+
+// TCC answers for the process that asked, so only the daemon speaks for the
+// daemon. An undecided grant blocks one already up: macOS would have asked.
+#[cfg(target_os = "macos")]
+fn check_permissions(daemon: &Daemon) -> bool {
+    let denied: Vec<(&str, &str, &str)> = match daemon {
+        Daemon::Running { blockers, .. } => {
+            let denied: Vec<_> = blockers
+                .iter()
+                .filter(|blocker| blocker.kind == BlockerKind::Permission)
+                .map(|blocker| {
+                    (
+                        blocker.name.as_str(),
+                        blocker.consequence.as_str(),
+                        blocker.fix.as_str(),
+                    )
+                })
+                .collect();
+            if denied.is_empty() {
+                return pass("permissions granted to the daemon");
+            }
+            denied
+        }
+        Daemon::Legacy(_) => return unreported("permissions"),
+        _ => {
+            use crate::permissions::Access;
+            let mut healthy = true;
+            let mut denied = Vec::new();
+            for grant in crate::permissions::Grant::REQUIRED {
+                match grant.access() {
+                    Access::Granted => {
+                        healthy &= pass(&format!("{} granted to this process", grant.name()));
+                    }
+                    // Only this branch has a third answer: nothing has asked yet
+                    Access::Undetermined => note(&format!(
+                        "{} not decided yet; macOS asks the first time the daemon runs",
+                        grant.name()
+                    )),
+                    Access::Denied => {
+                        denied.push((grant.name(), grant.consequence(), grant.fix()));
+                    }
+                }
+            }
+            if denied.is_empty() {
+                return healthy;
+            }
+            denied
+        }
+    };
+
+    let mut healthy = true;
+    for (name, consequence, fix) in denied {
+        healthy &= fail(&format!("{name} missing: {consequence}"), fix);
+    }
+    healthy
 }
 
 // status fields are optional by protocol, so every read needs a fallback
@@ -197,7 +261,7 @@ fn field<'a>(status: &'a serde_json::Value, key: &str, fallback: &'a str) -> &'a
     status.get(key).and_then(|v| v.as_str()).unwrap_or(fallback)
 }
 
-async fn probe_daemon() -> Daemon {
+pub async fn probe_daemon() -> Daemon {
     match utils::get_socket_path() {
         Some(socket) if socket.exists() => {
             if !crate::daemon::socket_answers(&socket) {
@@ -209,7 +273,7 @@ async fn probe_daemon() -> Daemon {
             )
             .await
             {
-                Ok(Ok(status)) => Daemon::Running(status),
+                Ok(Ok(status)) => classify(status),
                 Ok(Err(e)) => Daemon::Silent(e.to_string()),
                 Err(_) => Daemon::Silent("no answer within 2s".to_string()),
             }
@@ -218,22 +282,27 @@ async fn probe_daemon() -> Daemon {
     }
 }
 
-// A live daemon holds the device and already knows whether capture works, so
-// ask it. Opening a second stream fails on backends that allow only one, which
-// would report a broken microphone on a healthy machine. `Silent` counts as
-// live: something answered the socket, so something owns the device.
+// Opening a second stream fails on backends that allow only one, which would
+// report a broken microphone on a healthy machine, so ask the daemon instead.
+// `Silent` counts as live: something answered the socket, so something owns the
+// device. Missing models suppress the pipeline blocker, so no blocker proves
+// capture opened, not that recording works.
 fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     match daemon {
-        Daemon::Running(status) => match status.get("recording_error").and_then(|v| v.as_str()) {
+        Daemon::Running { status, blockers } => match blockers
+            .iter()
+            .find(|blocker| blocker.kind == BlockerKind::Pipeline)
+        {
             None => pass(&format!(
-                "recording works, daemon has the microphone: {}",
+                "daemon has the microphone: {}",
                 field(status, "audio_device", "unnamed device")
             )),
-            Some(reason) => fail(
-                &format!("the daemon cannot record: {reason}"),
-                "fix the cause named above, then restart: banshee start",
+            Some(blocker) => fail(
+                &format!("the daemon cannot record: {}", blocker.consequence),
+                &blocker.fix,
             ),
         },
+        Daemon::Legacy(_) => unreported("recording"),
         Daemon::Silent(_) => {
             note("microphone unchecked: a daemon holds it but did not answer status");
             true
@@ -254,7 +323,7 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
 
 fn report_daemon(daemon: &Daemon) -> bool {
     match daemon {
-        Daemon::Running(status) => {
+        Daemon::Running { status, .. } | Daemon::Legacy(status) => {
             let version = field(status, "version", "unknown");
             pass(&format!("daemon running (version {version})"));
             if version != env!("CARGO_PKG_VERSION") {
@@ -282,7 +351,7 @@ fn report_daemon(daemon: &Daemon) -> bool {
 }
 
 // Only fields the daemon reads, so a printed value is one in use.
-fn report_settings(config: &Config) {
+fn report_settings(config: &Config, daemon: &Daemon) {
     let hotkey_mode = match config.audio.hotkey_mode {
         HotkeyMode::Hold => "hold",
         HotkeyMode::Toggle => "toggle",
@@ -303,9 +372,17 @@ fn report_settings(config: &Config) {
         "hotkey {hotkey_mode}, barge-in {barge_in}, cues {}",
         on_off(config.audio.cues.enabled)
     ));
+    let vad_threshold = match daemon {
+        Daemon::Running { status, .. } | Daemon::Legacy(status) => {
+            status.get("vad_threshold").and_then(|v| v.as_f64())
+        }
+        _ => None,
+    }
+    .map_or(config.stt.vad_threshold, |live| live as f32);
+
     note(&format!(
         "stt {preset}, vad {}, endpoint {} ms, {} vocabulary terms",
-        config.stt.vad_threshold,
+        vad_threshold,
         config.stt.endpoint_silence_ms,
         config.stt.vocabulary.len()
     ));
@@ -330,4 +407,44 @@ fn fail(msg: &str, fix: &str) -> bool {
     println!("  ✗  {msg}");
     println!("     fix: {fix}");
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Daemon, classify};
+
+    #[test]
+    fn a_reply_without_blockers_is_an_older_daemon() {
+        let reply = serde_json::json!({"running": true, "version": "0.7.0"});
+        assert!(matches!(classify(reply), Daemon::Legacy(_)));
+    }
+
+    // A field that is present but unreadable is this build failing to parse a
+    // daemon, which no restart of an older one explains.
+    #[test]
+    fn a_reply_with_unreadable_blockers_is_not_an_older_daemon() {
+        let reply = serde_json::json!({"blockers": [{"kind": "moonbeam"}]});
+        assert!(matches!(classify(reply), Daemon::Silent(_)));
+    }
+
+    #[test]
+    fn a_reply_with_blockers_carries_them_decoded() {
+        let reply = serde_json::json!({"blockers": [{
+            "kind": "model", "id": "m.bin", "name": "m.bin",
+            "consequence": "nothing works", "fix": "run: banshee setup",
+        }]});
+        let Daemon::Running { blockers, .. } = classify(reply) else {
+            panic!("a decodable blockers field must not read as an older daemon");
+        };
+        assert_eq!(blockers.len(), 1);
+    }
+
+    #[test]
+    fn an_empty_blockers_list_is_not_the_same_as_no_field() {
+        let reply = serde_json::json!({"blockers": []});
+        assert!(
+            matches!(classify(reply), Daemon::Running { .. }),
+            "a daemon reporting nothing wrong is not a daemon that reported nothing"
+        );
+    }
 }

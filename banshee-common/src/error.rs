@@ -24,6 +24,10 @@ pub enum BansheeError {
     #[error("RPC error: {code}: {message}")]
     Rpc { code: i32, message: String },
 
+    // The caller's input, as against anything the daemon failed to do
+    #[error("{0}")]
+    Rejected(String),
+
     #[error("Internal error: {0}")]
     Other(String),
 }
@@ -42,6 +46,7 @@ impl BansheeError {
             BansheeError::NoAudioDevice => -32000,
             BansheeError::HistoryNotEnabled => -32003,
             BansheeError::Rpc { code, .. } => *code,
+            BansheeError::Rejected(_) => -32602,
             BansheeError::Transcription(_)
             | BansheeError::Io(_)
             | BansheeError::Serde(_)

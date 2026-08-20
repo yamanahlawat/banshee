@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
-use banshee_common::{error::BansheeError, utils::get_config_path};
+use banshee_common::error::BansheeError;
 use serde::Serialize;
 use toml_edit::DocumentMut;
 
@@ -13,18 +14,14 @@ pub type Assignments = BTreeMap<String, serde_json::Value>;
 /// The only setting the running daemon rereads.
 const LIVE: &str = "stt.vad_threshold";
 
+/// The daemon serves a task per connection, so two calls can otherwise read
+/// the same file before either writes and one setting is lost.
+static WRITING: Mutex<()> = Mutex::new(());
+
 #[derive(Default)]
 pub struct Outcome {
     pub applied: Vec<String>,
     pub restart_required: Vec<String>,
-}
-
-/// A caller fault, as against the daemon failing to read or write the file.
-fn rejected(message: String) -> BansheeError {
-    BansheeError::Rpc {
-        code: -32602,
-        message,
-    }
 }
 
 /// Edits the document rather than serializing a `Config`, so hand-written
@@ -36,45 +33,45 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
 
     for (key, value) in assignments {
         // `[audio.cues]` is a section two deep, so only the last segment is a field
-        let (path, field) = key
-            .rsplit_once('.')
-            .ok_or_else(|| rejected(format!("'{key}' must name a section, as in stt.language")))?;
+        let (path, field) = key.rsplit_once('.').ok_or_else(|| {
+            BansheeError::Rejected(format!("'{key}' must name a section, as in stt.language"))
+        })?;
         let mut table = document.as_table_mut();
         for section in path.split('.') {
+            let invented = !table.contains_key(section);
             table = table
                 .entry(section)
                 .or_insert(toml_edit::table())
                 .as_table_mut()
-                .ok_or_else(|| rejected(format!("[{path}] is not a section")))?;
-            // A parent written only to hold a subtable needs no header of its own
-            table.set_implicit(true);
+                .ok_or_else(|| BansheeError::Rejected(format!("[{path}] is not a section")))?;
+            // Suppressing an existing header takes the comment above it too
+            if invented {
+                table.set_implicit(true);
+            }
         }
 
         let toml_value = value
             .serialize(toml_edit::ser::ValueSerializer::new())
-            .map_err(|error| rejected(format!("'{key}': {error}")))?;
+            .map_err(|error| BansheeError::Rejected(format!("'{key}': {error}")))?;
         let mut item = toml_edit::value(toml_value);
         // An insert replaces the key too, and the comment above a line is the key's
-        match (
-            table.key(field).cloned(),
-            table.get(field).and_then(toml_edit::Item::as_value),
-        ) {
-            (Some(replaced_key), replaced_value) => {
-                if let (Some(replaced_value), Some(value)) = (replaced_value, item.as_value_mut()) {
-                    *value.decor_mut() = replaced_value.decor().clone();
-                }
-                table.insert_formatted(&replaced_key, item);
+        if let Some(replaced_key) = table.key(field).cloned() {
+            if let (Some(replaced), Some(value)) = (
+                table.get(field).and_then(toml_edit::Item::as_value),
+                item.as_value_mut(),
+            ) {
+                *value.decor_mut() = replaced.decor().clone();
             }
-            (None, _) => {
-                table.insert(field, item);
-            }
+            table.insert_formatted(&replaced_key, item);
+        } else {
+            table.insert(field, item);
         }
     }
 
     let rendered = document.to_string();
     // `Config`'s types and `deny_unknown_fields` are the only definition of a legal setting
     let validated: Config =
-        toml::from_str(&rendered).map_err(|error| rejected(error.to_string()))?;
+        toml::from_str(&rendered).map_err(|error| BansheeError::Rejected(error.to_string()))?;
     Ok((rendered, validated))
 }
 
@@ -91,18 +88,17 @@ pub fn configure(
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
     if !persist && let Some(key) = startup_only(assignments) {
-        return Err(rejected(format!(
+        return Err(BansheeError::Rejected(format!(
             "'{key}' is read when the daemon starts, so it needs persist: true"
         )));
     }
 
-    let path = get_config_path()
-        .ok_or_else(|| BansheeError::Other("Failed to get config path".to_string()))?;
-    let existing = if path.exists() {
-        std::fs::read_to_string(&path)?
-    } else {
-        String::new()
-    };
+    let _writing = WRITING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let path = Config::path()?;
+    let existing = Config::read(&path)?;
 
     let (rendered, config) = edit(&existing, assignments)?;
 
@@ -110,8 +106,9 @@ pub fn configure(
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // A partial write would truncate a file the user hand-edits
-        let staged = path.with_extension("toml.new");
+        // A partial write would truncate a file the user hand-edits, and a shared
+        // staging name would let two processes interleave their bytes
+        let staged = path.with_extension(format!("toml.{}", std::process::id()));
         std::fs::write(&staged, &rendered)?;
         std::fs::rename(&staged, &path)?;
     }
@@ -184,7 +181,32 @@ mod tests {
             rendered.contains("[audio.cues]"),
             "the key must land under its own section, not quoted under [audio]: {rendered}"
         );
+        assert!(
+            !rendered.contains("[audio]"),
+            "a parent invented only to hold the subtable needs no header: {rendered}"
+        );
         assert!(!config.audio.cues.enabled);
+    }
+
+    // An [audio] that holds keys of its own keeps its header either way, so the
+    // section here is empty: only then does suppressing it lose the comment.
+    #[test]
+    fn a_nested_write_keeps_a_section_that_was_already_written() {
+        let existing = "# audio settings, see docs\n[audio]\n\n[stt]\nvad_threshold = 0.5\n";
+        let (rendered, _) = edit(
+            existing,
+            &assignments(&[("audio.cues.enabled", false.into())]),
+        )
+        .unwrap();
+        assert!(
+            rendered.contains("# audio settings, see docs"),
+            "the comment above the section must survive: {rendered}"
+        );
+        assert!(
+            rendered.contains("[audio]"),
+            "a section the user wrote must keep its header: {rendered}"
+        );
+        assert!(rendered.contains("[audio.cues]"), "{rendered}");
     }
 
     #[test]

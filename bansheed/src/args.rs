@@ -15,12 +15,12 @@ pub enum CommandType {
     Stop,
     /// Download required models locally
     Setup,
-    /// Checks the health of the running daemon
-    Status,
-    /// Diagnose setup problems and report fixes
-    Doctor,
-    /// Lists what still blocks recording, as the running daemon sees it
-    Readiness,
+    /// Reports what Banshee is doing and what stops it working
+    Status {
+        /// Print the daemon's raw reply instead of the checklist
+        #[clap(long)]
+        json: bool,
+    },
     /// List the microphones Banshee can record from
     Devices,
     /// Change a setting in config.toml

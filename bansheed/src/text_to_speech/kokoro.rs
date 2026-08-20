@@ -210,7 +210,7 @@ impl KokoroEngine {
         if oov.is_none() {
             tracing::info!(
                 "espeak-ng not found; unknown words will be spelled out. \
-                 Install espeak-ng for better pronunciation (run 'banshee doctor')."
+                 Install espeak-ng for better pronunciation (run 'banshee status')."
             );
         }
 

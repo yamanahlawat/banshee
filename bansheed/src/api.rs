@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use banshee_common::{
     BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION,
-    BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_READINESS, BANSHEE_RECORD_START,
-    BANSHEE_RECORD_STOP, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
+    BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP,
+    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -305,30 +305,27 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 "current": daemon_state.audio_device(),
             }),
         ),
-        BANSHEE_READINESS => {
+        BANSHEE_STATUS => {
             let blockers = readiness::blockers(daemon_state);
             JsonRpcResponse::success(
                 request.id,
-                serde_json::json!({ "ready": blockers.is_empty(), "blockers": blockers }),
+                serde_json::json!({
+                    "running": true,
+                    "version": daemon_state.version(),
+                    "stt_model": daemon_state.stt_model(),
+                    "vad_model": daemon_state.vad_model(),
+                    "audio_device": daemon_state.audio_device(),
+                    "recording": daemon_state.is_recording(),
+                    "speaking": daemon_state.speech().is_speaking(),
+                    "uptime_seconds": &daemon_state.uptime().as_secs(),
+                    "vad_threshold": daemon_state.vad_threshold(),
+                    "history_enabled": daemon_state.db_connection().is_some(),
+                    // Stated, so no client invents a narrower definition of ready
+                    "ready": blockers.is_empty(),
+                    "blockers": blockers,
+                }),
             )
         }
-        BANSHEE_STATUS => JsonRpcResponse::success(
-            request.id,
-            serde_json::json!({
-                "running": true,
-                "version": daemon_state.version(),
-                "stt_model": daemon_state.stt_model(),
-                "vad_model": daemon_state.vad_model(),
-                "audio_device": daemon_state.audio_device(),
-                "recording": daemon_state.is_recording(),
-                // null when recording works, so one field cannot contradict another
-                "recording_error": daemon_state.recording_error().map(|e| e.to_string()),
-                "speaking": daemon_state.speech().is_speaking(),
-                "uptime_seconds": &daemon_state.uptime().as_secs(),
-                "vad_threshold": daemon_state.vad_threshold(),
-                "history_enabled": daemon_state.db_connection().is_some(),
-            }),
-        ),
         BANSHEE_HISTORY => {
             if let Some(db) = daemon_state.db_connection() {
                 match db.lock() {

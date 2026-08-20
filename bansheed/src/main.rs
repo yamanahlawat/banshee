@@ -4,7 +4,6 @@ mod audio;
 mod config;
 mod daemon;
 mod dictation;
-mod doctor;
 mod history;
 mod hotkey;
 mod models;
@@ -14,6 +13,7 @@ mod service;
 mod settings;
 mod speech_to_text;
 mod state;
+mod status;
 mod text_to_speech;
 
 use std::sync::{Arc, Mutex};
@@ -84,6 +84,18 @@ fn device_labels(device: &banshee_common::InputDevice, current: Option<&str>) ->
     labels.join(", ")
 }
 
+/// An answer meant for the caller reads on its own; anything else is this
+/// process failing to ask.
+fn fail(error: &BansheeError) -> ! {
+    match error {
+        BansheeError::Rejected(_) | BansheeError::Rpc { .. } => {
+            eprintln!("{}", error.rpc_message())
+        }
+        other => eprintln!("Could not reach the daemon: {other}"),
+    }
+    std::process::exit(1)
+}
+
 fn daemon_is_down(error: &BansheeError) -> bool {
     match error {
         BansheeError::Io(io) => matches!(
@@ -103,7 +115,7 @@ fn daemon_is_down(error: &BansheeError) -> bool {
 async fn main() -> Result<(), BansheeError> {
     let cli = Cli::parse();
     // Unwrapped only by the arms that read it: RPC works without a parseable
-    // config, and doctor diagnoses a broken one
+    // config, and the checklist diagnoses a broken one
     let config_result =
         Config::load().inspect_err(|error| eprintln!("Failed to load config: {error}"));
 
@@ -153,7 +165,7 @@ async fn main() -> Result<(), BansheeError> {
                             "The daemon is up: speak, status, and history still work. \
                              Recording, dictation, and ask_user do not."
                         );
-                        eprintln!("Run `banshee doctor` for the fix.");
+                        eprintln!("Run `banshee status` for the fix.");
                         daemon_state.set_recording_error(error);
                         None
                     }
@@ -178,45 +190,6 @@ async fn main() -> Result<(), BansheeError> {
                 Err(error) if daemon_is_down(&error) => println!("Daemon is not running."),
                 Err(error) => eprintln!("Failed to stop daemon: {error}"),
             }
-        }
-        CommandType::Doctor => {
-            if !doctor::run(config_result).await {
-                std::process::exit(1);
-            }
-        }
-        CommandType::Readiness => {
-            let reply =
-                match utils::call_daemon(banshee_common::BANSHEE_READINESS, serde_json::json!({}))
-                    .await
-                {
-                    Ok(reply) => reply,
-                    Err(error) if daemon_is_down(&error) => {
-                        eprintln!("The daemon is not running. Start it with: banshee start");
-                        std::process::exit(1);
-                    }
-                    Err(error) => {
-                        eprintln!("Could not reach the daemon: {error}");
-                        std::process::exit(1);
-                    }
-                };
-            let listed = reply.get("blockers").cloned().unwrap_or_default();
-            let blockers: Vec<banshee_common::Blocker> = match serde_json::from_value(listed) {
-                Ok(blockers) => blockers,
-                Err(error) => {
-                    eprintln!("The daemon sent a reply this build cannot read: {error}");
-                    std::process::exit(1);
-                }
-            };
-            if blockers.is_empty() {
-                println!("Nothing is blocking recording.");
-                return Ok(());
-            }
-            for blocker in &blockers {
-                println!();
-                println!("{} is not ready: {}.", blocker.name, blocker.consequence);
-                println!("  Fix: {}", blocker.fix);
-            }
-            std::process::exit(1);
         }
         CommandType::Devices => {
             let (devices, current) = match utils::call_daemon(
@@ -246,8 +219,7 @@ async fn main() -> Result<(), BansheeError> {
                 // You need the names before you can start a daemon on the right one
                 Err(error) if daemon_is_down(&error) => (audio::input_devices(), None),
                 Err(error) => {
-                    eprintln!("{}", error.rpc_message());
-                    std::process::exit(1);
+                    fail(&error);
                 }
             };
 
@@ -255,11 +227,17 @@ async fn main() -> Result<(), BansheeError> {
                 println!("No microphones found.");
                 return Ok(());
             }
-            let width = devices.iter().map(|d| d.name.len()).max().unwrap_or(0);
+            let width = devices
+                .iter()
+                .map(|d| d.name.chars().count())
+                .max()
+                .unwrap_or(0);
             for device in &devices {
-                match device_labels(device, current.as_deref()) {
-                    labels if labels.is_empty() => println!("  {}", device.name),
-                    labels => println!("  {:width$}  {labels}", device.name),
+                let labels = device_labels(device, current.as_deref());
+                if labels.is_empty() {
+                    println!("  {}", device.name);
+                } else {
+                    println!("  {:width$}  {labels}", device.name);
                 }
             }
             println!();
@@ -285,7 +263,8 @@ async fn main() -> Result<(), BansheeError> {
                     .is_some_and(|keys| !keys.is_empty())),
                 // A daemon that is down never writes, so the CLI can be the one writer
                 Err(error) if daemon_is_down(&error) => {
-                    settings::configure(None, &assignments, true).map(|_| true)
+                    settings::configure(None, &assignments, true)
+                        .map(|outcome| !outcome.restart_required.is_empty())
                 }
                 Err(error) => Err(error),
             };
@@ -298,8 +277,7 @@ async fn main() -> Result<(), BansheeError> {
                     }
                 }
                 Err(error) => {
-                    eprintln!("{}", error.rpc_message());
-                    std::process::exit(1);
+                    fail(&error);
                 }
             }
         }
@@ -313,13 +291,29 @@ async fn main() -> Result<(), BansheeError> {
             )
             .await;
         }
-        CommandType::Status => {
-            match utils::call_daemon(banshee_common::BANSHEE_STATUS, serde_json::json!({})).await {
-                Ok(result) => println!(
-                    "{}",
-                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
-                ),
-                Err(error) => eprintln!("Failed to get daemon status: {error}"),
+        CommandType::Status { json } => {
+            if !json {
+                if !status::run(config_result).await {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            // The same probe the checklist uses, so the two halves of one command
+            // cannot disagree about whether a daemon is up
+            let reply = match status::probe_daemon().await {
+                status::Daemon::Running { status, .. } | status::Daemon::Legacy(status) => status,
+                _ => {
+                    println!("{}", serde_json::json!({"running": false}));
+                    std::process::exit(1);
+                }
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&reply).unwrap_or_else(|_| reply.to_string())
+            );
+            // The checklist's verdict, and absent leaves the code alone
+            if reply.get("ready") == Some(&serde_json::Value::Bool(false)) {
+                std::process::exit(1);
             }
         }
         CommandType::Listen => {
