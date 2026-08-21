@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "banshee"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "banshee-common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "dirs",
  "serde",
