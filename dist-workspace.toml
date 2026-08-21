@@ -12,9 +12,10 @@ installers = ["shell", "homebrew"]
 # Dropped: x86_64-apple-darwin (ort ships no Intel-mac prebuilt) and Windows (UDS
 # unported). aarch64 Linux builds natively on ubuntu-*-arm. Source install covers
 # the rest.
-targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 # Homebrew formula is published to this tap repo (must exist on GitHub).
 tap = "yamanahlawat/homebrew-banshee"
+# Publish jobs to run in CI
 publish-jobs = ["homebrew"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
@@ -22,6 +23,11 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+# TCC keys Accessibility and Input Monitoring to the code signature, and an
+# ad-hoc one changes every build, so users would re-grant on every upgrade.
+# The certificate is self-signed and lives in repo secrets; no Apple membership
+# is involved. Note `dist init` rewrites the comments in this file.
+macos-sign = true
 
 # Pin Linux runners to 24.04; the ORT prebuilt needs glibc 2.38+.
 [dist.github-custom-runners]

@@ -24,7 +24,11 @@ pub enum CommandType {
     /// List the microphones Banshee can record from
     Devices,
     /// Follow what the daemon is doing, one line per change
-    Watch,
+    Watch {
+        /// Emit Waybar custom-module JSON instead of one word
+        #[clap(long)]
+        waybar: bool,
+    },
     /// List the text-to-speech voices that are on disk
     Voices,
     /// Change a setting in config.toml

@@ -5,9 +5,23 @@ All notable changes to Banshee are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-21
+
+**Upgrading from 0.7.0 or earlier asks for macOS permissions once more.** This is
+the first signed release. Earlier builds carried an ad-hoc signature, which
+changes on every build, so macOS could not tell one version from the next and
+dropped the grants each time. Releases are now signed with a stable certificate,
+so grant Accessibility, Input Monitoring and Microphone one final time and no
+later upgrade will ask again.
 
 ### Added
+
+- `banshee watch --waybar` emits one Waybar custom-module object per line, so
+  the microphone state can sit in a Wayland bar with no tray and no GUI. `text`
+  shows, `alt` selects a `format-icons` entry, and `class` is the CSS hook.
+  Readiness is left out on purpose: the daemon answers it once at connect and
+  never pushes it, so a bar showing it would go stale. Set `restart-interval`
+  in Waybar, since the command exits when the daemon stops.
 
 - **Model downloads resume.** Each file streams to `<name>.part` and is renamed
   into place only when complete, so an interrupted download is never mistaken
@@ -374,6 +388,7 @@ First public release. macOS only for now; Windows and Linux support is planned.
   reported back through `banshee status`.
 
 [Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.7.0...HEAD
+[0.8.0]: https://github.com/yamanahlawat/banshee/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/yamanahlawat/banshee/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/yamanahlawat/banshee/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/yamanahlawat/banshee/compare/v0.5.0...v0.6.0
