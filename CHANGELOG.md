@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Model downloads resume.** Each file streams to `<name>.part` and is renamed
+  into place only when complete, so an interrupted download is never mistaken
+  for a model and the next `banshee setup` continues from where it stopped
+  instead of starting over. Downloads also no longer hold the whole file in
+  memory, which was 547 MB for the balanced preset.
+
+- `banshee.download_models` starts a download in the daemon, and subscribing to
+  `downloads` follows it: `banshee.download_progress` reports `model`, `bytes`,
+  `total`, and a state of `downloading`, `done`, or `failed`. One download runs
+  at a time, and a second call is refused, because the partial file that makes
+  resume possible cannot have two writers. `banshee setup` asks a running daemon
+  rather than downloading alongside it.
+
+- `banshee.subscribe` takes `{"events": ["state", "downloads"]}`, defaulting to
+  `["state"]`, so a client that only wants one kind is not sent the other.
+
 - `banshee voices` lists the text-to-speech voices on disk and marks the one the
   daemon loaded, so `tts.voice` can be set to a name you have seen. Only
   downloaded voices are listed, so every name it prints works today. Nothing is
@@ -40,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not accept is refused, and the message lists the ones it does.
   `vad_threshold` takes effect at once; everything else needs a restart, and the
   command says so.
+
+### Fixed
+
+- `banshee setup` reported success after a failed download. The result was
+  discarded, so a network error printed nothing and exited 0, and the only
+  symptom was `banshee status` still reporting the model missing.
 
 ### Changed
 

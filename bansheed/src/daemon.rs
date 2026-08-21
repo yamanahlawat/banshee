@@ -1,6 +1,7 @@
 use banshee_common::utils::get_socket_path;
 use banshee_common::{
-    BANSHEE_STATE_CHANGED, BANSHEE_SUBSCRIBE, JsonRpcNotification, JsonRpcRequest,
+    BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_STATE_CHANGED, BANSHEE_SUBSCRIBE, DownloadProgress,
+    JsonRpcNotification, JsonRpcRequest,
 };
 use std::fs;
 use std::io;
@@ -12,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::api::{dispatch, live_state};
 use crate::state::DaemonState;
@@ -81,6 +82,56 @@ async fn write_line(
     writer.write_all(line.as_bytes()).await
 }
 
+struct Events {
+    state: bool,
+    downloads: bool,
+}
+
+// What a `subscribe` call asked to be sent. Absent means state alone, so a
+// client that names no events is unaffected by there being more than one
+fn requested_events(params: Option<&serde_json::Value>) -> Events {
+    let Some(named) = params
+        .and_then(|params| params.get("events"))
+        .and_then(|events| events.as_array())
+    else {
+        return Events {
+            state: true,
+            downloads: false,
+        };
+    };
+    let asked = |name: &str| named.iter().any(|event| event.as_str() == Some(name));
+    Events {
+        state: asked(banshee_common::EVENT_STATE),
+        downloads: asked(banshee_common::EVENT_DOWNLOADS),
+    }
+}
+
+// Sends one connection every download notification the daemon raises
+async fn push_downloads(
+    writer: Arc<Mutex<OwnedWriteHalf>>,
+    mut downloads: broadcast::Receiver<DownloadProgress>,
+) {
+    loop {
+        let progress = match downloads.recv().await {
+            Ok(progress) => progress,
+            // Too far behind to catch up on the ones it missed, but the ones
+            // still coming are worth having
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => break,
+        };
+        let Ok(params) = serde_json::to_value(progress) else {
+            continue;
+        };
+        let notification = JsonRpcNotification::new(BANSHEE_DOWNLOAD_PROGRESS, params);
+        if write_line(&mut *writer.lock().await, &notification)
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 /// Sends one connection its state changes, until the daemon stops or the client
 /// does. `told` is the state that client already has, which a push is judged
 /// against: an unchanged one is not worth a line.
@@ -123,7 +174,10 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
     // dispatch for minutes while it holds the microphone open
     let writer = Arc::new(Mutex::new(writer));
     let mut lines = BufReader::new(reader).lines();
-    let mut pushing: Option<tokio::task::JoinHandle<()>> = None;
+    // The handles are the bookkeeping: a later subscribe opens only the kind
+    // that has none
+    let mut pushing_state: Option<tokio::task::JoinHandle<()>> = None;
+    let mut pushing_downloads: Option<tokio::task::JoinHandle<()>> = None;
 
     while let Ok(Some(line)) = lines.next_line().await {
         let Ok(request) = serde_json::from_str::<JsonRpcRequest>(&line) else {
@@ -131,13 +185,23 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         };
         // Taken before the reply is built: a change landing in between then
         // costs a duplicate push, where the other order would lose it
-        let subscribing = (request.method == BANSHEE_SUBSCRIBE && pushing.is_none()).then(|| {
+        let asked = if request.method == BANSHEE_SUBSCRIBE {
+            requested_events(request.params.as_ref())
+        } else {
+            Events {
+                state: false,
+                downloads: false,
+            }
+        };
+        let opening_state = (asked.state && pushing_state.is_none()).then(|| {
             (
                 state.subscribe_recording(),
                 state.speech().subscribe_speaking(),
                 live_state(&state),
             )
         });
+        let opening_downloads =
+            (asked.downloads && pushing_downloads.is_none()).then(|| state.subscribe_downloads());
 
         let response = dispatch(request, &state).await;
         if write_line(&mut *writer.lock().await, &response)
@@ -147,8 +211,8 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             break;
         }
 
-        if let Some((recording, speaking, told)) = subscribing {
-            pushing = Some(tokio::spawn(push_changes(
+        if let Some((recording, speaking, told)) = opening_state {
+            pushing_state = Some(tokio::spawn(push_changes(
                 Arc::clone(&state),
                 Arc::clone(&writer),
                 recording,
@@ -156,10 +220,13 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
                 told,
             )));
         }
+        if let Some(downloads) = opening_downloads {
+            pushing_downloads = Some(tokio::spawn(push_downloads(Arc::clone(&writer), downloads)));
+        }
     }
 
-    if let Some(pushing) = pushing {
-        pushing.abort();
+    for task in [pushing_state, pushing_downloads].into_iter().flatten() {
+        task.abort();
     }
 }
 
@@ -239,6 +306,36 @@ mod tests {
         (lines, writer, reply)
     }
 
+    #[test]
+    fn a_subscribe_with_no_events_still_means_state() {
+        let asked = requested_events(None);
+        assert!(asked.state);
+        assert!(!asked.downloads);
+
+        let empty = serde_json::json!({});
+        assert!(requested_events(Some(&empty)).state);
+    }
+
+    #[test]
+    fn each_event_is_asked_for_by_name() {
+        let downloads = serde_json::json!({"events": ["downloads"]});
+        let asked = requested_events(Some(&downloads));
+        assert!(asked.downloads);
+        assert!(!asked.state, "asking for one must not deliver the other");
+
+        let both = serde_json::json!({"events": ["state", "downloads"]});
+        let asked = requested_events(Some(&both));
+        assert!(asked.state && asked.downloads);
+    }
+
+    #[test]
+    fn an_unknown_event_is_passed_over() {
+        let params = serde_json::json!({"events": ["state", "telemetry"]});
+        let asked = requested_events(Some(&params));
+        assert!(asked.state);
+        assert!(!asked.downloads);
+    }
+
     // The select loop is the only thing that writes a notification, so no unit
     // test reaches it. These drive a real socket.
     #[tokio::test]
@@ -280,6 +377,38 @@ mod tests {
             "the call that opened the microphone is still parked, so this is a push"
         );
         assert_eq!(pushed["params"]["recording"], true);
+    }
+
+    #[tokio::test]
+    async fn a_later_subscribe_adds_what_the_first_did_not() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        let (mut lines, mut writer) = connect(&state);
+
+        send(
+            &mut writer,
+            BANSHEE_SUBSCRIBE,
+            serde_json::json!({"events": ["state"]}),
+        )
+        .await;
+        next_message(&mut lines).await;
+        send(
+            &mut writer,
+            BANSHEE_SUBSCRIBE,
+            serde_json::json!({"events": ["downloads"]}),
+        )
+        .await;
+        next_message(&mut lines).await;
+
+        state.report_download(DownloadProgress {
+            model: "silero_vad.onnx".to_string(),
+            bytes: 1,
+            total: Some(2),
+            state: banshee_common::DownloadState::Downloading,
+        });
+
+        let pushed = next_message(&mut lines).await;
+        assert_eq!(pushed["method"], BANSHEE_DOWNLOAD_PROGRESS);
+        assert_eq!(pushed["params"]["model"], "silero_vad.onnx");
     }
 
     #[tokio::test]

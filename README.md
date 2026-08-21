@@ -93,6 +93,17 @@ banshee setup
 Files that already exist are skipped, so re-running `banshee setup` after
 changing the STT preset or the TTS voice only downloads what's missing.
 
+**An interrupted download resumes.** Each file is written to `<name>.part` and
+renamed into place only once it is complete, so a half-finished file is never
+mistaken for a model. Press Ctrl-C, lose your connection, or run out of disk,
+and the next `banshee setup` continues from where it stopped rather than
+starting the download again.
+
+If a daemon is already running, `banshee setup` asks it to do the downloading
+and prints what it reports. One process writes at a time, which is what lets the
+partial file be picked up again. Any client can start the same download over
+`banshee.download_models` and follow it by subscribing to `downloads`.
+
 **Optional: better pronunciation.** Install `espeak-ng` and Banshee pronounces
 unfamiliar words (tech jargon, proper nouns) instead of spelling them out. On
 macOS it's `brew install espeak-ng`; `banshee status` prints the command for

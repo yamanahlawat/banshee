@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use args::{Cli, CommandType};
 use banshee_common::{
-    KokoroTTSConfig, SileroVADConfig, WhisperConfig,
+    SileroVADConfig, WhisperConfig,
     error::BansheeError,
     utils::{self, get_db_path},
 };
@@ -73,6 +73,70 @@ fn start_recording(
         command_receiver,
     );
     Ok((stream, thread))
+}
+
+fn show_progress(progress: banshee_common::DownloadProgress) {
+    // Rewritten in place, so a percentage does not scroll the screen away
+    let ending = if progress.state == banshee_common::DownloadState::Downloading {
+        '\r'
+    } else {
+        '\n'
+    };
+    print!("{}{ending}", progress_line(&progress));
+    let _ = std::io::stdout().flush();
+}
+
+// One writer at a time: the `.part` file that makes resume possible has a
+// stable name, so this process must not fetch alongside a daemon already doing it
+async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(), BansheeError> {
+    let reply = utils::call_daemon(
+        banshee_common::BANSHEE_DOWNLOAD_MODELS,
+        serde_json::json!({}),
+    )
+    .await?;
+    // The counter terminates because only one download runs at a time, so every
+    // notification on this connection belongs to the batch just asked for
+    let mut pending: usize = reply
+        .get("downloading")
+        .and_then(|names| names.as_array())
+        .map_or(0, Vec::len);
+    if pending == 0 {
+        println!("Everything is already downloaded.");
+        return Ok(());
+    }
+
+    while pending > 0 {
+        let Some(params) = progress
+            .next_of(banshee_common::BANSHEE_DOWNLOAD_PROGRESS)
+            .await?
+        else {
+            return Err(BansheeError::Other(
+                "The daemon stopped before the download finished".to_string(),
+            ));
+        };
+        let reported: banshee_common::DownloadProgress = serde_json::from_value(params)?;
+        let done = reported.state != banshee_common::DownloadState::Downloading;
+        show_progress(reported);
+        if done {
+            pending -= 1;
+        }
+    }
+    Ok(())
+}
+
+fn progress_line(progress: &banshee_common::DownloadProgress) -> String {
+    use banshee_common::DownloadState;
+    match progress.state {
+        DownloadState::Done => format!("{} downloaded", progress.model),
+        DownloadState::Failed => format!("{} failed", progress.model),
+        DownloadState::Downloading => {
+            match models::download::percent(progress.bytes, progress.total) {
+                Some(done) => format!("{} {done}%", progress.model),
+                // No Content-Length, so there is no bar to draw: count what arrived
+                None => format!("{} {} MB", progress.model, progress.bytes / 1_048_576),
+            }
+        }
+    }
 }
 
 // Defaulting to empty would report a newer daemon's reply as nothing at all
@@ -182,6 +246,7 @@ async fn main() -> Result<(), BansheeError> {
             if let Some(voice) = live_voice {
                 daemon_state.set_tts_voice(voice);
             }
+            daemon_state.set_wanted_downloads(models::download::wanted(&config));
 
             // Held as one binding, and past daemon::run: dropping the stream
             // stops capture, and the thread is the only thing left to join
@@ -299,14 +364,15 @@ async fn main() -> Result<(), BansheeError> {
             println!("Speak with one by: banshee config set tts.voice \"<name>\"");
         }
         CommandType::Watch => {
-            let (mut state, mut changes) = match utils::Subscription::open().await {
-                Ok(subscription) => subscription,
-                Err(error) if daemon_is_down(&error) => {
-                    eprintln!("Daemon is not running.");
-                    std::process::exit(1);
-                }
-                Err(error) => fail(&error),
-            };
+            let (mut state, mut changes) =
+                match utils::Subscription::open(&[banshee_common::EVENT_STATE]).await {
+                    Ok(subscription) => subscription,
+                    Err(error) if daemon_is_down(&error) => {
+                        eprintln!("Daemon is not running.");
+                        std::process::exit(1);
+                    }
+                    Err(error) => fail(&error),
+                };
             let mut shown = "";
             loop {
                 let word = state_word(&state);
@@ -320,15 +386,17 @@ async fn main() -> Result<(), BansheeError> {
                         return Ok(());
                     }
                 }
-                state = match changes.next_change().await {
-                    Ok(Some(change)) => change,
-                    Ok(None) => break,
+                state = match changes.next_of(banshee_common::BANSHEE_STATE_CHANGED).await {
+                    Ok(Some(params)) => params,
+                    // There is no other clean end, so a supervisor can read the
+                    // exit code as one
+                    Ok(None) => {
+                        eprintln!("The daemon closed the connection.");
+                        std::process::exit(1);
+                    }
                     Err(error) => fail(&error),
                 };
             }
-            // There is no other clean end, so a supervisor can read this as one
-            eprintln!("The daemon closed the connection.");
-            std::process::exit(1);
         }
         CommandType::Config {
             action: args::ConfigAction::Set { key, value },
@@ -369,14 +437,36 @@ async fn main() -> Result<(), BansheeError> {
             }
         }
         CommandType::Setup => {
-            let config = config_result?;
-            println!("Download models offline!");
-            let _ = models::download::download_models(
-                WhisperConfig::new(config.stt.preset.model_name()),
-                SileroVADConfig::new(VAD_MODEL),
-                KokoroTTSConfig::new(&config.tts.voice),
-            )
-            .await;
+            // Subscribed before the download is asked for, so the first
+            // notifications are not lost in the gap
+            let watching = utils::Subscription::open(&[banshee_common::EVENT_DOWNLOADS]).await;
+            match watching {
+                Ok((_, subscription)) => {
+                    if let Err(error) = follow_daemon_download(subscription).await {
+                        fail(&error);
+                    }
+                }
+                Err(error) if daemon_is_down(&error) => {
+                    // No daemon, so this process is the only writer there can be
+                    let config = config_result?;
+                    let dir = models::download::models_dir()?;
+                    let missing =
+                        models::download::still_missing(&models::download::wanted(&config), &dir);
+                    if missing.is_empty() {
+                        println!("Everything is already downloaded.");
+                        return Ok(());
+                    }
+                    // Not `fail`: nothing was asked of a daemon here, so the
+                    // reason stands on its own
+                    if let Err(error) =
+                        models::download::download_all(&dir, &missing, &mut show_progress).await
+                    {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
+                }
+                Err(error) => fail(&error),
+            }
         }
         CommandType::Status { json } => {
             if !json {

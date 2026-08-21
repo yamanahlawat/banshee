@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use banshee_common::{
-    BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION,
-    BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES, BANSHEE_RECORD_START,
-    BANSHEE_RECORD_STOP, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
-    BANSHEE_SUBSCRIBE,
+    BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_DOWNLOAD_MODELS,
+    BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES,
+    BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP,
+    BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -329,6 +329,49 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 }
             }
         }
+        BANSHEE_DOWNLOAD_MODELS => {
+            let dir = match crate::models::download::models_dir() {
+                Ok(dir) => dir,
+                Err(error) => {
+                    return JsonRpcResponse::error(request.id, -32603, error.to_string());
+                }
+            };
+            let missing =
+                crate::models::download::still_missing(daemon_state.wanted_downloads(), &dir);
+            if missing.is_empty() {
+                return JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({"ok": true, "downloading": []}),
+                );
+            }
+            let Some(slot) = daemon_state.start_downloading() else {
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32005,
+                    "A download is already running.",
+                );
+            };
+
+            let names: Vec<&str> = missing.iter().map(|d| d.name.as_str()).collect();
+            let response = JsonRpcResponse::success(
+                request.id,
+                serde_json::json!({"ok": true, "downloading": names}),
+            );
+
+            let state = Arc::clone(daemon_state);
+            let dir = dir.clone();
+            let slot = slot;
+            tokio::spawn(async move {
+                let mut report = |progress| state.report_download(progress);
+                if let Err(error) =
+                    crate::models::download::download_all(&dir, &missing, &mut report).await
+                {
+                    eprintln!("Download failed: {error}");
+                }
+                drop(slot);
+            });
+            response
+        }
         BANSHEE_LIST_VOICES => JsonRpcResponse::success(
             request.id,
             serde_json::json!({
@@ -599,7 +642,18 @@ mod tests {
         };
 
         assert_eq!(polled["recording"], true, "the fixture must discriminate");
-        assert_eq!(polled, subscribed);
+        // Every key but the clock, which advances between the two calls
+        assert!(polled["uptime_seconds"].is_number());
+        for (key, value) in polled.as_object().expect("an object") {
+            if key != "uptime_seconds" {
+                assert_eq!(value, &subscribed[key], "'{key}' differs");
+            }
+        }
+        assert_eq!(
+            polled.as_object().map(serde_json::Map::len),
+            subscribed.as_object().map(serde_json::Map::len),
+            "one payload carries a key the other does not"
+        );
     }
 
     // Two spellings of one fact drift apart; this is what notices.
@@ -636,6 +690,46 @@ mod tests {
             panic!("expected success response");
         };
         assert_eq!(result["current"], "af_sky");
+    }
+
+    #[tokio::test]
+    async fn a_second_download_is_refused_while_one_runs() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        // Something to fetch, or the call answers "nothing to do" and never
+        // reaches the slot at all
+        state.set_wanted_downloads(vec![crate::models::download::Download {
+            name: "no-such-model-9f3a.bin".to_string(),
+            url: "https://example.invalid/no-such-model-9f3a.bin".to_string(),
+        }]);
+        let slot = state.start_downloading().expect("the slot starts free");
+
+        let JsonRpcResponse::Error { error, .. } =
+            dispatch(request(BANSHEE_DOWNLOAD_MODELS, None), &state).await
+        else {
+            panic!("expected the busy error");
+        };
+        assert_eq!(error.code, -32005);
+
+        drop(slot);
+        assert!(state.start_downloading().is_some(), "the slot came back");
+    }
+
+    #[tokio::test]
+    async fn downloading_nothing_reports_an_empty_list() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        state.set_wanted_downloads(Vec::new());
+
+        let JsonRpcResponse::Success { result, .. } =
+            dispatch(request(BANSHEE_DOWNLOAD_MODELS, None), &state).await
+        else {
+            panic!("expected success response");
+        };
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["downloading"].as_array().unwrap().len(), 0);
+        assert!(
+            state.start_downloading().is_some(),
+            "a call that fetched nothing must not hold the slot"
+        );
     }
 
     #[tokio::test]

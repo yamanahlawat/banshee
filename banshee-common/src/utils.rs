@@ -44,21 +44,27 @@ pub struct Subscription {
 
 impl Subscription {
     /// The daemon's state at the moment of subscribing, and the connection that
-    /// carries every later change to it. The two differ in width: the opening
+    /// carries every later notification. The two differ in width: the opening
     /// state is the whole `banshee.status` reply, and a change carries only the
     /// fields that move on their own. Re-read `banshee.status` for the rest.
-    pub async fn open() -> Result<(Value, Self), BansheeError> {
-        let (state, lines) = call(BANSHEE_SUBSCRIBE, serde_json::json!({})).await?;
+    pub async fn open(events: &[&str]) -> Result<(Value, Self), BansheeError> {
+        let (state, lines) =
+            call(BANSHEE_SUBSCRIBE, serde_json::json!({ "events": events })).await?;
         Ok((state, Subscription { lines }))
     }
 
-    /// The next change, or `None` once the daemon closes the connection.
-    pub async fn next_change(&mut self) -> Result<Option<Value>, BansheeError> {
-        let Some(line) = self.lines.next_line().await? else {
-            return Ok(None);
-        };
-        let pushed: JsonRpcNotification = serde_json::from_str(&line)?;
-        Ok(Some(pushed.params))
+    /// The next notification of one method, skipping the kinds this caller did
+    /// not ask about. `None` once the daemon closes the connection.
+    pub async fn next_of(&mut self, method: &str) -> Result<Option<Value>, BansheeError> {
+        loop {
+            let Some(line) = self.lines.next_line().await? else {
+                return Ok(None);
+            };
+            let pushed: JsonRpcNotification = serde_json::from_str(&line)?;
+            if pushed.method == method {
+                return Ok(Some(pushed.params));
+            }
+        }
     }
 }
 

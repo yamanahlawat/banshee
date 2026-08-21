@@ -7,13 +7,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::watch;
+use banshee_common::DownloadProgress;
+use tokio::sync::{broadcast, watch};
 
 use crate::audio::cues::Cue;
 use crate::config::BargeInMode;
 use crate::text_to_speech::SpeechPlayer;
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
+
+// One file emits at most 101 notifications, so a subscriber has to fall a whole
+// file behind before the channel starts dropping any of them
+const DOWNLOAD_BACKLOG: usize = 128;
 
 // A start with no stop otherwise holds the mic for the life of the daemon.
 // The ring only holds RING_SECS, so nothing is lost by capping it there.
@@ -106,6 +111,22 @@ impl RecordingError {
     }
 }
 
+/// The right to download, held for as long as one runs.
+// Released on drop rather than by hand: a panic in the download would otherwise
+// strand the slot for the life of the daemon. A stable `.part` name is what
+// makes resume possible, so it cannot be shared by two writers.
+pub struct DownloadSlot {
+    state: Arc<DaemonState>,
+}
+
+impl Drop for DownloadSlot {
+    fn drop(&mut self) {
+        self.state
+            .downloading
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub struct DaemonState {
     version: &'static str,
     stt_model: &'static str,
@@ -113,6 +134,7 @@ pub struct DaemonState {
     vad_threshold: AtomicU32,
     audio_device: OnceLock<String>,
     tts_voice: OnceLock<String>,
+    wanted_downloads: OnceLock<Vec<crate::models::download::Download>>,
     // Why recording is off, when it is. Set once at startup, because the mic
     // and the models are opened there and neither returns without a restart.
     recording_error: OnceLock<RecordingError>,
@@ -122,6 +144,8 @@ pub struct DaemonState {
     transcriptions: Mutex<TranscriptionRing>,
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
+    downloads: broadcast::Sender<DownloadProgress>,
+    downloading: AtomicBool,
     speech: Arc<SpeechPlayer>,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
     cues: std::sync::mpsc::Sender<Cue>,
@@ -154,6 +178,7 @@ impl DaemonState {
             vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
             audio_device: OnceLock::new(),
             tts_voice: OnceLock::new(),
+            wanted_downloads: OnceLock::new(),
             recording_error: OnceLock::new(),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
@@ -164,6 +189,8 @@ impl DaemonState {
             }),
             latest_transcription_id: watch::channel(0).0,
             recording_active: watch::channel(false).0,
+            downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
+            downloading: AtomicBool::new(false),
             speech: Arc::new(speech),
             commands,
             cues,
@@ -333,6 +360,30 @@ impl DaemonState {
         self.recording_active.subscribe()
     }
 
+    pub fn subscribe_downloads(&self) -> broadcast::Receiver<DownloadProgress> {
+        self.downloads.subscribe()
+    }
+
+    pub fn report_download(&self, progress: DownloadProgress) {
+        let _ = self.downloads.send(progress);
+    }
+
+    /// Takes the download slot, or `None` when one is already running. The
+    /// slot is released when the returned value drops.
+    pub fn start_downloading(self: &Arc<Self>) -> Option<DownloadSlot> {
+        self.downloading
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+            .then(|| DownloadSlot {
+                state: Arc::clone(self),
+            })
+    }
+
     pub fn is_recording(&self) -> bool {
         self.recording_mode() != RecordingMode::Idle
     }
@@ -385,6 +436,16 @@ impl DaemonState {
 
     pub fn set_tts_voice(&self, voice: String) {
         let _ = self.tts_voice.set(voice);
+    }
+
+    /// Every file this daemon's own config needs. Set before the socket
+    /// accepts, so a caller never sees it unset.
+    pub fn wanted_downloads(&self) -> &[crate::models::download::Download] {
+        self.wanted_downloads.get().map_or(&[], Vec::as_slice)
+    }
+
+    pub fn set_wanted_downloads(&self, wanted: Vec<crate::models::download::Download>) {
+        let _ = self.wanted_downloads.set(wanted);
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {

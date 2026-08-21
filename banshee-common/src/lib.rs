@@ -95,9 +95,33 @@ pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
 pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
 pub const BANSHEE_LIST_VOICES: &str = "banshee.list_voices";
+pub const BANSHEE_DOWNLOAD_MODELS: &str = "banshee.download_models";
 pub const BANSHEE_SUBSCRIBE: &str = "banshee.subscribe";
 // Sent by the daemon, not called by a client
 pub const BANSHEE_STATE_CHANGED: &str = "banshee.state_changed";
+pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
+
+// What `banshee.subscribe` accepts in `events`, spelled once for both sides
+pub const EVENT_STATE: &str = "state";
+pub const EVENT_DOWNLOADS: &str = "downloads";
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadState {
+    Downloading,
+    Done,
+    Failed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DownloadProgress {
+    pub model: String,
+    pub bytes: u64,
+    /// None when the server sends no `Content-Length`, so a client shows a
+    /// spinner rather than a bar.
+    pub total: Option<u64>,
+    pub state: DownloadState,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InputDevice {
@@ -181,7 +205,10 @@ impl KokoroTTSConfig {
 
 #[cfg(test)]
 mod wire_tests {
-    use super::{BANSHEE_STATE_CHANGED, Blocker, BlockerKind, InputDevice, JsonRpcNotification};
+    use super::{
+        BANSHEE_STATE_CHANGED, Blocker, BlockerKind, DownloadProgress, DownloadState, InputDevice,
+        JsonRpcNotification,
+    };
 
     #[test]
     fn a_blocker_serializes_with_the_keys_clients_read() {
@@ -226,6 +253,39 @@ mod wire_tests {
                 "params": {"recording": true, "speaking": false},
             })
         );
+    }
+
+    #[test]
+    fn progress_serializes_with_the_keys_clients_read() {
+        let wire = serde_json::to_value(DownloadProgress {
+            model: "ggml-base.en.bin".to_string(),
+            bytes: 512,
+            total: Some(1024),
+            state: DownloadState::Downloading,
+        })
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "model": "ggml-base.en.bin",
+                "bytes": 512,
+                "total": 1024,
+                "state": "downloading",
+            })
+        );
+    }
+
+    #[test]
+    fn an_unknown_total_stays_on_the_wire_as_null() {
+        let wire = serde_json::to_value(DownloadProgress {
+            model: "af_sky.bin".to_string(),
+            bytes: 7,
+            total: None,
+            state: DownloadState::Failed,
+        })
+        .unwrap();
+        assert!(wire["total"].is_null(), "{wire}");
+        assert_eq!(wire["state"], "failed");
     }
 
     #[test]
