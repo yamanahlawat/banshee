@@ -14,8 +14,11 @@ mod settings;
 mod speech_to_text;
 mod state;
 mod status;
+#[cfg(test)]
+mod test_support;
 mod text_to_speech;
 
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use args::{Cli, CommandType};
@@ -70,6 +73,19 @@ fn start_recording(
         command_receiver,
     );
     Ok((stream, thread))
+}
+
+/// One word for the two booleans a subscriber is sent. The microphone outranks
+/// the speaker: it is what the user is waiting on.
+fn state_word(state: &serde_json::Value) -> &'static str {
+    let flag = |name| state.get(name).and_then(serde_json::Value::as_bool) == Some(true);
+    if flag("recording") {
+        "recording"
+    } else if flag("speaking") {
+        "speaking"
+    } else {
+        "idle"
+    }
 }
 
 /// A device can be both, and hiding either label would read as its being false.
@@ -242,6 +258,38 @@ async fn main() -> Result<(), BansheeError> {
             }
             println!();
             println!("Record from one with: banshee config set audio.input_device \"<name>\"");
+        }
+        CommandType::Watch => {
+            let (mut state, mut changes) = match utils::Subscription::open().await {
+                Ok(subscription) => subscription,
+                Err(error) if daemon_is_down(&error) => {
+                    eprintln!("Daemon is not running.");
+                    std::process::exit(1);
+                }
+                Err(error) => fail(&error),
+            };
+            let mut shown = "";
+            loop {
+                let word = state_word(&state);
+                // The daemon judges a change on the two booleans, and both can
+                // move without changing the one word they are printed as
+                if word != shown {
+                    shown = word;
+                    // `banshee watch | head` closes the pipe. That is the reader
+                    // having seen enough, not this command failing
+                    if writeln!(std::io::stdout(), "{word}").is_err() {
+                        return Ok(());
+                    }
+                }
+                state = match changes.next_change().await {
+                    Ok(Some(change)) => change,
+                    Ok(None) => break,
+                    Err(error) => fail(&error),
+                };
+            }
+            // There is no other clean end, so a supervisor can read this as one
+            eprintln!("The daemon closed the connection.");
+            std::process::exit(1);
         }
         CommandType::Config {
             action: args::ConfigAction::Set { key, value },
@@ -422,7 +470,25 @@ async fn main() -> Result<(), BansheeError> {
 
 #[cfg(test)]
 mod tests {
+    use super::state_word;
     use banshee_common::InputDevice;
+
+    #[test]
+    fn the_microphone_outranks_the_speaker_in_one_word() {
+        let state =
+            |recording, speaking| serde_json::json!({"recording": recording, "speaking": speaking});
+        assert_eq!(state_word(&state(false, false)), "idle");
+        assert_eq!(state_word(&state(true, false)), "recording");
+        assert_eq!(state_word(&state(false, true)), "speaking");
+        // Both at once, when barge-in is off: the mic is what the user waits on
+        assert_eq!(state_word(&state(true, true)), "recording");
+    }
+
+    // An older daemon says less than this build reads
+    #[test]
+    fn a_state_missing_its_fields_reads_as_idle() {
+        assert_eq!(state_word(&serde_json::json!({})), "idle");
+    }
 
     fn device(name: &str, default: bool) -> InputDevice {
         InputDevice {

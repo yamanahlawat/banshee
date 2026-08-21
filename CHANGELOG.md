@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `banshee watch` follows the daemon and prints one word per state change:
+  `idle`, `recording`, or `speaking`. The first line is the state at the moment
+  you connect, so nothing has to be guessed, and a state that did not move is
+  not printed again. Clients get the same channel over `banshee.subscribe`,
+  which answers with everything `banshee.status` reports and then pushes
+  `banshee.state_changed` notifications on that connection. The subscription
+  lives and dies with the connection, so there is nothing to unsubscribe. This
+  replaces asking `banshee.status` on a timer, which made an indicator lag the
+  microphone.
+
 - `banshee devices` lists the microphones and marks which one the daemon opened,
   so `audio.input_device` can be set to a name you have seen rather than one you
   guessed. The daemon answers the same question over

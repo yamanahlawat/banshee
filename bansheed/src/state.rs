@@ -120,6 +120,7 @@ pub struct DaemonState {
     db_connection: Option<Mutex<rusqlite::Connection>>,
     transcriptions: Mutex<TranscriptionRing>,
     latest_transcription_id: watch::Sender<u64>,
+    recording_active: watch::Sender<bool>,
     speech: Arc<SpeechPlayer>,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
     cues: std::sync::mpsc::Sender<Cue>,
@@ -160,6 +161,7 @@ impl DaemonState {
                 entries: VecDeque::with_capacity(TRANSCRIPTION_RING_CAPACITY),
             }),
             latest_transcription_id: watch::channel(0).0,
+            recording_active: watch::channel(false).0,
             speech: Arc::new(speech),
             commands,
             cues,
@@ -298,19 +300,35 @@ impl DaemonState {
     pub fn set_recording_mode(&self, mode: RecordingMode) {
         self.recording
             .store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+        self.publish_recording();
     }
 
     // Concurrent transitions race (RPC arm vs hotkey vs session end);
     // compare_exchange makes losing a race a no-op instead of a stuck mode
     pub fn try_transition(&self, from: RecordingMode, to: RecordingMode) -> bool {
-        self.recording
+        let moved = self
+            .recording
             .compare_exchange(
                 from as u8,
                 to as u8,
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
             )
-            .is_ok()
+            .is_ok();
+        if moved {
+            self.publish_recording();
+        }
+        moved
+    }
+
+    // Re-reads the atomic rather than deriving the bool from the mode just
+    // written: another thread may have moved on, and subscribers want now.
+    fn publish_recording(&self) {
+        self.recording_active.send_replace(self.is_recording());
+    }
+
+    pub fn subscribe_recording(&self) -> watch::Receiver<bool> {
+        self.recording_active.subscribe()
     }
 
     pub fn is_recording(&self) -> bool {
@@ -473,6 +491,33 @@ mod tests {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         assert!(!state.expire_stuck_recording());
         assert_eq!(state.recording_mode(), RecordingMode::Armed);
+    }
+
+    // Three writers move the mic: the hotkey and the record RPCs through
+    // try_transition, the consumer thread through a direct write.
+    #[test]
+    fn every_path_that_moves_the_mic_publishes_it() {
+        let (state, _requests) = test_state_with_commands();
+        let mut recording = state.subscribe_recording();
+        assert!(!*recording.borrow_and_update());
+
+        assert!(state.record_start(TranscribeTarget::Mailbox));
+        assert!(
+            recording.has_changed().unwrap(),
+            "record_start went unheard"
+        );
+        assert!(*recording.borrow_and_update());
+
+        state.record_stop();
+        assert!(recording.has_changed().unwrap(), "record_stop went unheard");
+        assert!(!*recording.borrow_and_update());
+
+        state.set_recording_mode(RecordingMode::Armed);
+        assert!(
+            recording.has_changed().unwrap(),
+            "a direct write went unheard"
+        );
+        assert!(*recording.borrow_and_update());
     }
 
     #[test]

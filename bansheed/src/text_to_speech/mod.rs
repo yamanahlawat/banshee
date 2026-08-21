@@ -137,8 +137,6 @@ impl SpeechPlayer {
         *self.speaking.borrow()
     }
 
-    // completion signal; first production caller is banshee.ask_user
-    #[allow(dead_code)]
     pub fn subscribe_speaking(&self) -> watch::Receiver<bool> {
         self.speaking.subscribe()
     }

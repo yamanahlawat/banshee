@@ -4,7 +4,7 @@ use std::time::Duration;
 use banshee_common::{
     BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION,
     BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP,
-    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
+    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -67,6 +67,36 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
         RecordingError::Model(_) => -32002,
     };
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
+}
+
+/// Everything `banshee.status` reports.
+pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
+    let blockers = readiness::blockers(daemon_state);
+    serde_json::json!({
+        "running": true,
+        "version": daemon_state.version(),
+        "stt_model": daemon_state.stt_model(),
+        "vad_model": daemon_state.vad_model(),
+        "audio_device": daemon_state.audio_device(),
+        "recording": daemon_state.is_recording(),
+        "speaking": daemon_state.speech().is_speaking(),
+        "uptime_seconds": daemon_state.uptime().as_secs(),
+        "vad_threshold": daemon_state.vad_threshold(),
+        "history_enabled": daemon_state.db_connection().is_some(),
+        // Stated, so no client invents a narrower definition of ready
+        "ready": blockers.is_empty(),
+        "blockers": blockers,
+    })
+}
+
+/// The `banshee.state_changed` params: what moves without a client touching it.
+/// `vad_threshold` moves at runtime too, but only when a `configure` call asks
+/// it to, and that call already answers.
+pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
+    serde_json::json!({
+        "recording": daemon_state.is_recording(),
+        "speaking": daemon_state.speech().is_speaking(),
+    })
 }
 
 pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
@@ -305,26 +335,11 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 "current": daemon_state.audio_device(),
             }),
         ),
-        BANSHEE_STATUS => {
-            let blockers = readiness::blockers(daemon_state);
-            JsonRpcResponse::success(
-                request.id,
-                serde_json::json!({
-                    "running": true,
-                    "version": daemon_state.version(),
-                    "stt_model": daemon_state.stt_model(),
-                    "vad_model": daemon_state.vad_model(),
-                    "audio_device": daemon_state.audio_device(),
-                    "recording": daemon_state.is_recording(),
-                    "speaking": daemon_state.speech().is_speaking(),
-                    "uptime_seconds": &daemon_state.uptime().as_secs(),
-                    "vad_threshold": daemon_state.vad_threshold(),
-                    "history_enabled": daemon_state.db_connection().is_some(),
-                    // Stated, so no client invents a narrower definition of ready
-                    "ready": blockers.is_empty(),
-                    "blockers": blockers,
-                }),
-            )
+        // Subscribing answers with the poll, so a client needs no first poll and
+        // cannot miss a change in the gap before the pushes start. `daemon.rs`
+        // owns the pushing itself, because only it holds the connection.
+        BANSHEE_STATUS | BANSHEE_SUBSCRIBE => {
+            JsonRpcResponse::success(request.id, status_payload(daemon_state))
         }
         BANSHEE_HISTORY => {
             if let Some(db) = daemon_state.db_connection() {
@@ -386,8 +401,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BargeInMode;
-    use crate::text_to_speech::{ActiveUtterance, SpeechPlayer, TtsBackend};
+    use crate::test_support::daemon_state as test_state;
 
     fn get_transcription_request(params: serde_json::Value) -> JsonRpcRequest {
         JsonRpcRequest {
@@ -396,36 +410,6 @@ mod tests {
             params: Some(params),
             id: Some(serde_json::json!(1)),
         }
-    }
-
-    // Silent backend so tests never spawn a real `say` process
-    struct NullBackend;
-    struct Done;
-    impl ActiveUtterance for Done {
-        fn is_finished(&mut self) -> bool {
-            true
-        }
-        fn stop(&mut self) {}
-    }
-    impl TtsBackend for NullBackend {
-        fn start(&self, _text: &str) -> std::io::Result<Box<dyn ActiveUtterance>> {
-            Ok(Box::new(Done))
-        }
-    }
-
-    // Pass a real sender only when the test reads the command receiver
-    fn test_state(commands: std::sync::mpsc::Sender<ConsumerCommand>) -> Arc<DaemonState> {
-        Arc::new(DaemonState::new(
-            "0.0.0",
-            "stt",
-            "vad",
-            0.5,
-            None,
-            SpeechPlayer::new(Box::new(NullBackend)),
-            commands,
-            std::sync::mpsc::channel().0,
-            BargeInMode::Stop,
-        ))
     }
 
     fn ask_user_request(params: serde_json::Value) -> JsonRpcRequest {
@@ -501,7 +485,7 @@ mod tests {
             .expect("shutdown was not signaled");
     }
 
-    fn record_request(method: &str, params: Option<serde_json::Value>) -> JsonRpcRequest {
+    fn request(method: &str, params: Option<serde_json::Value>) -> JsonRpcRequest {
         JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),
@@ -521,7 +505,7 @@ mod tests {
             let state = test_state(std::sync::mpsc::channel().0);
             state.set_recording_error(cause);
 
-            let start = record_request(BANSHEE_RECORD_START, None);
+            let start = request(BANSHEE_RECORD_START, None);
             let JsonRpcResponse::Error { error, .. } = dispatch(start, &state).await else {
                 panic!("expected error response");
             };
@@ -543,7 +527,7 @@ mod tests {
         let (commands, command_receiver) = std::sync::mpsc::channel();
         let state = test_state(commands);
 
-        let start = record_request(
+        let start = request(
             BANSHEE_RECORD_START,
             Some(serde_json::json!({"dictate": true})),
         );
@@ -553,14 +537,14 @@ mod tests {
         assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
         // A second start must be refused while recording
-        let again = record_request(BANSHEE_RECORD_START, None);
+        let again = request(BANSHEE_RECORD_START, None);
         let JsonRpcResponse::Error { error, .. } = dispatch(again, &state).await else {
             panic!("expected error response");
         };
         assert_eq!(error.code, -32004);
         assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
-        let stop = record_request(BANSHEE_RECORD_STOP, None);
+        let stop = request(BANSHEE_RECORD_STOP, None);
         let JsonRpcResponse::Success { .. } = dispatch(stop, &state).await else {
             panic!("expected success response");
         };
@@ -578,13 +562,51 @@ mod tests {
         let (commands, command_receiver) = std::sync::mpsc::channel();
         let state = test_state(commands);
 
-        let stop = record_request(BANSHEE_RECORD_STOP, None);
+        let stop = request(BANSHEE_RECORD_STOP, None);
         let JsonRpcResponse::Success { result, .. } = dispatch(stop, &state).await else {
             panic!("expected success response");
         };
         assert_eq!(result["ok"], true);
         assert_eq!(state.recording_mode(), RecordingMode::Idle);
         assert!(command_receiver.try_recv().is_err(), "no command expected");
+    }
+
+    // One payload, so a subscriber's first read and a poller's read cannot
+    // disagree about what the daemon reports.
+    #[tokio::test]
+    async fn subscribe_answers_with_the_status_payload() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        state.set_recording_mode(RecordingMode::PushToTalk);
+
+        let JsonRpcResponse::Success { result: polled, .. } =
+            dispatch(request(BANSHEE_STATUS, None), &state).await
+        else {
+            panic!("expected success response");
+        };
+        let JsonRpcResponse::Success {
+            result: subscribed, ..
+        } = dispatch(request(BANSHEE_SUBSCRIBE, None), &state).await
+        else {
+            panic!("expected success response");
+        };
+
+        assert_eq!(polled["recording"], true, "the fixture must discriminate");
+        assert_eq!(polled, subscribed);
+    }
+
+    // Two spellings of one fact drift apart; this is what notices.
+    #[test]
+    fn a_pushed_change_agrees_with_what_status_reports() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        state.set_recording_mode(RecordingMode::PushToTalk);
+
+        let status = status_payload(&state);
+        let live = live_state(&state);
+
+        assert_eq!(live["recording"], true, "the fixture must discriminate");
+        for key in live.as_object().expect("live_state is an object").keys() {
+            assert_eq!(live[key], status[key], "'{key}' disagrees with status");
+        }
     }
 
     #[tokio::test]

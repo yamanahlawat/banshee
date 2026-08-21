@@ -63,6 +63,25 @@ impl JsonRpcResponse {
     }
 }
 
+/// A message the daemon sends unprompted. JSON-RPC marks these by the absent
+/// `id`, and expects no reply.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JsonRpcNotification {
+    pub jsonrpc: Version,
+    pub method: String,
+    pub params: Value,
+}
+
+impl JsonRpcNotification {
+    pub fn new(method: &str, params: Value) -> Self {
+        Self {
+            jsonrpc: Version::V2,
+            method: method.to_string(),
+            params,
+        }
+    }
+}
+
 pub const BANSHEE_SPEAK: &str = "banshee.speak";
 pub const BANSHEE_STOP_SPEAKING: &str = "banshee.stop_speaking";
 pub const BANSHEE_STATUS: &str = "banshee.status";
@@ -75,6 +94,9 @@ pub const BANSHEE_STOP: &str = "banshee.stop";
 pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
 pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
+pub const BANSHEE_SUBSCRIBE: &str = "banshee.subscribe";
+// Sent by the daemon, not called by a client
+pub const BANSHEE_STATE_CHANGED: &str = "banshee.state_changed";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InputDevice {
@@ -158,7 +180,7 @@ impl KokoroTTSConfig {
 
 #[cfg(test)]
 mod wire_tests {
-    use super::{Blocker, BlockerKind, InputDevice};
+    use super::{BANSHEE_STATE_CHANGED, Blocker, BlockerKind, InputDevice, JsonRpcNotification};
 
     #[test]
     fn a_blocker_serializes_with_the_keys_clients_read() {
@@ -186,6 +208,23 @@ mod wire_tests {
     fn the_model_kind_is_snake_case_too() {
         let wire = serde_json::to_value(BlockerKind::Model).unwrap();
         assert_eq!(wire, serde_json::json!("model"));
+    }
+
+    #[test]
+    fn a_notification_carries_no_id() {
+        let wire = serde_json::to_value(JsonRpcNotification::new(
+            BANSHEE_STATE_CHANGED,
+            serde_json::json!({"recording": true, "speaking": false}),
+        ))
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "banshee.state_changed",
+                "params": {"recording": true, "speaking": false},
+            })
+        );
     }
 
     #[test]

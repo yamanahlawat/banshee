@@ -23,6 +23,8 @@ pub enum CommandType {
     },
     /// List the microphones Banshee can record from
     Devices,
+    /// Follow what the daemon is doing, one line per change
+    Watch,
     /// Change a setting in config.toml
     Config {
         #[clap(subcommand)]

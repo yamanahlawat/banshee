@@ -187,6 +187,7 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee status`                | What Banshee is doing, and what stops it working           |
 | `banshee status --json`         | The same as machine-readable state and blockers            |
 | `banshee devices`               | List the microphones, and mark the one in use              |
+| `banshee watch`                 | Follow what the daemon is doing, one line per change       |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee serve`                 | Run the daemon in the foreground                           |
 | `banshee service uninstall`     | Remove the start-at-login launch agent                     |
@@ -292,6 +293,32 @@ when a daemon has actually opened that device.
 `vocabulary` biases Whisper toward project jargon and proper nouns it would
 otherwise misspell; it is read once at startup, so restart the daemon after
 changing it.
+
+### Following what the daemon is doing
+
+`banshee watch` prints one word per state change and keeps running:
+
+```
+$ banshee watch
+idle
+recording
+idle
+speaking
+idle
+```
+
+The first line is the state at the moment you connect, so a script never has to
+guess. The daemon pushes the rest as they happen, rather than the command asking
+again on a timer. A state that did not move is not printed twice.
+
+The command runs until the daemon stops, and then exits non-zero, so a
+supervisor can restart it. For a single answer rather than a stream, ask
+`banshee status`: a reader that stops early only ends `banshee watch` at the
+next change, which on a quiet daemon may be a long wait.
+
+The same channel is open to any client over `banshee.subscribe`, which answers
+with everything `banshee.status` reports and then sends
+`banshee.state_changed` notifications on that connection.
 
 ### Changing a setting without an editor
 
