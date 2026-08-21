@@ -1,6 +1,6 @@
 pub mod cues;
 pub mod utils;
-use banshee_common::error::BansheeError;
+use banshee_common::{InputDevice, error::BansheeError};
 
 use std::sync::Arc;
 
@@ -20,10 +20,32 @@ pub const RING_SECS: usize = 120; // 120 seconds of audio in the ring buffer
 // The name [audio] input_device carries to mean "whatever the OS is set to"
 pub const DEFAULT_INPUT_DEVICE: &str = "default";
 
+/// Names only: opening each device to prove it records would steal the
+/// microphone from a running daemon.
+pub fn input_devices() -> Vec<InputDevice> {
+    let host = cpal::default_host();
+    let preferred = host
+        .default_input_device()
+        .and_then(|device| device.description().ok())
+        .map(|description| description.name().to_string());
+    let Ok(devices) = host.input_devices() else {
+        return Vec::new();
+    };
+    devices
+        .filter_map(|device| device.description().ok())
+        .map(|description| {
+            let name = description.name().to_string();
+            InputDevice {
+                default: Some(&name) == preferred.as_ref(),
+                name,
+            }
+        })
+        .collect()
+}
+
 // Substring match, so a config can say "yeti" not "Blue Yeti Stereo Microphone"
 fn find_input_device(host: &cpal::Host, wanted: &str) -> Result<cpal::Device, BansheeError> {
     let wanted_lower = wanted.to_lowercase();
-    let mut available = Vec::new();
     for device in host
         .input_devices()
         .map_err(|e| BansheeError::Other(e.to_string()))?
@@ -31,12 +53,11 @@ fn find_input_device(host: &cpal::Host, wanted: &str) -> Result<cpal::Device, Ba
         let Ok(description) = device.description() else {
             continue;
         };
-        let name = description.name().to_string();
-        if name.to_lowercase().contains(&wanted_lower) {
+        if description.name().to_lowercase().contains(&wanted_lower) {
             return Ok(device);
         }
-        available.push(name);
     }
+    let available: Vec<String> = input_devices().into_iter().map(|d| d.name).collect();
     let available = if available.is_empty() {
         "none".to_string()
     } else {
@@ -48,9 +69,8 @@ fn find_input_device(host: &cpal::Host, wanted: &str) -> Result<cpal::Device, Ba
 }
 
 // Anything but "default" is explicit and must fail loudly rather than fall back
-// to the wrong microphone. Shared with doctor so it sees what capture opens.
+// to the wrong microphone. Shared with the checklist, so it sees what capture opens.
 pub fn resolve_input_device(input_device: &str) -> Result<cpal::Device, BansheeError> {
-    // Ask cpal to give us the default OS audio API
     let host = cpal::default_host();
     if input_device == DEFAULT_INPUT_DEVICE {
         host.default_input_device()
@@ -60,10 +80,8 @@ pub fn resolve_input_device(input_device: &str) -> Result<cpal::Device, BansheeE
     }
 }
 
-// The device, its name, and the config capture opens it with. Doctor probes
-// through the same three, so a green check and a working daemon cannot drift.
-// The name stays optional: a device that will not describe itself is unknown,
-// not "default", and `banshee status` reports the mic it really has.
+// The checklist opens through this too, so a green tick and a working daemon
+// cannot drift. A device that will not describe itself stays unknown.
 fn open_input(
     input_device: &str,
 ) -> Result<(cpal::Device, Option<String>, cpal::SupportedStreamConfig), BansheeError> {
@@ -75,8 +93,7 @@ fn open_input(
     Ok((device, name, config))
 }
 
-// Opens the stream and starts it. Shared so the probe fails wherever capture
-// would, down to the sample format and the error text.
+// Shared so the probe fails wherever capture would, down to the sample format.
 fn build_and_play<D>(
     device: &cpal::Device,
     config: cpal::SupportedStreamConfig,
@@ -99,9 +116,8 @@ where
     Ok(stream)
 }
 
-/// Open capture the way the daemon does, then drop it. Enumeration is not
-/// proof: a device can list itself and still fail `hw_params` when opened, so
-/// the only honest check is to try. Returns the microphone it opened.
+/// Enumeration is not proof: a device can list itself and still fail
+/// `hw_params` when opened. Returns the microphone it opened.
 pub fn probe_input_device(input_device: &str) -> Result<Option<String>, BansheeError> {
     let (device, name, config) = open_input(input_device)?;
     // Dropped at once: opening and starting it is the whole proof
@@ -121,7 +137,6 @@ pub fn start_audio_capture(
     let sample_rate = config.sample_rate();
     let channels = config.channels();
 
-    // Create a ring buffer with 120 sec capacity
     let ring_capacity = sample_rate as usize * RING_SECS;
     let (mut producer, consumer) = HeapRb::<f32>::new(ring_capacity).split();
 
@@ -141,8 +156,7 @@ pub fn start_audio_capture(
         }
     })?;
 
-    // Only a stream that opened and played proves the mic works, so status
-    // never names a device beside a recording_error that says it failed
+    // Set after play() succeeds, so status never names a mic that failed to open
     if let Some(name) = name {
         println!("Using microphone {name}");
         daemon_state.set_audio_device(name);

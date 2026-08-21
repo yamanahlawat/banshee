@@ -194,8 +194,10 @@ impl KokoroEngine {
             BansheeError::Other(format!("Failed to read voice file {voice_path:?}: {e}"))
         })?;
         let voice: Vec<f32> = voice_bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
             .collect();
         if voice.is_empty() || !voice.len().is_multiple_of(STYLE_DIM) {
             return Err(BansheeError::Other(format!(
@@ -210,7 +212,7 @@ impl KokoroEngine {
         if oov.is_none() {
             tracing::info!(
                 "espeak-ng not found; unknown words will be spelled out. \
-                 Install espeak-ng for better pronunciation (run 'banshee doctor')."
+                 Install espeak-ng for better pronunciation (run 'banshee status')."
             );
         }
 

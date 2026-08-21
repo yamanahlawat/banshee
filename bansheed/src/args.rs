@@ -15,10 +15,23 @@ pub enum CommandType {
     Stop,
     /// Download required models locally
     Setup,
-    /// Checks the health of the running daemon
-    Status,
-    /// Diagnose setup problems and report fixes
-    Doctor,
+    /// Reports what Banshee is doing and what stops it working
+    Status {
+        /// Print the daemon's raw reply instead of the checklist
+        #[clap(long)]
+        json: bool,
+    },
+    /// List the microphones Banshee can record from
+    Devices,
+    /// Follow what the daemon is doing, one line per change
+    Watch,
+    /// List the text-to-speech voices that are on disk
+    Voices,
+    /// Change a setting in config.toml
+    Config {
+        #[clap(subcommand)]
+        action: ConfigAction,
+    },
     /// Gets latest transcription
     Listen,
     /// Start or stop push-to-talk recording (for compositor keybinds and scripts)
@@ -38,6 +51,16 @@ pub enum CommandType {
     Service {
         #[clap(subcommand)]
         action: ServiceAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// Write one setting, as in: banshee config set stt.language de
+    Set {
+        /// A section and a field from config.toml, as in stt.vad_threshold
+        key: String,
+        value: String,
     },
 }
 

@@ -22,7 +22,8 @@ mod launchd {
         dirs::home_dir().ok_or_else(|| BansheeError::Other("home dir not found".into()))
     }
 
-    pub fn install() -> Result<(), BansheeError> {
+    /// Returns where this platform keeps the daemon's log.
+    pub fn install() -> Result<String, BansheeError> {
         let home = home_dir()?;
         let plist = agent_path(&home);
         let binary = std::env::current_exe()?;
@@ -80,10 +81,7 @@ mod launchd {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
         result?;
-        println!("Started {LABEL}: the daemon runs at login and restarts on crash.");
-        println!("Logs: {}", log.display());
-        println!("A daemon already running in a terminal keeps the socket; stop it to hand over.");
-        Ok(())
+        Ok(log.display().to_string())
     }
 
     pub fn uninstall() -> Result<(), BansheeError> {
@@ -136,7 +134,7 @@ mod systemd {
         Some(dirs::config_dir()?.join("systemd/user").join(UNIT))
     }
 
-    pub fn install() -> Result<(), BansheeError> {
+    pub fn install() -> Result<String, BansheeError> {
         let unit = service_file_path()
             .ok_or_else(|| BansheeError::Other("config dir not found".into()))?;
         let binary = std::env::current_exe()?;
@@ -166,10 +164,7 @@ WantedBy=default.target
         systemctl(&["enable", UNIT])?;
         // restart, not start: a reinstall must hand over to the new binary
         systemctl(&["restart", UNIT])?;
-        println!("Started {UNIT}: the daemon runs at login and restarts on crash.");
-        println!("Logs: journalctl --user -u banshee -f");
-        println!("A daemon already running in a terminal keeps the socket; stop it to hand over.");
-        Ok(())
+        Ok("journalctl --user -u banshee -f".to_string())
     }
 
     pub fn uninstall() -> Result<(), BansheeError> {
@@ -219,7 +214,7 @@ mod unsupported {
         None
     }
 
-    pub fn install() -> Result<(), BansheeError> {
+    pub fn install() -> Result<String, BansheeError> {
         Err(unsupported())
     }
 

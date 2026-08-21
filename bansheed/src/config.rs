@@ -1,12 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use banshee_common::{error::BansheeError, utils::get_config_path};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 // Every section denies unknown fields: TOML binds a key to whatever table
 // precedes it, so a misplaced setting parses fine and silently does nothing.
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
     pub always_on: bool,
@@ -22,14 +22,14 @@ impl Default for DaemonConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize, Debug, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum HotkeyMode {
     Hold,
     Toggle,
 }
 
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize, Debug, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum BargeInMode {
     Stop,
@@ -37,7 +37,7 @@ pub enum BargeInMode {
     None,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioCuesConfig {
     pub enabled: bool,
@@ -59,7 +59,7 @@ impl Default for AudioCuesConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
     pub input_device: String,
@@ -81,7 +81,7 @@ impl Default for AudioConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum STTPreset {
     Fast,
@@ -90,6 +90,8 @@ pub enum STTPreset {
 }
 
 impl STTPreset {
+    pub const ALL: [STTPreset; 3] = [STTPreset::Fast, STTPreset::Balanced, STTPreset::Quality];
+
     pub fn model_name(&self) -> &'static str {
         match self {
             STTPreset::Fast => "ggml-base.en.bin",
@@ -99,12 +101,24 @@ impl STTPreset {
     }
 }
 
-#[derive(Deserialize)]
+// Out of range no probability ever matches, so VAD stops firing with no error
+fn probability<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let value = f32::deserialize(deserializer)?;
+    if !(0.0..=1.0).contains(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "must be between 0.0 and 1.0, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct STTConfig {
     pub preset: STTPreset,
     pub language: String,
     pub translate: bool,
+    #[serde(deserialize_with = "probability")]
     pub vad_threshold: f32,
     pub vocabulary: Vec<String>,
     // Trailing silence that ends an armed-listening answer
@@ -124,14 +138,14 @@ impl Default for STTConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum TTSFallback {
     System,
     None,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct TTSConfig {
     pub voice: String,
@@ -149,7 +163,7 @@ impl Default for TTSConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     pub level: String,
@@ -163,7 +177,7 @@ impl Default for LoggingConfig {
     }
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub daemon: DaemonConfig,
@@ -174,15 +188,24 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load() -> Result<Self, BansheeError> {
-        let config_path = get_config_path()
-            .ok_or_else(|| BansheeError::Other("Failed to get config path".to_string()))?;
-        if !config_path.exists() {
-            return Ok(Config::default());
+    pub fn path() -> Result<PathBuf, BansheeError> {
+        get_config_path()
+            .ok_or_else(|| BansheeError::Other("Failed to get config path".to_string()))
+    }
+
+    /// Empty rather than an error when the file is absent, because no file means
+    /// every default.
+    pub fn read(path: &Path) -> Result<String, BansheeError> {
+        if path.exists() {
+            Ok(std::fs::read_to_string(path)?)
+        } else {
+            Ok(String::new())
         }
-        let config_content = std::fs::read_to_string(&config_path)?;
-        let config: Config = toml::from_str(&config_content)?;
-        Ok(config)
+    }
+
+    pub fn load() -> Result<Self, BansheeError> {
+        let contents = Config::read(&Config::path()?)?;
+        Ok(toml::from_str(&contents)?)
     }
 }
 
@@ -190,16 +213,13 @@ impl Config {
 mod tests {
     use super::*;
 
-    // `hotkey_mode` under `[tts]` is valid TOML: it used to parse and leave
-    // `audio.hotkey_mode` at its default with nothing reported.
+    // `hotkey_mode` under `[tts]` is valid TOML, so only `deny_unknown_fields`
+    // stands between a misplaced key and a silent default
     #[test]
     fn a_key_under_the_wrong_section_is_rejected() {
         let misplaced = "[tts]\nvoice = \"af_sky\"\nhotkey_mode = \"toggle\"\n";
-        // Matched rather than expect_err: Config has no Debug
-        let error = match toml::from_str::<Config>(misplaced) {
-            Ok(_) => panic!("a key in the wrong section must not parse"),
-            Err(error) => error,
-        };
+        let error = toml::from_str::<Config>(misplaced)
+            .expect_err("a key in the wrong section must not parse");
         assert!(
             error.to_string().contains("hotkey_mode"),
             "the error must name the offending key: {error}"

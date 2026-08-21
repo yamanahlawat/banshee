@@ -50,7 +50,7 @@ with has no Wayland path, so under Wayland `F5` does nothing. Bind
 `banshee record start` / `stop` in your compositor instead (see
 [Wayland](#wayland)). Dictation typing does work under Wayland if `wtype` or
 `ydotool` is installed. The agent voice (`speak_status`, `ask_user`) is
-unaffected either way, and `banshee doctor` reports what your session supports.
+unaffected either way, and `banshee status` reports what your session supports.
 
 ### Homebrew
 
@@ -93,9 +93,20 @@ banshee setup
 Files that already exist are skipped, so re-running `banshee setup` after
 changing the STT preset or the TTS voice only downloads what's missing.
 
+**An interrupted download resumes.** Each file is written to `<name>.part` and
+renamed into place only once it is complete, so a half-finished file is never
+mistaken for a model. Press Ctrl-C, lose your connection, or run out of disk,
+and the next `banshee setup` continues from where it stopped rather than
+starting the download again.
+
+If a daemon is already running, `banshee setup` asks it to do the downloading
+and prints what it reports. One process writes at a time, which is what lets the
+partial file be picked up again. Any client can start the same download over
+`banshee.download_models` and follow it by subscribing to `downloads`.
+
 **Optional: better pronunciation.** Install `espeak-ng` and Banshee pronounces
 unfamiliar words (tech jargon, proper nouns) instead of spelling them out. On
-macOS it's `brew install espeak-ng`; `banshee doctor` prints the command for
+macOS it's `brew install espeak-ng`; `banshee status` prints the command for
 your system.
 
 **2. Grant macOS permissions.** Banshee needs three of them, otherwise it
@@ -112,7 +123,7 @@ restart the daemon (permissions don't apply to an already-running process).
 **3. Check your setup:**
 
 ```bash
-banshee doctor
+banshee status
 ```
 
 It reports on models, config, microphone, permissions, and daemon health, and
@@ -175,7 +186,7 @@ Typing the transcription into the focused app needs **`wtype`** (wlroots
 compositors such as Hyprland and Sway) or **`ydotool`** (anywhere, but it needs
 its own daemon and uinput access). Without one of them, dictation has no way to
 type and reports an error; the transcription is still kept in
-`banshee history`. `banshee doctor` tells you which one it found.
+`banshee history`. `banshee status` tells you which one it found.
 
 The CLI commands all talk to the running daemon over its socket:
 
@@ -184,8 +195,12 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee start`                 | Start the daemon, now and at every login                   |
 | `banshee stop`                  | Stop the running daemon                                    |
 | `banshee setup`                 | Download the required models                               |
-| `banshee status`                | Show daemon health and state                               |
-| `banshee doctor`                | Diagnose setup problems and report fixes                   |
+| `banshee status`                | What Banshee is doing, and what stops it working           |
+| `banshee status --json`         | The same as machine-readable state and blockers            |
+| `banshee devices`               | List the microphones, and mark the one in use              |
+| `banshee watch`                 | Follow what the daemon is doing, one line per change       |
+| `banshee voices`                | List the speech voices on disk, and mark the one in use    |
+| `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee serve`                 | Run the daemon in the foreground                           |
 | `banshee service uninstall`     | Remove the start-at-login launch agent                     |
 | `banshee listen`                | Print recent transcriptions                                |
@@ -274,10 +289,98 @@ follow whatever the OS is set to. If the name matches nothing, the daemon
 refuses to start and lists the devices it did find, rather than quietly
 recording from the wrong microphone.
 
-You can also change `vad_threshold` at runtime through the `banshee.configure`
-RPC, no restart needed. `vocabulary` biases Whisper toward project jargon and
-proper nouns it would otherwise misspell; it is read once at startup, so
-restart the daemon after changing it.
+`banshee devices` shows the names to choose from:
+
+```
+$ banshee devices
+  Blue Yeti               system default, in use
+  BlackHole 2ch
+  MacBook Pro Microphone
+```
+
+It reads the microphones fresh each time, so unplugging one changes the list.
+The command works whether or not the daemon is running; `in use` only appears
+when a daemon has actually opened that device.
+
+`vocabulary` biases Whisper toward project jargon and proper nouns it would
+otherwise misspell; it is read once at startup, so restart the daemon after
+changing it.
+
+### Choosing a voice
+
+`banshee voices` lists the voices on disk and marks the one the daemon loaded:
+
+```
+$ banshee voices
+  af_heart
+  af_sky    in use
+  am_adam
+  am_santa
+
+Speak with one by: banshee config set tts.voice "<name>"
+```
+
+It lists only what is downloaded, so every name it prints can be spoken with
+today. Nothing is marked in use when Kokoro did not load: the system fallback
+speaks in whatever voice macOS is set to, which Banshee did not choose and does
+not report. The voice is read once at startup, so a change needs a restart.
+
+### Following what the daemon is doing
+
+`banshee watch` prints one word per state change and keeps running:
+
+```
+$ banshee watch
+idle
+recording
+idle
+speaking
+idle
+```
+
+The first line is the state at the moment you connect, so a script never has to
+guess. The daemon pushes the rest as they happen, rather than the command asking
+again on a timer. A state that did not move is not printed twice.
+
+The command runs until the daemon stops, and then exits non-zero, so a
+supervisor can restart it. For a single answer rather than a stream, ask
+`banshee status`: a reader that stops early only ends `banshee watch` at the
+next change, which on a quiet daemon may be a long wait.
+
+The same channel is open to any client over `banshee.subscribe`, which answers
+with everything `banshee.status` reports and then sends
+`banshee.state_changed` notifications on that connection.
+
+### Changing a setting without an editor
+
+`banshee config set` writes one key and keeps your comments and layout:
+
+```bash
+banshee config set stt.language de
+banshee config set stt.vad_threshold 0.7
+banshee config set stt.vocabulary '["tokio", "clippy"]'
+banshee config set audio.cues.enabled false
+```
+
+The key is the section and the field, as they appear in the file. A number, a
+`true`, or a `[list]` is read as that type; anything else is read as text. Quote
+twice to force text, as in `banshee config set audio.input_device '"12"'`.
+
+A value that the field does not accept is refused, and the message lists the
+ones it does:
+
+```
+$ banshee config set audio.hotkey_mode sideways
+TOML parse error at line 5, column 15
+  |
+5 | hotkey_mode = "sideways"
+  |               ^^^^^^^^^^
+unknown variant `sideways`, expected `hold` or `toggle`
+```
+
+`vad_threshold` takes effect immediately. Everything else is read once at
+startup, so the command tells you to restart. This works whether or not the
+daemon is running.
 
 `endpoint_silence_ms` is how long you can go quiet mid-answer before Banshee
 decides you're done. The default is deliberately generous so that thinking out
@@ -301,7 +404,7 @@ the daemon.
 
 ## Troubleshooting
 
-Start with `banshee doctor`; it catches most setup problems and tells you the
+Start with `banshee status`; it catches most setup problems and tells you the
 fix. Beyond that:
 
 - **The microphone looks dead: you record, and nothing ever comes back.**

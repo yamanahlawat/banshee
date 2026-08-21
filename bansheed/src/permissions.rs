@@ -1,19 +1,19 @@
-// macOS gates the hotkey behind two TCC grants, and each one applies only to
-// processes that started after it landed. No equivalent elsewhere, so this
-// whole surface is a no-op on other platforms.
+// A TCC grant applies only to processes started after it lands, so the daemon
+// has to restart to pick one up. No equivalent outside macOS.
 
-/// What macOS reports for a grant it has been asked about.
+use banshee_common::Blocker;
+#[cfg(target_os = "macos")]
+use banshee_common::BlockerKind;
+
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, PartialEq)]
 pub enum Access {
     Granted,
     Denied,
-    /// Never decided. The first event tap turns this into granted or denied.
+    /// Never asked. The first event tap turns this into granted or denied.
     Undetermined,
 }
 
-/// A permission the hotkey needs. Both are silent when missing, so each one
-/// carries what breaks, how to fix it, and the pane that grants it.
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 pub enum Grant {
@@ -23,8 +23,6 @@ pub enum Grant {
 
 #[cfg(target_os = "macos")]
 impl Grant {
-    /// Every grant the daemon needs. One list, so a check and a prompt cannot
-    /// disagree about what "permitted" means.
     pub const REQUIRED: [Grant; 2] = [Grant::Accessibility, Grant::InputMonitoring];
 
     pub fn name(self) -> &'static str {
@@ -34,7 +32,14 @@ impl Grant {
         }
     }
 
-    /// What the user loses while it is missing.
+    /// Stable across renames of `name`, so a client can switch on it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Grant::Accessibility => "accessibility",
+            Grant::InputMonitoring => "input_monitoring",
+        }
+    }
+
     pub fn consequence(self) -> &'static str {
         match self {
             Grant::Accessibility => "dictation cannot type and the hotkey stays inert",
@@ -86,8 +91,7 @@ impl Grant {
         }
     }
 
-    /// Opens the pane that grants it, rather than describing where it lives.
-    /// The anchors are the `revealElementKeyName` values macOS publishes in
+    /// Anchors are the `revealElementKeyName` values macOS publishes in
     /// `Security.prefPane/Contents/Resources/PrivacyTCCServices.plist`.
     pub fn open_settings(self) {
         let anchor = match self {
@@ -109,15 +113,32 @@ impl Grant {
     }
 }
 
-/// Names every missing grant and opens the pane for the first one, so someone
-/// who never opens a terminal still lands on the switch that has to be flipped.
-/// Only macOS gates the hotkey this way, so elsewhere there is nothing to say.
-pub fn guide_missing() {
+pub fn blockers() -> Vec<Blocker> {
+    #[cfg(target_os = "macos")]
+    {
+        Grant::missing()
+            .into_iter()
+            .map(|grant| Blocker {
+                kind: BlockerKind::Permission,
+                id: grant.id().to_string(),
+                name: grant.name().to_string(),
+                consequence: grant.consequence().to_string(),
+                fix: grant.fix().to_string(),
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+/// Names what is missing and opens the pane for the first one. True when a
+/// grant is missing.
+pub fn guide_missing() -> bool {
     #[cfg(target_os = "macos")]
     {
         let missing = Grant::missing();
         let Some(first) = missing.first() else {
-            return;
+            return false;
         };
         println!();
         for grant in &missing {
@@ -129,22 +150,21 @@ pub fn guide_missing() {
         );
         println!("The daemon restarts itself as each one lands.");
         first.open_settings();
+        true
     }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
-/// Exit once a missing grant lands, so the supervisor restarts us with it.
-/// launchd re-runs on nonzero exit (`KeepAlive`/`SuccessfulExit`) and so does
-/// systemd (`Restart=on-failure`), and the next start reclaims the stale
-/// socket. The event tap is built once at startup, so a grant that arrives
-/// later does nothing until the process comes back. Only macOS gates the hotkey
-/// this way, so elsewhere there is nothing to wait for.
+/// Exit once a missing grant lands, so the supervisor restarts us with it:
+/// launchd re-runs on nonzero exit (`KeepAlive`/`SuccessfulExit`), systemd on
+/// `Restart=on-failure`.
 pub fn restart_when_granted() {
     #[cfg(target_os = "macos")]
     {
         use std::thread;
         use std::time::Duration;
 
-        // How often we look for a grant that landed while we were running.
         const POLL: Duration = Duration::from_secs(2);
 
         let waiting = Grant::missing().len();
@@ -152,8 +172,7 @@ pub fn restart_when_granted() {
             return;
         }
         tracing::warn!("a hotkey permission is missing; the hotkey is inert until it lands");
-        // Restart as soon as any one lands, not once they all have: each grant
-        // buys back its own feature, and the next start re-arms for the rest
+        // Any one landing is worth a restart: each grant buys back its own feature
         thread::spawn(move || {
             loop {
                 thread::sleep(POLL);

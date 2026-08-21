@@ -5,6 +5,92 @@ All notable changes to Banshee are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Model downloads resume.** Each file streams to `<name>.part` and is renamed
+  into place only when complete, so an interrupted download is never mistaken
+  for a model and the next `banshee setup` continues from where it stopped
+  instead of starting over. Downloads also no longer hold the whole file in
+  memory, which was 547 MB for the balanced preset.
+
+- `banshee.download_models` starts a download in the daemon, and subscribing to
+  `downloads` follows it: `banshee.download_progress` reports `model`, `bytes`,
+  `total`, and a state of `downloading`, `done`, or `failed`. One download runs
+  at a time, and a second call is refused, because the partial file that makes
+  resume possible cannot have two writers. `banshee setup` asks a running daemon
+  rather than downloading alongside it.
+
+- `banshee.subscribe` takes `{"events": ["state", "downloads"]}`, defaulting to
+  `["state"]`, so a client that only wants one kind is not sent the other.
+
+- `banshee voices` lists the text-to-speech voices on disk and marks the one the
+  daemon loaded, so `tts.voice` can be set to a name you have seen. Only
+  downloaded voices are listed, so every name it prints works today. Nothing is
+  marked in use when Kokoro did not load, because the system fallback speaks in
+  the voice macOS is set to and Banshee did not choose it. The daemon answers the
+  same question over `banshee.list_voices`, and enumeration needs no daemon.
+
+- `banshee watch` follows the daemon and prints one word per state change:
+  `idle`, `recording`, or `speaking`. The first line is the state at the moment
+  you connect, so nothing has to be guessed, and a state that did not move is
+  not printed again. Clients get the same channel over `banshee.subscribe`,
+  which answers with everything `banshee.status` reports and then pushes
+  `banshee.state_changed` notifications on that connection. The subscription
+  lives and dies with the connection, so there is nothing to unsubscribe. This
+  replaces asking `banshee.status` on a timer, which made an indicator lag the
+  microphone.
+
+- `banshee devices` lists the microphones and marks which one the daemon opened,
+  so `audio.input_device` can be set to a name you have seen rather than one you
+  guessed. The daemon answers the same question over
+  `banshee.list_input_devices`. Enumeration needs no daemon, which matters
+  because you need the names before you can start one on the right microphone.
+  The list does not say whether each device opens: probing them all would steal
+  the microphone from the running daemon.
+
+- `banshee config set <key> <value>` writes one setting to `config.toml`. The key
+  is the section and the field, as in `stt.language`. Comments and layout
+  survive, because the file is edited rather than rewritten. A value the field
+  does not accept is refused, and the message lists the ones it does.
+  `vad_threshold` takes effect at once; everything else needs a restart, and the
+  command says so.
+
+### Fixed
+
+- `banshee setup` reported success after a failed download. The result was
+  discarded, so a network error printed nothing and exited 0, and the only
+  symptom was `banshee status` still reporting the model missing.
+
+### Changed
+
+- **`banshee status`, `banshee doctor` and `banshee readiness` are now one
+  command.** All three answered overlapping versions of "is it working", and
+  `readiness` reported nothing `doctor` did not. `banshee status` is the
+  checklist, and `banshee status --json` is the machine-readable state. The
+  daemon's `banshee.readiness` method is gone the same way: `banshee.status` now
+  carries `ready` and `blockers`, and no longer carries `recording_error`, which
+  was the same failure in a second wire shape without a fix attached.
+
+- **The checklist now asks the daemon whether its permissions are granted.** It
+  used to check the process it was running in, which cannot speak for a daemon
+  launchd started; the code said as much in a comment and did it anyway. Grant a
+  permission while the daemon runs and the old output showed a green tick for a
+  daemon that was still blind.
+
+- **Breaking.** `banshee.configure` now takes `{"settings": {"stt.language":
+  "de"}, "persist": false}` instead of a flat `{"vad_threshold": 0.6}`. Keys are
+  dotted, so every setting in `config.toml` is reachable through one call rather
+  than one field at a time, and an unknown key returns `-32602` instead of
+  succeeding silently. `persist` writes the value to the file as well as
+  applying it, and is required for any setting the daemon reads only at startup,
+  which is all of them except `vad_threshold`. The reply says which keys landed
+  and which need a restart.
+
+- A `vad_threshold` outside 0.0 to 1.0 is now refused wherever it arrives. The
+  daemon used to start with a hand-edited `5.0` and never detect speech again.
+
 ## [0.7.0] - 2026-08-01
 
 The no-silent-failures release: dictation no longer kills the daemon, the hotkey

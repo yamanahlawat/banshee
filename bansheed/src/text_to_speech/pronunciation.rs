@@ -161,8 +161,7 @@ mod tests {
         );
     }
 
-    // A plural acronym must survive whole; splitting it strands fragments that
-    // misaki then letter-spells.
+    // Split fragments get letter-spelled by misaki.
     #[test]
     fn keeps_plural_acronyms_intact() {
         for word in ["IDs", "APIs", "URLs", "PRs", "IDEs", "SDKs", "CLIs"] {
@@ -174,8 +173,6 @@ mod tests {
         );
     }
 
-    // The other half: a short word after an acronym is still its own word, and
-    // fusing them strands the same letter-spelled fragment the plural fix avoids.
     #[test]
     fn splits_an_acronym_from_a_short_following_word() {
         assert_eq!(normalize("convertJSONToXML"), "convert Jason To XML");

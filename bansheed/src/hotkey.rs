@@ -64,7 +64,7 @@ where
     })
 }
 
-// Said by the daemon at startup and by doctor, so the two cannot drift apart.
+// Said by the daemon at startup and by the checklist, so the two cannot drift apart.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub const WAYLAND_HOTKEY_HINT: &str = "the global hotkey needs X11. Bind \
      `banshee record start` on press and `banshee record stop` on release in \
@@ -80,6 +80,25 @@ fn recording(state: &DaemonState) -> bool {
 
 // rdev needs X11's XRecord, which wayland does not serve: listen either errors
 // or attaches to Xwayland and never sees a key. Say so instead of looking broken.
+// The key the listener matches; `audio.hotkey` parses but is never read.
+const HOTKEY: &str = "F5";
+
+/// How to dictate, for the mode in effect.
+pub fn usage_hint(hotkey_mode: HotkeyMode) -> String {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if crate::dictation::is_wayland() {
+        return format!("{WAYLAND_HOTKEY_HINT}.");
+    }
+    let press = match hotkey_mode {
+        HotkeyMode::Toggle => format!("Tap {HOTKEY} and speak, then tap it again to stop."),
+        HotkeyMode::Hold => format!("Hold {HOTKEY} and speak, then release to stop."),
+    };
+    format!(
+        "{press} The text lands in whatever app has focus.\n\
+         Shift + {HOTKEY} sends it to `banshee listen` instead of typing it."
+    )
+}
+
 // Registered by the daemon, not by the pipeline: a press must still reach
 // record_start when recording is unavailable, or it answers with silence.
 pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey_mode: HotkeyMode) {
@@ -444,6 +463,29 @@ fn save_history(state: &DaemonState, transcription: &str) {
         && let Err(e) = crate::history::TranscriptionHistory::insert(&connection, transcription)
     {
         eprintln!("Failed to insert transcription into database: {e}");
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    #[test]
+    fn the_hint_matches_the_mode_in_effect() {
+        let toggle = usage_hint(HotkeyMode::Toggle);
+        assert!(toggle.contains("again"), "toggle must say to press twice");
+        assert!(!toggle.contains("release"), "toggle must not say release");
+
+        let hold = usage_hint(HotkeyMode::Hold);
+        assert!(hold.contains("release"), "hold must say to release");
+        assert!(!hold.contains("again"), "hold must not say to press twice");
+    }
+
+    #[test]
+    fn the_hint_names_the_key_the_listener_matches() {
+        for mode in [HotkeyMode::Toggle, HotkeyMode::Hold] {
+            assert!(usage_hint(mode).contains(HOTKEY), "{HOTKEY} must be named");
+        }
     }
 }
 

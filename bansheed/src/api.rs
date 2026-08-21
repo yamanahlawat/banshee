@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use banshee_common::{
-    BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION,
-    BANSHEE_HISTORY, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_SPEAK, BANSHEE_STATUS,
-    BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
+    BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_DOWNLOAD_MODELS,
+    BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES,
+    BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP,
+    BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -12,6 +13,7 @@ use crate::state::{
     AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, TranscribeTarget,
 };
 use crate::text_to_speech::sanitizer::sanitize;
+use crate::{readiness, settings};
 
 const MAX_WAIT_MS: u64 = 30_000;
 const DEFAULT_ASK_WAIT_MS: u64 = 30_000;
@@ -66,6 +68,36 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
         RecordingError::Model(_) => -32002,
     };
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
+}
+
+/// Everything `banshee.status` reports.
+pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
+    let blockers = readiness::blockers(daemon_state);
+    serde_json::json!({
+        "running": true,
+        "version": daemon_state.version(),
+        "stt_model": daemon_state.stt_model(),
+        "vad_model": daemon_state.vad_model(),
+        "audio_device": daemon_state.audio_device(),
+        "recording": daemon_state.is_recording(),
+        "speaking": daemon_state.speech().is_speaking(),
+        "uptime_seconds": daemon_state.uptime().as_secs(),
+        "vad_threshold": daemon_state.vad_threshold(),
+        "history_enabled": daemon_state.db_connection().is_some(),
+        // Stated, so no client invents a narrower definition of ready
+        "ready": blockers.is_empty(),
+        "blockers": blockers,
+    })
+}
+
+/// The `banshee.state_changed` params: what moves without a client touching it.
+/// `vad_threshold` moves at runtime too, but only when a `configure` call asks
+/// it to, and that call already answers.
+pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
+    serde_json::json!({
+        "recording": daemon_state.is_recording(),
+        "speaking": daemon_state.speech().is_speaking(),
+    })
 }
 
 pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
@@ -258,49 +290,108 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             )
         }
         BANSHEE_CONFIGURE => {
-            if let Some(params) = &request.params
-                && let Some(threshold_val) = params.get("vad_threshold")
+            let Some(requested) = request.params.as_ref().and_then(|p| p.get("settings")) else {
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32602,
+                    "'settings' is required, as in {\"stt.language\": \"de\"}.",
+                );
+            };
+            let assignments: settings::Assignments = match serde_json::from_value(requested.clone())
             {
-                let Some(vad_threshold) = threshold_val.as_f64() else {
+                Ok(assignments) => assignments,
+                Err(error) => {
                     return JsonRpcResponse::error(
                         request.id,
                         -32602,
-                        "'vad_threshold' must be a numeric float.",
-                    );
-                };
-
-                if !(0.0..=1.0).contains(&vad_threshold) {
-                    return JsonRpcResponse::error(
-                        request.id,
-                        -32602,
-                        format!(
-                            "Invalid VAD threshold: {}. Must be between 0.0 and 1.0",
-                            vad_threshold
-                        ),
+                        format!("'settings' must map dotted keys to values: {error}"),
                     );
                 }
-                daemon_state.set_vad_threshold(vad_threshold as f32);
-            }
+            };
+            let persist = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("persist"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
-            JsonRpcResponse::success(request.id, serde_json::json!({}))
+            match settings::configure(Some(daemon_state), &assignments, persist) {
+                Ok(outcome) => JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({
+                        "ok": true,
+                        "applied": outcome.applied,
+                        "restart_required": outcome.restart_required,
+                    }),
+                ),
+                Err(error) => {
+                    JsonRpcResponse::error(request.id, error.rpc_code(), error.rpc_message())
+                }
+            }
         }
-        BANSHEE_STATUS => JsonRpcResponse::success(
+        BANSHEE_DOWNLOAD_MODELS => {
+            let dir = match crate::models::download::models_dir() {
+                Ok(dir) => dir,
+                Err(error) => {
+                    return JsonRpcResponse::error(request.id, -32603, error.to_string());
+                }
+            };
+            let missing =
+                crate::models::download::still_missing(daemon_state.wanted_downloads(), &dir);
+            if missing.is_empty() {
+                return JsonRpcResponse::success(
+                    request.id,
+                    serde_json::json!({"ok": true, "downloading": []}),
+                );
+            }
+            let Some(slot) = daemon_state.start_downloading() else {
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32005,
+                    "A download is already running.",
+                );
+            };
+
+            let names: Vec<&str> = missing.iter().map(|d| d.name.as_str()).collect();
+            let response = JsonRpcResponse::success(
+                request.id,
+                serde_json::json!({"ok": true, "downloading": names}),
+            );
+
+            let state = Arc::clone(daemon_state);
+            let dir = dir.clone();
+            let slot = slot;
+            tokio::spawn(async move {
+                let mut report = |progress| state.report_download(progress);
+                if let Err(error) =
+                    crate::models::download::download_all(&dir, &missing, &mut report).await
+                {
+                    eprintln!("Download failed: {error}");
+                }
+                drop(slot);
+            });
+            response
+        }
+        BANSHEE_LIST_VOICES => JsonRpcResponse::success(
             request.id,
             serde_json::json!({
-                "running": true,
-                "version": daemon_state.version(),
-                "stt_model": daemon_state.stt_model(),
-                "vad_model": daemon_state.vad_model(),
-                "audio_device": daemon_state.audio_device(),
-                "recording": daemon_state.is_recording(),
-                // null when recording works, so one field cannot contradict another
-                "recording_error": daemon_state.recording_error().map(|e| e.to_string()),
-                "speaking": daemon_state.speech().is_speaking(),
-                "uptime_seconds": &daemon_state.uptime().as_secs(),
-                "vad_threshold": daemon_state.vad_threshold(),
-                "history_enabled": daemon_state.db_connection().is_some(),
+                "voices": crate::models::installed_voices(),
+                "current": daemon_state.tts_voice(),
             }),
         ),
+        BANSHEE_LIST_INPUT_DEVICES => JsonRpcResponse::success(
+            request.id,
+            serde_json::json!({
+                "devices": crate::audio::input_devices(),
+                "current": daemon_state.audio_device(),
+            }),
+        ),
+        // Subscribing answers with the poll, so a client needs no first poll and
+        // cannot miss a change in the gap before the pushes start. `daemon.rs`
+        // owns the pushing itself, because only it holds the connection.
+        BANSHEE_STATUS | BANSHEE_SUBSCRIBE => {
+            JsonRpcResponse::success(request.id, status_payload(daemon_state))
+        }
         BANSHEE_HISTORY => {
             if let Some(db) = daemon_state.db_connection() {
                 match db.lock() {
@@ -361,8 +452,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BargeInMode;
-    use crate::text_to_speech::{ActiveUtterance, SpeechPlayer, TtsBackend};
+    use crate::test_support::daemon_state as test_state;
 
     fn get_transcription_request(params: serde_json::Value) -> JsonRpcRequest {
         JsonRpcRequest {
@@ -371,36 +461,6 @@ mod tests {
             params: Some(params),
             id: Some(serde_json::json!(1)),
         }
-    }
-
-    // Silent backend so tests never spawn a real `say` process
-    struct NullBackend;
-    struct Done;
-    impl ActiveUtterance for Done {
-        fn is_finished(&mut self) -> bool {
-            true
-        }
-        fn stop(&mut self) {}
-    }
-    impl TtsBackend for NullBackend {
-        fn start(&self, _text: &str) -> std::io::Result<Box<dyn ActiveUtterance>> {
-            Ok(Box::new(Done))
-        }
-    }
-
-    // Pass a real sender only when the test reads the command receiver
-    fn test_state(commands: std::sync::mpsc::Sender<ConsumerCommand>) -> Arc<DaemonState> {
-        Arc::new(DaemonState::new(
-            "0.0.0",
-            "stt",
-            "vad",
-            0.5,
-            None,
-            SpeechPlayer::new(Box::new(NullBackend)),
-            commands,
-            std::sync::mpsc::channel().0,
-            BargeInMode::Stop,
-        ))
     }
 
     fn ask_user_request(params: serde_json::Value) -> JsonRpcRequest {
@@ -476,7 +536,7 @@ mod tests {
             .expect("shutdown was not signaled");
     }
 
-    fn record_request(method: &str, params: Option<serde_json::Value>) -> JsonRpcRequest {
+    fn request(method: &str, params: Option<serde_json::Value>) -> JsonRpcRequest {
         JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),
@@ -496,7 +556,7 @@ mod tests {
             let state = test_state(std::sync::mpsc::channel().0);
             state.set_recording_error(cause);
 
-            let start = record_request(BANSHEE_RECORD_START, None);
+            let start = request(BANSHEE_RECORD_START, None);
             let JsonRpcResponse::Error { error, .. } = dispatch(start, &state).await else {
                 panic!("expected error response");
             };
@@ -518,7 +578,7 @@ mod tests {
         let (commands, command_receiver) = std::sync::mpsc::channel();
         let state = test_state(commands);
 
-        let start = record_request(
+        let start = request(
             BANSHEE_RECORD_START,
             Some(serde_json::json!({"dictate": true})),
         );
@@ -528,14 +588,14 @@ mod tests {
         assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
         // A second start must be refused while recording
-        let again = record_request(BANSHEE_RECORD_START, None);
+        let again = request(BANSHEE_RECORD_START, None);
         let JsonRpcResponse::Error { error, .. } = dispatch(again, &state).await else {
             panic!("expected error response");
         };
         assert_eq!(error.code, -32004);
         assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
-        let stop = record_request(BANSHEE_RECORD_STOP, None);
+        let stop = request(BANSHEE_RECORD_STOP, None);
         let JsonRpcResponse::Success { .. } = dispatch(stop, &state).await else {
             panic!("expected success response");
         };
@@ -553,13 +613,123 @@ mod tests {
         let (commands, command_receiver) = std::sync::mpsc::channel();
         let state = test_state(commands);
 
-        let stop = record_request(BANSHEE_RECORD_STOP, None);
+        let stop = request(BANSHEE_RECORD_STOP, None);
         let JsonRpcResponse::Success { result, .. } = dispatch(stop, &state).await else {
             panic!("expected success response");
         };
         assert_eq!(result["ok"], true);
         assert_eq!(state.recording_mode(), RecordingMode::Idle);
         assert!(command_receiver.try_recv().is_err(), "no command expected");
+    }
+
+    // One payload, so a subscriber's first read and a poller's read cannot
+    // disagree about what the daemon reports.
+    #[tokio::test]
+    async fn subscribe_answers_with_the_status_payload() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        state.set_recording_mode(RecordingMode::PushToTalk);
+
+        let JsonRpcResponse::Success { result: polled, .. } =
+            dispatch(request(BANSHEE_STATUS, None), &state).await
+        else {
+            panic!("expected success response");
+        };
+        let JsonRpcResponse::Success {
+            result: subscribed, ..
+        } = dispatch(request(BANSHEE_SUBSCRIBE, None), &state).await
+        else {
+            panic!("expected success response");
+        };
+
+        assert_eq!(polled["recording"], true, "the fixture must discriminate");
+        // Every key but the clock, which advances between the two calls
+        assert!(polled["uptime_seconds"].is_number());
+        for (key, value) in polled.as_object().expect("an object") {
+            if key != "uptime_seconds" {
+                assert_eq!(value, &subscribed[key], "'{key}' differs");
+            }
+        }
+        assert_eq!(
+            polled.as_object().map(serde_json::Map::len),
+            subscribed.as_object().map(serde_json::Map::len),
+            "one payload carries a key the other does not"
+        );
+    }
+
+    // Two spellings of one fact drift apart; this is what notices.
+    #[test]
+    fn a_pushed_change_agrees_with_what_status_reports() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        state.set_recording_mode(RecordingMode::PushToTalk);
+
+        let status = status_payload(&state);
+        let live = live_state(&state);
+
+        assert_eq!(live["recording"], true, "the fixture must discriminate");
+        for key in live.as_object().expect("live_state is an object").keys() {
+            assert_eq!(live[key], status[key], "'{key}' disagrees with status");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fallback_backend_reports_no_current_voice() {
+        let state = test_state(std::sync::mpsc::channel().0);
+
+        let JsonRpcResponse::Success { result, .. } =
+            dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
+        else {
+            panic!("expected success response");
+        };
+        assert!(result["current"].is_null());
+        assert!(result["voices"].is_array(), "{result}");
+
+        state.set_tts_voice("af_sky".to_string());
+        let JsonRpcResponse::Success { result, .. } =
+            dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
+        else {
+            panic!("expected success response");
+        };
+        assert_eq!(result["current"], "af_sky");
+    }
+
+    #[tokio::test]
+    async fn a_second_download_is_refused_while_one_runs() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        // Something to fetch, or the call answers "nothing to do" and never
+        // reaches the slot at all
+        state.set_wanted_downloads(vec![crate::models::download::Download {
+            name: "no-such-model-9f3a.bin".to_string(),
+            url: "https://example.invalid/no-such-model-9f3a.bin".to_string(),
+        }]);
+        let slot = state.start_downloading().expect("the slot starts free");
+
+        let JsonRpcResponse::Error { error, .. } =
+            dispatch(request(BANSHEE_DOWNLOAD_MODELS, None), &state).await
+        else {
+            panic!("expected the busy error");
+        };
+        assert_eq!(error.code, -32005);
+
+        drop(slot);
+        assert!(state.start_downloading().is_some(), "the slot came back");
+    }
+
+    #[tokio::test]
+    async fn downloading_nothing_reports_an_empty_list() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        state.set_wanted_downloads(Vec::new());
+
+        let JsonRpcResponse::Success { result, .. } =
+            dispatch(request(BANSHEE_DOWNLOAD_MODELS, None), &state).await
+        else {
+            panic!("expected success response");
+        };
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["downloading"].as_array().unwrap().len(), 0);
+        assert!(
+            state.start_downloading().is_some(),
+            "a call that fetched nothing must not hold the slot"
+        );
     }
 
     #[tokio::test]

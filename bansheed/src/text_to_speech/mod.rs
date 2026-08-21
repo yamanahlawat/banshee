@@ -28,18 +28,21 @@ pub trait ActiveUtterance: Send {
     fn stop(&mut self);
 }
 
-// Kokoro when its model is on disk, otherwise whatever the fallback allows
-pub fn select_backend(tts_config: &TTSConfig) -> Result<Box<dyn TtsBackend>, BansheeError> {
+/// The backend, and the voice it speaks in. `None` under the system fallback,
+/// which speaks in whatever voice the OS is set to.
+pub fn select_backend(
+    tts_config: &TTSConfig,
+) -> Result<(Box<dyn TtsBackend>, Option<String>), BansheeError> {
     let kokoro_config = KokoroTTSConfig::new(&tts_config.voice);
     match KokoroEngine::new(&kokoro_config, tts_config.speed).and_then(KokoroBackend::new) {
         Ok(backend) => {
             println!("TTS: Kokoro (voice {})", tts_config.voice);
-            Ok(Box::new(backend))
+            Ok((Box::new(backend), Some(tts_config.voice.clone())))
         }
         Err(e) => match tts_config.fallback {
             TTSFallback::System => {
                 eprintln!("Kokoro unavailable, falling back to system TTS: {e}");
-                Ok(Box::new(SayBackend))
+                Ok((Box::new(SayBackend), None))
             }
             TTSFallback::None => Err(e),
         },
@@ -137,8 +140,6 @@ impl SpeechPlayer {
         *self.speaking.borrow()
     }
 
-    // completion signal; first production caller is banshee.ask_user
-    #[allow(dead_code)]
     pub fn subscribe_speaking(&self) -> watch::Receiver<bool> {
         self.speaking.subscribe()
     }

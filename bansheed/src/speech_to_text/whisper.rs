@@ -45,7 +45,6 @@ impl WhisperEngine {
             ))
         })?;
 
-        // Enable flash attention for faster inference if supported by the hardware
         let mut context_params = WhisperContextParameters::default();
         context_params.flash_attn(true);
 
@@ -61,13 +60,11 @@ impl WhisperEngine {
     }
 
     pub fn transcribe(&self, audio_data: &[f32]) -> Result<String, BansheeError> {
-        // Holds the temporary memory for a single transcription
         let mut state = self
             .context
             .create_state()
             .map_err(|e| BansheeError::Transcription(e.to_string()))?;
 
-        // Setup the inference parameters
         // Beam search trades speed for accuracy
         let mut params = FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
             beam_size: 5,
@@ -77,17 +74,14 @@ impl WhisperEngine {
         params.set_temperature(0.0);
         params.set_no_context(true);
 
-        // Bias decoding toward the user's vocabulary
         if let Some(prompt) = &self.initial_prompt {
             params.set_initial_prompt(prompt);
         }
 
-        // Run the inference
         state
             .full(params, audio_data)
             .map_err(|e| BansheeError::Transcription(e.to_string()))?;
 
-        // Get the transcribed text
         let mut transcription = String::new();
 
         for segment in state.as_iter() {

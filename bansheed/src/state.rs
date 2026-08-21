@@ -7,13 +7,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::watch;
+use banshee_common::DownloadProgress;
+use tokio::sync::{broadcast, watch};
 
 use crate::audio::cues::Cue;
 use crate::config::BargeInMode;
 use crate::text_to_speech::SpeechPlayer;
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
+
+// One file emits at most 101 notifications, so a subscriber has to fall a whole
+// file behind before the channel starts dropping any of them
+const DOWNLOAD_BACKLOG: usize = 128;
 
 // A start with no stop otherwise holds the mic for the life of the daemon.
 // The ring only holds RING_SECS, so nothing is lost by capping it there.
@@ -88,12 +93,48 @@ impl std::fmt::Display for RecordingError {
     }
 }
 
+impl RecordingError {
+    /// Trimmed at the source, not in each renderer: the wrapped error ends in a
+    /// period and the other blocker prose does not.
+    pub fn consequence(&self) -> String {
+        self.to_string().trim_end_matches('.').to_string()
+    }
+
+    pub fn fix(&self) -> &'static str {
+        match self {
+            RecordingError::Microphone(_) => {
+                "connect the microphone, grant it in Privacy & Security, or fix \
+                 [audio] input_device, then restart: banshee start"
+            }
+            RecordingError::Model(_) => "restart it: banshee start",
+        }
+    }
+}
+
+/// The right to download, held for as long as one runs.
+// Released on drop rather than by hand: a panic in the download would otherwise
+// strand the slot for the life of the daemon. A stable `.part` name is what
+// makes resume possible, so it cannot be shared by two writers.
+pub struct DownloadSlot {
+    state: Arc<DaemonState>,
+}
+
+impl Drop for DownloadSlot {
+    fn drop(&mut self) {
+        self.state
+            .downloading
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub struct DaemonState {
     version: &'static str,
     stt_model: &'static str,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: OnceLock<String>,
+    tts_voice: OnceLock<String>,
+    wanted_downloads: OnceLock<Vec<crate::models::download::Download>>,
     // Why recording is off, when it is. Set once at startup, because the mic
     // and the models are opened there and neither returns without a restart.
     recording_error: OnceLock<RecordingError>,
@@ -102,6 +143,9 @@ pub struct DaemonState {
     db_connection: Option<Mutex<rusqlite::Connection>>,
     transcriptions: Mutex<TranscriptionRing>,
     latest_transcription_id: watch::Sender<u64>,
+    recording_active: watch::Sender<bool>,
+    downloads: broadcast::Sender<DownloadProgress>,
+    downloading: AtomicBool,
     speech: Arc<SpeechPlayer>,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
     cues: std::sync::mpsc::Sender<Cue>,
@@ -133,6 +177,8 @@ impl DaemonState {
             vad_model,
             vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
             audio_device: OnceLock::new(),
+            tts_voice: OnceLock::new(),
+            wanted_downloads: OnceLock::new(),
             recording_error: OnceLock::new(),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
@@ -142,6 +188,9 @@ impl DaemonState {
                 entries: VecDeque::with_capacity(TRANSCRIPTION_RING_CAPACITY),
             }),
             latest_transcription_id: watch::channel(0).0,
+            recording_active: watch::channel(false).0,
+            downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
+            downloading: AtomicBool::new(false),
             speech: Arc::new(speech),
             commands,
             cues,
@@ -280,19 +329,59 @@ impl DaemonState {
     pub fn set_recording_mode(&self, mode: RecordingMode) {
         self.recording
             .store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+        self.publish_recording();
     }
 
     // Concurrent transitions race (RPC arm vs hotkey vs session end);
     // compare_exchange makes losing a race a no-op instead of a stuck mode
     pub fn try_transition(&self, from: RecordingMode, to: RecordingMode) -> bool {
-        self.recording
+        let moved = self
+            .recording
             .compare_exchange(
                 from as u8,
                 to as u8,
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
             )
+            .is_ok();
+        if moved {
+            self.publish_recording();
+        }
+        moved
+    }
+
+    // Re-reads the atomic rather than deriving the bool from the mode just
+    // written: another thread may have moved on, and subscribers want now.
+    fn publish_recording(&self) {
+        self.recording_active.send_replace(self.is_recording());
+    }
+
+    pub fn subscribe_recording(&self) -> watch::Receiver<bool> {
+        self.recording_active.subscribe()
+    }
+
+    pub fn subscribe_downloads(&self) -> broadcast::Receiver<DownloadProgress> {
+        self.downloads.subscribe()
+    }
+
+    pub fn report_download(&self, progress: DownloadProgress) {
+        let _ = self.downloads.send(progress);
+    }
+
+    /// Takes the download slot, or `None` when one is already running. The
+    /// slot is released when the returned value drops.
+    pub fn start_downloading(self: &Arc<Self>) -> Option<DownloadSlot> {
+        self.downloading
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
             .is_ok()
+            .then(|| DownloadSlot {
+                state: Arc::clone(self),
+            })
     }
 
     pub fn is_recording(&self) -> bool {
@@ -337,6 +426,26 @@ impl DaemonState {
 
     pub fn set_audio_device(&self, device_name: String) {
         let _ = self.audio_device.set(device_name);
+    }
+
+    /// The voice the speech backend actually loaded, which `config.toml` may no
+    /// longer agree with.
+    pub fn tts_voice(&self) -> Option<&str> {
+        self.tts_voice.get().map(String::as_str)
+    }
+
+    pub fn set_tts_voice(&self, voice: String) {
+        let _ = self.tts_voice.set(voice);
+    }
+
+    /// Every file this daemon's own config needs. Set before the socket
+    /// accepts, so a caller never sees it unset.
+    pub fn wanted_downloads(&self) -> &[crate::models::download::Download] {
+        self.wanted_downloads.get().map_or(&[], Vec::as_slice)
+    }
+
+    pub fn set_wanted_downloads(&self, wanted: Vec<crate::models::download::Download>) {
+        let _ = self.wanted_downloads.set(wanted);
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {
@@ -455,6 +564,47 @@ mod tests {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         assert!(!state.expire_stuck_recording());
         assert_eq!(state.recording_mode(), RecordingMode::Armed);
+    }
+
+    // Three writers move the mic: the hotkey and the record RPCs through
+    // try_transition, the consumer thread through a direct write.
+    #[test]
+    fn every_path_that_moves_the_mic_publishes_it() {
+        let (state, _requests) = test_state_with_commands();
+        let mut recording = state.subscribe_recording();
+        assert!(!*recording.borrow_and_update());
+
+        assert!(state.record_start(TranscribeTarget::Mailbox));
+        assert!(
+            recording.has_changed().unwrap(),
+            "record_start went unheard"
+        );
+        assert!(*recording.borrow_and_update());
+
+        state.record_stop();
+        assert!(recording.has_changed().unwrap(), "record_stop went unheard");
+        assert!(!*recording.borrow_and_update());
+
+        state.set_recording_mode(RecordingMode::Armed);
+        assert!(
+            recording.has_changed().unwrap(),
+            "a direct write went unheard"
+        );
+        assert!(*recording.borrow_and_update());
+    }
+
+    #[test]
+    fn the_voice_reported_is_the_one_the_daemon_loaded() {
+        let state = test_state();
+        assert_eq!(state.tts_voice(), None);
+        state.set_tts_voice("af_sky".to_string());
+        assert_eq!(state.tts_voice(), Some("af_sky"));
+        state.set_tts_voice("am_adam".to_string());
+        assert_eq!(
+            state.tts_voice(),
+            Some("af_sky"),
+            "a second write must not replace what is already loaded"
+        );
     }
 
     #[test]

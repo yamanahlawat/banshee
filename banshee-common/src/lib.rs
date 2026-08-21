@@ -63,6 +63,25 @@ impl JsonRpcResponse {
     }
 }
 
+/// A message the daemon sends unprompted. JSON-RPC marks these by the absent
+/// `id`, and expects no reply.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JsonRpcNotification {
+    pub jsonrpc: Version,
+    pub method: String,
+    pub params: Value,
+}
+
+impl JsonRpcNotification {
+    pub fn new(method: &str, params: Value) -> Self {
+        Self {
+            jsonrpc: Version::V2,
+            method: method.to_string(),
+            params,
+        }
+    }
+}
+
 pub const BANSHEE_SPEAK: &str = "banshee.speak";
 pub const BANSHEE_STOP_SPEAKING: &str = "banshee.stop_speaking";
 pub const BANSHEE_STATUS: &str = "banshee.status";
@@ -74,6 +93,58 @@ pub const BANSHEE_ASK_USER: &str = "banshee.ask_user";
 pub const BANSHEE_STOP: &str = "banshee.stop";
 pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
+pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
+pub const BANSHEE_LIST_VOICES: &str = "banshee.list_voices";
+pub const BANSHEE_DOWNLOAD_MODELS: &str = "banshee.download_models";
+pub const BANSHEE_SUBSCRIBE: &str = "banshee.subscribe";
+// Sent by the daemon, not called by a client
+pub const BANSHEE_STATE_CHANGED: &str = "banshee.state_changed";
+pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
+
+// What `banshee.subscribe` accepts in `events`, spelled once for both sides
+pub const EVENT_STATE: &str = "state";
+pub const EVENT_DOWNLOADS: &str = "downloads";
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadState {
+    Downloading,
+    Done,
+    Failed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DownloadProgress {
+    pub model: String,
+    pub bytes: u64,
+    /// None when the server sends no `Content-Length`, so a client shows a
+    /// spinner rather than a bar.
+    pub total: Option<u64>,
+    pub state: DownloadState,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InputDevice {
+    pub name: String,
+    pub default: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerKind {
+    Permission,
+    Model,
+    Pipeline,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Blocker {
+    pub kind: BlockerKind,
+    pub id: String,
+    pub name: String,
+    pub consequence: String,
+    pub fix: String,
+}
 
 // Whisper model configuration
 pub struct WhisperConfig {
@@ -129,5 +200,104 @@ impl KokoroTTSConfig {
             voice_name: format!("{voice}.bin"),
             voice_url: format!("{KOKORO_REPO}/voices/{voice}.bin"),
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::{
+        BANSHEE_STATE_CHANGED, Blocker, BlockerKind, DownloadProgress, DownloadState, InputDevice,
+        JsonRpcNotification,
+    };
+
+    #[test]
+    fn a_blocker_serializes_with_the_keys_clients_read() {
+        let blocker = Blocker {
+            kind: BlockerKind::Permission,
+            id: "input_monitoring".to_string(),
+            name: "Input Monitoring".to_string(),
+            consequence: "the hotkey receives no key presses".to_string(),
+            fix: "grant it in System Settings".to_string(),
+        };
+        let wire = serde_json::to_value(&blocker).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "kind": "permission",
+                "id": "input_monitoring",
+                "name": "Input Monitoring",
+                "consequence": "the hotkey receives no key presses",
+                "fix": "grant it in System Settings",
+            })
+        );
+    }
+
+    #[test]
+    fn the_model_kind_is_snake_case_too() {
+        let wire = serde_json::to_value(BlockerKind::Model).unwrap();
+        assert_eq!(wire, serde_json::json!("model"));
+    }
+
+    #[test]
+    fn a_notification_carries_no_id() {
+        let wire = serde_json::to_value(JsonRpcNotification::new(
+            BANSHEE_STATE_CHANGED,
+            serde_json::json!({"recording": true, "speaking": false}),
+        ))
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "banshee.state_changed",
+                "params": {"recording": true, "speaking": false},
+            })
+        );
+    }
+
+    #[test]
+    fn progress_serializes_with_the_keys_clients_read() {
+        let wire = serde_json::to_value(DownloadProgress {
+            model: "ggml-base.en.bin".to_string(),
+            bytes: 512,
+            total: Some(1024),
+            state: DownloadState::Downloading,
+        })
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "model": "ggml-base.en.bin",
+                "bytes": 512,
+                "total": 1024,
+                "state": "downloading",
+            })
+        );
+    }
+
+    #[test]
+    fn an_unknown_total_stays_on_the_wire_as_null() {
+        let wire = serde_json::to_value(DownloadProgress {
+            model: "af_sky.bin".to_string(),
+            bytes: 7,
+            total: None,
+            state: DownloadState::Failed,
+        })
+        .unwrap();
+        assert!(wire["total"].is_null(), "{wire}");
+        assert_eq!(wire["state"], "failed");
+    }
+
+    #[test]
+    fn a_device_serializes_with_the_keys_clients_read() {
+        let wire = serde_json::to_value(InputDevice {
+            name: "Blue Yeti".to_string(),
+            default: true,
+        })
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"name": "Blue Yeti", "default": true})
+        );
     }
 }
