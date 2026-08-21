@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `banshee watch --waybar` emits one Waybar custom-module object per line, so
+  the microphone state can sit in a Wayland bar with no tray and no GUI. `text`
+  shows, `alt` selects a `format-icons` entry, and `class` is the CSS hook.
+  Readiness is left out on purpose: the daemon answers it once at connect and
+  never pushes it, so a bar showing it would go stale. Set `restart-interval`
+  in Waybar, since the command exits when the daemon stops.
+
 - **Model downloads resume.** Each file streams to `<name>.part` and is renamed
   into place only when complete, so an interrupted download is never mistaken
   for a model and the next `banshee setup` continues from where it stopped

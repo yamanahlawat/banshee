@@ -199,6 +199,7 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee status --json`         | The same as machine-readable state and blockers            |
 | `banshee devices`               | List the microphones, and mark the one in use              |
 | `banshee watch`                 | Follow what the daemon is doing, one line per change       |
+| `banshee watch --waybar`        | The same, as Waybar custom-module JSON                     |
 | `banshee voices`                | List the speech voices on disk, and mark the one in use    |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee serve`                 | Run the daemon in the foreground                           |
@@ -346,6 +347,40 @@ The command runs until the daemon stops, and then exits non-zero, so a
 supervisor can restart it. For a single answer rather than a stream, ask
 `banshee status`: a reader that stops early only ends `banshee watch` at the
 next change, which on a quiet daemon may be a long wait.
+
+### Showing the state in a Waybar module
+
+`banshee watch --waybar` emits one Waybar custom-module object per line:
+
+```json
+{"text":"recording","alt":"recording","class":"recording","tooltip":"Banshee is recording. Microphone: Blue Yeti"}
+```
+
+`text` shows, `alt` picks a `format-icons` entry, and `class` is the CSS hook.
+Put this in your Waybar config:
+
+```jsonc
+"custom/banshee": {
+    "exec": "banshee watch --waybar",
+    "return-type": "json",
+    "restart-interval": 5,
+    "format": "{icon}",
+    "format-icons": { "idle": "mic", "recording": "REC", "speaking": "spk" }
+}
+```
+
+and style it in your own CSS:
+
+```css
+#custom-banshee.recording { color: #e06c75; }
+#custom-banshee.speaking  { color: #61afef; }
+```
+
+`restart-interval` matters: the command exits when the daemon stops, and that
+is how the module reconnects once it comes back. Readiness is deliberately not
+in the module. The daemon answers it when you connect and never pushes it
+again, so a bar that showed it would be right once and wrong from then on. Ask
+`banshee status` for that.
 
 The same channel is open to any client over `banshee.subscribe`, which answers
 with everything `banshee.status` reports and then sends

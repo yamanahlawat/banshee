@@ -150,6 +150,24 @@ fn decoded<T: serde::de::DeserializeOwned>(reply: &serde_json::Value, key: &str)
     }
 }
 
+// One object per line, as Waybar requires. The same word lands in three keys
+// because Waybar splits them: `text` shows, `alt` picks a format-icon, `class`
+// picks CSS. Readiness is left out: blockers are answered once and never
+// pushed, so a bar would show them stale.
+fn waybar_line(word: &str, device: Option<&str>) -> String {
+    let tooltip = match device {
+        Some(device) => format!("Banshee is {word}. Microphone: {device}"),
+        None => format!("Banshee is {word}"),
+    };
+    serde_json::json!({
+        "text": word,
+        "alt": word,
+        "class": word,
+        "tooltip": tooltip,
+    })
+    .to_string()
+}
+
 /// One word for the two booleans a subscriber is sent. The microphone outranks
 /// the speaker: it is what the user is waiting on.
 fn state_word(state: &serde_json::Value) -> &'static str {
@@ -363,7 +381,7 @@ async fn main() -> Result<(), BansheeError> {
             println!();
             println!("Speak with one by: banshee config set tts.voice \"<name>\"");
         }
-        CommandType::Watch => {
+        CommandType::Watch { waybar } => {
             let (mut state, mut changes) =
                 match utils::Subscription::open(&[banshee_common::EVENT_STATE]).await {
                     Ok(subscription) => subscription,
@@ -373,6 +391,11 @@ async fn main() -> Result<(), BansheeError> {
                     }
                     Err(error) => fail(&error),
                 };
+            // Only the opening reply carries it; a change carries the live fields
+            let device = state
+                .get("audio_device")
+                .and_then(|name| name.as_str())
+                .map(str::to_string);
             let mut shown = "";
             loop {
                 let word = state_word(&state);
@@ -380,9 +403,14 @@ async fn main() -> Result<(), BansheeError> {
                 // move without changing the one word they are printed as
                 if word != shown {
                     shown = word;
+                    let line = if waybar {
+                        waybar_line(word, device.as_deref())
+                    } else {
+                        word.to_string()
+                    };
                     // `banshee watch | head` closes the pipe. That is the reader
                     // having seen enough, not this command failing
-                    if writeln!(std::io::stdout(), "{word}").is_err() {
+                    if writeln!(std::io::stdout(), "{line}").is_err() {
                         return Ok(());
                     }
                 }
@@ -599,8 +627,52 @@ async fn main() -> Result<(), BansheeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::state_word;
+    use super::{state_word, waybar_line};
     use banshee_common::InputDevice;
+
+    #[test]
+    fn a_waybar_line_is_one_parseable_object() {
+        let line = waybar_line("recording", Some("Blue Yeti"));
+        assert!(
+            !line.contains('\n'),
+            "Waybar reads one object per line: {line}"
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        assert_eq!(parsed["text"], "recording");
+        assert_eq!(parsed["alt"], "recording", "format-icons keys on alt");
+        assert_eq!(parsed["class"], "recording", "CSS keys on class");
+        assert!(
+            parsed["tooltip"].as_str().unwrap().contains("Blue Yeti"),
+            "{parsed}"
+        );
+    }
+
+    // A device name is whatever the hardware calls itself, so it has to be
+    // escaped rather than pasted into the line
+    #[test]
+    fn a_quote_in_the_device_name_does_not_break_the_line() {
+        let line = waybar_line("idle", Some("Bob\"s \\ Mic"));
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        assert!(
+            parsed["tooltip"]
+                .as_str()
+                .unwrap()
+                .contains("Bob\"s \\ Mic")
+        );
+    }
+
+    #[test]
+    fn an_unknown_device_is_left_out_rather_than_named_empty() {
+        let line = waybar_line("idle", None);
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        let tooltip = parsed["tooltip"].as_str().unwrap();
+        assert!(
+            !tooltip.contains("Microphone"),
+            "no device means none is named: {tooltip}"
+        );
+        assert!(tooltip.contains("idle"), "{tooltip}");
+    }
 
     #[test]
     fn the_microphone_outranks_the_speaker_in_one_word() {
