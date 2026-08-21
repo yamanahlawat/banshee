@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `banshee voices` lists the text-to-speech voices on disk and marks the one the
+  daemon loaded, so `tts.voice` can be set to a name you have seen. Only
+  downloaded voices are listed, so every name it prints works today. Nothing is
+  marked in use when Kokoro did not load, because the system fallback speaks in
+  the voice macOS is set to and Banshee did not choose it. The daemon answers the
+  same question over `banshee.list_voices`, and enumeration needs no daemon.
+
 - `banshee watch` follows the daemon and prints one word per state change:
   `idle`, `recording`, or `speaking`. The first line is the state at the moment
   you connect, so nothing has to be guessed, and a state that did not move is

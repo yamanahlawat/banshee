@@ -90,6 +90,8 @@ pub enum STTPreset {
 }
 
 impl STTPreset {
+    pub const ALL: [STTPreset; 3] = [STTPreset::Fast, STTPreset::Balanced, STTPreset::Quality];
+
     pub fn model_name(&self) -> &'static str {
         match self {
             STTPreset::Fast => "ggml-base.en.bin",

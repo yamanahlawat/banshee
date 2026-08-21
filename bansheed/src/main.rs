@@ -75,6 +75,17 @@ fn start_recording(
     Ok((stream, thread))
 }
 
+// Defaulting to empty would report a newer daemon's reply as nothing at all
+fn decoded<T: serde::de::DeserializeOwned>(reply: &serde_json::Value, key: &str) -> T {
+    match serde_json::from_value(reply.get(key).cloned().unwrap_or_default()) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("The daemon sent a reply this build cannot read: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// One word for the two booleans a subscriber is sent. The microphone outranks
 /// the speaker: it is what the user is waiting on.
 fn state_word(state: &serde_json::Value) -> &'static str {
@@ -153,7 +164,7 @@ async fn main() -> Result<(), BansheeError> {
                 None
             };
 
-            let speech_backend = text_to_speech::select_backend(&config.tts)?;
+            let (speech_backend, live_voice) = text_to_speech::select_backend(&config.tts)?;
             let (commands, command_receiver) = std::sync::mpsc::channel();
             let cue_sender = audio::cues::start_cue_player(config.audio.cues.enabled);
             let daemon_state = Arc::new(state::DaemonState::new(
@@ -167,6 +178,10 @@ async fn main() -> Result<(), BansheeError> {
                 cue_sender.clone(),
                 config.audio.barge_in,
             ));
+
+            if let Some(voice) = live_voice {
+                daemon_state.set_tts_voice(voice);
+            }
 
             // Held as one binding, and past daemon::run: dropping the stream
             // stops capture, and the thread is the only thing left to join
@@ -215,17 +230,7 @@ async fn main() -> Result<(), BansheeError> {
             .await
             {
                 Ok(reply) => {
-                    let listed = reply.get("devices").cloned().unwrap_or_default();
-                    let devices: Vec<banshee_common::InputDevice> =
-                        match serde_json::from_value(listed) {
-                            Ok(devices) => devices,
-                            Err(error) => {
-                                eprintln!(
-                                    "The daemon sent a reply this build cannot read: {error}"
-                                );
-                                std::process::exit(1);
-                            }
-                        };
+                    let devices: Vec<banshee_common::InputDevice> = decoded(&reply, "devices");
                     let current = reply
                         .get("current")
                         .and_then(|name| name.as_str())
@@ -258,6 +263,40 @@ async fn main() -> Result<(), BansheeError> {
             }
             println!();
             println!("Record from one with: banshee config set audio.input_device \"<name>\"");
+        }
+        CommandType::Voices => {
+            let (voices, current) = match utils::call_daemon(
+                banshee_common::BANSHEE_LIST_VOICES,
+                serde_json::json!({}),
+            )
+            .await
+            {
+                Ok(reply) => (
+                    decoded::<Vec<String>>(&reply, "voices"),
+                    reply
+                        .get("current")
+                        .and_then(|voice| voice.as_str())
+                        .map(str::to_string),
+                ),
+                // A voice gets chosen before there is a daemon to ask
+                Err(error) if daemon_is_down(&error) => (models::installed_voices(), None),
+                Err(error) => fail(&error),
+            };
+
+            if voices.is_empty() {
+                println!("No voices found. Download one with: banshee setup");
+                return Ok(());
+            }
+            let width = voices.iter().map(|v| v.chars().count()).max().unwrap_or(0);
+            for voice in &voices {
+                if current.as_deref() == Some(voice.as_str()) {
+                    println!("  {voice:width$}  in use");
+                } else {
+                    println!("  {voice}");
+                }
+            }
+            println!();
+            println!("Speak with one by: banshee config set tts.voice \"<name>\"");
         }
         CommandType::Watch => {
             let (mut state, mut changes) = match utils::Subscription::open().await {

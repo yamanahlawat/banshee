@@ -112,6 +112,7 @@ pub struct DaemonState {
     vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: OnceLock<String>,
+    tts_voice: OnceLock<String>,
     // Why recording is off, when it is. Set once at startup, because the mic
     // and the models are opened there and neither returns without a restart.
     recording_error: OnceLock<RecordingError>,
@@ -152,6 +153,7 @@ impl DaemonState {
             vad_model,
             vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
             audio_device: OnceLock::new(),
+            tts_voice: OnceLock::new(),
             recording_error: OnceLock::new(),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
@@ -375,6 +377,16 @@ impl DaemonState {
         let _ = self.audio_device.set(device_name);
     }
 
+    /// The voice the speech backend actually loaded, which `config.toml` may no
+    /// longer agree with.
+    pub fn tts_voice(&self) -> Option<&str> {
+        self.tts_voice.get().map(String::as_str)
+    }
+
+    pub fn set_tts_voice(&self, voice: String) {
+        let _ = self.tts_voice.set(voice);
+    }
+
     pub fn set_vad_threshold(&self, threshold: f32) {
         self.vad_threshold
             .store(threshold.to_bits(), std::sync::atomic::Ordering::Relaxed);
@@ -518,6 +530,20 @@ mod tests {
             "a direct write went unheard"
         );
         assert!(*recording.borrow_and_update());
+    }
+
+    #[test]
+    fn the_voice_reported_is_the_one_the_daemon_loaded() {
+        let state = test_state();
+        assert_eq!(state.tts_voice(), None);
+        state.set_tts_voice("af_sky".to_string());
+        assert_eq!(state.tts_voice(), Some("af_sky"));
+        state.set_tts_voice("am_adam".to_string());
+        assert_eq!(
+            state.tts_voice(),
+            Some("af_sky"),
+            "a second write must not replace what is already loaded"
+        );
     }
 
     #[test]

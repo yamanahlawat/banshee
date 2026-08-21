@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use banshee_common::{
     BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_GET_TRANSCRIPTION,
-    BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP,
-    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
+    BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES, BANSHEE_RECORD_START,
+    BANSHEE_RECORD_STOP, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
+    BANSHEE_SUBSCRIBE,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -328,6 +329,13 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 }
             }
         }
+        BANSHEE_LIST_VOICES => JsonRpcResponse::success(
+            request.id,
+            serde_json::json!({
+                "voices": crate::models::installed_voices(),
+                "current": daemon_state.tts_voice(),
+            }),
+        ),
         BANSHEE_LIST_INPUT_DEVICES => JsonRpcResponse::success(
             request.id,
             serde_json::json!({
@@ -607,6 +615,27 @@ mod tests {
         for key in live.as_object().expect("live_state is an object").keys() {
             assert_eq!(live[key], status[key], "'{key}' disagrees with status");
         }
+    }
+
+    #[tokio::test]
+    async fn a_fallback_backend_reports_no_current_voice() {
+        let state = test_state(std::sync::mpsc::channel().0);
+
+        let JsonRpcResponse::Success { result, .. } =
+            dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
+        else {
+            panic!("expected success response");
+        };
+        assert!(result["current"].is_null());
+        assert!(result["voices"].is_array(), "{result}");
+
+        state.set_tts_voice("af_sky".to_string());
+        let JsonRpcResponse::Success { result, .. } =
+            dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
+        else {
+            panic!("expected success response");
+        };
+        assert_eq!(result["current"], "af_sky");
     }
 
     #[tokio::test]

@@ -94,6 +94,7 @@ pub const BANSHEE_STOP: &str = "banshee.stop";
 pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
 pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
+pub const BANSHEE_LIST_VOICES: &str = "banshee.list_voices";
 pub const BANSHEE_SUBSCRIBE: &str = "banshee.subscribe";
 // Sent by the daemon, not called by a client
 pub const BANSHEE_STATE_CHANGED: &str = "banshee.state_changed";

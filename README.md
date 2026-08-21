@@ -188,6 +188,7 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee status --json`         | The same as machine-readable state and blockers            |
 | `banshee devices`               | List the microphones, and mark the one in use              |
 | `banshee watch`                 | Follow what the daemon is doing, one line per change       |
+| `banshee voices`                | List the speech voices on disk, and mark the one in use    |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee serve`                 | Run the daemon in the foreground                           |
 | `banshee service uninstall`     | Remove the start-at-login launch agent                     |
@@ -293,6 +294,25 @@ when a daemon has actually opened that device.
 `vocabulary` biases Whisper toward project jargon and proper nouns it would
 otherwise misspell; it is read once at startup, so restart the daemon after
 changing it.
+
+### Choosing a voice
+
+`banshee voices` lists the voices on disk and marks the one the daemon loaded:
+
+```
+$ banshee voices
+  af_heart
+  af_sky    in use
+  am_adam
+  am_santa
+
+Speak with one by: banshee config set tts.voice "<name>"
+```
+
+It lists only what is downloaded, so every name it prints can be spoken with
+today. Nothing is marked in use when Kokoro did not load: the system fallback
+speaks in whatever voice macOS is set to, which Banshee did not choose and does
+not report. The voice is read once at startup, so a change needs a restart.
 
 ### Following what the daemon is doing
 

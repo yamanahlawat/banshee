@@ -25,6 +25,8 @@ pub enum CommandType {
     Devices,
     /// Follow what the daemon is doing, one line per change
     Watch,
+    /// List the text-to-speech voices that are on disk
+    Voices,
     /// Change a setting in config.toml
     Config {
         #[clap(subcommand)]
