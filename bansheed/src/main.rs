@@ -168,16 +168,12 @@ fn waybar_line(word: &str, device: Option<&str>) -> String {
     .to_string()
 }
 
-/// One word for the two booleans a subscriber is sent. The microphone outranks
-/// the speaker: it is what the user is waiting on.
+// The ranking lives in `banshee_common::Activity`; only the naming is here
 fn state_word(state: &serde_json::Value) -> &'static str {
-    let flag = |name| state.get(name).and_then(serde_json::Value::as_bool) == Some(true);
-    if flag("recording") {
-        "recording"
-    } else if flag("speaking") {
-        "speaking"
-    } else {
-        "idle"
+    match banshee_common::Activity::of(state) {
+        banshee_common::Activity::Idle => "idle",
+        banshee_common::Activity::Recording => "recording",
+        banshee_common::Activity::Speaking => "speaking",
     }
 }
 

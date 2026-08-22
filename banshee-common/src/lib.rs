@@ -105,6 +105,30 @@ pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
 pub const EVENT_STATE: &str = "state";
 pub const EVENT_DOWNLOADS: &str = "downloads";
 
+/// What the daemon is doing, derived from a `state_changed` payload. Each
+/// surface names these for itself; only the ranking lives here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    Idle,
+    Recording,
+    Speaking,
+}
+
+impl Activity {
+    // The microphone outranks the speaker: it is what the user is waiting on,
+    // and both are true at once when barge-in is off
+    pub fn of(state: &Value) -> Self {
+        let flag = |name| state.get(name).and_then(Value::as_bool) == Some(true);
+        if flag("recording") {
+            Activity::Recording
+        } else if flag("speaking") {
+            Activity::Speaking
+        } else {
+            Activity::Idle
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DownloadState {
@@ -206,8 +230,8 @@ impl KokoroTTSConfig {
 #[cfg(test)]
 mod wire_tests {
     use super::{
-        BANSHEE_STATE_CHANGED, Blocker, BlockerKind, DownloadProgress, DownloadState, InputDevice,
-        JsonRpcNotification,
+        Activity, BANSHEE_STATE_CHANGED, Blocker, BlockerKind, DownloadProgress, DownloadState,
+        InputDevice, JsonRpcNotification,
     };
 
     #[test]
@@ -286,6 +310,26 @@ mod wire_tests {
         .unwrap();
         assert!(wire["total"].is_null(), "{wire}");
         assert_eq!(wire["state"], "failed");
+    }
+
+    #[test]
+    fn the_microphone_outranks_the_speaker() {
+        let both = serde_json::json!({"recording": true, "speaking": true});
+        assert_eq!(
+            Activity::of(&both),
+            Activity::Recording,
+            "the mic is what the user waits on"
+        );
+        let speaking = serde_json::json!({"recording": false, "speaking": true});
+        assert_eq!(Activity::of(&speaking), Activity::Speaking);
+        let idle = serde_json::json!({"recording": false, "speaking": false});
+        assert_eq!(Activity::of(&idle), Activity::Idle);
+    }
+
+    // An older daemon says less than this build reads
+    #[test]
+    fn a_payload_missing_its_fields_reads_as_idle() {
+        assert_eq!(Activity::of(&serde_json::json!({})), Activity::Idle);
     }
 
     #[test]
