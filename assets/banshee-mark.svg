@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <title>Banshee mark</title>
+  <!-- A shrouded, faceless figure: the keening spirit. The hem falls in two
+       soft folds so the silhouette reads as cloth, not as feet. Faceless is
+       deliberate; eyes turn a spirit into a cartoon at 18pt. -->
+  <path id="shroud" fill="currentColor"
+    d="M21 70 L24 46 C24 27 34 14 50 14 C66 14 76 27 76 46 L79 70 C79 80 72 88 64 86 C57 84 55 72 50 72 C45 72 43 84 36 86 C28 88 21 80 21 70 Z"/>
+</svg>

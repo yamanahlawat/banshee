@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banshee-icon.png" alt="banshee" width="104">
+</p>
+
 # Banshee
 
 Banshee gives your AI coding agent a voice. Your agent - Claude Code, Cursor,
@@ -120,14 +124,17 @@ You'll find all three under **System Settings > Privacy & Security**. macOS
 prompts for each one the first time Banshee needs it; approve the prompts, then
 restart the daemon (permissions don't apply to an already-running process).
 
-**3. Check your setup:**
+**3. Start Banshee, then check your setup:**
 
 ```bash
+banshee start
 banshee status
 ```
 
 It reports on models, config, microphone, permissions, and daemon health, and
-prints a fix for anything that's off. It never changes anything itself.
+prints a fix for anything that's off. It never changes anything itself. Check
+after starting, not before: a daemon that isn't running is one of the problems
+it reports.
 
 ## Usage
 
@@ -203,7 +210,9 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee voices`                | List the speech voices on disk, and mark the one in use    |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee serve`                 | Run the daemon in the foreground                           |
-| `banshee service uninstall`     | Remove the start-at-login launch agent                     |
+| `banshee tray`                  | Show the menu bar icon, now and at every login (macOS)     |
+| `banshee tray --uninstall`      | Stop the menu bar icon and remove its launch agent         |
+| `banshee service uninstall`     | Remove the start-at-login launch agents                    |
 | `banshee listen`                | Print recent transcriptions                                |
 | `banshee record start` / `stop` | Push-to-talk without the hotkey (for keybinds and scripts) |
 | `banshee speak "<text>"`        | Speak some text aloud                                      |
@@ -347,6 +356,23 @@ The command runs until the daemon stops, and then exits non-zero, so a
 supervisor can restart it. For a single answer rather than a stream, ask
 `banshee status`: a reader that stops early only ends `banshee watch` at the
 next change, which on a quiet daemon may be a long wait.
+
+### Showing the state in the macOS menu bar
+
+```bash
+banshee tray
+```
+
+An icon in the menu bar answers one question: can I speak right now. It comes
+back at every login, and its menu names the state in words and the microphone
+in use. Quit it from that menu, or remove it with `banshee tray --uninstall`.
+
+| Idle | Recording | Speaking | Not running |
+|:----:|:---------:|:--------:|:-----------:|
+| <img src="assets/states/idle.png" width="52"> | <img src="assets/states/recording.png" width="52"> | <img src="assets/states/speaking.png" width="52"> | <img src="assets/states/notrunning.png" width="52"> |
+
+The states differ by shape, never by colour alone, and the icon is a template
+image, so macOS tints it to match the menu bar in light and dark.
 
 ### Showing the state in a Waybar module
 

@@ -168,16 +168,11 @@ fn waybar_line(word: &str, device: Option<&str>) -> String {
     .to_string()
 }
 
-/// One word for the two booleans a subscriber is sent. The microphone outranks
-/// the speaker: it is what the user is waiting on.
 fn state_word(state: &serde_json::Value) -> &'static str {
-    let flag = |name| state.get(name).and_then(serde_json::Value::as_bool) == Some(true);
-    if flag("recording") {
-        "recording"
-    } else if flag("speaking") {
-        "speaking"
-    } else {
-        "idle"
+    match banshee_common::Activity::of(state) {
+        banshee_common::Activity::Idle => "idle",
+        banshee_common::Activity::Recording => "recording",
+        banshee_common::Activity::Speaking => "speaking",
     }
 }
 
@@ -391,11 +386,7 @@ async fn main() -> Result<(), BansheeError> {
                     }
                     Err(error) => fail(&error),
                 };
-            // Only the opening reply carries it; a change carries the live fields
-            let device = state
-                .get("audio_device")
-                .and_then(|name| name.as_str())
-                .map(str::to_string);
+            let device = banshee_common::audio_device(&state).map(str::to_string);
             let mut shown = "";
             loop {
                 let word = state_word(&state);
@@ -584,7 +575,7 @@ async fn main() -> Result<(), BansheeError> {
             }
         }
         CommandType::Start => {
-            let log = service::install()?;
+            let log = service::install(service::Agent::Daemon)?;
             println!("Banshee is running, and starts again at login.");
 
             // The daemon reports these to its log, which nobody reads on a first run
@@ -618,8 +609,33 @@ async fn main() -> Result<(), BansheeError> {
                 _ => println!("Logs: {log}"),
             }
         }
+        CommandType::Tray { uninstall } => {
+            if uninstall {
+                if service::uninstall(service::Agent::Tray)? {
+                    println!("The menu bar icon no longer starts at login.");
+                } else {
+                    println!("The menu bar icon was not set to start at login.");
+                }
+            } else {
+                let log = service::install(service::Agent::Tray)?;
+                println!("The menu bar icon is running, and comes back at login.");
+                println!("Logs: {log}");
+            }
+        }
         CommandType::Service { action } => match action {
-            args::ServiceAction::Uninstall => service::uninstall()?,
+            // Every entry, so none is left behind to fail at the next login
+            args::ServiceAction::Uninstall => {
+                let mut removed = false;
+                for agent in service::Agent::ALL {
+                    if service::uninstall(agent)? {
+                        println!("The {} no longer starts at login.", agent.name());
+                        removed = true;
+                    }
+                }
+                if !removed {
+                    println!("Nothing was set to start at login.");
+                }
+            }
         },
     }
     Ok(())

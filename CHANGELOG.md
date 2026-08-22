@@ -5,6 +5,49 @@ All notable changes to Banshee are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-22
+
+### Added
+
+- **A menu bar icon on macOS.** `banshee tray` puts an indicator in the menu bar
+  that answers one question: can I speak right now. Four states, told apart by
+  shape and never by colour alone, so a tinted menu bar and a colour vision
+  difference both stay readable: an outline shroud when idle, a filled one while
+  recording, arcs at the shoulders while speaking, and a broken outline when the
+  daemon is not running. The icon is a template image, so macOS tints it for
+  light and dark. Its menu names the state in words and the microphone in use,
+  and quits from there. `banshee tray --uninstall` removes it.
+
+  It runs as its own process with its own launch agent, not as a child of the
+  daemon. AppKit has to own the main thread, which belongs to tokio in the
+  daemon, and a separate lifetime is what lets the icon report that the daemon
+  is down rather than vanishing with it. It reads the socket and nothing else,
+  so it asks for no permissions of its own.
+
+- **Banshee has a mark.** A shrouded figure, drawn once and used everywhere: as
+  the four menu bar states, and in colour as the app icon that now heads the
+  README.
+
+### Changed
+
+- `banshee status` reads in causal order, so a failure that causes the ones
+  below it comes first. A stopped daemon is now a failure rather than a note,
+  because nothing records without it. Check after `banshee start`, not before.
+
+- A missing permission names whose grant was read. TCC answers for the process
+  that asked, so a grant read from the CLI says nothing about a daemon that
+  launchd started.
+
+- A microphone that will not open names all three causes it could be, since
+  Core Audio does not say which: a denied grant, a disconnected device, or an
+  `[audio] input_device` that names something absent.
+
+- A `config.toml` that will not parse reports only the first line of the error
+  and names the file's path.
+
+- `banshee service uninstall` removes every launch agent Banshee installed, so
+  none is left behind to fail at the next login.
+
 ## [0.8.0] - 2026-08-21
 
 **Upgrading from 0.7.0 or earlier asks for macOS permissions once more.** This is

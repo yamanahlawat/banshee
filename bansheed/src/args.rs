@@ -13,6 +13,12 @@ pub enum CommandType {
     Start,
     /// Stops the running daemon
     Stop,
+    /// Shows the menu bar icon now and at every login (macOS)
+    Tray {
+        /// Stop the icon and remove its launch agent
+        #[clap(long)]
+        uninstall: bool,
+    },
     /// Download required models locally
     Setup,
     /// Reports what Banshee is doing and what stops it working
