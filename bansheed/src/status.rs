@@ -21,9 +21,16 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             config
         }
         Err(e) => {
+            let path = utils::get_config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "config.toml".to_string());
+            // First line only: toml's diagnostic runs five lines with a caret,
+            // and `main` has already printed it in full
+            let reason = e.to_string();
+            let reason = reason.lines().next().unwrap_or("could not be read");
             healthy &= fail(
-                &format!("config.toml invalid: {e}"),
-                "fix the TOML, or delete the file to use defaults",
+                &format!("config.toml invalid: {reason}"),
+                &format!("edit {path}, or delete it to use defaults"),
             );
             Config::default()
         }
@@ -63,6 +70,10 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 
     check_espeak();
 
+    // Before the checks that depend on it: a dead daemon causes the microphone
+    // and permission failures below, and read after them it looks like a footnote
+    healthy &= report_daemon(&daemon);
+
     healthy &= check_recording(&daemon, &config.audio.input_device);
 
     #[cfg(target_os = "macos")]
@@ -97,8 +108,6 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         }
     }
 
-    healthy &= report_daemon(&daemon);
-
     if let Some(service) = crate::service::service_file_path() {
         if service.exists() {
             note("start-at-login service installed");
@@ -110,7 +119,8 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     if healthy {
         println!("All checks passed.");
     } else {
-        println!("Problems found, fixes listed above.");
+        // Causal order: a later failure is often an earlier one's symptom
+        println!("Problems found. Work down from the top.");
     }
     healthy
 }
@@ -159,8 +169,14 @@ fn on_path(bin: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()))
 }
 
+// A model is a file with bytes in it. An interrupted copy leaves the name
+// behind with nothing in it, and `exists` alone calls that installed.
+fn model_present(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
+}
+
 fn check_model(models_dir: &Path, name: &str) -> bool {
-    if models_dir.join(name).exists() {
+    if model_present(&models_dir.join(name)) {
         pass(&format!("model present: {name}"))
     } else {
         fail(&format!("model missing: {name}"), "run: banshee setup")
@@ -195,7 +211,7 @@ fn classify(status: serde_json::Value) -> Daemon {
 
 fn unreported(what: &str) -> bool {
     note(&format!(
-        "{what} unchecked: this daemon predates blocker reporting"
+        "{what} unchecked: this daemon is older than this command and does not report it"
     ));
     true
 }
@@ -249,11 +265,20 @@ fn check_permissions(daemon: &Daemon) -> bool {
         }
     };
 
+    let subject = permission_subject(daemon);
     let mut healthy = true;
     for (name, consequence, fix) in denied {
-        healthy &= fail(&format!("{name} missing: {consequence}"), fix);
+        healthy &= fail(&format!("{name} missing for {subject}: {consequence}"), fix);
     }
     healthy
+}
+
+#[cfg(target_os = "macos")]
+fn permission_subject(daemon: &Daemon) -> &'static str {
+    match daemon {
+        Daemon::Running { .. } => "the daemon",
+        _ => "this process",
+    }
 }
 
 // status fields are optional by protocol, so every read needs a fallback
@@ -287,6 +312,16 @@ pub async fn probe_daemon() -> Daemon {
 // `Silent` counts as live: something answered the socket, so something owns the
 // device. Missing models suppress the pipeline blocker, so no blocker proves
 // capture opened, not that recording works.
+// Core Audio does not say which of these it was: the one failure measured here
+// returned kAudioHardwareBadObjectError, which a denied grant and a vanished
+// device can both produce. All three are named because none can be ruled out.
+#[cfg(target_os = "macos")]
+const MICROPHONE_FIX: &str = "check Microphone is allowed in System Settings > \
+     Privacy & Security, that the device is connected, and that [audio] input_device \
+     names it";
+#[cfg(not(target_os = "macos"))]
+const MICROPHONE_FIX: &str = "connect a microphone, or fix [audio] input_device in config.toml";
+
 fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     match daemon {
         Daemon::Running { status, blockers } => match blockers
@@ -313,10 +348,7 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
                 let name = name.unwrap_or_else(|| "unnamed device".to_string());
                 pass(&format!("microphone opens for capture: {name}"))
             }
-            Err(e) => fail(
-                &format!("microphone will not open: {e}"),
-                "connect a microphone, or fix [audio] input_device in config.toml",
-            ),
+            Err(e) => fail(&format!("microphone will not open: {e}"), MICROPHONE_FIX),
         },
     }
 }
@@ -339,14 +371,13 @@ fn report_daemon(daemon: &Daemon) -> bool {
             &format!("daemon answered the socket but status failed: {e}"),
             "restart it: banshee start",
         ),
-        Daemon::Stale => {
-            note("stale socket from a crash; banshee start cleans it up");
-            true
-        }
-        Daemon::Missing => {
-            note("daemon not running (start with: banshee start)");
-            true
-        }
+        // Not notes: nothing records without a daemon, and a checklist that
+        // passes here reports a green check it cannot back
+        Daemon::Stale => fail(
+            "the daemon is not running; a stale socket is left from a crash",
+            "start it: banshee start",
+        ),
+        Daemon::Missing => fail("the daemon is not running", "start it: banshee start"),
     }
 }
 
@@ -381,10 +412,15 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     .map_or(config.stt.vad_threshold, |live| live as f32);
 
     note(&format!(
-        "stt {preset}, vad {}, endpoint {} ms, {} vocabulary terms",
+        "stt {preset}, vad {}, endpoint {} ms, {} vocabulary {}",
         vad_threshold,
         config.stt.endpoint_silence_ms,
-        config.stt.vocabulary.len()
+        config.stt.vocabulary.len(),
+        if config.stt.vocabulary.len() == 1 {
+            "term"
+        } else {
+            "terms"
+        }
     ));
     note(&format!(
         "tts {} at {}x, history {}",
@@ -411,6 +447,41 @@ fn fail(msg: &str, fix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_empty_file_is_not_a_model() {
+        let dir = std::env::temp_dir().join(format!("banshee-model-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let empty = dir.join("empty.bin");
+        std::fs::write(&empty, b"").expect("write");
+        let real = dir.join("real.bin");
+        std::fs::write(&real, b"bytes").expect("write");
+
+        assert!(!super::model_present(&empty), "zero bytes is not a model");
+        assert!(super::model_present(&real));
+        assert!(!super::model_present(&dir.join("absent.bin")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_permission_failure_names_whose_grant_it_checked() {
+        use super::{Daemon, permission_subject};
+        let running = Daemon::Running {
+            status: serde_json::json!({}),
+            blockers: Vec::new(),
+        };
+        assert_eq!(permission_subject(&running), "the daemon");
+        assert_eq!(permission_subject(&Daemon::Missing), "this process");
+        assert_eq!(permission_subject(&Daemon::Stale), "this process");
+    }
+
+    #[test]
+    fn a_daemon_that_is_not_running_fails_the_checklist() {
+        assert!(!super::report_daemon(&super::Daemon::Missing));
+        assert!(!super::report_daemon(&super::Daemon::Stale));
+    }
+
     use super::{Daemon, classify};
 
     #[test]

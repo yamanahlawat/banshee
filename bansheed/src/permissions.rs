@@ -50,8 +50,7 @@ impl Grant {
     pub fn fix(self) -> &'static str {
         match self {
             Grant::Accessibility => {
-                "grant it in System Settings > Privacy & Security > \
-                 Accessibility. unsigned debug builds lose the grant on every rebuild"
+                "grant it in System Settings > Privacy & Security > Accessibility"
             }
             Grant::InputMonitoring => {
                 "grant it in System Settings > Privacy & Security > Input Monitoring"
