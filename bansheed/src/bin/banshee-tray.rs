@@ -323,7 +323,9 @@ mod mac {
         fn alpha(indicator: Indicator) -> Vec<u8> {
             mask(indicator)
                 .0
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|pixel| pixel[3])
                 .collect()
         }
@@ -356,11 +358,15 @@ mod mac {
             for indicator in STATES {
                 let (pixels, _, _) = mask(indicator);
                 assert!(
-                    pixels.chunks_exact(4).all(|pixel| pixel[..3] == [0, 0, 0]),
+                    pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|pixel| pixel[..3] == [0, 0, 0]),
                     "{indicator:?} carries colour, which the template renderer drops"
                 );
                 assert!(
-                    pixels.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                    pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0),
                     "{indicator:?} is an empty mask"
                 );
             }
@@ -372,7 +378,12 @@ mod mac {
             // must stay exactly where it was
             let (idle, _, _) = mask(Indicator::Idle);
             let (recording, _, _) = mask(Indicator::Recording);
-            for (before, after) in idle.chunks_exact(4).zip(recording.chunks_exact(4)) {
+            for (before, after) in idle
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(recording.as_chunks::<4>().0)
+            {
                 assert!(after[3] >= before[3], "the shroud moved instead of filling");
             }
         }
