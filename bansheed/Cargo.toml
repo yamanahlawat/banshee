@@ -47,9 +47,14 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 whisper-rs = "0.16.0"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The menu bar indicator. winit runs the loop because tray-icon tests against
+# it and it commits to no toolkit.
+png = "0.18.1"
+tray-icon = "0.24.2"
+winit = "0.30.13"
 # Metal + CoreML are always on for macOS (including prebuilt release binaries);
 # whisper.cpp falls back to CPU at runtime if the GPU path is unavailable.
-[target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal", "coreml"] }
 
 [dev-dependencies]

@@ -1,5 +1,24 @@
 // Start-at-login behind a neutral surface: launchd on macOS, systemd on Linux.
 
+/// What can be set to start at login. The platform arms decide what they can
+/// honour, so a new entry is one variant rather than a new pair of functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agent {
+    Daemon,
+    Tray,
+}
+
+impl Agent {
+    pub const ALL: [Agent; 2] = [Agent::Daemon, Agent::Tray];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Agent::Daemon => "daemon",
+            Agent::Tray => "tray",
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod launchd {
     use std::path::{Path, PathBuf};
@@ -7,31 +26,42 @@ mod launchd {
 
     use banshee_common::error::BansheeError;
 
-    const LABEL: &str = "com.banshee.daemon";
+    use super::Agent;
 
-    pub fn service_file_path() -> Option<PathBuf> {
-        Some(agent_path(&dirs::home_dir()?))
+    fn label(agent: Agent) -> &'static str {
+        match agent {
+            Agent::Daemon => "com.banshee.daemon",
+            Agent::Tray => "com.banshee.tray",
+        }
     }
 
-    fn agent_path(home: &Path) -> PathBuf {
+    pub fn service_file_path() -> Option<PathBuf> {
+        Some(agent_path(&dirs::home_dir()?, label(Agent::Daemon)))
+    }
+
+    fn agent_path(home: &Path, label: &str) -> PathBuf {
         home.join("Library/LaunchAgents")
-            .join(format!("{LABEL}.plist"))
+            .join(format!("{label}.plist"))
     }
 
     fn home_dir() -> Result<PathBuf, BansheeError> {
         dirs::home_dir().ok_or_else(|| BansheeError::Other("home dir not found".into()))
     }
 
-    /// Returns where this platform keeps the daemon's log.
-    pub fn install() -> Result<String, BansheeError> {
+    /// One plist shape for both agents. `KeepAlive` fires only on failure, so
+    /// the tray's Quit item is not undone by launchd starting it again.
+    fn write_agent(label: &str, arguments: &[String], log: &Path) -> Result<(), BansheeError> {
         let home = home_dir()?;
-        let plist = agent_path(&home);
-        let binary = std::env::current_exe()?;
-        let log = home.join(".banshee").join("daemon.log");
+        let plist = agent_path(&home, label);
         std::fs::create_dir_all(home.join(".banshee"))?;
         if let Some(dir) = plist.parent() {
             std::fs::create_dir_all(dir)?;
         }
+
+        let arguments: String = arguments
+            .iter()
+            .map(|argument| format!("        <string>{argument}</string>\n"))
+            .collect();
 
         let content = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -39,12 +69,10 @@ mod launchd {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{LABEL}</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{}</string>
-        <string>serve</string>
-    </array>
+{arguments}    </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -59,12 +87,11 @@ mod launchd {
 </dict>
 </plist>
 "#,
-            binary.display(),
             log = log.display(),
         );
 
         // Reinstall must be idempotent: unload any previous copy before loading
-        let _ = launchctl(&["bootout", &format!("gui/{}/{LABEL}", uid())]);
+        let _ = launchctl(&["bootout", &format!("gui/{}/{label}", uid())]);
         std::fs::write(&plist, content)?;
         // bootout is asynchronous and bootstrap fails while the old job is
         // still tearing down, so retry the bootstrap itself
@@ -80,20 +107,53 @@ mod launchd {
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        result?;
+        result
+    }
+
+    fn remove_agent(label: &str) -> Result<bool, BansheeError> {
+        let plist = agent_path(&home_dir()?, label);
+        let _ = launchctl(&["bootout", &format!("gui/{}/{label}", uid())]);
+        if plist.exists() {
+            std::fs::remove_file(&plist)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    // The daemon is this binary; the tray ships beside it, so one install
+    // moves the pair together
+    fn program(agent: Agent) -> Result<Vec<String>, BansheeError> {
+        let binary = std::env::current_exe()?;
+        match agent {
+            Agent::Daemon => Ok(vec![binary.display().to_string(), "serve".to_string()]),
+            Agent::Tray => {
+                let tray = binary
+                    .parent()
+                    .ok_or_else(|| BansheeError::Other("banshee is not inside a directory".into()))?
+                    .join("banshee-tray");
+                if !tray.exists() {
+                    return Err(BansheeError::Other(format!(
+                        "{} not found; reinstall so the tray ships beside the CLI",
+                        tray.display()
+                    )));
+                }
+                Ok(vec![tray.display().to_string()])
+            }
+        }
+    }
+
+    /// Returns where this platform keeps that agent's log.
+    pub fn install(agent: Agent) -> Result<String, BansheeError> {
+        let log = home_dir()?
+            .join(".banshee")
+            .join(format!("{}.log", agent.name()));
+        write_agent(label(agent), &program(agent)?, &log)?;
         Ok(log.display().to_string())
     }
 
-    pub fn uninstall() -> Result<(), BansheeError> {
-        let plist = agent_path(&home_dir()?);
-        let _ = launchctl(&["bootout", &format!("gui/{}/{LABEL}", uid())]);
-        if plist.exists() {
-            std::fs::remove_file(&plist)?;
-            println!("Removed {LABEL}.");
-        } else {
-            println!("No launch agent installed.");
-        }
-        Ok(())
+    /// True when there was one to remove.
+    pub fn uninstall(agent: Agent) -> Result<bool, BansheeError> {
+        remove_agent(label(agent))
     }
 
     fn launchctl(args: &[&str]) -> Result<(), BansheeError> {
@@ -124,6 +184,8 @@ pub use launchd::{install, service_file_path, uninstall};
 #[cfg(target_os = "linux")]
 mod systemd {
     use std::path::PathBuf;
+
+    use super::Agent;
     use std::process::Command;
 
     use banshee_common::error::BansheeError;
@@ -134,7 +196,12 @@ mod systemd {
         Some(dirs::config_dir()?.join("systemd/user").join(UNIT))
     }
 
-    pub fn install() -> Result<String, BansheeError> {
+    pub fn install(agent: Agent) -> Result<String, BansheeError> {
+        if agent != Agent::Daemon {
+            return Err(BansheeError::Other(
+                "the menu bar icon is macOS only; here use: banshee watch --waybar".into(),
+            ));
+        }
         let unit = service_file_path()
             .ok_or_else(|| BansheeError::Other("config dir not found".into()))?;
         let binary = std::env::current_exe()?;
@@ -167,17 +234,19 @@ WantedBy=default.target
         Ok("journalctl --user -u banshee -f".to_string())
     }
 
-    pub fn uninstall() -> Result<(), BansheeError> {
+    pub fn uninstall(agent: Agent) -> Result<bool, BansheeError> {
+        if agent != Agent::Daemon {
+            return Ok(false);
+        }
         let _ = systemctl(&["disable", "--now", UNIT]);
         match service_file_path() {
             Some(unit) if unit.exists() => {
                 std::fs::remove_file(&unit)?;
                 let _ = systemctl(&["daemon-reload"]);
-                println!("Removed {UNIT}.");
+                Ok(true)
             }
-            _ => println!("No service installed."),
+            _ => Ok(false),
         }
-        Ok(())
     }
 
     fn systemctl(args: &[&str]) -> Result<(), BansheeError> {
@@ -204,6 +273,8 @@ pub use systemd::{install, service_file_path, uninstall};
 mod unsupported {
     use std::path::PathBuf;
 
+    use super::Agent;
+
     use banshee_common::error::BansheeError;
 
     fn unsupported() -> BansheeError {
@@ -214,11 +285,11 @@ mod unsupported {
         None
     }
 
-    pub fn install() -> Result<String, BansheeError> {
+    pub fn install(_agent: Agent) -> Result<String, BansheeError> {
         Err(unsupported())
     }
 
-    pub fn uninstall() -> Result<(), BansheeError> {
+    pub fn uninstall(_agent: Agent) -> Result<bool, BansheeError> {
         Err(unsupported())
     }
 }

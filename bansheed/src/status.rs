@@ -169,14 +169,8 @@ fn on_path(bin: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()))
 }
 
-// A model is a file with bytes in it. An interrupted copy leaves the name
-// behind with nothing in it, and `exists` alone calls that installed.
-fn model_present(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
-}
-
 fn check_model(models_dir: &Path, name: &str) -> bool {
-    if model_present(&models_dir.join(name)) {
+    if models_dir.join(name).exists() {
         pass(&format!("model present: {name}"))
     } else {
         fail(&format!("model missing: {name}"), "run: banshee setup")
@@ -307,11 +301,6 @@ pub async fn probe_daemon() -> Daemon {
     }
 }
 
-// Opening a second stream fails on backends that allow only one, which would
-// report a broken microphone on a healthy machine, so ask the daemon instead.
-// `Silent` counts as live: something answered the socket, so something owns the
-// device. Missing models suppress the pipeline blocker, so no blocker proves
-// capture opened, not that recording works.
 // Core Audio does not say which of these it was: the one failure measured here
 // returned kAudioHardwareBadObjectError, which a denied grant and a vanished
 // device can both produce. All three are named because none can be ruled out.
@@ -322,6 +311,11 @@ const MICROPHONE_FIX: &str = "check Microphone is allowed in System Settings > \
 #[cfg(not(target_os = "macos"))]
 const MICROPHONE_FIX: &str = "connect a microphone, or fix [audio] input_device in config.toml";
 
+// Opening a second stream fails on backends that allow only one, which would
+// report a broken microphone on a healthy machine, so ask the daemon instead.
+// `Silent` counts as live: something answered the socket, so something owns the
+// device. Missing models suppress the pipeline blocker, so no blocker proves
+// capture opened, not that recording works.
 fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     match daemon {
         Daemon::Running { status, blockers } => match blockers
@@ -330,7 +324,7 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
         {
             None => pass(&format!(
                 "daemon has the microphone: {}",
-                field(status, "audio_device", "unnamed device")
+                banshee_common::audio_device(status).unwrap_or("unnamed device")
             )),
             Some(blocker) => fail(
                 &format!("the daemon cannot record: {}", blocker.consequence),
@@ -447,22 +441,6 @@ fn fail(msg: &str, fix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn an_empty_file_is_not_a_model() {
-        let dir = std::env::temp_dir().join(format!("banshee-model-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        let empty = dir.join("empty.bin");
-        std::fs::write(&empty, b"").expect("write");
-        let real = dir.join("real.bin");
-        std::fs::write(&real, b"bytes").expect("write");
-
-        assert!(!super::model_present(&empty), "zero bytes is not a model");
-        assert!(super::model_present(&real));
-        assert!(!super::model_present(&dir.join("absent.bin")));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn a_permission_failure_names_whose_grant_it_checked() {

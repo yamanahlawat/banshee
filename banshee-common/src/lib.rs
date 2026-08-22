@@ -105,7 +105,14 @@ pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
 pub const EVENT_STATE: &str = "state";
 pub const EVENT_DOWNLOADS: &str = "downloads";
 
-/// What the daemon is doing, derived from a `state_changed` payload. Each
+/// The microphone named in a `banshee.status` reply. Only that reply carries
+/// it; a `state_changed` push does not, so a subscriber reads it once on open.
+pub fn audio_device(status: &Value) -> Option<&str> {
+    status.get("audio_device").and_then(Value::as_str)
+}
+
+/// What the daemon is doing, read from the `recording` and `speaking` flags.
+/// Both a `banshee.status` reply and a `state_changed` push carry them. Each
 /// surface names these for itself; only the ranking lives here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activity {
