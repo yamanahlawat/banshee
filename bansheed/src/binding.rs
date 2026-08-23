@@ -445,8 +445,14 @@ impl HotkeyTracker {
             }
             return None;
         }
+        let was_held = self.held;
         self.held = false;
         self.started = false;
+        // A release only completes a press this tracker saw: the listener drops
+        // events while the daemon types, so a press can go missing
+        if !was_held {
+            return None;
+        }
         match (self.mode, self.combo) {
             (HotkeyMode::Hold, true) => Some(HotkeyAction::Cancel),
             (HotkeyMode::Hold, false) => Some(HotkeyAction::Stop),
@@ -789,6 +795,19 @@ mod tracker_tests {
         t.on_event(&press(Key::MetaLeft));
         t.on_event(&release(Key::MetaLeft));
         assert_eq!(t.on_event(&release(Key::AltGr)), Some(HotkeyAction::Cancel));
+    }
+
+    #[test]
+    fn an_orphan_release_is_not_a_tap() {
+        let mut t = tracker("RightOption", HotkeyMode::Toggle);
+        assert_eq!(t.on_event(&release(Key::AltGr)), None);
+        assert_eq!(t.on_event(&release(Key::AltGr)), None);
+        // A real tap still toggles
+        t.on_event(&press(Key::AltGr));
+        assert_eq!(
+            t.on_event(&release(Key::AltGr)),
+            Some(HotkeyAction::Toggle(TranscribeTarget::Dictate))
+        );
     }
 
     #[test]

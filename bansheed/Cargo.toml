@@ -48,6 +48,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 whisper-rs = "0.16.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Posts the paste keystroke with its modifier as a flag; see dictation.rs.
+core-graphics = "0.25"
 # The menu bar indicator. winit runs the loop because tray-icon tests against
 # it and it commits to no toolkit.
 png = "0.18.1"

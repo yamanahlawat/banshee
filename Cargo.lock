@@ -291,6 +291,7 @@ dependencies = [
  "audioadapter-buffers",
  "banshee-common",
  "clap",
+ "core-graphics 0.25.0",
  "cpal",
  "crossbeam-channel",
  "dirs",

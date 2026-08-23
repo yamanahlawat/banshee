@@ -1,4 +1,5 @@
 use arboard::Clipboard;
+#[cfg(not(target_os = "macos"))]
 use enigo::{
     Direction::{Click, Press, Release},
     Enigo, Key, Keyboard, Settings,
@@ -22,12 +23,11 @@ pub fn type_text(text: &str) -> Result<(), Box<dyn Error>> {
         return type_text_wayland(text);
     }
 
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
-        format!(
-            "Accessibility permissions missing, Please grant them in settings! {}",
-            e
-        )
-    })?;
+    // Before the clipboard is staged, because a denied grant makes the paste a
+    // silent no-op that nothing downstream can report
+    #[cfg(target_os = "macos")]
+    ensure_accessibility()?;
+
     let mut clipboard = Clipboard::new().map_err(|e| {
         format!(
             "Clipboard access failed! Please grant permission in System Settings: {}",
@@ -39,19 +39,56 @@ pub fn type_text(text: &str) -> Result<(), Box<dyn Error>> {
 
     stage(clipboard, text, old_clipboard)?;
 
-    // Key::Unicode would resolve through Text Input Services, which is
-    // main-thread-only and aborts when called from here.
-    #[cfg(target_os = "macos")]
-    let (modifier, paste_key) = (Key::Meta, Key::Other(0x09));
-    #[cfg(not(target_os = "macos"))]
-    let (modifier, paste_key) = (Key::Control, Key::Unicode('v'));
-
     thread::sleep(PASTE_SETTLE);
 
-    enigo.key(modifier, Press)?;
-    enigo.key(paste_key, Click)?;
-    enigo.key(modifier, Release)?;
+    send_paste()?;
 
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_accessibility() -> Result<(), Box<dyn Error>> {
+    use crate::permissions::{Access, Grant};
+
+    if Grant::Accessibility.access() == Access::Denied {
+        return Err(format!(
+            "Accessibility permission missing! To type, {}",
+            Grant::Accessibility.fix()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+// The modifier is a flag on the keystroke, never a key event of its own: a
+// synthetic Command press desynchronises the system's modifier state, and the
+// next press of that modifier then arrives as a release with no press.
+#[cfg(target_os = "macos")]
+fn send_paste() -> Result<(), Box<dyn Error>> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    // A macOS virtual keycode, not ASCII
+    const KEY_V: u16 = 0x09;
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| "Could not open an event source to paste with")?;
+    for key_down in [true, false] {
+        let event = CGEvent::new_keyboard_event(source.clone(), KEY_V, key_down)
+            .map_err(|_| "Could not build the paste keystroke")?;
+        event.set_flags(CGEventFlags::CGEventFlagCommand);
+        event.post(CGEventTapLocation::HID);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn send_paste() -> Result<(), Box<dyn Error>> {
+    let mut enigo = Enigo::new(&Settings::default())
+        .map_err(|e| format!("Could not reach the display to type with! {e}"))?;
+    enigo.key(Key::Control, Press)?;
+    enigo.key(Key::Unicode('v'), Click)?;
+    enigo.key(Key::Control, Release)?;
     Ok(())
 }
 
