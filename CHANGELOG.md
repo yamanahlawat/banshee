@@ -5,6 +5,48 @@ All notable changes to Banshee are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-08-23
+
+### Added
+
+- **The hotkey is configurable.** `banshee config set audio.hotkey RightOption`,
+  restart, done. A binding is an F-key (`F1`-`F12`), a modifier pressed alone
+  (`RightOption`, `LeftOption`, `LeftControl`, `LeftCommand`, plus
+  `RightCommand` and `Fn` on macOS), or modifiers and a key, as in
+  `Ctrl+Alt+D`. A binding the listener could never match refuses to parse and
+  names the legal forms: F13 does not exist to the key library, Right Control
+  never arrives on macOS, and Shift stays reserved as the mailbox modifier.
+
+  A modifier bound alone still works as a modifier. `RightOption+E` types é,
+  Option+click stays a click, and the accidental recording is discarded
+  quietly. In toggle mode a tap acts on the release, so a press that becomes a
+  chord toggles nothing. Typing a chord's bare letter neither starts nor stops
+  a session.
+
+  The daemon's own paste is fenced off from its own listener: dictation types
+  into the same event stream the hotkey is read from, so without the fence a
+  `LeftCommand` binding would trigger itself on every dictation.
+
+### Changed
+
+- **The default hotkey is Right Option.** A lone right-hand modifier types
+  nothing, sits under the thumb, and works on both platforms; on Mac keyboards
+  a bare F5 belongs to Apple's own Dictation. **This changes behavior on any
+  machine whose config does not set `audio.hotkey`** — to keep F5, run
+  `banshee config set audio.hotkey F5`.
+- `banshee status` names the key in use, not just the mode: `hotkey F5 hold`
+  is now, say, `hotkey RightOption toggle`.
+
+### Fixed
+
+- **A modifier hotkey no longer fires itself after dictation.** On macOS the
+  paste pressed Command as a key event of its own, which desynchronised the
+  system's modifier state: the next press of that modifier arrived as a release
+  with no press, and a lone-modifier binding read it as one tap that both
+  started and stopped a recording. The paste now sets Command as a flag on the
+  keystroke and emits no modifier event at all. A release also only ends a
+  session whose press was seen.
+
 ## [0.9.0] - 2026-08-22
 
 ### Added
