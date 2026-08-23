@@ -25,13 +25,9 @@ pub enum Hotkey {
 }
 
 impl Default for Hotkey {
+    // AltGr is the one right-hand modifier rdev maps on both platforms
     fn default() -> Self {
-        Hotkey::Key {
-            ctrl: false,
-            alt: false,
-            cmd: false,
-            key: Key::F5,
-        }
+        Hotkey::Modifier(Key::AltGr)
     }
 }
 
@@ -489,7 +485,7 @@ mod parse_tests {
 
     #[test]
     fn the_shipped_default_still_parses() {
-        assert_eq!(hotkey("F5").unwrap(), Hotkey::default());
+        assert_eq!(hotkey("RightOption").unwrap(), Hotkey::default());
     }
 
     #[test]

@@ -120,7 +120,7 @@ The daemon runs at every login, restarts if it crashes, and logs to
 
 With the daemon running, the global hotkeys are:
 
-- **Hold the hotkey** (`F5` by default) to record. On release, the
+- **Hold the hotkey** (Right Option by default) to record. On release, the
   transcription is typed straight into the app you're focused on (this is
   dictation mode).
 - **Hold `Shift` + the hotkey** to record. On release, the transcription is
@@ -130,20 +130,19 @@ To tap once to start and once to stop instead of holding, set
 `hotkey_mode = "toggle"` under `[audio]`. Long dictations are easier that way,
 and a session you forget about is still released by the push-to-talk watchdog.
 
-The key is rebindable: `banshee config set audio.hotkey RightOption`, then
+The key is rebindable: `banshee config set audio.hotkey F6`, then
 `banshee start`. Legal values are an F-key (`F1`–`F12`), a modifier alone
 (`RightOption`, `LeftOption`, `LeftControl`, `LeftCommand`, plus
 `RightCommand` and `Fn` on macOS), or modifiers and a key, as in `Ctrl+Alt+D`.
 A modifier bound alone still works as a modifier: `RightOption+E` types é, and
 banshee discards the accidental recording instead of transcribing it.
 
-#### On a Mac, `F5` means `Fn + F5`
+#### Binding an F-key on a Mac
 
-macOS ships the top row as media keys, so plain `F5` starts Apple's own
-Dictation and never reaches the daemon; hold `Fn` to send the real `F5`. To
-make it a single press, turn on _Settings → Keyboard → "Use F1, F2, etc. keys
-as standard function keys"_ — or skip the trade-off and rebind, say to
-`RightOption`.
+macOS ships the top row as media keys, so a plain `F5` press starts Apple's
+own Dictation and never reaches the daemon; hold `Fn` to send the real key. To
+make F-keys single presses, turn on _Settings → Keyboard → "Use F1, F2, etc.
+keys as standard function keys"_.
 
 ### Wayland
 
@@ -255,7 +254,7 @@ fallback = "system"    # system = use `say` when Kokoro is unavailable | none
 
 [audio]
 input_device = "default"  # "default" = follow the OS; otherwise match a device name
-hotkey = "F5"          # F1-F12, a lone modifier like "RightOption", or a chord like "Ctrl+Alt+D"
+hotkey = "RightOption" # F1-F12, a lone modifier, or a chord like "Ctrl+Alt+D"
 hotkey_mode = "hold"   # hold = record while the hotkey is down | toggle = tap to start, tap to stop
 barge_in = "stop"      # stop = the record hotkey cuts off whatever Banshee is saying | none
 

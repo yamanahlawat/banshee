@@ -465,14 +465,14 @@ mod hint_tests {
     // A non-default key, so a regression to a constant goes red
     #[test]
     fn the_hint_names_the_key_the_listener_matches() {
-        let rebound = hotkey("RightOption").unwrap();
+        let rebound = hotkey("F6").unwrap();
         for mode in [HotkeyMode::Toggle, HotkeyMode::Hold] {
             let hint = usage_hint(rebound, mode);
+            assert!(hint.contains("F6"), "the bound key must be named: {hint}");
             assert!(
-                hint.contains("RightOption"),
-                "the bound key must be named: {hint}"
+                !hint.contains("RightOption"),
+                "the default must not leak in: {hint}"
             );
-            assert!(!hint.contains("F5"), "the default must not leak in: {hint}");
         }
     }
 }
