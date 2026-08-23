@@ -63,7 +63,7 @@ impl Default for AudioCuesConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
     pub input_device: String,
-    pub hotkey: String,
+    pub hotkey: crate::binding::Hotkey,
     pub hotkey_mode: HotkeyMode,
     pub barge_in: BargeInMode,
     pub cues: AudioCuesConfig,
@@ -73,7 +73,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             input_device: crate::audio::DEFAULT_INPUT_DEVICE.to_string(),
-            hotkey: "F5".to_string(),
+            hotkey: crate::binding::Hotkey::default(),
             hotkey_mode: HotkeyMode::Hold,
             barge_in: BargeInMode::Stop,
             cues: AudioCuesConfig::default(),
@@ -228,5 +228,23 @@ mod tests {
         let placed = "[audio]\nhotkey_mode = \"toggle\"\n\n[tts]\nvoice = \"af_sky\"\n";
         let config: Config = toml::from_str(placed).expect("the same key parses under [audio]");
         assert!(matches!(config.audio.hotkey_mode, HotkeyMode::Toggle));
+    }
+
+    // The listener matches what this field parses, so an unmatchable binding
+    // must fail the config load, not sit silent behind a working-looking file
+    #[test]
+    fn a_hotkey_the_listener_cannot_match_is_refused() {
+        let error = toml::from_str::<Config>("[audio]\nhotkey = \"banana\"\n")
+            .expect_err("an unknown key name must not parse");
+        assert!(
+            error.to_string().contains("RightOption"),
+            "the error must list the legal names: {error}"
+        );
+
+        let config: Config = toml::from_str("[audio]\nhotkey = \"RightOption\"\n").unwrap();
+        assert_eq!(
+            config.audio.hotkey,
+            crate::binding::Hotkey::Modifier(rdev::Key::AltGr)
+        );
     }
 }

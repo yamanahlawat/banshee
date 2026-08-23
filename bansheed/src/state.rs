@@ -25,7 +25,7 @@ const DOWNLOAD_BACKLOG: usize = 128;
 pub const MAX_PUSH_TO_TALK: Duration = Duration::from_secs(crate::audio::RING_SECS as u64);
 
 // Where a finished transcription is delivered
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscribeTarget {
     Mailbox,
     Dictate,
@@ -39,6 +39,9 @@ pub struct AskCommand {
 // Work items for the audio consumer thread
 pub enum ConsumerCommand {
     Transcribe(TranscribeTarget),
+    // The consumer empties the ring, so a cancelled session does not feed
+    // the next transcription
+    Discard,
     Ask(AskCommand),
     Shutdown,
 }
@@ -50,7 +53,7 @@ pub enum RecordingMode {
     Idle = 0,
     PushToTalk = 1,
     Armed = 2,
-    // Armed, but the user is holding F5 to answer manually
+    // Armed, but the user is holding the hotkey to answer manually
     ArmedHold = 3,
 }
 
@@ -152,6 +155,10 @@ pub struct DaemonState {
     barge_in: BargeInMode,
     // Start and stop can be separate RPC calls, so this cannot live on a stack
     pending_dictate: AtomicBool,
+    // enigo posts to the same HID stream rdev listens at, so while this is
+    // true the hotkey listener drops events: the paste's own modifier presses
+    // would otherwise cancel or open sessions.
+    typing: AtomicBool,
     // Milliseconds since `started_at` at which an open push-to-talk is stuck.
     // A deadline rather than a start keeps the watchdog to one load and compare.
     push_to_talk_deadline: AtomicU64,
@@ -196,6 +203,7 @@ impl DaemonState {
             cues,
             barge_in,
             pending_dictate: AtomicBool::new(false),
+            typing: AtomicBool::new(false),
             push_to_talk_deadline: AtomicU64::new(0),
             shutdown: tokio::sync::Notify::new(),
         }
@@ -256,6 +264,45 @@ impl DaemonState {
         } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
             let _ = self.cues.send(Cue::RecordStop);
         }
+    }
+
+    // A toggle press ends the session a press began, or begins one. Resolved
+    // here rather than in the tracker: the modes live here, and a tracker-side
+    // read races a mode change between the read and the call. Returns true
+    // when it starts a session.
+    pub fn record_toggle(&self, action: TranscribeTarget) -> bool {
+        if matches!(
+            self.recording_mode(),
+            RecordingMode::PushToTalk | RecordingMode::ArmedHold
+        ) {
+            self.record_stop();
+            false
+        } else {
+            self.record_start(action)
+        }
+    }
+
+    // The user pressed a chord through the hotkey, so the session it opened
+    // is a mistake: discard the audio rather than route it. No stop cue for
+    // push-to-talk: the start cue was already noise, a second cue doubles it.
+    pub fn record_cancel(&self) {
+        if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
+            println!("Recording cancelled");
+            let _ = self.commands.send(ConsumerCommand::Discard);
+        } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
+            // The armed session keeps its audio; only the manual hold ends.
+            // This cue answers the start cue the hold played.
+            let _ = self.cues.send(Cue::RecordStop);
+        }
+    }
+
+    pub fn set_typing(&self, typing: bool) {
+        self.typing
+            .store(typing, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_typing(&self) -> bool {
+        self.typing.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     // Releases a session that never got its stop. Stops rather than discards:
@@ -523,6 +570,59 @@ mod tests {
         // The same gate record_start uses, so ask_user cannot arm a deaf mic
         assert!(!state.arm_for_ask());
         assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    }
+
+    // A wrong branch here drops the utterance or leaves the mic open
+    #[test]
+    fn a_toggle_stops_the_session_a_toggle_started() {
+        let (state, requests) = test_state_with_commands();
+
+        assert!(
+            state.record_toggle(TranscribeTarget::Dictate),
+            "idle: starts"
+        );
+        assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+
+        assert!(
+            !state.record_toggle(TranscribeTarget::Dictate),
+            "in flight: stops"
+        );
+        assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate))
+        ));
+
+        // A manual override counts as in flight and ends as a stop
+        state.set_recording_mode(RecordingMode::ArmedHold);
+        assert!(!state.record_toggle(TranscribeTarget::Dictate));
+        assert_eq!(state.recording_mode(), RecordingMode::Armed);
+    }
+
+    // A wrong routing here turns typed-with-the-modifier noise into dictation
+    #[test]
+    fn cancel_discards_the_session_instead_of_routing_it() {
+        let (state, requests) = test_state_with_commands();
+
+        assert!(state.record_start(TranscribeTarget::Dictate));
+        state.record_cancel();
+        assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        assert!(matches!(requests.try_recv(), Ok(ConsumerCommand::Discard)));
+        assert!(requests.try_recv().is_err(), "nothing may be transcribed");
+
+        // Nothing in flight, so a cancel is a no-op, like record_stop
+        state.record_cancel();
+        assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        assert!(requests.try_recv().is_err());
+
+        // A manual override returns to armed and keeps its audio
+        state.set_recording_mode(RecordingMode::ArmedHold);
+        state.record_cancel();
+        assert_eq!(state.recording_mode(), RecordingMode::Armed);
+        assert!(
+            requests.try_recv().is_err(),
+            "the armed session owns the ring"
+        );
     }
 
     #[test]

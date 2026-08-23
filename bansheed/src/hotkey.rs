@@ -3,10 +3,11 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rdev::{EventType, Key, listen};
+use rdev::listen;
 
 use crate::audio::cues::Cue;
 use crate::audio::utils::{StreamingResampler, resample_audio};
+use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
 use crate::config::HotkeyMode;
 use crate::dictation::type_text;
 use crate::speech_to_text::vad::VADEngine;
@@ -40,7 +41,7 @@ pub struct Pipeline<C: Consumer<Item = f32>> {
 enum Phase {
     Waiting { speech_run: usize },
     InSpeech { silence_run: usize, start: usize },
-    // The user is holding F5; the release ends the answer
+    // The user is holding the hotkey; the release ends the answer
     Manual { start: usize },
 }
 
@@ -57,6 +58,13 @@ where
         while let Ok(command) = commands.recv() {
             match command {
                 ConsumerCommand::Transcribe(action) => pipeline.transcribe_utterance(action),
+                // A session opened while this command sat in the queue owns
+                // the ring now: the drain skips, the cancelled lead-in stays.
+                ConsumerCommand::Discard => {
+                    if !pipeline.state.is_recording() {
+                        pipeline.drain();
+                    }
+                }
                 ConsumerCommand::Ask(ask) => pipeline.ask(ask),
                 ConsumerCommand::Shutdown => break,
             }
@@ -70,38 +78,27 @@ pub const WAYLAND_HOTKEY_HINT: &str = "the global hotkey needs X11. Bind \
      `banshee record start` on press and `banshee record stop` on release in \
      your compositor instead";
 
-// The two modes record_stop acts on; anything else means nothing is in flight.
-fn recording(state: &DaemonState) -> bool {
-    matches!(
-        state.recording_mode(),
-        RecordingMode::PushToTalk | RecordingMode::ArmedHold
-    )
-}
-
-// rdev needs X11's XRecord, which wayland does not serve: listen either errors
-// or attaches to Xwayland and never sees a key. Say so instead of looking broken.
-// The key the listener matches; `audio.hotkey` parses but is never read.
-const HOTKEY: &str = "F5";
-
-/// How to dictate, for the mode in effect.
-pub fn usage_hint(hotkey_mode: HotkeyMode) -> String {
+/// How to dictate, for the binding and mode in effect.
+pub fn usage_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
     #[cfg(all(unix, not(target_os = "macos")))]
     if crate::dictation::is_wayland() {
         return format!("{WAYLAND_HOTKEY_HINT}.");
     }
     let press = match hotkey_mode {
-        HotkeyMode::Toggle => format!("Tap {HOTKEY} and speak, then tap it again to stop."),
-        HotkeyMode::Hold => format!("Hold {HOTKEY} and speak, then release to stop."),
+        HotkeyMode::Toggle => format!("Tap {hotkey} and speak, then tap it again to stop."),
+        HotkeyMode::Hold => format!("Hold {hotkey} and speak, then release to stop."),
     };
     format!(
         "{press} The text lands in whatever app has focus.\n\
-         Shift + {HOTKEY} sends it to `banshee listen` instead of typing it."
+         Shift + {hotkey} sends it to `banshee listen` instead of typing it."
     )
 }
 
 // Registered by the daemon, not by the pipeline: a press must still reach
 // record_start when recording is unavailable, or it answers with silence.
-pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey_mode: HotkeyMode) {
+// rdev needs X11's XRecord, which wayland does not serve: listen either errors
+// or attaches to Xwayland and never sees a key. Say so instead of looking broken.
+pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_mode: HotkeyMode) {
     #[cfg(all(unix, not(target_os = "macos")))]
     if crate::dictation::is_wayland() {
         println!("Wayland session: {WAYLAND_HOTKEY_HINT}.");
@@ -110,43 +107,23 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey_mode: HotkeyMode)
 
     // Spawn a heavy thread for the global hotkey listener
     thread::spawn(move || {
-        // Track the state of the shift key
-        let mut shift_key_pressed = false;
-        // Held keys auto-repeat their press; toggle would flip on every repeat
-        let mut hotkey_held = false;
-
+        let mut tracker = HotkeyTracker::new(hotkey, hotkey_mode);
+        // Whether this listener's own start opened the session in flight.
+        // Cancel discards audio, so it must never touch a session another
+        // caller opened while our start was refused as busy.
+        let mut owned = false;
         if let Err(error) = listen(move |event| {
-            match event.event_type {
-                // Track when shift goes down or up
-                EventType::KeyPress(Key::ShiftLeft) | EventType::KeyPress(Key::ShiftRight) => {
-                    shift_key_pressed = true;
-                }
-                EventType::KeyRelease(Key::ShiftLeft) | EventType::KeyRelease(Key::ShiftRight) => {
-                    shift_key_pressed = false;
-                }
-
-                // Shift is sampled at the press instant, so dictation takes
-                // the unmodified key: a near simultaneous press cannot misroute it.
-                EventType::KeyPress(Key::F5) if !hotkey_held => {
-                    hotkey_held = true;
-                    // The press that ends a session is the one that would start it
-                    if matches!(hotkey_mode, HotkeyMode::Toggle) && recording(&key_state) {
-                        key_state.record_stop();
-                    } else {
-                        key_state.record_start(if shift_key_pressed {
-                            TranscribeTarget::Mailbox
-                        } else {
-                            TranscribeTarget::Dictate
-                        });
-                    }
-                }
-                EventType::KeyRelease(Key::F5) => {
-                    hotkey_held = false;
-                    if matches!(hotkey_mode, HotkeyMode::Hold) {
-                        key_state.record_stop();
-                    }
-                }
-                _ => (), // Ignore mouse movements and hotkey auto-repeat
+            // The daemon's own paste presses modifier keys on this same
+            // event stream; they must not re-enter the tracker
+            if key_state.is_typing() {
+                return;
+            }
+            match tracker.on_event(&event.event_type) {
+                Some(HotkeyAction::Start(target)) => owned = key_state.record_start(target),
+                Some(HotkeyAction::Toggle(target)) => owned = key_state.record_toggle(target),
+                Some(HotkeyAction::Stop) => key_state.record_stop(),
+                Some(HotkeyAction::Cancel) if owned => key_state.record_cancel(),
+                Some(HotkeyAction::Cancel) | None => {}
             }
         }) {
             // Names the capability that is gone, not just the error type
@@ -159,7 +136,7 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey_mode: HotkeyMode)
 }
 
 impl<C: Consumer<Item = f32>> Pipeline<C> {
-    // Push-to-talk: F5 was released, the ring holds the whole utterance
+    // Push-to-talk ended: the ring holds the whole utterance
     fn transcribe_utterance(&mut self, action: TranscribeTarget) {
         // pull all the floats out of the ring buffer into a standard Vec
         let mut audio_data = Vec::new();
@@ -273,7 +250,10 @@ impl<C: Consumer<Item = f32>> Pipeline<C> {
                     }
                     TranscribeTarget::Dictate => {
                         println!("Dictating: {}", transcription);
-                        match type_text(&transcription) {
+                        self.state.set_typing(true);
+                        let typed = type_text(&transcription);
+                        self.state.set_typing(false);
+                        match typed {
                             Ok(_) => {
                                 let _ = self.cues.send(Cue::Ready);
                             }
@@ -365,7 +345,7 @@ impl<C: Consumer<Item = f32>> Pipeline<C> {
                 }
                 RecordingMode::Armed => {
                     if let Phase::Manual { start } = phase {
-                        // F5 release ends the manual answer
+                        // The hotkey release ends the manual answer
                         audio.drain(..start);
                         return Some(audio);
                     }
@@ -469,59 +449,30 @@ fn save_history(state: &DaemonState, transcription: &str) {
 #[cfg(test)]
 mod hint_tests {
     use super::*;
+    use crate::binding::hotkey;
 
     #[test]
     fn the_hint_matches_the_mode_in_effect() {
-        let toggle = usage_hint(HotkeyMode::Toggle);
+        let toggle = usage_hint(Hotkey::default(), HotkeyMode::Toggle);
         assert!(toggle.contains("again"), "toggle must say to press twice");
         assert!(!toggle.contains("release"), "toggle must not say release");
 
-        let hold = usage_hint(HotkeyMode::Hold);
+        let hold = usage_hint(Hotkey::default(), HotkeyMode::Hold);
         assert!(hold.contains("release"), "hold must say to release");
         assert!(!hold.contains("again"), "hold must not say to press twice");
     }
 
+    // A non-default key, so a regression to a constant goes red
     #[test]
     fn the_hint_names_the_key_the_listener_matches() {
+        let rebound = hotkey("RightOption").unwrap();
         for mode in [HotkeyMode::Toggle, HotkeyMode::Hold] {
-            assert!(usage_hint(mode).contains(HOTKEY), "{HOTKEY} must be named");
+            let hint = usage_hint(rebound, mode);
+            assert!(
+                hint.contains("RightOption"),
+                "the bound key must be named: {hint}"
+            );
+            assert!(!hint.contains("F5"), "the default must not leak in: {hint}");
         }
-    }
-}
-
-#[cfg(test)]
-mod toggle_tests {
-    use super::*;
-    use crate::config::BargeInMode;
-
-    // Toggle branches on `recording`: a wrong answer drops the utterance
-    #[test]
-    fn recording_tracks_the_session_a_toggle_press_would_end() {
-        let (commands, requests) = mpsc::channel();
-        let state = DaemonState::new(
-            "0.0.0",
-            "stt",
-            "vad",
-            0.5,
-            None,
-            crate::text_to_speech::SpeechPlayer::default(),
-            commands,
-            mpsc::channel().0,
-            BargeInMode::Stop,
-        );
-
-        // Nothing in flight, so a toggle press has to start rather than stop
-        assert!(!recording(&state));
-
-        assert!(state.record_start(TranscribeTarget::Dictate));
-        assert!(recording(&state));
-
-        // In flight, so the next press stops and the utterance is dispatched
-        state.record_stop();
-        assert!(!recording(&state));
-        assert!(matches!(
-            requests.try_recv(),
-            Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate))
-        ));
     }
 }

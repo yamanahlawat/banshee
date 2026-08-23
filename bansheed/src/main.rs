@@ -1,6 +1,7 @@
 mod api;
 mod args;
 mod audio;
+mod binding;
 mod config;
 mod daemon;
 mod dictation;
@@ -281,7 +282,11 @@ async fn main() -> Result<(), BansheeError> {
                 };
             // After the pipeline, so a press always reaches record_start: with
             // no pipeline it answers with the error cue rather than nothing
-            hotkey::start_global_hotkey(Arc::clone(&daemon_state), config.audio.hotkey_mode);
+            hotkey::start_global_hotkey(
+                Arc::clone(&daemon_state),
+                config.audio.hotkey,
+                config.audio.hotkey_mode,
+            );
             let result = daemon::run(&daemon_state, socket_path, listener).await;
             // Drop the Whisper context before atexit: ggml's Metal cleanup
             // asserts if buffers are still resident
@@ -580,7 +585,7 @@ async fn main() -> Result<(), BansheeError> {
 
             // The daemon reports these to its log, which nobody reads on a first run
             let mut blocked = false;
-            let hotkey_mode = match &config_result {
+            let binding = match &config_result {
                 Ok(config) => {
                     let missing = models::missing(&models::required(config));
                     if !missing.is_empty() {
@@ -589,7 +594,7 @@ async fn main() -> Result<(), BansheeError> {
                         println!("Models not downloaded yet: {}.", missing.join(", "));
                         println!("It runs without them, but cannot record. Run: banshee setup");
                     }
-                    Some(config.audio.hotkey_mode)
+                    Some((config.audio.hotkey, config.audio.hotkey_mode))
                 }
                 // main already printed why the config would not load
                 Err(_) => {
@@ -601,10 +606,10 @@ async fn main() -> Result<(), BansheeError> {
             // Opens System Settings, so it goes last: read here, then switch
             blocked |= permissions::guide_missing();
 
-            match hotkey_mode {
-                Some(mode) if !blocked => {
+            match binding {
+                Some((hotkey, mode)) if !blocked => {
                     println!();
-                    println!("{}", hotkey::usage_hint(mode));
+                    println!("{}", hotkey::usage_hint(hotkey, mode));
                 }
                 _ => println!("Logs: {log}"),
             }
