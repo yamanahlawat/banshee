@@ -3,7 +3,7 @@ members = ["bansheed", "banshee-common"]
 resolver = "2"
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 authors = ["Yaman Ahlawat"]
 license = "MIT OR Apache-2.0"

@@ -394,7 +394,8 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     let on_off = |enabled: bool| if enabled { "on" } else { "off" };
 
     note(&format!(
-        "hotkey {hotkey_mode}, barge-in {barge_in}, cues {}",
+        "hotkey {} {hotkey_mode}, barge-in {barge_in}, cues {}",
+        config.audio.hotkey,
         on_off(config.audio.cues.enabled)
     ));
     let vad_threshold = match daemon {

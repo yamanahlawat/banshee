@@ -49,12 +49,9 @@ the other half of the conversation.
 Runs on **macOS (Apple Silicon)** and **Linux** (x86_64 / aarch64); Intel Macs
 aren't supported. Needs ~1 GB of disk for the models.
 
-On Linux, the **global hotkey** goes through X11; the library Banshee listens
-with has no Wayland path, so under Wayland `F5` does nothing. Bind
-`banshee record start` / `stop` in your compositor instead (see
-[Wayland](#wayland)). Dictation typing does work under Wayland if `wtype` or
-`ydotool` is installed. The agent voice (`speak_status`, `ask_user`) is
-unaffected either way, and `banshee status` reports what your session supports.
+On Wayland the global hotkey needs your compositor's help and typing needs
+`wtype` or `ydotool` — see [Wayland](#wayland). The agent voice works
+everywhere, and `banshee status` reports what your session supports.
 
 ### Homebrew
 
@@ -81,48 +78,27 @@ cargo install --path bansheed  # the `banshee` command and `banshee-mcp-shim`
 
 ## Setup
 
-**1. Download the models** into `~/.banshee/models/`:
+**1. Download the models** (~860 MB: Whisper, Silero VAD, Kokoro) into
+`~/.banshee/models/`:
 
 ```bash
 banshee setup
 ```
 
-| File                           | Size    | What it is                                    |
-| ------------------------------ | ------- | --------------------------------------------- |
-| `ggml-large-v3-turbo-q5_0.bin` | ~547 MB | Whisper STT model (default `balanced` preset) |
-| `silero_vad.onnx`              | ~2 MB   | Silero voice-activity detection               |
-| `kokoro-v1.0.onnx`             | ~310 MB | Kokoro TTS model                              |
-| `af_sky.bin`                   | ~512 KB | Kokoro voice style (the configured `voice`)   |
-
-Files that already exist are skipped, so re-running `banshee setup` after
-changing the STT preset or the TTS voice only downloads what's missing.
-
-**An interrupted download resumes.** Each file is written to `<name>.part` and
-renamed into place only once it is complete, so a half-finished file is never
-mistaken for a model. Press Ctrl-C, lose your connection, or run out of disk,
-and the next `banshee setup` continues from where it stopped rather than
-starting the download again.
-
-If a daemon is already running, `banshee setup` asks it to do the downloading
-and prints what it reports. One process writes at a time, which is what lets the
-partial file be picked up again. Any client can start the same download over
-`banshee.download_models` and follow it by subscribing to `downloads`.
+An interrupted download resumes where it stopped, and a re-run fetches only
+what's missing — so after changing the STT preset or the TTS voice, run it
+again.
 
 **Optional: better pronunciation.** Install `espeak-ng` and Banshee pronounces
 unfamiliar words (tech jargon, proper nouns) instead of spelling them out. On
 macOS it's `brew install espeak-ng`; `banshee status` prints the command for
 your system.
 
-**2. Grant macOS permissions.** Banshee needs three of them, otherwise it
-quietly fails to record or type:
-
-- **Microphone**, so it can capture audio.
-- **Input Monitoring**, so it can listen for the global hotkey.
-- **Accessibility**, so it can type out your transcribed text.
-
-You'll find all three under **System Settings > Privacy & Security**. macOS
-prompts for each one the first time Banshee needs it; approve the prompts, then
-restart the daemon (permissions don't apply to an already-running process).
+**2. Grant macOS permissions.** Banshee needs three, or it quietly fails to
+record or type: **Microphone** (capture), **Input Monitoring** (the global
+hotkey), and **Accessibility** (typing the transcription). macOS prompts for
+each the first time Banshee needs it; approve, then restart the daemon —
+permissions don't apply to an already-running process.
 
 **3. Start Banshee, then check your setup:**
 
@@ -138,39 +114,35 @@ it reports.
 
 ## Usage
 
-Start the daemon:
-
-```bash
-banshee start
-```
-
-It runs at every login, restarts if it crashes, and logs to
-`~/.banshee/daemon.log`. `banshee stop` pauses it until the next login or the
-next `banshee start`. To run the daemon in the foreground instead (say, to
-watch the logs while debugging), use `banshee serve`.
+The daemon runs at every login, restarts if it crashes, and logs to
+`~/.banshee/daemon.log`. `banshee stop` pauses it until the next login;
+`banshee serve` runs it in the foreground for debugging.
 
 With the daemon running, the global hotkeys are:
 
-- **Hold `F5`** to record. On release, the transcription is typed straight into
-  the app you're focused on (this is dictation mode).
-- **Hold `Shift + F5`** to record. On release, the transcription is saved, and
-  you can grab it later with `banshee listen`.
+- **Hold the hotkey** (Right Option by default) to record. On release, the
+  transcription is typed straight into the app you're focused on (this is
+  dictation mode).
+- **Hold `Shift` + the hotkey** to record. On release, the transcription is
+  saved, and you can grab it later with `banshee listen`.
 
 To tap once to start and once to stop instead of holding, set
 `hotkey_mode = "toggle"` under `[audio]`. Long dictations are easier that way,
 and a session you forget about is still released by the push-to-talk watchdog.
 
-#### On a Mac, `F5` means `Fn + F5`
+The key is rebindable: `banshee config set audio.hotkey F6`, then
+`banshee start`. Legal values are an F-key (`F1`–`F12`), a modifier alone
+(`RightOption`, `LeftOption`, `LeftControl`, `LeftCommand`, plus
+`RightCommand` and `Fn` on macOS), or modifiers and a key, as in `Ctrl+Alt+D`.
+A modifier bound alone still works as a modifier: `RightOption+E` types é, and
+banshee discards the accidental recording instead of transcribing it.
 
-macOS ships the top row as media keys, so plain `F5` is the microphone key and
-starts Apple's own Dictation. The daemon never sees it: rdev watches key and
-modifier events, and media keys are not among them. `Fn` is what turns it into
-the keycode banshee can read.
+#### Binding an F-key on a Mac
 
-Turning on _Settings → Keyboard → "Use F1, F2, etc. keys as standard function
-keys"_ makes `F5` a single press, on the key that already has a microphone
-printed on it. The trade is that brightness, volume, and the rest then need
-`Fn`, so it is only worth it if you use those less than you dictate.
+macOS ships the top row as media keys, so a plain `F5` press starts Apple's
+own Dictation and never reaches the daemon; hold `Fn` to send the real key. To
+make F-keys single presses, turn on _Settings → Keyboard → "Use F1, F2, etc.
+keys as standard function keys"_.
 
 ### Wayland
 
@@ -186,14 +158,13 @@ bind  = SHIFT, F5, exec, banshee record start
 bindr = SHIFT, F5, exec, banshee record stop
 ```
 
-Both release binds are there on purpose. Hyprland matches modifiers exactly, so
-letting go of `Shift` before `F5` means only the unmodified release matches.
+Both release binds are there on purpose: Hyprland matches modifiers exactly,
+and `Shift` may be released before `F5`.
 
-Typing the transcription into the focused app needs **`wtype`** (wlroots
-compositors such as Hyprland and Sway) or **`ydotool`** (anywhere, but it needs
-its own daemon and uinput access). Without one of them, dictation has no way to
-type and reports an error; the transcription is still kept in
-`banshee history`. `banshee status` tells you which one it found.
+Typing into the focused app needs **`wtype`** (wlroots compositors) or
+**`ydotool`** (anywhere, with its own daemon and uinput access). Without one,
+dictation reports an error and the transcription is kept in `banshee history`.
+`banshee status` tells you which one it found.
 
 The CLI commands all talk to the running daemon over its socket:
 
@@ -231,8 +202,7 @@ exposes three tools:
 | `ask_user`          | Ask a question aloud, then wait for and return your spoken answer |
 | `listen_for_prompt` | Pick up anything you've said since it last checked                |
 
-It works with any MCP-capable tool, like Claude Code, OpenCode, Cursor, and
-others. Most of them use the same `mcpServers` config shape:
+Most MCP tools use the same `mcpServers` config shape:
 
 ```json
 {
@@ -244,11 +214,9 @@ others. Most of them use the same `mcpServers` config shape:
 }
 ```
 
-Each tool keeps this config in its own spot (for example, Cursor uses
-`~/.cursor/mcp.json`, and Claude Code lets you add it with `claude mcp add`), so
-check your tool's docs for where the MCP config lives. If your tool doesn't pick
-up the binary from your `PATH`, use its full path instead. Restart the tool, and
-the three tools will show up.
+Each tool keeps this config in its own spot — Cursor in `~/.cursor/mcp.json`,
+Claude Code via `claude mcp add` — so check your tool's docs. If the binary is
+not found, use its full path. Restart the tool, and the three tools show up.
 
 ### Pi coding agent
 
@@ -286,7 +254,8 @@ fallback = "system"    # system = use `say` when Kokoro is unavailable | none
 
 [audio]
 input_device = "default"  # "default" = follow the OS; otherwise match a device name
-hotkey_mode = "hold"   # hold = record while F5 is down | toggle = tap to start, tap to stop
+hotkey = "RightOption" # F1-F12, a lone modifier, or a chord like "Ctrl+Alt+D"
+hotkey_mode = "hold"   # hold = record while the hotkey is down | toggle = tap to start, tap to stop
 barge_in = "stop"      # stop = the record hotkey cuts off whatever Banshee is saying | none
 
 [audio.cues]
@@ -294,12 +263,10 @@ enabled = true         # tones on record start/stop, success, and errors
 ```
 
 `input_device` is a case-insensitive substring of the microphone name, so
-`"yeti"` matches `Blue Yeti Stereo Microphone`. Leave it as `"default"` to
-follow whatever the OS is set to. If the name matches nothing, the daemon
-refuses to start and lists the devices it did find, rather than quietly
-recording from the wrong microphone.
-
-`banshee devices` shows the names to choose from:
+`"yeti"` matches `Blue Yeti Stereo Microphone`. A name that matches nothing
+stops the daemon with the list of devices it did find, rather than quietly
+recording from the wrong microphone. `banshee devices` shows the names to
+choose from:
 
 ```
 $ banshee devices
@@ -307,14 +274,6 @@ $ banshee devices
   BlackHole 2ch
   MacBook Pro Microphone
 ```
-
-It reads the microphones fresh each time, so unplugging one changes the list.
-The command works whether or not the daemon is running; `in use` only appears
-when a daemon has actually opened that device.
-
-`vocabulary` biases Whisper toward project jargon and proper nouns it would
-otherwise misspell; it is read once at startup, so restart the daemon after
-changing it.
 
 ### Choosing a voice
 
@@ -330,10 +289,9 @@ $ banshee voices
 Speak with one by: banshee config set tts.voice "<name>"
 ```
 
-It lists only what is downloaded, so every name it prints can be spoken with
-today. Nothing is marked in use when Kokoro did not load: the system fallback
-speaks in whatever voice macOS is set to, which Banshee did not choose and does
-not report. The voice is read once at startup, so a change needs a restart.
+It lists only what is downloaded, so every name it prints works today. Nothing
+is marked in use when Kokoro did not load: the system fallback speaks in
+whatever voice macOS is set to, which Banshee did not choose.
 
 ### Following what the daemon is doing
 
@@ -348,14 +306,9 @@ speaking
 idle
 ```
 
-The first line is the state at the moment you connect, so a script never has to
-guess. The daemon pushes the rest as they happen, rather than the command asking
-again on a timer. A state that did not move is not printed twice.
-
-The command runs until the daemon stops, and then exits non-zero, so a
-supervisor can restart it. For a single answer rather than a stream, ask
-`banshee status`: a reader that stops early only ends `banshee watch` at the
-next change, which on a quiet daemon may be a long wait.
+The first line is the state at connect; the daemon pushes the rest as they
+happen. The command exits non-zero when the daemon stops, so a supervisor can
+restart it. For a single answer rather than a stream, ask `banshee status`.
 
 ### Showing the state in the macOS menu bar
 
@@ -403,50 +356,31 @@ and style it in your own CSS:
 ```
 
 `restart-interval` matters: the command exits when the daemon stops, and that
-is how the module reconnects once it comes back. Readiness is deliberately not
-in the module. The daemon answers it when you connect and never pushes it
-again, so a bar that showed it would be right once and wrong from then on. Ask
-`banshee status` for that.
-
-The same channel is open to any client over `banshee.subscribe`, which answers
-with everything `banshee.status` reports and then sends
-`banshee.state_changed` notifications on that connection.
+is how the module reconnects once it comes back. The same channel is open to
+any client over `banshee.subscribe`.
 
 ### Changing a setting without an editor
 
 `banshee config set` writes one key and keeps your comments and layout:
 
 ```bash
-banshee config set stt.language de
+banshee config set audio.hotkey RightOption
 banshee config set stt.vad_threshold 0.7
 banshee config set stt.vocabulary '["tokio", "clippy"]'
 banshee config set audio.cues.enabled false
 ```
 
 The key is the section and the field, as they appear in the file. A number, a
-`true`, or a `[list]` is read as that type; anything else is read as text. Quote
-twice to force text, as in `banshee config set audio.input_device '"12"'`.
-
-A value that the field does not accept is refused, and the message lists the
-ones it does:
-
-```
-$ banshee config set audio.hotkey_mode sideways
-TOML parse error at line 5, column 15
-  |
-5 | hotkey_mode = "sideways"
-  |               ^^^^^^^^^^
-unknown variant `sideways`, expected `hold` or `toggle`
-```
-
-`vad_threshold` takes effect immediately. Everything else is read once at
+`true`, or a `[list]` is read as that type; anything else is read as text.
+Quote twice to force text, as in `banshee config set audio.input_device '"12"'`.
+A value the field does not accept is refused, and the message lists the legal
+ones. `vad_threshold` takes effect immediately; everything else is read once at
 startup, so the command tells you to restart. This works whether or not the
 daemon is running.
 
 `endpoint_silence_ms` is how long you can go quiet mid-answer before Banshee
-decides you're done. The default is deliberately generous so that thinking out
-loud doesn't truncate your answer. Lower it if replies feel sluggish, raise it
-if you keep getting cut off.
+decides you're done. Lower it if replies feel sluggish, raise it if you keep
+getting cut off.
 
 The `preset` picks which Whisper model Banshee uses:
 
@@ -469,24 +403,18 @@ Start with `banshee status`; it catches most setup problems and tells you the
 fix. Beyond that:
 
 - **The microphone looks dead: you record, and nothing ever comes back.**
-  Usually the machine is just slow, not broken. On an older CPU the default
-  `balanced` model can take minutes on a few seconds of speech, which is
-  indistinguishable from a mic that never captured anything. Run the daemon in
-  the foreground with `banshee serve` and watch for the `Transcribed Ns of
-audio in Ms` line; if it warns that transcription ran slower than realtime,
-  set `preset = "fast"` in `config.toml` and run `banshee setup`. On a 2014
-  dual-core laptop that took one clip from 104s to 4.8s.
+  Usually the machine is slow, not broken: on an older CPU the `balanced`
+  model can take minutes on a few seconds of speech. Run `banshee serve` and
+  watch the `Transcribed` line; if it warns about slower-than-realtime, set
+  `preset = "fast"` and run `banshee setup`. On a 2014 dual-core laptop that
+  took one clip from 104s to 4.8s.
 - **`banshee record start` says the microphone is busy.** A previous
-  push-to-talk never got its matching `stop` (a dropped key release, or a
-  script that died mid-recording). `banshee record stop` clears it; the daemon
-  also releases the mic on its own after two minutes.
-- **Audio sounds muffled on Bluetooth earbuds while Banshee runs.** Banshee
-  keeps the microphone open so the hotkey can start recording instantly, and
-  macOS switches Bluetooth earbuds to their low-quality telephony profile
-  whenever any app holds their mic. The fix: in **System Settings > Sound**, set
-  _Input_ to your Mac's built-in microphone and leave _Output_ on the earbuds.
-  Playback quality comes back, and the built-in mic transcribes better anyway.
-  For a one-off (say, a movie), `banshee stop` releases the mic entirely.
+  push-to-talk never got its `stop`. `banshee record stop` clears it; the
+  daemon also releases the mic on its own after two minutes.
+- **Audio sounds muffled on Bluetooth earbuds while Banshee runs.** macOS
+  switches earbuds to their telephony profile while any app holds their mic.
+  In **System Settings > Sound**, set _Input_ to the built-in microphone and
+  leave _Output_ on the earbuds — the built-in mic transcribes better anyway.
 - **Hotkeys or typing stopped working, but no error appears.** macOS withholds
   input events silently when an Input Monitoring or Accessibility grant is
   stale. Remove the Banshee entries from both lists in **System Settings >
