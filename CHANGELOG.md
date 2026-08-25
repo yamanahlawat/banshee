@@ -40,6 +40,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Banshee now installs as `Banshee.app`, so macOS shows its icon in System
+  Settings instead of a generic placeholder. The command line `banshee` is
+  unchanged and still works.
+
+  **You must grant two permissions again, once.** The binaries inside the
+  bundle now sign under the bundle's identifier, and macOS ties each
+  permission to that identity. After you upgrade, open System Settings >
+  Privacy & Security and grant Banshee **Accessibility** and **Input
+  Monitoring** again. Until you do, the hotkey receives no key presses and
+  dictation cannot type. This is expected, and it happens only on this
+  upgrade.
+
+  **Input Monitoring may need one extra step.** The list can keep a stale
+  Banshee entry, shown with an alias or shortcut arrow, and then show no
+  Banshee entry at all once you remove it. Banshee never prompts for
+  permissions, it only checks them, so macOS does not always add a fresh row
+  on its own. Remove any stale entry, then use the **+** button to add
+  `~/Applications/Banshee.app` directly. Accessibility does not need this
+  step; its row appears on its own.
+
 - **`audio.input_device` applies without a restart.**
   `banshee config set audio.input_device "yeti"` now reaches the running daemon,
   which rebinds capture in well under a second. Every other setting except

@@ -114,6 +114,10 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         } else {
             note("no start-at-login service (install with: banshee start)");
         }
+        #[cfg(target_os = "macos")]
+        if let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) {
+            note(&format!("running from {}", install_shape(&exe)));
+        }
     }
 
     if healthy {
@@ -445,6 +449,19 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     ));
 }
 
+// Two install shapes exist on macOS, so status names the one that answered.
+#[cfg(target_os = "macos")]
+fn install_shape(exe: &std::path::Path) -> &'static str {
+    if exe
+        .components()
+        .any(|part| part.as_os_str() == "Banshee.app")
+    {
+        "Banshee.app"
+    } else {
+        "a loose binary"
+    }
+}
+
 fn pass(msg: &str) -> bool {
     println!("  ✓  {msg}");
     true
@@ -545,5 +562,16 @@ mod tests {
             matches!(classify(reply), Daemon::Running { .. }),
             "a daemon reporting nothing wrong is not a daemon that reported nothing"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_install_inside_a_bundle_is_named_as_one() {
+        let bundled =
+            std::path::Path::new("/Users/x/Applications/Banshee.app/Contents/MacOS/banshee");
+        let loose = std::path::Path::new("/Users/x/.cargo/bin/banshee");
+
+        assert_eq!(super::install_shape(bundled), "Banshee.app");
+        assert_eq!(super::install_shape(loose), "a loose binary");
     }
 }

@@ -67,12 +67,15 @@ From then on, build and install with:
 make install
 ```
 
-It installs the release binary to `~/.cargo/bin`, signs it with `banshee-dev`,
-and restarts the daemon. The first signed run needs one last round of
-permission grants; each grant only applies to a freshly started process, so
-expect to approve a prompt, run `banshee start` again, and repeat until the
-hotkey earcon plays. After that, the signature never changes and the grants
-stick.
+It builds the release binaries, assembles and signs `~/Applications/Banshee.app`
+with `banshee-dev`, and symlinks `banshee` and `banshee-mcp-shim` from
+`~/.cargo/bin` into the bundle. It then starts the daemon and the tray launch
+agents. The bundled binaries sign under the bundle's identifier
+`com.banshee.app`, which differs from the old per-file identifier, so macOS
+asks you to grant Accessibility and Input Monitoring once more. Each grant
+only applies to a freshly started process, so expect to approve a prompt, run
+`banshee start` again, and repeat until the hotkey earcon plays. After that,
+the signature never changes and the grants stick.
 
 ## Submitting changes
 
