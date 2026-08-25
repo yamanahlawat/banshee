@@ -180,6 +180,7 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee watch --waybar`        | The same, as Waybar custom-module JSON                     |
 | `banshee voices`                | List the speech voices on disk, and mark the one in use    |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
+| `banshee connect [agent]`       | Connect a coding agent, after showing the change           |
 | `banshee serve`                 | Run the daemon in the foreground                           |
 | `banshee tray`                  | Show the menu bar icon, now and at every login (macOS)     |
 | `banshee tray --uninstall`      | Stop the menu bar icon and remove its launch agent         |
@@ -190,11 +191,25 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee history`               | List all saved transcriptions                              |
 | `banshee clear-history`         | Clear the saved transcriptions                             |
 
-## Connect your coding agent (MCP)
+## Connect your coding agent
 
-`banshee-mcp-shim` is an MCP stdio server that bridges your coding agent to the
-running daemon. This is what turns Banshee into a voice for the agent. It
-exposes three tools:
+```bash
+banshee connect            # which agents are installed, and which are connected
+banshee connect antigravity # Antigravity IDE, agy CLI and SDK: the MCP server in ~/.gemini/config/mcp_config.json
+banshee connect claude      # Claude Code: the MCP server and a stop hook that refuses to end a turn with no spoken status
+banshee connect codex       # Codex CLI: the MCP server in ~/.codex/config.toml
+banshee connect cursor      # Cursor: the MCP server in ~/.cursor/mcp.json
+banshee connect opencode    # OpenCode: the MCP server
+banshee connect pi          # Pi: the native extension
+```
+
+Each command shows the exact change to that tool's config and asks before it writes.
+The Claude Code hook needs `jq` on your PATH. Antigravity, Claude Code, OpenCode
+and Pi are verified on a real install; Codex and Cursor follow their published config formats
+and wait for a report from a machine that has them.
+Restart the tool afterwards.
+
+`banshee-mcp-shim` is the MCP stdio server behind this. It exposes three tools:
 
 | Tool                | What the agent does with it                                       |
 | ------------------- | ----------------------------------------------------------------- |
@@ -202,7 +217,7 @@ exposes three tools:
 | `ask_user`          | Ask a question aloud, then wait for and return your spoken answer |
 | `listen_for_prompt` | Pick up anything you've said since it last checked                |
 
-Most MCP tools use the same `mcpServers` config shape:
+Any other MCP host takes the same `mcpServers` shape.
 
 ```json
 {
@@ -214,21 +229,12 @@ Most MCP tools use the same `mcpServers` config shape:
 }
 ```
 
-Each tool keeps this config in its own spot — Cursor in `~/.cursor/mcp.json`,
-Claude Code via `claude mcp add` — so check your tool's docs. If the binary is
-not found, use its full path. Restart the tool, and the three tools show up.
+If the binary is not found, use its full path.
 
 ### Pi coding agent
 
-Pi has its own extension API instead of MCP, so it gets a native extension that
-talks to the daemon directly. Copy it in and restart Pi:
-
-```bash
-cp integrations/pi/banshee.ts ~/.pi/agent/extensions/
-```
-
-That's the whole setup; see [integrations/pi](integrations/pi) for details.
-This is what the demo at the top is running.
+Pi has its own extension API instead of MCP, so `banshee connect pi` installs a native
+extension that talks to the daemon directly. See [integrations/pi](integrations/pi).
 
 ---
 

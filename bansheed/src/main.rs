@@ -3,6 +3,7 @@ mod args;
 mod audio;
 mod binding;
 mod config;
+mod connect;
 mod daemon;
 mod dictation;
 mod history;
@@ -686,6 +687,12 @@ async fn main() -> Result<(), BansheeError> {
                 let log = service::install(service::Agent::Tray)?;
                 println!("The menu bar icon is running, and comes back at login.");
                 println!("Logs: {log}");
+            }
+        }
+        CommandType::Connect { agent, yes } => {
+            if let Err(error) = connect::run(agent.map(Into::into), yes) {
+                eprintln!("{error}");
+                std::process::exit(1);
             }
         }
         CommandType::Service { action } => match action {
