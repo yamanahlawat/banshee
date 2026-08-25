@@ -261,6 +261,8 @@ async fn main() -> Result<(), BansheeError> {
                 daemon_state.set_tts_voice(voice);
             }
             daemon_state.set_wanted_downloads(models::download::wanted(&config));
+            // So the input-health poll knows which preference to re-enumerate.
+            daemon_state.set_configured_input(config.audio.input_device.clone());
 
             // Held as one binding, and past daemon::run: dropping the stream
             // stops capture, and the thread is the only thing left to join

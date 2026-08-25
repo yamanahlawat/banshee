@@ -80,6 +80,34 @@ pub fn resolve_input_device(input_device: &str) -> Result<cpal::Device, BansheeE
     }
 }
 
+/// Whether the configured preference still appears in the OS input list.
+/// Portable: no CoreAudio property listeners (cpal's disconnect path does not
+/// fire on Bluetooth object destruction — see #47 maintainer measurements).
+pub fn configured_input_still_listed(input_device: &str) -> bool {
+    if input_device == DEFAULT_INPUT_DEVICE {
+        // "default" tracks whatever the OS currently prefers; absence of *any*
+        // input device is the only list-level failure mode.
+        return !input_devices().is_empty();
+    }
+    let wanted = input_device.to_lowercase();
+    input_devices()
+        .into_iter()
+        .any(|d| d.name.to_lowercase().contains(&wanted))
+}
+
+/// Run the #47 health checks and fail closed if the bound input is gone.
+pub fn poll_input_health(daemon_state: &DaemonState, configured_input: &str) {
+    let listed = configured_input_still_listed(configured_input);
+    if daemon_state.should_mark_input_lost(listed) {
+        let detail = if !listed {
+            format!("input device no longer listed ({configured_input})")
+        } else {
+            "input stream stopped delivering audio callbacks".to_string()
+        };
+        daemon_state.mark_input_lost(detail);
+    }
+}
+
 // The checklist opens through this too, so a green tick and a working daemon
 // cannot drift. A device that will not describe itself stays unknown.
 fn open_input(
@@ -144,6 +172,9 @@ pub fn start_audio_capture(
     // Runs on the real-time audio thread, so it must not allocate: downmixing
     // through an iterator keeps the mono copy out of the heap
     let stream = build_and_play(&device, config, move |data: &[f32], _| {
+        // Always tick: a dead BT device stops callbacks entirely (#47). Silence
+        // is not what we see — we see nothing, and that is the detect signal.
+        capture_state.note_input_callback();
         if capture_state.is_recording() {
             if channels > 1 {
                 producer.push_iter(

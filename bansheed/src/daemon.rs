@@ -44,6 +44,11 @@ pub async fn run(
     let mut sigterm = signal(SignalKind::terminate())?;
     // Coarse tick: the ceiling it enforces is measured in minutes
     let mut watchdog = tokio::time::interval(Duration::from_secs(30));
+    // Input loss lands within ~1s of a BT drop (#47); one second is enough.
+    let mut input_health = tokio::time::interval(Duration::from_secs(1));
+    // First tick is immediate; skip so we do not false-positive before cpal
+    // has delivered its opening callbacks.
+    input_health.tick().await;
 
     loop {
         tokio::select! {
@@ -51,6 +56,11 @@ pub async fn run(
             _ = sigterm.recv() => break,
             _ = watchdog.tick() => {
                 daemon_state.expire_stuck_recording();
+            }
+            _ = input_health.tick() => {
+                if let Some(configured) = daemon_state.configured_input() {
+                    crate::audio::poll_input_health(daemon_state, configured);
+                }
             }
             // Stop RPC: wait a beat so the client task can flush its response
             _ = daemon_state.shutdown().notified() => {

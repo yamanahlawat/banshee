@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Detect Bluetooth/input device disappearance via device-list membership and stopped cpal data callbacks (not the cpal error callback, which stays silent on macOS BT drop). Status/tray clear the dead device name and recording fails closed until restart (#47).
+
 All notable changes to Banshee are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

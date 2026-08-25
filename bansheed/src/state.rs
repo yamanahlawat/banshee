@@ -2,9 +2,9 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use banshee_common::DownloadProgress;
@@ -23,6 +23,19 @@ const DOWNLOAD_BACKLOG: usize = 128;
 // A start with no stop otherwise holds the mic for the life of the daemon.
 // The ring only holds RING_SECS, so nothing is lost by capping it there.
 pub const MAX_PUSH_TO_TALK: Duration = Duration::from_secs(crate::audio::RING_SECS as u64);
+
+/// How long the input stream may stay quiet before we treat it as dead.
+/// Measured on macOS BT disconnect: callbacks drop to zero within ~1s and
+/// never resume (see #47). Two seconds leaves headroom for scheduling jitter
+/// without waiting forever on a ghost mic.
+pub const INPUT_CALLBACK_STALE: Duration = Duration::from_secs(2);
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 // Where a finished transcription is delivered
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,11 +148,22 @@ pub struct DaemonState {
     stt_model: &'static str,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
-    audio_device: OnceLock<String>,
+    // Mutable: a Bluetooth disconnect must clear the name so status/tray do
+    // not keep advertising a mic that no longer exists (#47).
+    audio_device: Mutex<Option<String>>,
+    // Preferred config string ("default" or a substring). Used by the health
+    // poll to decide whether the bound device is still in the OS list.
+    configured_input: OnceLock<String>,
+    // Wall-clock ms of the last cpal input callback. Zero until the first one.
+    last_input_callback_ms: AtomicU64,
+    // True after capture has produced at least one callback (stream is live).
+    input_stream_seen_data: AtomicBool,
+    // Sticky: once the bound input is gone, recording must fail closed until restart.
+    input_lost: AtomicBool,
     tts_voice: OnceLock<String>,
     wanted_downloads: OnceLock<Vec<crate::models::download::Download>>,
-    // Why recording is off, when it is. Set once at startup, because the mic
-    // and the models are opened there and neither returns without a restart.
+    // Why recording is off, when it is. Set once at startup or on input loss;
+    // the mic and models do not hot-reload without a restart today.
     recording_error: OnceLock<RecordingError>,
     recording: AtomicU8,
     started_at: Instant,
@@ -183,7 +207,11 @@ impl DaemonState {
             stt_model,
             vad_model,
             vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
-            audio_device: OnceLock::new(),
+            audio_device: Mutex::new(None),
+            configured_input: OnceLock::new(),
+            last_input_callback_ms: AtomicU64::new(0),
+            input_stream_seen_data: AtomicBool::new(false),
+            input_lost: AtomicBool::new(false),
             tts_voice: OnceLock::new(),
             wanted_downloads: OnceLock::new(),
             recording_error: OnceLock::new(),
@@ -214,7 +242,7 @@ impl DaemonState {
     pub fn record_start(&self, action: TranscribeTarget) -> bool {
         // The hotkey arrives here too, so a deaf daemon answers a press with the
         // error cue. Arming a session nothing can transcribe would be silent.
-        if self.recording_error.get().is_some() {
+        if self.recording_blocked() {
             let _ = self.cues.send(Cue::Error);
             return false;
         }
@@ -451,8 +479,11 @@ impl DaemonState {
         self.vad_model
     }
 
-    pub fn audio_device(&self) -> Option<&str> {
-        self.audio_device.get().map(String::as_str)
+    pub fn audio_device(&self) -> Option<String> {
+        self.audio_device
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Why recording is unavailable, or `None` when it works.
@@ -464,15 +495,98 @@ impl DaemonState {
         let _ = self.recording_error.set(reason);
     }
 
+    /// True when startup failed or the bound input later disappeared (#47).
+    pub fn recording_blocked(&self) -> bool {
+        self.recording_error.get().is_some() || self.input_lost.load(Ordering::Relaxed)
+    }
+
     /// Takes the armed-listening lock for `ask_user`. Shares the availability
     /// gate with `record_start`, so no caller can arm a mic that cannot record.
     pub fn arm_for_ask(&self) -> bool {
-        self.recording_error.get().is_none()
+        !self.recording_blocked()
             && self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
     }
 
     pub fn set_audio_device(&self, device_name: String) {
-        let _ = self.audio_device.set(device_name);
+        *self
+            .audio_device
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(device_name);
+    }
+
+    pub fn clear_audio_device(&self) {
+        *self
+            .audio_device
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    pub fn set_configured_input(&self, input_device: String) {
+        let _ = self.configured_input.set(input_device);
+    }
+
+    pub fn configured_input(&self) -> Option<&str> {
+        self.configured_input.get().map(String::as_str)
+    }
+
+    /// Called from the real-time cpal input callback. Must not allocate or lock
+    /// anything heavier than atomics.
+    pub fn note_input_callback(&self) {
+        self.last_input_callback_ms.store(now_ms(), Ordering::Relaxed);
+        self.input_stream_seen_data.store(true, Ordering::Relaxed);
+    }
+
+    /// Fail closed when the bound input is gone: clear the advertised name,
+    /// refuse new recording sessions, stop any open session without routing
+    /// its (empty) ring, and set a sticky mic error for status/RPC.
+    ///
+    /// This is deliberately not a display-only refresh: naming a different
+    /// default mic while capture is still bound to the dead device would look
+    /// healthy and stay broken (see #47).
+    pub fn mark_input_lost(&self, detail: impl Into<String>) {
+        if self.input_lost.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let detail = detail.into();
+        eprintln!("Input device lost: {detail}");
+        self.clear_audio_device();
+        let _ = self
+            .recording_error
+            .set(RecordingError::Microphone(detail));
+        // Drop an in-flight session rather than transcribe an empty ring.
+        if self.is_recording() {
+            self.record_cancel();
+            // Cancel leaves Armed alone; force idle so the UI is not stuck.
+            if self.recording_mode() != RecordingMode::Idle {
+                self.set_recording_mode(RecordingMode::Idle);
+            }
+        }
+        let _ = self.cues.send(Cue::Error);
+        self.publish_recording();
+    }
+
+    /// Portable health check from maintainer measurements on #47:
+    /// 1) the configured device leaves `input_devices()`, and/or
+    /// 2) data callbacks stop (cpal error callback does *not* fire on BT drop).
+    ///
+    /// `listed` is whether the configured preference still resolves in the OS
+    /// device list (caller enumerates; this stays unit-testable).
+    pub fn should_mark_input_lost(&self, configured_still_listed: bool) -> bool {
+        if self.input_lost.load(Ordering::Relaxed) {
+            return false;
+        }
+        // Never opened a live stream — startup already set recording_error.
+        if !self.input_stream_seen_data.load(Ordering::Relaxed) {
+            return false;
+        }
+        if !configured_still_listed {
+            return true;
+        }
+        let last = self.last_input_callback_ms.load(Ordering::Relaxed);
+        if last == 0 {
+            return false;
+        }
+        now_ms().saturating_sub(last) >= INPUT_CALLBACK_STALE.as_millis() as u64
     }
 
     /// The voice the speech backend actually loaded, which `config.toml` may no
@@ -705,6 +819,69 @@ mod tests {
             Some("af_sky"),
             "a second write must not replace what is already loaded"
         );
+    }
+
+    #[test]
+    fn audio_device_name_can_be_cleared_after_set() {
+        let state = test_state();
+        assert_eq!(state.audio_device(), None);
+        state.set_audio_device("OnePlus Buds 3".to_string());
+        assert_eq!(state.audio_device().as_deref(), Some("OnePlus Buds 3"));
+        state.clear_audio_device();
+        assert_eq!(state.audio_device(), None);
+    }
+
+    // #47: once callbacks have been seen, leaving the OS list is enough.
+    #[test]
+    fn input_loss_when_configured_device_leaves_the_list() {
+        let state = test_state();
+        state.note_input_callback();
+        assert!(state.should_mark_input_lost(false));
+        assert!(!state.should_mark_input_lost(true));
+    }
+
+    // #47: callbacks going quiet is itself the signal (cpal errors stay at 0).
+    #[test]
+    fn input_loss_when_callbacks_go_stale() {
+        let state = test_state();
+        // Simulate a last callback well past the stale window.
+        state
+            .last_input_callback_ms
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        state
+            .input_stream_seen_data
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(state.should_mark_input_lost(true));
+    }
+
+    #[test]
+    fn mark_input_lost_fails_closed_and_clears_the_advertised_name() {
+        let (state, requests) = test_state_with_commands();
+        state.set_audio_device("gone-headset".to_string());
+        assert!(state.record_start(TranscribeTarget::Mailbox));
+
+        state.mark_input_lost("input device no longer listed");
+
+        assert_eq!(state.audio_device(), None);
+        assert!(state.recording_blocked());
+        assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        assert!(matches!(requests.try_recv(), Ok(ConsumerCommand::Discard)));
+        // New sessions must not open on a ghost mic.
+        assert!(!state.record_start(TranscribeTarget::Mailbox));
+        // Second mark is a no-op (sticky).
+        state.mark_input_lost("again");
+        assert!(matches!(
+            state.recording_error(),
+            Some(RecordingError::Microphone(_))
+        ));
+    }
+
+    #[test]
+    fn no_false_input_loss_before_the_stream_has_ticked() {
+        let state = test_state();
+        // Capture never opened (or never delivered a callback yet).
+        assert!(!state.should_mark_input_lost(false));
+        assert!(!state.should_mark_input_lost(true));
     }
 
     #[test]
