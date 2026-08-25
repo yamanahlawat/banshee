@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64},
     },
     time::{Duration, Instant},
@@ -24,6 +24,10 @@ const DOWNLOAD_BACKLOG: usize = 128;
 // The ring only holds RING_SECS, so nothing is lost by capping it there.
 pub const MAX_PUSH_TO_TALK: Duration = Duration::from_secs(crate::audio::RING_SECS as u64);
 
+// Capture is treated as dead after this long with no callback. Measured
+// healthy gaps are 11 ms to 18 ms, so this keeps 55 to 90 times headroom.
+pub const CAPTURE_SILENCE_LIMIT: Duration = Duration::from_secs(1);
+
 // Where a finished transcription is delivered
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscribeTarget {
@@ -43,6 +47,12 @@ pub enum ConsumerCommand {
     // the next transcription
     Discard,
     Ask(AskCommand),
+    // A new stream opened, so the old ring is dead. The rate comes with it:
+    // devices do not share one.
+    Rebind {
+        consumer: ringbuf::HeapCons<f32>,
+        sample_rate: u32,
+    },
     Shutdown,
 }
 
@@ -82,6 +92,7 @@ struct TranscriptionRing {
 
 /// Why the recording pipeline did not start. A missing mic and a missing model
 /// need different fixes, so they stay distinct out to the RPC error code.
+#[derive(Clone)]
 pub enum RecordingError {
     Microphone(String),
     Model(String),
@@ -105,9 +116,12 @@ impl RecordingError {
 
     pub fn fix(&self) -> &'static str {
         match self {
+            // The watchdog rescans after a fault, so most microphones recover
+            // on their own. A capture that failed at startup has no watchdog.
             RecordingError::Microphone(_) => {
                 "connect the microphone, grant it in Privacy & Security, or fix \
-                 [audio] input_device, then restart: banshee start"
+                 [audio] input_device. If recording does not recover on its own, \
+                 restart: banshee start"
             }
             RecordingError::Model(_) => "restart it: banshee start",
         }
@@ -130,23 +144,42 @@ impl Drop for DownloadSlot {
     }
 }
 
+fn replace_if_new(field: &RwLock<Option<String>>, name: Option<String>) -> bool {
+    let mut held = field.write().unwrap();
+    if *held == name {
+        return false;
+    }
+    *held = name;
+    true
+}
+
 pub struct DaemonState {
     version: &'static str,
     stt_model: &'static str,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
-    audio_device: OnceLock<String>,
+    audio_device: RwLock<Option<String>>,
+    // The named device the config asks for while something else records. Never
+    // a blocker: a daemon on a substitute records correctly.
+    missing_device: RwLock<Option<String>>,
+    // What `audio.input_device` asks for. The watchdog reads it and rebuilds
+    // capture when it differs from the device it opened.
+    wanted_device: Mutex<String>,
     tts_voice: OnceLock<String>,
     wanted_downloads: OnceLock<Vec<crate::models::download::Download>>,
-    // Why recording is off, when it is. Set once at startup, because the mic
-    // and the models are opened there and neither returns without a restart.
-    recording_error: OnceLock<RecordingError>,
+    // Why recording is off, when it is. The microphone half clears when the
+    // watchdog rebinds; the model half still needs a restart.
+    recording_error: RwLock<Option<RecordingError>>,
     recording: AtomicU8,
     started_at: Instant,
     db_connection: Option<Mutex<rusqlite::Connection>>,
     transcriptions: Mutex<TranscriptionRing>,
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
+    // One counter for the whole device picture. It moves only when a setter
+    // writes a value that differs, because the watchdog rewrites the same one
+    // every rescan and each move wakes the push task of every subscriber.
+    device_changes: watch::Sender<u64>,
     downloads: broadcast::Sender<DownloadProgress>,
     downloading: AtomicBool,
     speech: Arc<SpeechPlayer>,
@@ -162,6 +195,9 @@ pub struct DaemonState {
     // Milliseconds since `started_at` at which an open push-to-talk is stuck.
     // A deadline rather than a start keeps the watchdog to one load and compare.
     push_to_talk_deadline: AtomicU64,
+    // Milliseconds since `started_at` at which the capture callback last ran.
+    // Zero means it has never run, which reads as stalled.
+    capture_tick: AtomicU64,
     shutdown: tokio::sync::Notify,
 }
 
@@ -172,6 +208,7 @@ impl DaemonState {
         stt_model: &'static str,
         vad_model: &'static str,
         initial_vad_threshold: f32,
+        wanted_device: String,
         db_connection: Option<Mutex<rusqlite::Connection>>,
         speech: SpeechPlayer,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
@@ -183,10 +220,12 @@ impl DaemonState {
             stt_model,
             vad_model,
             vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
-            audio_device: OnceLock::new(),
+            audio_device: RwLock::new(None),
+            missing_device: RwLock::new(None),
+            wanted_device: Mutex::new(wanted_device),
             tts_voice: OnceLock::new(),
             wanted_downloads: OnceLock::new(),
-            recording_error: OnceLock::new(),
+            recording_error: RwLock::new(None),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
             db_connection,
@@ -196,6 +235,7 @@ impl DaemonState {
             }),
             latest_transcription_id: watch::channel(0).0,
             recording_active: watch::channel(false).0,
+            device_changes: watch::channel(0).0,
             downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
             downloading: AtomicBool::new(false),
             speech: Arc::new(speech),
@@ -205,6 +245,7 @@ impl DaemonState {
             pending_dictate: AtomicBool::new(false),
             typing: AtomicBool::new(false),
             push_to_talk_deadline: AtomicU64::new(0),
+            capture_tick: AtomicU64::new(0),
             shutdown: tokio::sync::Notify::new(),
         }
     }
@@ -214,7 +255,7 @@ impl DaemonState {
     pub fn record_start(&self, action: TranscribeTarget) -> bool {
         // The hotkey arrives here too, so a deaf daemon answers a press with the
         // error cue. Arming a session nothing can transcribe would be silent.
-        if self.recording_error.get().is_some() {
+        if self.recording_error.read().unwrap().is_some() {
             let _ = self.cues.send(Cue::Error);
             return false;
         }
@@ -451,28 +492,77 @@ impl DaemonState {
         self.vad_model
     }
 
-    pub fn audio_device(&self) -> Option<&str> {
-        self.audio_device.get().map(String::as_str)
+    pub fn audio_device(&self) -> Option<String> {
+        self.audio_device.read().unwrap().clone()
+    }
+
+    /// `None` when the device will not name itself, so status says so rather
+    /// than keeping the last name it knew.
+    pub fn set_audio_device(&self, name: Option<String>) {
+        if !replace_if_new(&self.audio_device, name) {
+            return;
+        }
+        self.publish_device_change();
+    }
+
+    pub fn missing_device(&self) -> Option<String> {
+        self.missing_device.read().unwrap().clone()
+    }
+
+    pub fn set_missing_device(&self, name: Option<String>) {
+        if !replace_if_new(&self.missing_device, name) {
+            return;
+        }
+        self.publish_device_change();
+    }
+
+    /// The raw setting, not a resolved device. `choose` is the one place that
+    /// turns a blank name into the default.
+    pub fn wanted_device(&self) -> String {
+        self.locked_wanted_device().clone()
+    }
+
+    pub fn set_wanted_device(&self, name: String) {
+        *self.locked_wanted_device() = name;
+    }
+
+    // A device name has no invariant a panic can break, and a panic here kills
+    // capture silently, so the value stands
+    fn locked_wanted_device(&self) -> std::sync::MutexGuard<'_, String> {
+        self.wanted_device
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn publish_device_change(&self) {
+        self.device_changes
+            .send_modify(|generation| *generation += 1);
+    }
+
+    /// Moves when the device a client can see changes. The value is a
+    /// generation, not a device: the reader reads the fields themselves.
+    pub fn device_changes(&self) -> watch::Receiver<u64> {
+        self.device_changes.subscribe()
     }
 
     /// Why recording is unavailable, or `None` when it works.
-    pub fn recording_error(&self) -> Option<&RecordingError> {
-        self.recording_error.get()
+    pub fn recording_error(&self) -> Option<RecordingError> {
+        self.recording_error.read().unwrap().clone()
     }
 
     pub fn set_recording_error(&self, reason: RecordingError) {
-        let _ = self.recording_error.set(reason);
+        *self.recording_error.write().unwrap() = Some(reason);
+    }
+
+    pub fn clear_recording_error(&self) {
+        *self.recording_error.write().unwrap() = None;
     }
 
     /// Takes the armed-listening lock for `ask_user`. Shares the availability
     /// gate with `record_start`, so no caller can arm a mic that cannot record.
     pub fn arm_for_ask(&self) -> bool {
-        self.recording_error.get().is_none()
+        self.recording_error.read().unwrap().is_none()
             && self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
-    }
-
-    pub fn set_audio_device(&self, device_name: String) {
-        let _ = self.audio_device.set(device_name);
     }
 
     /// The voice the speech backend actually loaded, which `config.toml` may no
@@ -510,11 +600,43 @@ impl DaemonState {
     pub fn db_connection(&self) -> Option<&Mutex<rusqlite::Connection>> {
         self.db_connection.as_ref()
     }
+
+    /// Called from the real time audio thread, so it must not lock or allocate.
+    pub fn mark_capture_alive(&self) {
+        let millis = self.started_at.elapsed().as_millis() as u64 + 1;
+        self.capture_tick
+            .store(millis, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A device that disappears stops the callback; it does not deliver silence.
+    pub fn capture_is_stalled(&self) -> bool {
+        let last = self.capture_tick.load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            return true;
+        }
+        let now = self.started_at.elapsed().as_millis() as u64;
+        Duration::from_millis(now.saturating_sub(last)) > CAPTURE_SILENCE_LIMIT
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A watchdog rescans after a fault, but `start_recording` returning Err
+    // spawns none, so that one microphone fault needs a restart.
+    #[test]
+    fn a_microphone_fix_names_the_restart_that_some_faults_need() {
+        let fix = RecordingError::Microphone("no device".to_string()).fix();
+        assert!(fix.contains("connect the microphone"), "{fix}");
+        assert!(fix.contains("[audio] input_device"), "{fix}");
+        assert!(
+            fix.contains("banshee start"),
+            "a fault at startup recovers only on a restart: {fix}"
+        );
+        // The renderer prints "fix: {}" and adds no period of its own
+        assert!(!fix.ends_with('.'), "{fix}");
+    }
 
     // Hands back the receiver: dropping it discards whatever record_stop queues
     fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<ConsumerCommand>) {
@@ -524,6 +646,7 @@ mod tests {
             "stt",
             "vad",
             0.5,
+            "default".to_string(),
             None,
             crate::text_to_speech::SpeechPlayer::default(),
             commands,
@@ -570,6 +693,113 @@ mod tests {
         // The same gate record_start uses, so ask_user cannot arm a deaf mic
         assert!(!state.arm_for_ask());
         assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    }
+
+    #[test]
+    fn audio_device_refreshes() {
+        let (state, _requests) = test_state_with_commands();
+        assert_eq!(state.audio_device(), None);
+
+        state.set_audio_device(Some("OnePlus Buds 3".to_string()));
+        assert_eq!(state.audio_device().as_deref(), Some("OnePlus Buds 3"));
+
+        // The OnceLock discarded this. A rebind depends on it landing.
+        state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
+        assert_eq!(
+            state.audio_device().as_deref(),
+            Some("MacBook Pro Microphone")
+        );
+
+        state.set_audio_device(None);
+        assert_eq!(state.audio_device(), None);
+    }
+
+    #[test]
+    fn missing_device_names_what_the_config_waits_for() {
+        let (state, _requests) = test_state_with_commands();
+        assert_eq!(state.missing_device(), None);
+
+        state.set_missing_device(Some("yeti".to_string()));
+        assert_eq!(state.missing_device().as_deref(), Some("yeti"));
+
+        // A substitute does not block recording, so no blocker appears with it
+        assert!(state.recording_error().is_none());
+        assert!(state.record_start(TranscribeTarget::Mailbox));
+        state.record_stop();
+
+        // The named device returns, so nothing is missing any more
+        state.set_missing_device(None);
+        assert_eq!(state.missing_device(), None);
+    }
+
+    // A panic here kills capture silently, and a device name has no invariant
+    // a panic can break, so a poisoned lock must still answer
+    #[test]
+    fn the_wanted_device_survives_a_poisoned_lock() {
+        let state = Arc::new(test_state());
+        let holder = Arc::clone(&state);
+        let poisoning = std::thread::spawn(move || {
+            let _held = holder.wanted_device.lock().unwrap();
+            panic!("the writer died holding the lock");
+        });
+        assert!(poisoning.join().is_err());
+
+        assert_eq!(state.wanted_device(), "default");
+        state.set_wanted_device("yeti".to_string());
+        assert_eq!(state.wanted_device(), "yeti");
+    }
+
+    // While a named device stays absent the watchdog rewrites the same name
+    // every rescan, which is every 5 seconds. Each rewrite that counts as a
+    // change wakes the push task of every subscriber.
+    #[test]
+    fn a_rewritten_device_name_is_not_a_change() {
+        let (state, _requests) = test_state_with_commands();
+        let mut changes = state.device_changes();
+        assert_eq!(*changes.borrow_and_update(), 0);
+
+        state.set_missing_device(Some("yeti".to_string()));
+        state.set_missing_device(Some("yeti".to_string()));
+        state.set_missing_device(Some("yeti".to_string()));
+        assert!(
+            changes.has_changed().unwrap(),
+            "the first write went unheard"
+        );
+        assert_eq!(*changes.borrow_and_update(), 1, "a rewrite counted");
+        assert!(!changes.has_changed().unwrap());
+
+        state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
+        state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
+        assert!(
+            changes.has_changed().unwrap(),
+            "the open device went unheard"
+        );
+        assert_eq!(*changes.borrow_and_update(), 2, "a rewrite counted");
+
+        // One counter for the whole picture, so either field moving wakes the push
+        state.set_missing_device(None);
+        assert!(
+            changes.has_changed().unwrap(),
+            "the device returning went unheard"
+        );
+        assert_eq!(*changes.borrow_and_update(), 3);
+    }
+
+    #[test]
+    fn recording_error_clears_when_capture_recovers() {
+        let (state, _requests) = test_state_with_commands();
+        state.set_recording_error(RecordingError::Microphone("gone".to_string()));
+        assert!(state.recording_error().is_some());
+
+        state.clear_recording_error();
+        assert!(state.recording_error().is_none());
+
+        // A second fault after a recovery must still report
+        state.set_recording_error(RecordingError::Microphone("gone again".to_string()));
+        assert!(matches!(
+            state.recording_error(),
+            Some(RecordingError::Microphone(_))
+        ));
     }
 
     // A wrong branch here drops the utterance or leaves the mic open
@@ -737,5 +967,27 @@ mod tests {
 
         assert!(state.transcriptions_since(20).is_empty());
         assert_eq!(*state.subscribe_transcriptions().borrow(), 20);
+    }
+
+    #[test]
+    fn capture_is_stalled_until_the_callback_stamps_it() {
+        let (state, _requests) = test_state_with_commands();
+        // Nothing has captured yet, so a watchdog must not call this healthy
+        assert!(state.capture_is_stalled());
+
+        state.mark_capture_alive();
+        assert!(!state.capture_is_stalled());
+    }
+
+    #[test]
+    fn the_silence_limit_clears_every_measured_callback_rate() {
+        // Measured: 55 callbacks per second on Bluetooth, 93 on the built in mic.
+        // The slowest gives the longest gap, so it sets the headroom.
+        let slowest_gap = Duration::from_millis(1000 / 55);
+        assert!(
+            CAPTURE_SILENCE_LIMIT >= slowest_gap * 20,
+            "the limit must keep well clear of a healthy gap, or a busy \
+             machine trips it"
+        );
     }
 }

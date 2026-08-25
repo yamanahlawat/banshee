@@ -263,10 +263,9 @@ enabled = true         # tones on record start/stop, success, and errors
 ```
 
 `input_device` is a case-insensitive substring of the microphone name, so
-`"yeti"` matches `Blue Yeti Stereo Microphone`. A name that matches nothing
-stops the daemon with the list of devices it did find, rather than quietly
-recording from the wrong microphone. `banshee devices` shows the names to
-choose from:
+`"yeti"` matches `Blue Yeti Stereo Microphone`. An exact name wins over a longer
+name that contains it, so a `Yeti` next to a `Blue Yeti Pro` opens its own
+device. `banshee devices` shows the names to choose from:
 
 ```
 $ banshee devices
@@ -274,6 +273,21 @@ $ banshee devices
   BlackHole 2ch
   MacBook Pro Microphone
 ```
+
+**`"default"` follows the OS while Banshee runs.** Connect a headset, macOS makes
+it the system default, and Banshee moves capture to it within about five seconds.
+A device you name is not treated this way: Banshee opens the device you named,
+and the system default never takes its place while it is present.
+
+**A microphone that disappears does not stop dictation.** Unplug the headset you
+named and Banshee records from the system default instead, so a press still
+works. It says which microphone it moved to, and it says which one it is still
+waiting for: the tray, `banshee status` and `banshee watch --waybar` all show
+`MacBook Pro Microphone (waiting for "yeti")`. Reconnect the headset and Banshee
+takes it back within about five seconds. Nothing needs a restart.
+
+Banshee never picks a different microphone in silence. If it cannot open any
+device at all, it says so and refuses to record rather than returning silence.
 
 ### Choosing a voice
 
@@ -374,9 +388,9 @@ The key is the section and the field, as they appear in the file. A number, a
 `true`, or a `[list]` is read as that type; anything else is read as text.
 Quote twice to force text, as in `banshee config set audio.input_device '"12"'`.
 A value the field does not accept is refused, and the message lists the legal
-ones. `vad_threshold` takes effect immediately; everything else is read once at
-startup, so the command tells you to restart. This works whether or not the
-daemon is running.
+ones. `vad_threshold` and `audio.input_device` take effect immediately;
+everything else is read once at startup, so the command tells you to restart.
+This works whether or not the daemon is running.
 
 `endpoint_silence_ms` is how long you can go quiet mid-answer before Banshee
 decides you're done. Lower it if replies feel sluggish, raise it if you keep

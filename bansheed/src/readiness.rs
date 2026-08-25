@@ -7,7 +7,7 @@ pub fn blockers(state: &DaemonState) -> Vec<Blocker> {
     assemble(
         permissions::blockers(),
         models::blockers(&[state.stt_model(), state.vad_model()]),
-        state.recording_error(),
+        state.recording_error().as_ref(),
     )
 }
 

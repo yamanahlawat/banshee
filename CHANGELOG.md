@@ -7,7 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A microphone that disappears no longer kills dictation.** Unplug a Bluetooth
+  headset mid-session and Banshee used to keep naming the device that was gone,
+  record nothing, and play no cue. A restart was the only way back. Now the
+  daemon notices within a second or two, moves capture to the system default so
+  a press still works, and takes your device back when it returns.
+
+  **It never swaps your microphone in silence.** When you named a device and it
+  disappears, every surface says which one is recording and which one it is
+  waiting for: the tray menu, `banshee status`, and `banshee watch --waybar` all
+  show `MacBook Pro Microphone (waiting for "yeti")`. When no device can be
+  opened at all, Banshee refuses to record and says why, rather than returning
+  silence.
+
+  This also covers the case where the microphone is already missing when the
+  daemon starts, so booting with the headset off no longer needs a restart once
+  you connect it.
+
+  **`audio.input_device = "default"` now follows the OS.** Connect a headset,
+  macOS makes it the system default, and Banshee moves capture to it within
+  about five seconds. It used to keep whatever was the default when capture last
+  opened, so a headset connected mid-session went unheard. A device you named by
+  hand is never given up this way.
+
+  Two limits are worth knowing. If you have no working microphone at all, for
+  example because the permission is denied, then granting it still needs a
+  daemon restart. And a headset that is both your microphone and your speakers
+  loses its cue tones until you reconnect it, because the output side is not
+  rebuilt yet.
+
 ### Changed
+
+- **`audio.input_device` applies without a restart.**
+  `banshee config set audio.input_device "yeti"` now reaches the running daemon,
+  which rebinds capture in well under a second. Every other setting except
+  `stt.vad_threshold` is still read once at startup.
+
+- **An exact microphone name now wins over a longer name that contains it.**
+  `input_device` still matches a case-insensitive substring, so `"yeti"` finds
+  `Blue Yeti Stereo Microphone`. But a `Yeti` sitting beside a `Blue Yeti Pro`
+  now opens its own device rather than the first match. A blank
+  `input_device` is read as `default` instead of matching whichever device
+  enumerated first.
 
 - Banshee now installs as `Banshee.app`, so macOS shows its icon in System
   Settings instead of a generic placeholder. The command line `banshee` is

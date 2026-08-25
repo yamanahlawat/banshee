@@ -105,10 +105,29 @@ pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
 pub const EVENT_STATE: &str = "state";
 pub const EVENT_DOWNLOADS: &str = "downloads";
 
-/// The microphone named in a `banshee.status` reply. Only that reply carries
-/// it; a `state_changed` push does not, so a subscriber reads it once on open.
+/// The microphone the daemon records from. A `banshee.status` reply and a
+/// `state_changed` push both carry it, so a subscriber reads it from every
+/// update rather than once on open.
 pub fn audio_device(status: &Value) -> Option<&str> {
     status.get("audio_device").and_then(Value::as_str)
+}
+
+/// The device the config waits for while a substitute records. Not a blocker:
+/// a daemon on a substitute records correctly. `None` whenever the wanted
+/// device is open, and whenever nothing at all is open.
+pub fn missing_device(status: &Value) -> Option<&str> {
+    status.get("missing_device").and_then(Value::as_str)
+}
+
+/// The sentence every surface shows for these two fields. Each client adds its
+/// own lead-in and nothing else, so all of them spell the absent case alike.
+pub fn microphone_label(open: Option<&str>, missing: Option<&str>) -> String {
+    let open = open.unwrap_or("No microphone");
+    match missing {
+        // The quotes keep two multi-word names apart
+        Some(missing) => format!("{open} (waiting for \"{missing}\")"),
+        None => open.to_string(),
+    }
 }
 
 /// What the daemon is doing, read from the `recording` and `speaking` flags.
@@ -350,5 +369,32 @@ mod wire_tests {
             wire,
             serde_json::json!({"name": "Blue Yeti", "default": true})
         );
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::microphone_label;
+
+    // The tray, `banshee status` and `banshee watch --waybar` all show this
+    // sentence, so it is spelled once and tested once
+    #[test]
+    fn the_microphone_label_covers_both_fields() {
+        for (open, missing, expected) in [
+            (
+                Some("MacBook Pro Microphone"),
+                Some("yeti"),
+                "MacBook Pro Microphone (waiting for \"yeti\")",
+            ),
+            (
+                Some("MacBook Pro Microphone"),
+                None,
+                "MacBook Pro Microphone",
+            ),
+            (None, Some("yeti"), "No microphone (waiting for \"yeti\")"),
+            (None, None, "No microphone"),
+        ] {
+            assert_eq!(microphone_label(open, missing), expected);
+        }
     }
 }
