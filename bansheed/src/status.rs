@@ -515,6 +515,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn an_install_inside_a_bundle_is_named_as_one() {
         let bundled =
