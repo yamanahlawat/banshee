@@ -28,6 +28,7 @@ pub fn daemon_state(commands: std::sync::mpsc::Sender<ConsumerCommand>) -> Arc<D
         "stt",
         "vad",
         0.5,
+        "default".to_string(),
         None,
         SpeechPlayer::new(Box::new(NullBackend)),
         commands,

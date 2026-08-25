@@ -11,8 +11,18 @@ use crate::state::DaemonState;
 /// Dotted `section.field` keys, spelled as `config.toml` spells them.
 pub type Assignments = BTreeMap<String, serde_json::Value>;
 
-/// The only setting the running daemon rereads.
-const LIVE: &str = "stt.vad_threshold";
+enum Live {
+    VadThreshold,
+    InputDevice,
+}
+
+fn live(key: &str) -> Option<Live> {
+    match key {
+        "stt.vad_threshold" => Some(Live::VadThreshold),
+        "audio.input_device" => Some(Live::InputDevice),
+        _ => None,
+    }
+}
 
 /// The daemon serves a task per connection, so two calls can otherwise read
 /// the same file before either writes and one setting is lost.
@@ -77,7 +87,7 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
 
 /// Applying one of these without writing it would report success and change nothing.
 fn startup_only(assignments: &Assignments) -> Option<&String> {
-    assignments.keys().find(|key| key.as_str() != LIVE)
+    assignments.keys().find(|key| live(key).is_none())
 }
 
 /// Pass no `state` when no daemon is running: nothing to apply live, and no
@@ -115,12 +125,22 @@ pub fn configure(
 
     let mut outcome = Outcome::default();
     for key in assignments.keys() {
-        match (key.as_str(), state) {
-            (LIVE, Some(state)) => {
+        // One arm per `Live` variant and no catch-all over them, so a variant
+        // without an arm does not compile
+        match (live(key), state) {
+            (Some(Live::VadThreshold), Some(state)) => {
                 state.set_vad_threshold(config.stt.vad_threshold);
                 outcome.applied.push(key.clone());
             }
-            _ => outcome.restart_required.push(key.clone()),
+            // The watchdog reads this on its next tick and rebinds capture
+            (Some(Live::InputDevice), Some(state)) => {
+                state.set_wanted_device(config.audio.input_device.clone());
+                outcome.applied.push(key.clone());
+            }
+            // A live key needs a restart too when no daemon runs
+            (Some(Live::VadThreshold) | Some(Live::InputDevice), None) | (None, _) => {
+                outcome.restart_required.push(key.clone())
+            }
         }
     }
     Ok(outcome)
@@ -219,6 +239,26 @@ mod tests {
             startup_only(&assignments(&[("stt.vad_threshold", 0.6.into())])),
             None,
             "the daemon rereads this one, so applying it without a write does change something"
+        );
+    }
+
+    #[test]
+    fn the_input_device_no_longer_needs_a_restart() {
+        assert_eq!(
+            startup_only(&assignments(&[("audio.input_device", "yeti".into())])),
+            None,
+            "the watchdog rebuilds capture, so this key applies live now"
+        );
+    }
+
+    #[test]
+    fn both_live_keys_together_still_need_no_restart() {
+        assert_eq!(
+            startup_only(&assignments(&[
+                ("audio.input_device", "yeti".into()),
+                ("stt.vad_threshold", 0.6.into()),
+            ])),
+            None
         );
     }
 

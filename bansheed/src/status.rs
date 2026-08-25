@@ -311,20 +311,44 @@ const MICROPHONE_FIX: &str = "check Microphone is allowed in System Settings > \
 #[cfg(not(target_os = "macos"))]
 const MICROPHONE_FIX: &str = "connect a microphone, or fix [audio] input_device in config.toml";
 
+// One line for both paths, so a substitution reads the same whether the daemon
+// reports it or the checklist opens the device itself.
+fn microphone_line(lead: &str, open: Option<&str>, missing: Option<&str>) -> String {
+    format!(
+        "{lead}: {}",
+        banshee_common::microphone_label(open, missing)
+    )
+}
+
+// Split out so the decision is testable without a microphone: a substitute
+// records, so it passes, and only a device that will not open fails.
+fn report_probe(probed: Result<(String, Option<String>), String>) -> bool {
+    match probed {
+        Ok((open, missing)) => pass(&microphone_line(
+            "microphone opens for capture",
+            Some(&open),
+            missing.as_deref(),
+        )),
+        Err(e) => fail(&format!("microphone will not open: {e}"), MICROPHONE_FIX),
+    }
+}
+
 // Opening a second stream fails on backends that allow only one, which would
 // report a broken microphone on a healthy machine, so ask the daemon instead.
 // `Silent` counts as live: something answered the socket, so something owns the
 // device. Missing models suppress the pipeline blocker, so no blocker proves
-// capture opened, not that recording works.
+// capture opened, not that recording works. A substitute records correctly, so
+// it stays a pass.
 fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     match daemon {
         Daemon::Running { status, blockers } => match blockers
             .iter()
             .find(|blocker| blocker.kind == BlockerKind::Pipeline)
         {
-            None => pass(&format!(
-                "daemon has the microphone: {}",
-                banshee_common::audio_device(status).unwrap_or("unnamed device")
+            None => pass(&microphone_line(
+                "daemon has the microphone",
+                banshee_common::audio_device(status),
+                banshee_common::missing_device(status),
             )),
             Some(blocker) => fail(
                 &format!("the daemon cannot record: {}", blocker.consequence),
@@ -337,13 +361,9 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
             true
         }
         // Nothing holds the device, so open it here: enumeration is not proof
-        Daemon::Stale | Daemon::Missing => match crate::audio::probe_input_device(input_device) {
-            Ok(name) => {
-                let name = name.unwrap_or_else(|| "unnamed device".to_string());
-                pass(&format!("microphone opens for capture: {name}"))
-            }
-            Err(e) => fail(&format!("microphone will not open: {e}"), MICROPHONE_FIX),
-        },
+        Daemon::Stale | Daemon::Missing => {
+            report_probe(crate::audio::probe_input_device(input_device))
+        }
     }
 }
 
@@ -442,6 +462,35 @@ fn fail(msg: &str, fix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{microphone_line, report_probe};
+
+    const DAEMON_HOLDS: &str = "daemon has the microphone";
+
+    #[test]
+    fn the_microphone_line_leads_with_who_holds_the_device() {
+        assert_eq!(
+            microphone_line(DAEMON_HOLDS, Some("MacBook Pro Microphone"), Some("yeti")),
+            "daemon has the microphone: MacBook Pro Microphone (waiting for \"yeti\")"
+        );
+    }
+
+    // No daemon holds the device, so the checklist opens it. It selects the way
+    // capture does, so a substitute is a working machine, not a broken one.
+    #[test]
+    fn a_probed_substitute_passes_and_names_what_it_waits_for() {
+        assert!(report_probe(Ok((
+            "MacBook Pro Microphone".to_string(),
+            Some("oneplus".to_string())
+        ))));
+    }
+
+    #[test]
+    fn a_microphone_that_will_not_open_fails_the_checklist() {
+        assert!(!report_probe(Err(
+            "no input device is available".to_string()
+        )));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn a_permission_failure_names_whose_grant_it_checked() {
