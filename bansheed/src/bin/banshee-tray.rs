@@ -95,8 +95,34 @@ mod mac {
 
     enum Message {
         State(Indicator),
-        Device(Option<String>),
+        // One message for the pair, so user_event drops an unchanged picture
+        // before it costs a redraw
+        Device(Device),
         Quit,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Device {
+        open: Option<String>,
+        missing: Option<String>,
+    }
+
+    impl Device {
+        fn of(state: &Value) -> Self {
+            Self {
+                open: banshee_common::audio_device(state).map(str::to_string),
+                missing: banshee_common::missing_device(state).map(str::to_string),
+            }
+        }
+    }
+
+    // Reads as the state, then what it is listening with. A dead daemon has no
+    // device to name, so the second line carries the way back instead.
+    fn device_line(indicator: Indicator, device: &Device) -> String {
+        if indicator == Indicator::NotRunning {
+            return "Start with: banshee start".to_string();
+        }
+        banshee_common::microphone_label(device.open.as_deref(), device.missing.as_deref())
     }
 
     struct Ui {
@@ -110,24 +136,15 @@ mod mac {
     struct App {
         ui: Option<Ui>,
         indicator: Indicator,
-        device: Option<String>,
+        device: Device,
     }
 
     impl App {
-        // Reads as the state, then what it is listening with. A dead daemon has
-        // no device to name, so the second line carries the way back instead.
-        fn device_line(&self) -> String {
-            match (self.indicator, &self.device) {
-                (Indicator::NotRunning, _) => "Start with: banshee start".to_string(),
-                (_, Some(device)) => device.clone(),
-                (_, None) => "No microphone".to_string(),
-            }
-        }
-
         fn show(&self) {
             let Some(ui) = &self.ui else { return };
             ui.state_item.set_text(self.indicator.label());
-            ui.device_item.set_text(self.device_line());
+            ui.device_item
+                .set_text(device_line(self.indicator, &self.device));
             if let Err(error) = draw(&ui.tray, self.indicator) {
                 eprintln!("banshee-tray: could not draw the icon: {error}");
             }
@@ -216,14 +233,17 @@ mod mac {
         let send = |message| proxy.send_event(message).is_ok();
         loop {
             if let Ok((status, mut changes)) = utils::Subscription::open(&[EVENT_STATE]).await {
-                let device = banshee_common::audio_device(&status).map(str::to_string);
-                if !send(Message::Device(device))
+                if !send(Message::Device(Device::of(&status)))
                     || !send(Message::State(Indicator::of(Some(&status))))
                 {
                     return;
                 }
+                // Every push carries the device too: the watchdog rebinds while
+                // the daemon idles, so no other field has to move with it
                 while let Ok(Some(state)) = changes.next_of(BANSHEE_STATE_CHANGED).await {
-                    if !send(Message::State(Indicator::of(Some(&state)))) {
+                    if !send(Message::Device(Device::of(&state)))
+                        || !send(Message::State(Indicator::of(Some(&state))))
+                    {
                         return;
                     }
                 }
@@ -289,7 +309,7 @@ mod mac {
         let mut app = App {
             ui: None,
             indicator: Indicator::NotRunning,
-            device: None,
+            device: Device::default(),
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -312,6 +332,35 @@ mod mac {
 
         fn mask(indicator: Indicator) -> (Vec<u8>, u32, u32) {
             glyph(indicator).expect("a shipped asset must decode")
+        }
+
+        fn device(open: Option<&str>, missing: Option<&str>) -> Device {
+            Device {
+                open: open.map(str::to_string),
+                missing: missing.map(str::to_string),
+            }
+        }
+
+        #[test]
+        fn a_dead_daemon_offers_the_way_back_instead_of_a_device() {
+            assert_eq!(
+                device_line(Indicator::NotRunning, &device(Some("Yeti"), Some("yeti"))),
+                "Start with: banshee start"
+            );
+        }
+
+        #[test]
+        fn a_pushed_update_carries_both_device_fields() {
+            let pushed = serde_json::json!({
+                "recording": false,
+                "speaking": false,
+                "audio_device": "MacBook Pro Microphone",
+                "missing_device": "yeti",
+            });
+            assert_eq!(
+                Device::of(&pushed),
+                device(Some("MacBook Pro Microphone"), Some("yeti"))
+            );
         }
 
         #[test]

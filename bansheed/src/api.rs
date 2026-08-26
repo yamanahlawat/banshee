@@ -79,6 +79,7 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "stt_model": daemon_state.stt_model(),
         "vad_model": daemon_state.vad_model(),
         "audio_device": daemon_state.audio_device(),
+        "missing_device": daemon_state.missing_device(),
         "recording": daemon_state.is_recording(),
         "speaking": daemon_state.speech().is_speaking(),
         "uptime_seconds": daemon_state.uptime().as_secs(),
@@ -91,12 +92,15 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
 }
 
 /// The `banshee.state_changed` params: what moves without a client touching it.
-/// `vad_threshold` moves at runtime too, but only when a `configure` call asks
-/// it to, and that call already answers.
+/// The two device fields move on their own, because the watchdog rebinds while
+/// the daemon idles. `vad_threshold` moves at runtime too, but only when a
+/// `configure` call asks it to, and that call already answers.
 pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
     serde_json::json!({
         "recording": daemon_state.is_recording(),
         "speaking": daemon_state.speech().is_speaking(),
+        "audio_device": daemon_state.audio_device(),
+        "missing_device": daemon_state.missing_device(),
     })
 }
 
@@ -150,7 +154,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             };
             // Checked before the transition, so -32004 keeps meaning "busy"
             if let Some(reason) = daemon_state.recording_error() {
-                return unavailable(request.id, reason);
+                return unavailable(request.id, &reason);
             }
             if daemon_state.record_start(action) {
                 JsonRpcResponse::success(request.id, serde_json::json!({"ok": true}))
@@ -182,7 +186,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             };
 
             if let Some(reason) = daemon_state.recording_error() {
-                return unavailable(request.id, reason);
+                return unavailable(request.id, &reason);
             }
 
             // One armed session at a time; the mode is the lock
@@ -661,14 +665,39 @@ mod tests {
     fn a_pushed_change_agrees_with_what_status_reports() {
         let state = test_state(std::sync::mpsc::channel().0);
         state.set_recording_mode(RecordingMode::PushToTalk);
+        // Both device fields carry a value, or `null == null` passes for them
+        state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
+        state.set_missing_device(Some("Yeti Nano".to_string()));
 
         let status = status_payload(&state);
         let live = live_state(&state);
 
         assert_eq!(live["recording"], true, "the fixture must discriminate");
+        assert_eq!(live["audio_device"], "MacBook Pro Microphone");
+        assert_eq!(live["missing_device"], "Yeti Nano");
         for key in live.as_object().expect("live_state is an object").keys() {
             assert_eq!(live[key], status[key], "'{key}' disagrees with status");
         }
+    }
+
+    #[test]
+    fn the_pushed_state_carries_the_device_and_what_it_waits_for() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        state.set_audio_device(Some("OnePlus Buds 3".to_string()));
+        let bound = live_state(&state);
+        assert_eq!(bound["audio_device"], "OnePlus Buds 3");
+        assert!(bound["missing_device"].is_null());
+
+        // A substitution must reach a subscriber, or the tray shows the dead device
+        state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
+        state.set_missing_device(Some("OnePlus Buds 3".to_string()));
+        let substituted = live_state(&state);
+        assert_eq!(substituted["audio_device"], "MacBook Pro Microphone");
+        assert_eq!(substituted["missing_device"], "OnePlus Buds 3");
+        assert_ne!(
+            bound, substituted,
+            "push_changes suppresses an unchanged state"
+        );
     }
 
     #[tokio::test]

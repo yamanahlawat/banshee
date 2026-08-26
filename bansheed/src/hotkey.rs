@@ -1,3 +1,4 @@
+use ringbuf::HeapCons;
 use ringbuf::traits::Consumer;
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -27,12 +28,27 @@ const MAX_ANSWER: Duration = Duration::from_secs(60);
 // Past this ratio of wall time to audio length, the model is too heavy
 const SLOW_TRANSCRIBE_FACTOR: f32 = 2.0;
 
+/// They change together on a rebind, so they travel together.
+pub struct CaptureSource {
+    pub consumer: HeapCons<f32>,
+    pub sample_rate: u32,
+}
+
+impl CaptureSource {
+    pub fn drain(&mut self) -> Vec<f32> {
+        self.consumer.pop_iter().collect()
+    }
+
+    pub fn discard(&mut self) {
+        self.consumer.pop_iter().for_each(drop);
+    }
+}
+
 // Everything the audio consumer thread owns
-pub struct Pipeline<C: Consumer<Item = f32>> {
-    pub consumer: C,
+pub struct Pipeline {
+    pub source: CaptureSource,
     pub speech_to_text: WhisperEngine,
     pub vad: VADEngine,
-    pub sample_rate: u32,
     pub state: Arc<DaemonState>,
     pub cues: mpsc::Sender<Cue>,
     pub endpoint_silence_ms: u64,
@@ -45,13 +61,10 @@ enum Phase {
     Manual { start: usize },
 }
 
-pub fn hotkey_listener<C>(
-    pipeline: Pipeline<C>,
+pub fn hotkey_listener(
+    pipeline: Pipeline,
     commands: mpsc::Receiver<ConsumerCommand>,
-) -> thread::JoinHandle<()>
-where
-    C: Consumer<Item = f32> + Send + 'static,
-{
+) -> thread::JoinHandle<()> {
     // The handle lets shutdown join it, dropping the Whisper context before atexit
     thread::spawn(move || {
         let mut pipeline = pipeline;
@@ -59,13 +72,24 @@ where
             match command {
                 ConsumerCommand::Transcribe(action) => pipeline.transcribe_utterance(action),
                 // A session opened while this command sat in the queue owns
-                // the ring now: the drain skips, the cancelled lead-in stays.
+                // the ring now: the discard skips, the cancelled lead-in stays.
                 ConsumerCommand::Discard => {
                     if !pipeline.state.is_recording() {
-                        pipeline.drain();
+                        pipeline.source.discard();
                     }
                 }
                 ConsumerCommand::Ask(ask) => pipeline.ask(ask),
+                // The old ring dies with the stream that filled it. Anything
+                // still in it came from a device that is gone.
+                ConsumerCommand::Rebind {
+                    consumer,
+                    sample_rate,
+                } => {
+                    pipeline.source = CaptureSource {
+                        consumer,
+                        sample_rate,
+                    };
+                }
                 ConsumerCommand::Shutdown => break,
             }
         }
@@ -135,27 +159,27 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
     });
 }
 
-impl<C: Consumer<Item = f32>> Pipeline<C> {
+impl Pipeline {
     // Push-to-talk ended: the ring holds the whole utterance
     fn transcribe_utterance(&mut self, action: TranscribeTarget) {
         // pull all the floats out of the ring buffer into a standard Vec
-        let mut audio_data = Vec::new();
-        audio_data.extend(self.consumer.pop_iter());
+        let audio_data = self.source.drain();
 
         println!(
             "Downsampling audio from {} Hz to {TARGET_SAMPLE_RATE} Hz...",
-            self.sample_rate
+            self.source.sample_rate
         );
 
         // Downsample the audio by taking every nth sample
-        let final_data = match resample_audio(&audio_data, self.sample_rate, TARGET_SAMPLE_RATE) {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!("Error: {e}");
-                let _ = self.cues.send(Cue::Error);
-                return;
-            }
-        };
+        let final_data =
+            match resample_audio(&audio_data, self.source.sample_rate, TARGET_SAMPLE_RATE) {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    let _ = self.cues.send(Cue::Error);
+                    return;
+                }
+            };
 
         let (min_amplitude, max_amplitude) = final_data
             .iter()
@@ -275,11 +299,11 @@ impl<C: Consumer<Item = f32>> Pipeline<C> {
     // Armed listening: the mode is Armed and the question has finished playing
     fn ask(&mut self, ask: AskCommand) {
         // The ring holds echo captured while the question played
-        self.drain();
+        self.source.discard();
         let _ = self.cues.send(Cue::Arm);
         // Let the arm cue leave the speaker before the VAD listens
         thread::sleep(CUE_SETTLE);
-        self.drain();
+        self.source.discard();
 
         let answer_audio = self.listen_for_answer(ask.timeout);
 
@@ -313,13 +337,14 @@ impl<C: Consumer<Item = f32>> Pipeline<C> {
     // Online endpointing: confirm speech onset, then end on trailing silence.
     // Returns the answer audio at 16 kHz, or None on timeout or error.
     fn listen_for_answer(&mut self, timeout: Duration) -> Option<Vec<f32>> {
-        let mut resampler = match StreamingResampler::new(self.sample_rate, TARGET_SAMPLE_RATE) {
-            Ok(resampler) => resampler,
-            Err(e) => {
-                eprintln!("Failed to create resampler: {e}");
-                return None;
-            }
-        };
+        let mut resampler =
+            match StreamingResampler::new(self.source.sample_rate, TARGET_SAMPLE_RATE) {
+                Ok(resampler) => resampler,
+                Err(e) => {
+                    eprintln!("Failed to create resampler: {e}");
+                    return None;
+                }
+            };
         self.vad.reset_state();
         let vad_threshold = self.state.vad_threshold();
         let endpoint_chunks = (self.endpoint_silence_ms / CHUNK_MS).max(1) as usize;
@@ -367,7 +392,7 @@ impl<C: Consumer<Item = f32>> Pipeline<C> {
 
             // Half-duplex: drop capture while the daemon itself is speaking
             if self.state.speech().is_speaking() {
-                self.drain();
+                self.source.discard();
                 suppressed = true;
                 continue;
             }
@@ -384,7 +409,7 @@ impl<C: Consumer<Item = f32>> Pipeline<C> {
             }
 
             batch.clear();
-            batch.extend(self.consumer.pop_iter());
+            batch.extend(self.source.consumer.pop_iter());
             if let Err(e) = resampler.push(&batch, &mut audio) {
                 eprintln!("Resampling failed: {e}");
                 return None;
@@ -431,10 +456,6 @@ impl<C: Consumer<Item = f32>> Pipeline<C> {
             }
         }
     }
-
-    fn drain(&mut self) {
-        self.consumer.pop_iter().for_each(drop);
-    }
 }
 
 fn save_history(state: &DaemonState, transcription: &str) {
@@ -474,5 +495,50 @@ mod hint_tests {
                 "the default must not leak in: {hint}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ringbuf::traits::{Producer, Split};
+
+    fn source_holding(
+        samples: &[f32],
+        sample_rate: u32,
+    ) -> (CaptureSource, ringbuf::HeapProd<f32>) {
+        let (mut producer, consumer) = ringbuf::HeapRb::<f32>::new(64).split();
+        producer.push_slice(samples);
+        (
+            CaptureSource {
+                consumer,
+                sample_rate,
+            },
+            producer,
+        )
+    }
+
+    #[test]
+    fn a_swapped_source_reads_the_new_ring_and_the_new_rate() {
+        let (mut source, _old_producer) = source_holding(&[1.0, 2.0], 16000);
+        assert_eq!(source.drain(), vec![1.0, 2.0]);
+        assert_eq!(source.sample_rate, 16000);
+
+        // A headset at 16 kHz gives way to the built in mic at 48 kHz
+        let (replacement, _new_producer) = source_holding(&[7.0], 48000);
+        source = replacement;
+
+        assert_eq!(source.drain(), vec![7.0]);
+        assert_eq!(
+            source.sample_rate, 48000,
+            "a stale rate resamples by the wrong ratio and distorts silently"
+        );
+    }
+
+    #[test]
+    fn discarding_a_source_empties_it() {
+        let (mut source, _producer) = source_holding(&[1.0, 2.0, 3.0], 16000);
+        source.discard();
+        assert!(source.drain().is_empty());
     }
 }
