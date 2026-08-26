@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Stopping speech no longer hangs the daemon when the speaker is gone.** Disconnect a
+  Bluetooth headset that Banshee was speaking through, interrupt an utterance, and the
+  daemon stopped answering anything: `banshee status` timed out, the tray froze on its last
+  state, and nothing spoke until a restart. The audio library's `append` waits for a stopped
+  player to drain, a player whose device vanished never drains, and that wait happened under
+  a lock every stop needs. Each utterance now plays through its own player, so a stop never
+  waits on the device, and a stopped utterance never blocks the next one. What remains until
+  the headset returns or the daemon restarts: no sound; an utterance that ends on the dead
+  device keeps `speaking` true until something stops it, so further speech queues up and the
+  oldest is dropped; and each utterance leaves its audio parked in the mixer. That is the
+  output half of the device change work, on the roadmap.
+
 ## [0.11.0] - 2026-08-26
 
 ### Added
