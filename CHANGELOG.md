@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-26
+
 ### Fixed
 
 - **Stopping speech no longer hangs the daemon when the speaker is gone.** Disconnect a
@@ -568,7 +570,8 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/yamanahlawat/banshee/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/yamanahlawat/banshee/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/yamanahlawat/banshee/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/yamanahlawat/banshee/compare/v0.8.0...v0.9.0
