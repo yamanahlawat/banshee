@@ -10,8 +10,12 @@ extra to install or configure.
 
 ## Install
 
-The extension isn't part of the `banshee` binary, so fetch it into Pi's
-extensions directory:
+```bash
+banshee connect pi
+```
+
+That writes `~/.pi/agent/extensions/banshee.ts` after showing you the change. Without the
+`banshee` CLI, fetch the file yourself:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
@@ -19,11 +23,7 @@ curl -o ~/.pi/agent/extensions/banshee.ts \
   https://raw.githubusercontent.com/yamanahlawat/banshee/main/integrations/pi/banshee.ts
 ```
 
-From a clone, `cp integrations/pi/banshee.ts ~/.pi/agent/extensions/` does the
-same thing.
-
-Restart Pi. The tools are picked up automatically; extensions in that directory
-need no registration.
+Restart Pi. Extensions in that directory need no registration.
 
 The daemon has to be running, with the models already downloaded:
 

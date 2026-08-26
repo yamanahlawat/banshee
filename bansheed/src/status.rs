@@ -167,8 +167,7 @@ fn runs(bin: &str) -> bool {
 }
 
 // Walks $PATH directly: `which` is its own package on minimal systems.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn on_path(bin: &str) -> bool {
+pub(crate) fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()))
 }
