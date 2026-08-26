@@ -7,16 +7,18 @@ pub enum Agent {
     Antigravity,
     ClaudeCode,
     Codex,
+    Copilot,
     Cursor,
     OpenCode,
     Pi,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 6] = [
+    pub const ALL: [Agent; 7] = [
         Agent::Antigravity,
         Agent::ClaudeCode,
         Agent::Codex,
+        Agent::Copilot,
         Agent::Cursor,
         Agent::OpenCode,
         Agent::Pi,
@@ -27,6 +29,7 @@ impl Agent {
             Agent::Antigravity => "antigravity",
             Agent::ClaudeCode => "claude",
             Agent::Codex => "codex",
+            Agent::Copilot => "copilot",
             Agent::Cursor => "cursor",
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
@@ -38,6 +41,7 @@ impl Agent {
             Agent::Antigravity => Signal::OnPath("agy"),
             Agent::ClaudeCode => Signal::OnPath("claude"),
             Agent::Codex => Signal::OnPath("codex"),
+            Agent::Copilot => Signal::OnPath("copilot"),
             Agent::Cursor => Signal::HomeDir(".cursor"),
             Agent::OpenCode => Signal::HomeDir(".config/opencode"),
             Agent::Pi => Signal::HomeDir(".pi/agent"),
@@ -57,6 +61,7 @@ impl From<crate::args::AgentName> for Agent {
             crate::args::AgentName::Antigravity => Agent::Antigravity,
             crate::args::AgentName::Claude => Agent::ClaudeCode,
             crate::args::AgentName::Codex => Agent::Codex,
+            crate::args::AgentName::Copilot => Agent::Copilot,
             crate::args::AgentName::Cursor => Agent::Cursor,
             crate::args::AgentName::Opencode => Agent::OpenCode,
             crate::args::AgentName::Pi => Agent::Pi,
@@ -222,6 +227,12 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
             let shim = require_shim(env)?;
             rewrite(env.home.join(".codex/config.toml"), |before| {
                 with_codex_server(before, shim, env.shim_on_path)
+            })
+        }
+        Agent::Copilot => {
+            let shim = require_shim(env)?;
+            rewrite(env.home.join(".copilot/mcp-config.json"), |before| {
+                with_mcp_server(before, "mcp-config.json", shim, env.shim_on_path)
             })
         }
         Agent::Cursor => {
@@ -722,6 +733,12 @@ mod tests {
             }
         );
         assert_eq!(
+            detect(Agent::Copilot, &env),
+            Presence::NotInstalled {
+                looked_for: "copilot on PATH".into()
+            }
+        );
+        assert_eq!(
             detect(Agent::Antigravity, &env),
             Presence::NotInstalled {
                 looked_for: "agy on PATH".into()
@@ -729,9 +746,11 @@ mod tests {
         );
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
         env.on_path.push("codex");
+        env.on_path.push("copilot");
         env.on_path.push("agy");
         assert_eq!(detect(Agent::Cursor, &env), Presence::Installed);
         assert_eq!(detect(Agent::Codex, &env), Presence::Installed);
+        assert_eq!(detect(Agent::Copilot, &env), Presence::Installed);
         assert_eq!(detect(Agent::Antigravity, &env), Presence::Installed);
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -885,10 +904,12 @@ mod tests {
         let mut env = env_at(&home);
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
         env.on_path.push("codex");
+        env.on_path.push("copilot");
         env.on_path.push("agy");
         for (agent, file) in [
             (Agent::Cursor, ".cursor/mcp.json"),
             (Agent::Codex, ".codex/config.toml"),
+            (Agent::Copilot, ".copilot/mcp-config.json"),
             (Agent::Antigravity, ".gemini/config/mcp_config.json"),
         ] {
             match &plan(agent, &env).unwrap()[..] {
@@ -906,7 +927,12 @@ mod tests {
             }
         }
         env.shim = None;
-        for agent in [Agent::Cursor, Agent::Codex, Agent::Antigravity] {
+        for agent in [
+            Agent::Cursor,
+            Agent::Codex,
+            Agent::Copilot,
+            Agent::Antigravity,
+        ] {
             assert!(plan(agent, &env).is_err(), "{agent:?} must need the shim");
         }
         let _ = std::fs::remove_dir_all(&home);
@@ -1015,7 +1041,15 @@ mod tests {
         let names: Vec<&str> = Agent::ALL.iter().map(|a| a.name()).collect();
         assert_eq!(
             names,
-            ["antigravity", "claude", "codex", "cursor", "opencode", "pi"]
+            [
+                "antigravity",
+                "claude",
+                "codex",
+                "copilot",
+                "cursor",
+                "opencode",
+                "pi"
+            ]
         );
     }
 

@@ -4,8 +4,8 @@
 
 # Banshee
 
-Banshee gives your AI coding agent a voice. Your agent - Claude Code, Cursor,
-or any MCP host - speaks its decisions and questions out loud, and you answer
+Banshee gives your AI coding agent a voice. Your agent - Claude Code, Copilot,
+Cursor, or any MCP host - speaks its decisions and questions out loud, and you answer
 back by talking, hands-free, while it works. It runs entirely on your machine:
 local Whisper for listening, a local neural voice for speaking, no cloud, no
 API keys, no audio ever leaving your laptop.
@@ -39,8 +39,8 @@ the other half of the conversation.
 - **It handles your jargon in both directions.** `vocabulary` biases Whisper
   toward project words it would otherwise mangle, and the espeak-ng fallback
   pronounces unfamiliar terms instead of spelling them out letter by letter.
-- **Not tied to one vendor.** It's an MCP server, so Claude Code, Cursor,
-  OpenCode, and anything else that speaks MCP all work.
+- **Not tied to one vendor.** It's an MCP server, so Claude Code, Copilot,
+  Cursor, OpenCode, and anything else that speaks MCP all work.
 - **One daemon, both jobs.** Agent voice and system-wide dictation share the
   same process, models, and microphone.
 
@@ -198,6 +198,7 @@ banshee connect            # which agents are installed, and which are connected
 banshee connect antigravity # Antigravity IDE, agy CLI and SDK: the MCP server in ~/.gemini/config/mcp_config.json
 banshee connect claude      # Claude Code: the MCP server and a stop hook that refuses to end a turn with no spoken status
 banshee connect codex       # Codex CLI: the MCP server in ~/.codex/config.toml
+banshee connect copilot     # GitHub Copilot CLI: the MCP server in ~/.copilot/mcp-config.json
 banshee connect cursor      # Cursor: the MCP server in ~/.cursor/mcp.json
 banshee connect opencode    # OpenCode: the MCP server
 banshee connect pi          # Pi: the native extension
@@ -205,8 +206,8 @@ banshee connect pi          # Pi: the native extension
 
 Each command shows the exact change to that tool's config and asks before it writes.
 The Claude Code hook needs `jq` on your PATH. Antigravity, Claude Code, OpenCode
-and Pi are verified on a real install; Codex and Cursor follow their published config formats
-and wait for a report from a machine that has them.
+and Pi are verified on a real install; Codex, Copilot, and Cursor follow their
+published config formats and wait for a report from a machine that has them.
 Restart the tool afterwards.
 
 `banshee-mcp-shim` is the MCP stdio server behind this. It exposes three tools:
