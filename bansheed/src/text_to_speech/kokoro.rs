@@ -12,6 +12,7 @@ use misaki_rs::lexicon::PhonemeEntry;
 use misaki_rs::{G2P, Language, MToken};
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use rodio::buffer::SamplesBuffer;
+use rodio::mixer::Mixer;
 use rodio::{DeviceSinkBuilder, Player};
 
 use super::oov::OovFallback;
@@ -331,21 +332,21 @@ impl KokoroEngine {
 
 pub struct KokoroBackend {
     engine: Arc<Mutex<KokoroEngine>>,
-    player: Arc<Player>,
+    mixer: Mixer,
 }
 
 impl KokoroBackend {
     pub fn new(engine: KokoroEngine) -> Result<Self, BansheeError> {
         let sink = DeviceSinkBuilder::open_default_sink()
             .map_err(|e| BansheeError::Other(format!("No audio output device: {e}")))?;
-        let player = Player::connect_new(sink.mixer());
+        let mixer = sink.mixer().clone();
         // The !Send sink only has to stay alive, never move; leaking it
         // keeps the output stream open for the daemon's lifetime
         std::mem::forget(sink);
 
         Ok(Self {
             engine: Arc::new(Mutex::new(engine)),
-            player: Arc::new(player),
+            mixer,
         })
     }
 }
@@ -357,50 +358,61 @@ struct KokoroUtterance {
     player: Arc<Player>,
 }
 
+// One player per utterance: rodio's `append` sleeps until a stopped player
+// drains, and a player whose device is gone never drains
+fn play(mixer: &Mixer, chunks: impl Iterator<Item = Vec<f32>> + Send + 'static) -> KokoroUtterance {
+    let player = Arc::new(Player::connect_new(mixer));
+    let cancelled = Arc::new(Mutex::new(false));
+    let thread_player = Arc::clone(&player);
+    let thread_cancelled = Arc::clone(&cancelled);
+    let synth = thread::spawn(move || {
+        for samples in chunks {
+            if samples.is_empty() {
+                continue;
+            }
+            // Append under the lock so stop() can never race a chunk into a
+            // stopped player, where append would sleep
+            let guard = lock(&thread_cancelled);
+            if *guard {
+                break;
+            }
+            thread_player.append(SamplesBuffer::new(CHANNELS, SAMPLE_RATE, samples));
+        }
+    });
+    KokoroUtterance {
+        cancelled,
+        synth,
+        player,
+    }
+}
+
 impl TtsBackend for KokoroBackend {
     fn start(&self, text: &str) -> std::io::Result<Box<dyn ActiveUtterance>> {
-        let cancelled = Arc::new(Mutex::new(false));
-
         let engine = Arc::clone(&self.engine);
-        let player = Arc::clone(&self.player);
-        let thread_cancelled = Arc::clone(&cancelled);
-        let text = text.to_string();
-
+        let mut sentences = sentences(text)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+            .into_iter();
         // Sentence-chunked streaming: the first sentence plays while the
         // rest are still synthesizing
-        let synth = thread::spawn(move || {
-            for sentence in sentences(&text) {
-                let synthesized = lock(&engine).synthesize(sentence);
-                let samples = match synthesized {
-                    Ok(samples) => samples,
-                    Err(e) => {
-                        eprintln!("Kokoro synthesis failed: {e}");
-                        break;
-                    }
-                };
-                if samples.is_empty() {
-                    continue;
+        let chunks = std::iter::from_fn(move || {
+            let sentence = sentences.next()?;
+            match lock(&engine).synthesize(&sentence) {
+                Ok(samples) => Some(samples),
+                Err(e) => {
+                    eprintln!("Kokoro synthesis failed: {e}");
+                    None
                 }
-                // Append under the lock so stop() can never race a sentence
-                // into an already-stopped player
-                let guard = lock(&thread_cancelled);
-                if *guard {
-                    break;
-                }
-                player.append(SamplesBuffer::new(CHANNELS, SAMPLE_RATE, samples));
             }
         });
-
-        Ok(Box::new(KokoroUtterance {
-            cancelled,
-            synth,
-            player: Arc::clone(&self.player),
-        }))
+        Ok(Box::new(play(&self.mixer, chunks)))
     }
 }
 
 impl ActiveUtterance for KokoroUtterance {
     fn is_finished(&mut self) -> bool {
+        // empty() only drops when the device pulls samples; a dead device keeps
+        // an utterance unfinished until stop()
         self.synth.is_finished() && self.player.empty()
     }
 
@@ -435,6 +447,61 @@ fn append_oov(word: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A mixer nobody reads: the output device is gone, so no sample is ever pulled
+    fn dead_mixer() -> rodio::mixer::Mixer {
+        let (mixer, _never_read) = rodio::mixer::mixer(CHANNELS, SAMPLE_RATE);
+        mixer
+    }
+
+    fn one_second_of_silence() -> impl Iterator<Item = Vec<f32>> + Send + 'static {
+        std::iter::once(vec![0.0; SAMPLE_RATE.get() as usize])
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !done() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what} did not happen within 2s"
+            );
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_stopped_utterance_on_a_dead_device_does_not_block_the_next_one() {
+        let mixer = dead_mixer();
+        let mut first = play(&mixer, one_second_of_silence());
+        wait_until("the first sentence is queued", || first.player.len() == 1);
+        first.stop();
+
+        let second = play(&mixer, one_second_of_silence());
+        wait_until("the second utterance's thread finishes", || {
+            second.synth.is_finished()
+        });
+        assert_eq!(
+            second.player.len(),
+            1,
+            "the second sentence was queued on its own player"
+        );
+    }
+
+    #[test]
+    fn a_sentence_after_stop_is_never_appended() {
+        let mixer = dead_mixer();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let chunks = std::iter::once(vec![0.0; 240]).chain(std::iter::once_with(move || {
+            let _ = release_rx.recv();
+            vec![0.0; 240]
+        }));
+        let mut utterance = play(&mixer, chunks);
+        wait_until("the first chunk is queued", || utterance.player.len() == 1);
+        utterance.stop();
+        release_tx.send(()).unwrap();
+        wait_until("the thread ends", || utterance.synth.is_finished());
+        assert_eq!(utterance.player.len(), 1, "no chunk may follow a stop");
+    }
 
     #[test]
     fn flags_letter_spelled_words_only() {
