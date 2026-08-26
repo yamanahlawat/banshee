@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-26
+
 ### Added
 
 - **`banshee connect` wires up your coding agent.** `banshee connect antigravity`,
@@ -50,16 +52,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Banshee now installs as `Banshee.app`, so macOS shows its icon in System
-  Settings instead of a generic placeholder. The command line `banshee` is
-  unchanged and still works.
+- **A source install is now a signed `Banshee.app`.** `make install` from a
+  clone builds the bundle, so macOS shows Banshee's icon in System Settings
+  instead of a generic placeholder. The command line `banshee` is unchanged
+  and still works. Homebrew and the shell installer are not affected: they
+  ship the same binaries as before, signed with the same certificate, so
+  nothing below applies to them.
 
-  **You must grant two permissions again, once.** The binaries inside the
-  bundle now sign under the bundle's identifier, and macOS ties each
-  permission to that identity. After you upgrade, open System Settings >
-  Privacy & Security and grant Banshee **Accessibility** and **Input
-  Monitoring** again. Until you do, the hotkey receives no key presses and
-  dictation cannot type. This is expected, and it happens only on this
+  **If you install from source, you must grant two permissions again, once.**
+  The binaries inside the bundle sign under the bundle's identifier, and macOS
+  ties each permission to that identity. After you upgrade, open System
+  Settings > Privacy & Security and grant Banshee **Accessibility** and
+  **Input Monitoring** again. Until you do, the hotkey receives no key presses
+  and dictation cannot type. This is expected, and it happens only on this
   upgrade.
 
   **Input Monitoring may need one extra step.** The list can keep a stale
@@ -549,7 +554,10 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/yamanahlawat/banshee/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/yamanahlawat/banshee/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/yamanahlawat/banshee/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/yamanahlawat/banshee/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/yamanahlawat/banshee/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/yamanahlawat/banshee/compare/v0.6.0...v0.6.1
