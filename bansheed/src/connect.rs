@@ -9,16 +9,18 @@ pub enum Agent {
     Antigravity,
     ClaudeCode,
     Codex,
+    Copilot,
     Cursor,
     OpenCode,
     Pi,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 6] = [
+    pub const ALL: [Agent; 7] = [
         Agent::Antigravity,
         Agent::ClaudeCode,
         Agent::Codex,
+        Agent::Copilot,
         Agent::Cursor,
         Agent::OpenCode,
         Agent::Pi,
@@ -29,6 +31,7 @@ impl Agent {
             Agent::Antigravity => "antigravity",
             Agent::ClaudeCode => "claude",
             Agent::Codex => "codex",
+            Agent::Copilot => "copilot",
             Agent::Cursor => "cursor",
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
@@ -41,6 +44,7 @@ impl Agent {
             Agent::Antigravity => "Antigravity",
             Agent::ClaudeCode => "Claude Code",
             Agent::Codex => "Codex",
+            Agent::Copilot => "Copilot",
             Agent::Cursor => "Cursor",
             Agent::OpenCode => "OpenCode",
             Agent::Pi => "Pi",
@@ -52,6 +56,7 @@ impl Agent {
             Agent::Antigravity => Signal::OnPath("agy"),
             Agent::ClaudeCode => Signal::OnPath("claude"),
             Agent::Codex => Signal::OnPath("codex"),
+            Agent::Copilot => Signal::OnPath("copilot"),
             Agent::Cursor => Signal::HomeDir(".cursor"),
             Agent::OpenCode => Signal::HomeDir(".config/opencode"),
             Agent::Pi => Signal::HomeDir(".pi/agent"),
@@ -71,6 +76,7 @@ impl From<crate::args::AgentName> for Agent {
             crate::args::AgentName::Antigravity => Agent::Antigravity,
             crate::args::AgentName::Claude => Agent::ClaudeCode,
             crate::args::AgentName::Codex => Agent::Codex,
+            crate::args::AgentName::Copilot => Agent::Copilot,
             crate::args::AgentName::Cursor => Agent::Cursor,
             crate::args::AgentName::Opencode => Agent::OpenCode,
             crate::args::AgentName::Pi => Agent::Pi,
@@ -287,6 +293,12 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
                 with_codex_server(before, shim)
             })
         }
+        Agent::Copilot => {
+            let shim = require_shim(env)?;
+            rewrite(env.home.join(".copilot/mcp-config.json"), |before| {
+                with_copilot_server(before, shim)
+            })
+        }
         Agent::Cursor => {
             let shim = require_shim(env)?;
             rewrite(env.home.join(".cursor/mcp.json"), |before| {
@@ -415,6 +427,36 @@ fn with_mcp_server(
     if reaches_shim(command, shim) {
         return Ok(None);
     }
+    entry.insert(
+        "command".into(),
+        serde_json::json!(shim.display().to_string()),
+    );
+    Ok(Some(pretty_json(&root)?))
+}
+
+fn with_copilot_server(config: Option<&str>, shim: &Path) -> Result<Option<String>, BansheeError> {
+    let mut root: serde_json::Value = match config {
+        Some(text) => json5::from_str(text).map_err(|error| {
+            malformed("mcp-config.json", &format!("could not be read: {error}"))
+        })?,
+        None => serde_json::json!({}),
+    };
+    let entry = root
+        .as_object_mut()
+        .ok_or_else(|| malformed("mcp-config.json", "is not a JSON object"))?
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| malformed("mcp-config.json", "mcpServers is not an object"))?
+        .entry("banshee")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| malformed("mcp-config.json", "mcpServers.banshee is not an object"))?;
+    let command = entry.get("command").and_then(serde_json::Value::as_str);
+    if entry.get("type") == Some(&serde_json::json!("local")) && reaches_shim(command, shim) {
+        return Ok(None);
+    }
+    entry.insert("type".into(), serde_json::json!("local"));
     entry.insert(
         "command".into(),
         serde_json::json!(shim.display().to_string()),

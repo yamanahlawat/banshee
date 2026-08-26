@@ -167,6 +167,12 @@ fn cursor_is_installed_when_its_dir_exists_and_the_clis_when_on_path() {
         }
     );
     assert_eq!(
+        detect(Agent::Copilot, &env),
+        Presence::NotInstalled {
+            looked_for: "copilot on PATH".into()
+        }
+    );
+    assert_eq!(
         detect(Agent::Antigravity, &env),
         Presence::NotInstalled {
             looked_for: "agy on PATH".into()
@@ -174,9 +180,11 @@ fn cursor_is_installed_when_its_dir_exists_and_the_clis_when_on_path() {
     );
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     found(&mut env, "codex");
+    found(&mut env, "copilot");
     found(&mut env, "agy");
     assert_eq!(detect(Agent::Cursor, &env), Presence::Installed);
     assert_eq!(detect(Agent::Codex, &env), Presence::Installed);
+    assert_eq!(detect(Agent::Copilot, &env), Presence::Installed);
     assert_eq!(detect(Agent::Antigravity, &env), Presence::Installed);
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -229,6 +237,38 @@ fn mcp_server_errors_name_the_file() {
     let error =
         with_mcp_server(Some("[1]"), "mcp.json", Path::new(SHIM)).expect_err("not an object");
     assert!(error.to_string().starts_with("mcp.json "), "{error}");
+}
+
+#[test]
+fn copilot_server_is_added_with_local_type() {
+    let after = with_copilot_server(None, Path::new(SHIM))
+        .unwrap()
+        .expect("a change");
+    let value: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({ "mcpServers": { "banshee": { "type": "local", "command": SHIM } } })
+    );
+}
+
+#[test]
+fn copilot_server_updates_an_entry_without_local_type() {
+    let before = format!(r#"{{"mcpServers":{{"banshee":{{"command":"{SHIM}"}}}}}}"#);
+    let after = with_copilot_server(Some(&before), Path::new(SHIM))
+        .unwrap()
+        .expect("missing type must be fixed");
+    let value: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(value["mcpServers"]["banshee"]["type"], "local");
+    assert_eq!(value["mcpServers"]["banshee"]["command"], SHIM);
+}
+
+#[test]
+fn copilot_server_with_local_type_and_shim_means_no_change() {
+    let before = format!(r#"{{"mcpServers":{{"banshee":{{"type":"local","command":"{SHIM}"}}}}}}"#);
+    assert_eq!(
+        with_copilot_server(Some(&before), Path::new(SHIM)).unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -321,28 +361,33 @@ fn the_new_agents_plan_their_own_files_and_need_the_shim() {
     let mut env = env_at(&home);
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     found(&mut env, "codex");
+    found(&mut env, "copilot");
     found(&mut env, "agy");
     for (agent, file) in [
         (Agent::Cursor, ".cursor/mcp.json"),
         (Agent::Codex, ".codex/config.toml"),
+        (Agent::Copilot, ".copilot/mcp-config.json"),
         (Agent::Antigravity, ".gemini/config/mcp_config.json"),
     ] {
         match &plan(agent, &env).unwrap()[..] {
-            [
-                Change::WriteFile {
-                    path,
-                    before: None,
-                    executable: false,
-                    ..
-                },
-            ] => {
+            [Change::WriteFile {
+                path,
+                before: None,
+                executable: false,
+                ..
+            }] => {
                 assert_eq!(path, &home.join(file));
             }
             other => panic!("{agent:?}: {other:?}"),
         }
     }
     env.shim = None;
-    for agent in [Agent::Cursor, Agent::Codex, Agent::Antigravity] {
+    for agent in [
+        Agent::Cursor,
+        Agent::Codex,
+        Agent::Copilot,
+        Agent::Antigravity,
+    ] {
         assert!(plan(agent, &env).is_err(), "{agent:?} must need the shim");
     }
     let _ = std::fs::remove_dir_all(&home);
@@ -476,7 +521,15 @@ fn every_agent_has_a_cli_name() {
     let names: Vec<&str> = Agent::ALL.iter().map(|a| a.name()).collect();
     assert_eq!(
         names,
-        ["antigravity", "claude", "codex", "cursor", "opencode", "pi"]
+        [
+            "antigravity",
+            "claude",
+            "codex",
+            "copilot",
+            "cursor",
+            "opencode",
+            "pi"
+        ]
     );
 }
 
@@ -710,14 +763,12 @@ fn claude_plan_repairs_a_registered_script_that_is_missing() {
     )
     .unwrap();
     match &plan(Agent::ClaudeCode, &env).unwrap()[..] {
-        [
-            Change::WriteFile {
-                path,
-                before: None,
-                executable: true,
-                ..
-            },
-        ] => {
+        [Change::WriteFile {
+            path,
+            before: None,
+            executable: true,
+            ..
+        }] => {
             assert_eq!(path, &registered)
         }
         other => panic!("{other:?}"),
@@ -1167,14 +1218,12 @@ fn claude_plan_repairs_a_missing_script_at_the_canonical_path() {
     .unwrap();
     let changes = plan(Agent::ClaudeCode, &env).unwrap();
     match &changes[..] {
-        [
-            Change::WriteFile {
-                path,
-                before,
-                after,
-                executable,
-            },
-        ] => {
+        [Change::WriteFile {
+            path,
+            before,
+            after,
+            executable,
+        }] => {
             assert_eq!(path, &script_path);
             assert_eq!(*before, None);
             assert_eq!(after, &hook_script(&env.banshee));
@@ -1191,14 +1240,12 @@ fn opencode_plan_targets_the_jsonc_file() {
     std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
     let changes = plan(Agent::OpenCode, &env_at(&home)).unwrap();
     match &changes[..] {
-        [
-            Change::WriteFile {
-                path,
-                before,
-                executable,
-                ..
-            },
-        ] => {
+        [Change::WriteFile {
+            path,
+            before,
+            executable,
+            ..
+        }] => {
             assert_eq!(path, &home.join(".config/opencode/opencode.jsonc"));
             assert_eq!(*before, None);
             assert!(!executable);

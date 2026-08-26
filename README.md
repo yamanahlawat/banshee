@@ -190,6 +190,7 @@ banshee connect            # which agents are installed, and which are connected
 banshee connect antigravity # Antigravity IDE, agy CLI and SDK: the MCP server in ~/.gemini/config/mcp_config.json
 banshee connect claude      # Claude Code: the MCP server and a stop hook that refuses to end a turn with no spoken status
 banshee connect codex       # Codex CLI: the MCP server in ~/.codex/config.toml
+banshee connect copilot     # GitHub Copilot CLI: the MCP server in ~/.copilot/mcp-config.json
 banshee connect cursor      # Cursor: the MCP server in ~/.cursor/mcp.json
 banshee connect opencode    # OpenCode: the MCP server
 banshee connect pi          # Pi: the native extension
@@ -198,7 +199,7 @@ banshee connect pi          # Pi: the native extension
 Each command shows the exact change to that tool's config and asks before it
 writes, then you restart the tool. The Claude Code hook needs `jq` on your
 PATH. Antigravity, Claude Code, OpenCode and Pi are verified on a real install;
-Codex and Cursor follow their published formats and wait for a report.
+Codex, Copilot and Cursor follow their published formats and wait for a report.
 
 Pi has its own extension API instead of MCP, so `banshee connect pi` installs a
 native extension that talks to the daemon directly; see
@@ -209,7 +210,7 @@ the change before it writes, and says which agents are connected.
 
 <p align="center">
   <img src="assets/agents.png" width="360"
-       alt="The Agents panel, listing Antigravity, Claude Code, OpenCode and Pi as connected, and noting that Banshee also works with Codex and Cursor.">
+       alt="The Agents panel, listing Antigravity, Claude Code, OpenCode and Pi as connected, and noting that Banshee also works with Codex, Copilot and Cursor.">
 </p>
 
 `banshee-mcp-shim` is the MCP stdio server behind this. Any other MCP host takes
