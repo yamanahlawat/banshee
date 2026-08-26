@@ -5,6 +5,88 @@ All notable changes to Banshee are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.11.0] - 2026-08-26
+
+### Added
+
+- **`banshee connect` wires up your coding agent.** `banshee connect antigravity`,
+  `claude`, `codex`, `cursor`, `opencode` or `pi` detects the tool, shows the exact
+  change to its config, and writes it only after you say yes. Claude Code gets the MCP
+  server and a stop hook that makes each turn end with a spoken status; the others get
+  the MCP server entry, and Pi its native extension. `banshee connect` alone lists what
+  is installed and what is connected. A server already registered by its bare name
+  counts as connected when `PATH` resolves it to the same shim.
+
+### Fixed
+
+- **A microphone that disappears no longer kills dictation.** Unplug a Bluetooth
+  headset mid-session and Banshee used to keep naming the device that was gone,
+  record nothing, and play no cue. A restart was the only way back. Now the
+  daemon notices within a second or two, moves capture to the system default so
+  a press still works, and takes your device back when it returns.
+
+  **It never swaps your microphone in silence.** When you named a device and it
+  disappears, every surface says which one is recording and which one it is
+  waiting for: the tray menu, `banshee status`, and `banshee watch --waybar` all
+  show `MacBook Pro Microphone (waiting for "yeti")`. When no device can be
+  opened at all, Banshee refuses to record and says why, rather than returning
+  silence.
+
+  This also covers the case where the microphone is already missing when the
+  daemon starts, so booting with the headset off no longer needs a restart once
+  you connect it.
+
+  **`audio.input_device = "default"` now follows the OS.** Connect a headset,
+  macOS makes it the system default, and Banshee moves capture to it within
+  about five seconds. It used to keep whatever was the default when capture last
+  opened, so a headset connected mid-session went unheard. A device you named by
+  hand is never given up this way.
+
+  Two limits are worth knowing. If you have no working microphone at all, for
+  example because the permission is denied, then granting it still needs a
+  daemon restart. And a headset that is both your microphone and your speakers
+  loses its cue tones until you reconnect it, because the output side is not
+  rebuilt yet.
+
+### Changed
+
+- **A source install is now a signed `Banshee.app`.** `make install` from a
+  clone builds the bundle, so macOS shows Banshee's icon in System Settings
+  instead of a generic placeholder. The command line `banshee` is unchanged
+  and still works. Homebrew and the shell installer are not affected: they
+  ship the same binaries as before, signed with the same certificate, so
+  nothing below applies to them.
+
+  **If you install from source, you must grant two permissions again, once.**
+  The binaries inside the bundle sign under the bundle's identifier, and macOS
+  ties each permission to that identity. After you upgrade, open System
+  Settings > Privacy & Security and grant Banshee **Accessibility** and
+  **Input Monitoring** again. Until you do, the hotkey receives no key presses
+  and dictation cannot type. This is expected, and it happens only on this
+  upgrade.
+
+  **Input Monitoring may need one extra step.** The list can keep a stale
+  Banshee entry, shown with an alias or shortcut arrow, and then show no
+  Banshee entry at all once you remove it. Banshee never prompts for
+  permissions, it only checks them, so macOS does not always add a fresh row
+  on its own. Remove any stale entry, then use the **+** button to add
+  `~/Applications/Banshee.app` directly. Accessibility does not need this
+  step; its row appears on its own.
+
+- **`audio.input_device` applies without a restart.**
+  `banshee config set audio.input_device "yeti"` now reaches the running daemon,
+  which rebinds capture in well under a second. Every other setting except
+  `stt.vad_threshold` is still read once at startup.
+
+- **An exact microphone name now wins over a longer name that contains it.**
+  `input_device` still matches a case-insensitive substring, so `"yeti"` finds
+  `Blue Yeti Stereo Microphone`. But a `Yeti` sitting beside a `Blue Yeti Pro`
+  now opens its own device rather than the first match. A blank
+  `input_device` is read as `default` instead of matching whichever device
+  enumerated first.
+
 ## [0.10.0] - 2026-08-23
 
 ### Added
@@ -472,7 +554,10 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/yamanahlawat/banshee/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/yamanahlawat/banshee/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/yamanahlawat/banshee/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/yamanahlawat/banshee/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/yamanahlawat/banshee/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/yamanahlawat/banshee/compare/v0.6.0...v0.6.1

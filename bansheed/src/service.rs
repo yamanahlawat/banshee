@@ -1,5 +1,9 @@
 // Start-at-login behind a neutral surface: launchd on macOS, systemd on Linux.
 
+use std::path::{Path, PathBuf};
+
+use banshee_common::error::BansheeError;
+
 /// What can be set to start at login. The platform arms decide what they can
 /// honour, so a new entry is one variant rather than a new pair of functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +23,27 @@ impl Agent {
     }
 }
 
+// current_exe returns the symlink, so canonicalize first or a symlinked CLI
+// searches the wrong directory.
+pub(crate) fn home_dir() -> Result<PathBuf, BansheeError> {
+    dirs::home_dir().ok_or_else(|| BansheeError::Other("home dir not found".into()))
+}
+
+pub(crate) fn sibling(exe: &Path, name: &str) -> Result<PathBuf, BansheeError> {
+    let real = std::fs::canonicalize(exe)?;
+    let found = real
+        .parent()
+        .ok_or_else(|| BansheeError::Other("banshee is not inside a directory".into()))?
+        .join(name);
+    if !found.exists() {
+        return Err(BansheeError::Other(format!(
+            "{} not found; reinstall so {name} ships beside the CLI",
+            found.display()
+        )));
+    }
+    Ok(found)
+}
+
 #[cfg(target_os = "macos")]
 mod launchd {
     use std::path::{Path, PathBuf};
@@ -26,7 +51,7 @@ mod launchd {
 
     use banshee_common::error::BansheeError;
 
-    use super::Agent;
+    use super::{Agent, home_dir, sibling};
 
     fn label(agent: Agent) -> &'static str {
         match agent {
@@ -42,10 +67,6 @@ mod launchd {
     fn agent_path(home: &Path, label: &str) -> PathBuf {
         home.join("Library/LaunchAgents")
             .join(format!("{label}.plist"))
-    }
-
-    fn home_dir() -> Result<PathBuf, BansheeError> {
-        dirs::home_dir().ok_or_else(|| BansheeError::Other("home dir not found".into()))
     }
 
     /// One plist shape for both agents. `KeepAlive` fires only on failure, so
@@ -125,20 +146,13 @@ mod launchd {
     fn program(agent: Agent) -> Result<Vec<String>, BansheeError> {
         let binary = std::env::current_exe()?;
         match agent {
-            Agent::Daemon => Ok(vec![binary.display().to_string(), "serve".to_string()]),
-            Agent::Tray => {
-                let tray = binary
-                    .parent()
-                    .ok_or_else(|| BansheeError::Other("banshee is not inside a directory".into()))?
-                    .join("banshee-tray");
-                if !tray.exists() {
-                    return Err(BansheeError::Other(format!(
-                        "{} not found; reinstall so the tray ships beside the CLI",
-                        tray.display()
-                    )));
-                }
-                Ok(vec![tray.display().to_string()])
+            Agent::Daemon => {
+                let real = std::fs::canonicalize(&binary)?;
+                Ok(vec![real.display().to_string(), "serve".to_string()])
             }
+            Agent::Tray => Ok(vec![
+                sibling(&binary, "banshee-tray")?.display().to_string(),
+            ]),
         }
     }
 
@@ -296,3 +310,53 @@ mod unsupported {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub use unsupported::{install, service_file_path, uninstall};
+
+#[cfg(test)]
+mod sibling_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // Builds a scratch directory holding a bundle layout for the test to use.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("banshee-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Banshee.app/Contents/MacOS")).unwrap();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_sibling_resolves_through_a_symlinked_cli() {
+        let dir = scratch("sibling");
+        let real = dir.join("Banshee.app/Contents/MacOS/banshee");
+        let tray = dir.join("Banshee.app/Contents/MacOS/banshee-tray");
+        std::fs::write(&real, "").unwrap();
+        std::fs::write(&tray, "").unwrap();
+        let link = dir.join("bin/banshee");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let found = sibling(&link, "banshee-tray").unwrap();
+
+        assert_eq!(
+            std::fs::canonicalize(&found).unwrap(),
+            std::fs::canonicalize(&tray).unwrap(),
+            "the lookup must land inside the bundle, not beside the symlink"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_sibling_names_itself() {
+        let dir = scratch("missing");
+        let real = dir.join("Banshee.app/Contents/MacOS/banshee");
+        std::fs::write(&real, "").unwrap();
+
+        let error = sibling(&real, "banshee-tray").expect_err("a missing tray must not succeed");
+
+        assert!(
+            error.to_string().contains("banshee-tray"),
+            "unhelpful error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

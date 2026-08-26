@@ -140,13 +140,15 @@ async fn push_changes(
     writer: Arc<Mutex<OwnedWriteHalf>>,
     mut recording: watch::Receiver<bool>,
     mut speaking: watch::Receiver<bool>,
+    mut devices: watch::Receiver<u64>,
     mut told: serde_json::Value,
 ) {
     loop {
-        // Both arms only wake the task; the state is read fresh below
+        // Every arm only wakes the task; the state is read fresh below
         let woken = tokio::select! {
             woken = recording.changed() => woken,
             woken = speaking.changed() => woken,
+            woken = devices.changed() => woken,
         };
         if woken.is_err() {
             break;
@@ -197,6 +199,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             (
                 state.subscribe_recording(),
                 state.speech().subscribe_speaking(),
+                state.device_changes(),
                 live_state(&state),
             )
         });
@@ -211,12 +214,13 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             break;
         }
 
-        if let Some((recording, speaking, told)) = opening_state {
+        if let Some((recording, speaking, devices, told)) = opening_state {
             pushing_state = Some(tokio::spawn(push_changes(
                 Arc::clone(&state),
                 Arc::clone(&writer),
                 recording,
                 speaking,
+                devices,
                 told,
             )));
         }
@@ -453,6 +457,48 @@ mod tests {
                 .await
                 .is_err(),
             "a write that moves nothing a client sees must push nothing"
+        );
+    }
+
+    // The watchdog rebinds while the daemon idles, so neither the recording nor
+    // the speaking flag moves with it.
+    #[tokio::test]
+    async fn a_subscriber_hears_a_rebind_with_nothing_else_moving() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        state.set_audio_device(Some("OnePlus Buds 3".to_string()));
+        let (mut lines, _writer, reply) = subscribed(&state).await;
+        assert_eq!(reply["result"]["audio_device"], "OnePlus Buds 3");
+
+        state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
+        state.set_missing_device(Some("OnePlus Buds 3".to_string()));
+
+        let pushed = next_message(&mut lines).await;
+        assert_eq!(pushed["method"], BANSHEE_STATE_CHANGED);
+        assert_eq!(pushed["params"]["audio_device"], "MacBook Pro Microphone");
+        assert_eq!(pushed["params"]["recording"], false);
+    }
+
+    // While the named device stays absent the watchdog writes the same name
+    // every rescan, which is every 5 seconds.
+    #[tokio::test]
+    async fn a_rewritten_device_name_pushes_nothing() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        let (mut lines, _writer, _) = subscribed(&state).await;
+
+        state.set_missing_device(Some("yeti".to_string()));
+        assert_eq!(
+            next_message(&mut lines).await["params"]["missing_device"],
+            "yeti"
+        );
+
+        state.set_missing_device(Some("yeti".to_string()));
+        state.set_missing_device(Some("yeti".to_string()));
+
+        assert!(
+            tokio::time::timeout(SILENT, lines.next_line())
+                .await
+                .is_err(),
+            "a rescan that finds the same device absent must push nothing"
         );
     }
 

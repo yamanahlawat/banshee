@@ -3,6 +3,7 @@ mod args;
 mod audio;
 mod binding;
 mod config;
+mod connect;
 mod daemon;
 mod dictation;
 mod history;
@@ -39,6 +40,23 @@ use crate::{
 
 const VAD_MODEL: &str = "silero_vad.onnx";
 
+/// Turns a model failure into the reported error, and drops the device name
+/// with the stream this error takes down. `open_capture` writes that name once
+/// `play()` succeeds, and every subscriber is told it.
+fn model_failure(daemon_state: &state::DaemonState, reason: String) -> RecordingError {
+    daemon_state.set_audio_device(None);
+    RecordingError::Model(reason)
+}
+
+/// What startup built and resolved. `open` and `missing` seed the watchdog, so
+/// its binding never reads them back out of `DaemonState`.
+struct Recording {
+    stream: cpal::Stream,
+    thread: std::thread::JoinHandle<()>,
+    open: String,
+    missing: Option<String>,
+}
+
 /// Capture, the models, and the thread that turns audio into text. All of it or
 /// none: with any piece missing the daemon cannot transcribe, so they share one
 /// error path and one reason for `banshee status` to report.
@@ -47,33 +65,53 @@ fn start_recording(
     config: &Config,
     command_receiver: std::sync::mpsc::Receiver<state::ConsumerCommand>,
     cues: std::sync::mpsc::Sender<audio::cues::Cue>,
-) -> Result<(cpal::Stream, std::thread::JoinHandle<()>), RecordingError> {
+) -> Result<Recording, RecordingError> {
+    // Startup selects through the same function the watchdog tick uses, so a
+    // device that is absent at boot falls back rather than leaving capture dead
+    let selection =
+        audio::select(&config.audio.input_device).map_err(RecordingError::Microphone)?;
     // Both failures stringify to BansheeError::Other, so the stage that failed
     // is only knowable here, at the call
-    let (stream, consumer, sample_rate) =
-        audio::start_audio_capture(Arc::clone(daemon_state), &config.audio.input_device)
-            .map_err(|e| RecordingError::Microphone(e.to_string()))?;
+    let capture = audio::open_capture(Arc::clone(daemon_state), &selection)
+        .map_err(|e| RecordingError::Microphone(e.to_string()))?;
+    match &selection.missing {
+        Some(name) => println!(
+            "Capture opened {}, still waiting for {name}",
+            selection.open
+        ),
+        None => println!("Capture opened {}", selection.open),
+    }
     println!("Loading Whisper AI...");
     let speech_to_text = WhisperEngine::new(
         WhisperConfig::new(config.stt.preset.model_name()),
         &config.stt.vocabulary,
     )
-    .map_err(|e| RecordingError::Model(e.to_string()))?;
+    .map_err(|e| model_failure(daemon_state, e.to_string()))?;
     let vad = VADEngine::new(SileroVADConfig::new(VAD_MODEL))
-        .map_err(|e| RecordingError::Model(e.to_string()))?;
+        .map_err(|e| model_failure(daemon_state, e.to_string()))?;
     let thread = hotkey::hotkey_listener(
         hotkey::Pipeline {
-            consumer,
+            source: hotkey::CaptureSource {
+                consumer: capture.consumer,
+                sample_rate: capture.sample_rate,
+            },
             speech_to_text,
             vad,
-            sample_rate,
             state: Arc::clone(daemon_state),
             cues,
             endpoint_silence_ms: config.stt.endpoint_silence_ms,
         },
         command_receiver,
     );
-    Ok((stream, thread))
+    // Written once the whole pipeline stands. A model failure drops capture, and
+    // a substitution recorded with nothing open contradicts the accessor.
+    daemon_state.set_missing_device(selection.missing.clone());
+    Ok(Recording {
+        stream: capture.stream,
+        thread,
+        open: selection.open,
+        missing: selection.missing,
+    })
 }
 
 fn show_progress(progress: banshee_common::DownloadProgress) {
@@ -155,10 +193,14 @@ fn decoded<T: serde::de::DeserializeOwned>(reply: &serde_json::Value, key: &str)
 // because Waybar splits them: `text` shows, `alt` picks a format-icon, `class`
 // picks CSS. Readiness is left out: blockers are answered once and never
 // pushed, so a bar would show them stale.
-fn waybar_line(word: &str, device: Option<&str>) -> String {
-    let tooltip = match device {
-        Some(device) => format!("Banshee is {word}. Microphone: {device}"),
-        None => format!("Banshee is {word}"),
+fn waybar_line(word: &str, device: Option<&str>, missing: Option<&str>) -> String {
+    let tooltip = match (device, missing) {
+        // Nothing to say about the microphone, so the word stands alone
+        (None, None) => format!("Banshee is {word}"),
+        _ => format!(
+            "Banshee is {word}. Microphone: {}",
+            banshee_common::microphone_label(device, missing)
+        ),
     };
     serde_json::json!({
         "text": word,
@@ -167,6 +209,15 @@ fn waybar_line(word: &str, device: Option<&str>) -> String {
         "tooltip": tooltip,
     })
     .to_string()
+}
+
+// What one iteration of `banshee watch` prints.
+fn watch_line(waybar: bool, word: &str, device: Option<&str>, missing: Option<&str>) -> String {
+    if waybar {
+        waybar_line(word, device, missing)
+    } else {
+        word.to_string()
+    }
 }
 
 fn state_word(state: &serde_json::Value) -> &'static str {
@@ -250,6 +301,7 @@ async fn main() -> Result<(), BansheeError> {
                 config.stt.preset.model_name(),
                 VAD_MODEL,
                 config.stt.vad_threshold,
+                config.audio.input_device.clone(),
                 db_connection,
                 text_to_speech::SpeechPlayer::new(speech_backend),
                 commands,
@@ -262,11 +314,19 @@ async fn main() -> Result<(), BansheeError> {
             }
             daemon_state.set_wanted_downloads(models::download::wanted(&config));
 
-            // Held as one binding, and past daemon::run: dropping the stream
-            // stops capture, and the thread is the only thing left to join
+            // The watchdog owns the stream past daemon::run: stopping it stops
+            // capture, and the thread is the only thing left to join
             let recording =
                 match start_recording(&daemon_state, &config, command_receiver, cue_sender) {
-                    Ok(pair) => Some(pair),
+                    Ok(started) => {
+                        let watchdog = audio::watchdog::spawn(
+                            Arc::clone(&daemon_state),
+                            started.stream,
+                            started.open,
+                            started.missing,
+                        );
+                        Some((watchdog, started.thread))
+                    }
                     // A missing mic or model leaves the daemon useful rather than
                     // exiting, which the supervisor reads as a crash and retries
                     Err(error) => {
@@ -288,12 +348,15 @@ async fn main() -> Result<(), BansheeError> {
                 config.audio.hotkey_mode,
             );
             let result = daemon::run(&daemon_state, socket_path, listener).await;
-            // Drop the Whisper context before atexit: ggml's Metal cleanup
-            // asserts if buffers are still resident
-            let _ = daemon_state
-                .commands()
-                .send(state::ConsumerCommand::Shutdown);
-            if let Some((_stream, consumer_thread)) = recording {
+            if let Some((watchdog, consumer_thread)) = recording {
+                // Capture stops first, so no Rebind arrives at a thread that
+                // has already left its loop
+                watchdog.stop();
+                // Drop the Whisper context before atexit: ggml's Metal cleanup
+                // asserts if buffers are still resident
+                let _ = daemon_state
+                    .commands()
+                    .send(state::ConsumerCommand::Shutdown);
                 let _ = consumer_thread.join();
             }
             result?;
@@ -391,24 +454,23 @@ async fn main() -> Result<(), BansheeError> {
                     }
                     Err(error) => fail(&error),
                 };
-            let device = banshee_common::audio_device(&state).map(str::to_string);
-            let mut shown = "";
+            // No real line is empty, so the first one always prints
+            let mut shown = String::new();
             loop {
-                let word = state_word(&state);
-                // The daemon judges a change on the two booleans, and both can
-                // move without changing the one word they are printed as
-                if word != shown {
-                    shown = word;
-                    let line = if waybar {
-                        waybar_line(word, device.as_deref())
-                    } else {
-                        word.to_string()
-                    };
+                let line = watch_line(
+                    waybar,
+                    state_word(&state),
+                    banshee_common::audio_device(&state),
+                    banshee_common::missing_device(&state),
+                );
+                // The reader sees the line, so the line is what has to differ
+                if line != shown {
                     // `banshee watch | head` closes the pipe. That is the reader
                     // having seen enough, not this command failing
                     if writeln!(std::io::stdout(), "{line}").is_err() {
                         return Ok(());
                     }
+                    shown = line;
                 }
                 state = match changes.next_of(banshee_common::BANSHEE_STATE_CHANGED).await {
                     Ok(Some(params)) => params,
@@ -627,6 +689,12 @@ async fn main() -> Result<(), BansheeError> {
                 println!("Logs: {log}");
             }
         }
+        CommandType::Connect { agent, yes } => {
+            if let Err(error) = connect::run(agent.map(Into::into), yes) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
         CommandType::Service { action } => match action {
             // Every entry, so none is left behind to fail at the next login
             args::ServiceAction::Uninstall => {
@@ -648,12 +716,12 @@ async fn main() -> Result<(), BansheeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{state_word, waybar_line};
+    use super::{state_word, watch_line, waybar_line};
     use banshee_common::InputDevice;
 
     #[test]
     fn a_waybar_line_is_one_parseable_object() {
-        let line = waybar_line("recording", Some("Blue Yeti"));
+        let line = waybar_line("recording", Some("Blue Yeti"), None);
         assert!(
             !line.contains('\n'),
             "Waybar reads one object per line: {line}"
@@ -673,7 +741,7 @@ mod tests {
     // escaped rather than pasted into the line
     #[test]
     fn a_quote_in_the_device_name_does_not_break_the_line() {
-        let line = waybar_line("idle", Some("Bob\"s \\ Mic"));
+        let line = waybar_line("idle", Some("Bob\"s \\ Mic"), None);
         let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
         assert!(
             parsed["tooltip"]
@@ -685,7 +753,7 @@ mod tests {
 
     #[test]
     fn an_unknown_device_is_left_out_rather_than_named_empty() {
-        let line = waybar_line("idle", None);
+        let line = waybar_line("idle", None, None);
         let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
         let tooltip = parsed["tooltip"].as_str().unwrap();
         assert!(
@@ -693,6 +761,52 @@ mod tests {
             "no device means none is named: {tooltip}"
         );
         assert!(tooltip.contains("idle"), "{tooltip}");
+    }
+
+    // A bar reader has the tooltip only, so a substitution has to show there or
+    // the bar names a device that is gone
+    #[test]
+    fn a_waybar_tooltip_names_what_the_config_still_waits_for() {
+        // Nothing records, so the bar has to say both: no device, and the one
+        // the config is still waiting for
+        let line = waybar_line("idle", None, Some("Yeti Nano"));
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        let tooltip = parsed["tooltip"].as_str().unwrap();
+        assert!(tooltip.contains("No microphone"), "{tooltip}");
+        assert!(tooltip.contains("\"Yeti Nano\""), "{tooltip}");
+    }
+
+    // The reader sees the line, so the dedupe compares lines. A plain reader
+    // cannot see the device, so the same word twice would be noise.
+    #[test]
+    fn a_device_change_alone_moves_the_line_only_where_the_device_shows() {
+        let plain_bound = watch_line(false, "idle", Some("Yeti Nano"), None);
+        let plain_substituted = watch_line(
+            false,
+            "idle",
+            Some("MacBook Pro Microphone"),
+            Some("Yeti Nano"),
+        );
+        assert_eq!(
+            plain_bound, plain_substituted,
+            "plain mode prints the word alone"
+        );
+
+        let waybar_bound = watch_line(true, "idle", Some("Yeti Nano"), None);
+        let waybar_substituted = watch_line(
+            true,
+            "idle",
+            Some("MacBook Pro Microphone"),
+            Some("Yeti Nano"),
+        );
+        assert_ne!(
+            waybar_bound, waybar_substituted,
+            "the tooltip carries the device"
+        );
+
+        // The loop starts from an empty line, which must print
+        assert!(!plain_bound.is_empty());
+        assert!(!waybar_bound.is_empty());
     }
 
     #[test]
@@ -737,6 +851,20 @@ mod tests {
             super::device_labels(&device("Blue Yeti", false), Some("Blue Yeti")),
             "in use"
         );
+    }
+
+    // open_capture names the device once play() succeeds, and a model failure
+    // drops that stream. Every subscriber is told the name, so a stale one
+    // shows a microphone that nothing holds.
+    #[test]
+    fn a_model_failure_stops_naming_a_device_nothing_holds() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        state.set_audio_device(Some("Blue Yeti".to_string()));
+
+        let error = super::model_failure(&state, "missing file".to_string());
+
+        assert!(matches!(error, crate::state::RecordingError::Model(_)));
+        assert_eq!(state.audio_device(), None);
     }
 
     #[test]

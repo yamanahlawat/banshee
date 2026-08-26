@@ -180,6 +180,7 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee watch --waybar`        | The same, as Waybar custom-module JSON                     |
 | `banshee voices`                | List the speech voices on disk, and mark the one in use    |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
+| `banshee connect [agent]`       | Connect a coding agent, after showing the change           |
 | `banshee serve`                 | Run the daemon in the foreground                           |
 | `banshee tray`                  | Show the menu bar icon, now and at every login (macOS)     |
 | `banshee tray --uninstall`      | Stop the menu bar icon and remove its launch agent         |
@@ -190,11 +191,25 @@ The CLI commands all talk to the running daemon over its socket:
 | `banshee history`               | List all saved transcriptions                              |
 | `banshee clear-history`         | Clear the saved transcriptions                             |
 
-## Connect your coding agent (MCP)
+## Connect your coding agent
 
-`banshee-mcp-shim` is an MCP stdio server that bridges your coding agent to the
-running daemon. This is what turns Banshee into a voice for the agent. It
-exposes three tools:
+```bash
+banshee connect            # which agents are installed, and which are connected
+banshee connect antigravity # Antigravity IDE, agy CLI and SDK: the MCP server in ~/.gemini/config/mcp_config.json
+banshee connect claude      # Claude Code: the MCP server and a stop hook that refuses to end a turn with no spoken status
+banshee connect codex       # Codex CLI: the MCP server in ~/.codex/config.toml
+banshee connect cursor      # Cursor: the MCP server in ~/.cursor/mcp.json
+banshee connect opencode    # OpenCode: the MCP server
+banshee connect pi          # Pi: the native extension
+```
+
+Each command shows the exact change to that tool's config and asks before it writes.
+The Claude Code hook needs `jq` on your PATH. Antigravity, Claude Code, OpenCode
+and Pi are verified on a real install; Codex and Cursor follow their published config formats
+and wait for a report from a machine that has them.
+Restart the tool afterwards.
+
+`banshee-mcp-shim` is the MCP stdio server behind this. It exposes three tools:
 
 | Tool                | What the agent does with it                                       |
 | ------------------- | ----------------------------------------------------------------- |
@@ -202,7 +217,7 @@ exposes three tools:
 | `ask_user`          | Ask a question aloud, then wait for and return your spoken answer |
 | `listen_for_prompt` | Pick up anything you've said since it last checked                |
 
-Most MCP tools use the same `mcpServers` config shape:
+Any other MCP host takes the same `mcpServers` shape.
 
 ```json
 {
@@ -214,21 +229,12 @@ Most MCP tools use the same `mcpServers` config shape:
 }
 ```
 
-Each tool keeps this config in its own spot — Cursor in `~/.cursor/mcp.json`,
-Claude Code via `claude mcp add` — so check your tool's docs. If the binary is
-not found, use its full path. Restart the tool, and the three tools show up.
+If the binary is not found, use its full path.
 
 ### Pi coding agent
 
-Pi has its own extension API instead of MCP, so it gets a native extension that
-talks to the daemon directly. Copy it in and restart Pi:
-
-```bash
-cp integrations/pi/banshee.ts ~/.pi/agent/extensions/
-```
-
-That's the whole setup; see [integrations/pi](integrations/pi) for details.
-This is what the demo at the top is running.
+Pi has its own extension API instead of MCP, so `banshee connect pi` installs a native
+extension that talks to the daemon directly. See [integrations/pi](integrations/pi).
 
 ---
 
@@ -263,10 +269,9 @@ enabled = true         # tones on record start/stop, success, and errors
 ```
 
 `input_device` is a case-insensitive substring of the microphone name, so
-`"yeti"` matches `Blue Yeti Stereo Microphone`. A name that matches nothing
-stops the daemon with the list of devices it did find, rather than quietly
-recording from the wrong microphone. `banshee devices` shows the names to
-choose from:
+`"yeti"` matches `Blue Yeti Stereo Microphone`. An exact name wins over a longer
+name that contains it, so a `Yeti` next to a `Blue Yeti Pro` opens its own
+device. `banshee devices` shows the names to choose from:
 
 ```
 $ banshee devices
@@ -274,6 +279,21 @@ $ banshee devices
   BlackHole 2ch
   MacBook Pro Microphone
 ```
+
+**`"default"` follows the OS while Banshee runs.** Connect a headset, macOS makes
+it the system default, and Banshee moves capture to it within about five seconds.
+A device you name is not treated this way: Banshee opens the device you named,
+and the system default never takes its place while it is present.
+
+**A microphone that disappears does not stop dictation.** Unplug the headset you
+named and Banshee records from the system default instead, so a press still
+works. It says which microphone it moved to, and it says which one it is still
+waiting for: the tray, `banshee status` and `banshee watch --waybar` all show
+`MacBook Pro Microphone (waiting for "yeti")`. Reconnect the headset and Banshee
+takes it back within about five seconds. Nothing needs a restart.
+
+Banshee never picks a different microphone in silence. If it cannot open any
+device at all, it says so and refuses to record rather than returning silence.
 
 ### Choosing a voice
 
@@ -374,9 +394,9 @@ The key is the section and the field, as they appear in the file. A number, a
 `true`, or a `[list]` is read as that type; anything else is read as text.
 Quote twice to force text, as in `banshee config set audio.input_device '"12"'`.
 A value the field does not accept is refused, and the message lists the legal
-ones. `vad_threshold` takes effect immediately; everything else is read once at
-startup, so the command tells you to restart. This works whether or not the
-daemon is running.
+ones. `vad_threshold` and `audio.input_device` take effect immediately;
+everything else is read once at startup, so the command tells you to restart.
+This works whether or not the daemon is running.
 
 `endpoint_silence_ms` is how long you can go quiet mid-answer before Banshee
 decides you're done. Lower it if replies feel sluggish, raise it if you keep
