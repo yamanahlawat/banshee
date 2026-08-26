@@ -62,7 +62,7 @@ pub enum CommandType {
         #[clap(subcommand)]
         action: ServiceAction,
     },
-    /// Connect a coding agent to Banshee: Antigravity, Claude Code, Codex, Cursor, OpenCode or Pi
+    /// Connect a coding agent to Banshee: Antigravity, Claude Code, Codex, Copilot, Cursor, OpenCode or Pi
     Connect {
         /// Which agent; omit to list what is installed and connected
         agent: Option<AgentName>,
@@ -77,6 +77,7 @@ pub enum AgentName {
     Antigravity,
     Claude,
     Codex,
+    Copilot,
     Cursor,
     Opencode,
     Pi,
