@@ -1,3 +1,5 @@
+
+
 <p align="center">
   <img src="assets/banshee-icon.png" alt="banshee" width="104">
 </p>
@@ -204,6 +206,7 @@ banshee connect pi          # Pi: the native extension
 ```
 
 Each command shows the exact change to that tool's config and asks before it writes.
+Pass `--yes` to apply without asking.
 The Claude Code hook needs `jq` on your PATH. Antigravity, Claude Code, OpenCode
 and Pi are verified on a real install; Codex and Cursor follow their published config formats
 and wait for a report from a machine that has them.
