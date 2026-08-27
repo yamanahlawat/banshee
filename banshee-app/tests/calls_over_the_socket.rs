@@ -8,6 +8,8 @@ use banshee_common::{
     BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_SPEAK, BANSHEE_STATUS,
 };
 use common::{recording_daemon, recording_error_daemon};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixListener;
 
 #[tokio::test]
 async fn status_returns_the_reply_untouched() {
@@ -255,4 +257,45 @@ async fn open_permission_pane_sends_the_id_key() {
         request.params.unwrap(),
         serde_json::json!({"id": "input_monitoring"})
     );
+}
+
+/// A reply left in the buffer by an abandoned call must not be handed to the
+/// next caller as its own answer.
+#[tokio::test]
+async fn a_stale_reply_is_read_past_not_returned() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("banshee.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let daemon = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut lines = BufReader::new(stream).lines();
+        let line = lines.next().unwrap().unwrap();
+        let request: banshee_common::JsonRpcRequest = serde_json::from_str(&line).unwrap();
+        // One reply for a call nobody is waiting on, then this call's own.
+        for reply in [
+            banshee_common::JsonRpcResponse::success(
+                Some(serde_json::json!(999)),
+                serde_json::json!({"running": false}),
+            ),
+            banshee_common::JsonRpcResponse::success(
+                request.id,
+                serde_json::json!({"running": true}),
+            ),
+        ] {
+            let mut text = serde_json::to_string(&reply).unwrap();
+            text.push('\n');
+            writer.write_all(text.as_bytes()).unwrap();
+        }
+    });
+
+    let mut client = Client::connect(&path).await.unwrap();
+    let status = calls::status(&mut client).await.unwrap();
+
+    assert_eq!(
+        status["running"], true,
+        "the stale reply was returned instead"
+    );
+    daemon.join().unwrap();
 }

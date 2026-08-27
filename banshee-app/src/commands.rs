@@ -2,19 +2,55 @@
 //! held connection and calls the matching `calls` function.
 
 use crate::calls::{self, CommandError, Devices, Voices};
-use crate::socket::{Client, SOCKET_CLOSED};
+use crate::socket::Client;
 use banshee_common::{AgentRow, PlannedChange, utils};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::State;
 use tokio::sync::Mutex;
 
-/// True only for the error `Client::call` produces when the daemon side of
-/// the connection is gone (an EOF, most often a restart): both the code and
-/// the message it always sets together must match, not just one. Every other
-/// error, including a live refusal the daemon wrote itself, is left alone,
-/// so a real refusal is never mistaken for a dead connection.
-fn is_dead_connection(error: &CommandError) -> bool {
-    error.code == -32000 && error.message == SOCKET_CLOSED
+pub const NO_HOME_DIR: &str = "Banshee cannot find your home directory.";
+
+/// The socket path and the connection that runs over it. Resolving the path
+/// once keeps a missing home directory from stopping the window opening.
+pub struct Daemon {
+    path: Option<PathBuf>,
+    client: Mutex<Option<Client>>,
+}
+
+impl Daemon {
+    pub fn new() -> Self {
+        Daemon {
+            path: utils::get_socket_path(),
+            client: Mutex::new(None),
+        }
+    }
+
+    /// The path the event bridge listens on.
+    pub fn socket_path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    fn path_or_error(&self) -> Result<&Path, CommandError> {
+        self.path.as_deref().ok_or_else(|| CommandError {
+            code: -32000,
+            message: NO_HOME_DIR.to_string(),
+            transport: false,
+            sent: false,
+        })
+    }
+}
+
+impl Default for Daemon {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// True only for a connection that died before the request left the client.
+/// A request the daemon received may already have run, so a replay could
+/// speak a preview twice or rewrite an agent's config twice.
+fn is_safe_to_retry(error: &CommandError) -> bool {
+    error.transport && !error.sent
 }
 
 /// Connects fresh through `path`, replacing whatever was in `slot`. The one
@@ -24,6 +60,8 @@ pub async fn force_reconnect(slot: &mut Option<Client>, path: &Path) -> Result<(
     let client = Client::connect(path).await.map_err(|error| CommandError {
         code: -32000,
         message: error.to_string(),
+        transport: true,
+        sent: false,
     })?;
     *slot = Some(client);
     Ok(())
@@ -46,11 +84,12 @@ pub async fn ensure_connected(slot: &mut Option<Client>, path: &Path) -> Result<
 /// here hits a known rustc limitation with `AsyncFn` closures that borrow
 /// their arguments, so this is a macro.
 macro_rules! retrying {
-    ($client:expr, $path:expr, $body:expr) => {{
-        ensure_connected(&mut $client, $path).await?;
+    ($daemon:expr, $client:expr, $body:expr) => {{
+        let path = $daemon.path_or_error()?;
+        ensure_connected(&mut $client, path).await?;
         match $body {
-            Err(error) if is_dead_connection(&error) => {
-                force_reconnect(&mut $client, $path).await?;
+            Err(error) if is_safe_to_retry(&error) => {
+                force_reconnect(&mut $client, path).await?;
                 $body
             }
             other => other,
@@ -60,186 +99,226 @@ macro_rules! retrying {
 
 #[cfg(test)]
 mod tests {
-    use super::is_dead_connection;
+    use super::{Daemon, is_safe_to_retry};
     use crate::calls::CommandError;
-    use crate::socket::SOCKET_CLOSED;
+    use crate::socket::{RpcError, SOCKET_CLOSED};
+    use std::path::PathBuf;
+    use tokio::sync::Mutex;
 
-    fn error(code: i32, message: &str) -> CommandError {
-        CommandError {
-            code,
-            message: message.to_string(),
+    fn daemon(path: Option<&str>) -> Daemon {
+        Daemon {
+            path: path.map(PathBuf::from),
+            client: Mutex::new(None),
         }
     }
 
     #[test]
-    fn only_the_closed_socket_code_and_message_together_read_as_dead() {
-        assert!(is_dead_connection(&error(-32000, SOCKET_CLOSED)));
-        assert!(!is_dead_connection(&error(
-            -32602,
-            "Disconnect is not available yet."
-        )));
-        // The daemon's own -32000 (a microphone error) must not be mistaken
-        // for a transport failure just because the code matches.
-        assert!(!is_dead_connection(&error(
+    fn a_resolved_socket_path_reaches_every_command() {
+        let daemon = daemon(Some("/home/someone/.banshee/banshee.sock"));
+        assert_eq!(
+            daemon.path_or_error().unwrap(),
+            PathBuf::from("/home/someone/.banshee/banshee.sock")
+        );
+        assert!(daemon.socket_path().is_some());
+    }
+
+    #[test]
+    fn no_home_directory_is_a_sentence_a_command_returns_not_a_panic() {
+        let daemon = daemon(None);
+        let error = daemon.path_or_error().unwrap_err();
+        assert!(!error.message.is_empty());
+        // There is nothing to reconnect to, so the retry must not run.
+        assert!(!error.transport);
+        assert!(daemon.socket_path().is_none());
+    }
+
+    fn from_socket(code: i32, message: &str, transport: bool, sent: bool) -> CommandError {
+        RpcError {
+            code,
+            message: message.to_string(),
+            transport,
+            sent,
+        }
+        .into()
+    }
+
+    #[test]
+    fn a_request_that_never_left_the_client_is_safe_to_send_again() {
+        // The write side fails first on a restart, and the operating system
+        // names that one itself.
+        assert!(is_safe_to_retry(&from_socket(
             -32000,
-            "Microphone unavailable."
+            "Broken pipe (os error 32)",
+            true,
+            false
         )));
-        // A message that happens to match with the wrong code is not enough.
-        assert!(!is_dead_connection(&error(-32603, SOCKET_CLOSED)));
+    }
+
+    #[test]
+    fn a_request_the_daemon_may_have_run_is_never_replayed() {
+        // An EOF while waiting for the reply: the daemon held the request and
+        // may have acted on it before it died.
+        assert!(!is_safe_to_retry(&from_socket(
+            -32000,
+            SOCKET_CLOSED,
+            true,
+            true
+        )));
+    }
+
+    #[test]
+    fn a_refusal_the_daemon_wrote_is_never_a_dead_connection() {
+        assert!(!is_safe_to_retry(&from_socket(
+            -32602,
+            "Disconnect is not available yet.",
+            false,
+            true
+        )));
+        // The daemon writes `-32000` for its own refusals too, so the code
+        // alone must not decide this.
+        assert!(!is_safe_to_retry(&from_socket(
+            -32000,
+            "Microphone unavailable.",
+            false,
+            true
+        )));
     }
 }
 
 #[tauri::command]
-pub async fn status(
-    client: State<'_, Mutex<Option<Client>>>,
-) -> Result<serde_json::Value, CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
-    retrying!(client, &path, calls::status(client.as_mut().unwrap()).await)
+pub async fn status(daemon: State<'_, Daemon>) -> Result<serde_json::Value, CommandError> {
+    let mut client = daemon.client.lock().await;
+    retrying!(
+        daemon,
+        client,
+        calls::status(client.as_mut().unwrap()).await
+    )
 }
 
 #[tauri::command]
 pub async fn set_setting(
-    client: State<'_, Mutex<Option<Client>>>,
+    daemon: State<'_, Daemon>,
     key: String,
     value: serde_json::Value,
 ) -> Result<Vec<String>, CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::set_setting(client.as_mut().unwrap(), &key, value.clone()).await
     )
 }
 
 #[tauri::command]
-pub async fn list_devices(
-    client: State<'_, Mutex<Option<Client>>>,
-) -> Result<Devices, CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+pub async fn list_devices(daemon: State<'_, Daemon>) -> Result<Devices, CommandError> {
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::list_devices(client.as_mut().unwrap()).await
     )
 }
 
 #[tauri::command]
-pub async fn list_voices(client: State<'_, Mutex<Option<Client>>>) -> Result<Voices, CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+pub async fn list_voices(daemon: State<'_, Daemon>) -> Result<Voices, CommandError> {
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::list_voices(client.as_mut().unwrap()).await
     )
 }
 
 #[tauri::command]
-pub async fn preview_voice(
-    client: State<'_, Mutex<Option<Client>>>,
-    id: String,
-) -> Result<(), CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+pub async fn preview_voice(daemon: State<'_, Daemon>, id: String) -> Result<(), CommandError> {
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::preview_voice(client.as_mut().unwrap(), &id).await
     )
 }
 
 #[tauri::command]
-pub async fn download_models(client: State<'_, Mutex<Option<Client>>>) -> Result<(), CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+pub async fn download_models(daemon: State<'_, Daemon>) -> Result<(), CommandError> {
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::download_models(client.as_mut().unwrap()).await
     )
 }
 
 #[tauri::command]
-pub async fn detect_agents(
-    client: State<'_, Mutex<Option<Client>>>,
-) -> Result<Vec<AgentRow>, CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+pub async fn detect_agents(daemon: State<'_, Daemon>) -> Result<Vec<AgentRow>, CommandError> {
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::detect_agents(client.as_mut().unwrap()).await
     )
 }
 
 #[tauri::command]
 pub async fn plan_connect(
-    client: State<'_, Mutex<Option<Client>>>,
+    daemon: State<'_, Daemon>,
     id: String,
     disconnect: bool,
 ) -> Result<Vec<PlannedChange>, CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::plan_connect(client.as_mut().unwrap(), &id, disconnect).await
     )
 }
 
 #[tauri::command]
 pub async fn apply_connect(
-    client: State<'_, Mutex<Option<Client>>>,
+    daemon: State<'_, Daemon>,
     id: String,
     disconnect: bool,
 ) -> Result<(), CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::apply_connect(client.as_mut().unwrap(), &id, disconnect).await
     )
 }
 
 #[tauri::command]
 pub async fn history(
-    client: State<'_, Mutex<Option<Client>>>,
+    daemon: State<'_, Daemon>,
     limit: Option<u32>,
 ) -> Result<Vec<serde_json::Value>, CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::history(client.as_mut().unwrap(), limit).await
     )
 }
 
 #[tauri::command]
-pub async fn clear_history(client: State<'_, Mutex<Option<Client>>>) -> Result<(), CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+pub async fn clear_history(daemon: State<'_, Daemon>) -> Result<(), CommandError> {
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::clear_history(client.as_mut().unwrap()).await
     )
 }
 
 #[tauri::command]
 pub async fn open_permission_pane(
-    client: State<'_, Mutex<Option<Client>>>,
+    daemon: State<'_, Daemon>,
     id: String,
 ) -> Result<(), CommandError> {
-    let mut client = client.lock().await;
-    let path = utils::get_socket_path().expect("a home directory");
+    let mut client = daemon.client.lock().await;
     retrying!(
+        daemon,
         client,
-        &path,
         calls::open_permission_pane(client.as_mut().unwrap(), &id).await
     )
 }
@@ -252,5 +331,7 @@ pub async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), Comman
         .map_err(|error| CommandError {
             code: -32603,
             message: error.to_string(),
+            transport: false,
+            sent: true,
         })
 }

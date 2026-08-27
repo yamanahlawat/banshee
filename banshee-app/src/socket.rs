@@ -12,6 +12,14 @@ pub const SOCKET_CLOSED: &str = "the daemon closed the socket";
 pub struct RpcError {
     pub code: i32,
     pub message: String,
+    /// True when the connection failed rather than the daemon refusing. The
+    /// daemon writes `-32000` for its own refusals too, so the code alone
+    /// cannot tell the two apart.
+    pub transport: bool,
+    /// True once the request reached the socket. A request that failed on
+    /// the way out cannot have been acted on, so it is safe to send again;
+    /// one that failed while waiting for the reply may already have run.
+    pub sent: bool,
 }
 
 pub struct Client {
@@ -49,7 +57,7 @@ impl Client {
         self.writer
             .write_all(line.as_bytes())
             .await
-            .map_err(io_error)?;
+            .map_err(unsent)?;
         loop {
             let mut reply = String::new();
             let read = self.reader.read_line(&mut reply).await.map_err(io_error)?;
@@ -57,17 +65,26 @@ impl Client {
                 return Err(RpcError {
                     code: -32000,
                     message: SOCKET_CLOSED.to_string(),
+                    transport: true,
+                    sent: true,
                 });
             }
             // A notification carries no `result` and no `error`, so the untagged
-            // enum below never matches one; only a reply to this call parses.
+            // enum below never matches one; only a reply to some call parses.
             if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&reply) {
+                // A reply left behind by an abandoned call is not this call's
+                // answer, whatever it holds. Read past it.
+                if !answers(&response, &request.id) {
+                    continue;
+                }
                 match response {
                     JsonRpcResponse::Success { result, .. } => return Ok(result),
                     JsonRpcResponse::Error { error, .. } => {
                         return Err(RpcError {
                             code: error.code,
                             message: error.message,
+                            transport: false,
+                            sent: true,
                         });
                     }
                 }
@@ -76,14 +93,19 @@ impl Client {
     }
 
     /// Runs until the socket drops; every notification is passed to `on_event`.
+    /// The daemon answers the subscribe call with the same status its pushes
+    /// measure against, so `on_open` sees a snapshot with no gap after it.
     pub async fn subscribe(
         mut self,
         events: &[&str],
+        on_open: impl FnOnce(serde_json::Value),
         mut on_event: impl FnMut(JsonRpcNotification),
     ) -> std::io::Result<()> {
-        self.call(BANSHEE_SUBSCRIBE, serde_json::json!({ "events": events }))
+        let opening = self
+            .call(BANSHEE_SUBSCRIBE, serde_json::json!({ "events": events }))
             .await
             .map_err(|e| std::io::Error::other(e.message))?;
+        on_open(opening);
         let mut line = String::new();
         loop {
             line.clear();
@@ -97,10 +119,28 @@ impl Client {
     }
 }
 
+pub fn answers(response: &JsonRpcResponse, id: &Option<serde_json::Value>) -> bool {
+    let reply_id = match response {
+        JsonRpcResponse::Success { id, .. } => id,
+        JsonRpcResponse::Error { id, .. } => id,
+    };
+    reply_id == id
+}
+
+/// A transport failure that happened before the request left the client.
+fn unsent(error: impl std::fmt::Display) -> RpcError {
+    RpcError {
+        sent: false,
+        ..io_error(error)
+    }
+}
+
 fn io_error(error: impl std::fmt::Display) -> RpcError {
     RpcError {
         code: -32000,
         message: error.to_string(),
+        transport: true,
+        sent: true,
     }
 }
 

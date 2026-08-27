@@ -25,6 +25,11 @@ const SHAPE_MISMATCH: i32 = -32700;
 pub struct CommandError {
     pub code: i32,
     pub message: String,
+    /// Which layer failed, and how far the request got.
+    #[serde(skip)]
+    pub transport: bool,
+    #[serde(skip)]
+    pub sent: bool,
 }
 
 impl From<RpcError> for CommandError {
@@ -32,6 +37,8 @@ impl From<RpcError> for CommandError {
         CommandError {
             code: error.code,
             message: error.message,
+            transport: error.transport,
+            sent: error.sent,
         }
     }
 }
@@ -41,6 +48,8 @@ fn shape_mismatch(error: serde_json::Error) -> CommandError {
     CommandError {
         code: SHAPE_MISMATCH,
         message: error.to_string(),
+        transport: false,
+        sent: true,
     }
 }
 

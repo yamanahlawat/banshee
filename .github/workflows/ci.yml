@@ -33,4 +33,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxtst-dev libxi-dev libxdo-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets
+      # The window is a macOS app bundle. Building it here would need
+      # webkit2gtk and soup, which this job has no reason to install.
+      - run: cargo check --workspace --all-targets --exclude banshee-app

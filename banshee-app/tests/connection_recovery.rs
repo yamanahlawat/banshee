@@ -111,3 +111,37 @@ async fn a_dead_connection_is_repaired_and_the_retried_call_succeeds() {
     assert_eq!(status["running"], true);
     revived.join().unwrap();
 }
+
+/// The path a real restart takes: the write fails, and the operating system
+/// names that error itself. No message match can recognise it.
+#[tokio::test]
+async fn a_write_to_a_departed_daemon_reads_as_a_dead_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("banshee.sock");
+
+    let listener = UnixListener::bind(&path).unwrap();
+    let departing = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        drop(stream);
+    });
+
+    let mut slot = Some(Client::connect(&path).await.unwrap());
+    departing.join().unwrap();
+
+    // The first call after the peer left. Either half can fail first, so the
+    // test pins what both must report rather than which one wins the race.
+    let mut dead = calls::status(slot.as_mut().unwrap()).await;
+    if dead.is_ok() {
+        dead = calls::status(slot.as_mut().unwrap()).await;
+    }
+    let error = dead.unwrap_err();
+
+    assert!(
+        error.transport,
+        "a departed daemon must read as a transport failure, got {error:?}"
+    );
+    assert!(
+        !error.sent,
+        "a write that failed cannot have reached the daemon, got {error:?}"
+    );
+}

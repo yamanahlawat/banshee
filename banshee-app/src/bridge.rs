@@ -1,8 +1,8 @@
 use crate::socket::{Client, SOCKET_CLOSED, backoff};
 use banshee_common::{
-    BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_STATE_CHANGED, BANSHEE_STATUS, EVENT_DOWNLOADS, EVENT_STATE,
-    utils,
+    BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_STATE_CHANGED, EVENT_DOWNLOADS, EVENT_STATE,
 };
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
@@ -28,23 +28,26 @@ pub fn next_attempt(attempt: u32, session: Duration) -> u32 {
 
 /// Connects, reads status, subscribes, forwards events; on any drop, emits
 /// daemon:down and reconnects with backoff. Never returns.
-pub async fn run(app: AppHandle) {
-    let path = utils::get_socket_path().expect("a home directory");
+pub async fn run(app: AppHandle, path: PathBuf) {
     let mut attempt = 0u32;
     loop {
         attempt = match Client::connect(&path).await {
-            Ok(mut client) => {
+            Ok(client) => {
                 let started = Instant::now();
-                if let Ok(status) = client.call(BANSHEE_STATUS, serde_json::json!({})).await {
-                    let _ = app.emit("daemon:status", status);
-                }
+                let opened = app.clone();
                 let handle = app.clone();
                 let result = client
-                    .subscribe(&[EVENT_STATE, EVENT_DOWNLOADS], move |notification| {
-                        if let Some(name) = event_name(&notification.method) {
-                            let _ = handle.emit(name, notification.params);
-                        }
-                    })
+                    .subscribe(
+                        &[EVENT_STATE, EVENT_DOWNLOADS],
+                        move |status| {
+                            let _ = opened.emit("daemon:status", status);
+                        },
+                        move |notification| {
+                            if let Some(name) = event_name(&notification.method) {
+                                let _ = handle.emit(name, notification.params);
+                            }
+                        },
+                    )
                     .await;
                 let reason = result
                     .err()
