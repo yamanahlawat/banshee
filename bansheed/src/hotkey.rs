@@ -243,6 +243,9 @@ impl Pipeline {
         let transcribe_started = Instant::now();
         self.state.set_transcribing(true);
         let transcribed = self.speech_to_text.transcribe(&final_data);
+        // A client refetches its history when `transcribing` falls, so the
+        // row has to be stored before the flag drops.
+        store(&self.state, transcribed.as_deref().ok());
         self.state.set_transcribing(false);
         match transcribed {
             Ok(transcription) => {
@@ -266,8 +269,6 @@ impl Pipeline {
                     let _ = self.cues.send(Cue::Error);
                     return;
                 }
-
-                save_history(&self.state, &transcription);
 
                 // Ready only after the utterance is actually delivered
                 match action {
@@ -318,13 +319,11 @@ impl Pipeline {
             Some(audio) => {
                 self.state.set_transcribing(true);
                 let transcribed = self.speech_to_text.transcribe(&audio);
+                store(&self.state, transcribed.as_deref().ok());
                 self.state.set_transcribing(false);
                 match transcribed {
                     Ok(text) => {
                         println!("Answer: {text}");
-                        if !text.is_empty() {
-                            save_history(&self.state, &text);
-                        }
                         text
                     }
                     Err(e) => {
@@ -463,6 +462,16 @@ impl Pipeline {
                 return None;
             }
         }
+    }
+}
+
+/// Stores an utterance worth keeping. Whisper answers an empty string for
+/// noise, and that is not a dictation.
+fn store(state: &DaemonState, transcription: Option<&str>) {
+    if let Some(text) = transcription
+        && !text.is_empty()
+    {
+        save_history(state, text);
     }
 }
 
