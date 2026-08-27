@@ -4,6 +4,10 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+/// What a dropped connection reads as. Distinct from any message the daemon
+/// itself writes, so a caller can tell a dead socket from a real refusal.
+pub const SOCKET_CLOSED: &str = "the daemon closed the socket";
+
 #[derive(Debug)]
 pub struct RpcError {
     pub code: i32,
@@ -52,7 +56,7 @@ impl Client {
             if read == 0 {
                 return Err(RpcError {
                     code: -32000,
-                    message: "the daemon closed the socket".to_string(),
+                    message: SOCKET_CLOSED.to_string(),
                 });
             }
             // A notification carries no `result` and no `error`, so the untagged

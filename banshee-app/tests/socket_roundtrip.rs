@@ -1,37 +1,13 @@
-use banshee_app::socket::{Client, backoff};
-use banshee_common::{BANSHEE_STATUS, JsonRpcRequest, JsonRpcResponse};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
-use tokio::sync::mpsc::UnboundedSender;
+mod common;
 
-/// A stand-in daemon. Every request it decodes is sent to `methods` so the
-/// test body can assert on it; a swallowed panic inside `tokio::spawn` cannot
-/// fail the test the way an assertion in the test body can.
-async fn fake_daemon(path: std::path::PathBuf, methods: UnboundedSender<String>) {
-    let listener = UnixListener::bind(&path).unwrap();
-    let (stream, _) = listener.accept().await.unwrap();
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let request: JsonRpcRequest = serde_json::from_str(&line).unwrap();
-        methods.send(request.method.clone()).unwrap();
-        let reply = JsonRpcResponse::success(
-            request.id,
-            serde_json::json!({"running": true, "version": "test"}),
-        );
-        let mut text = serde_json::to_string(&reply).unwrap();
-        text.push('\n');
-        writer.write_all(text.as_bytes()).await.unwrap();
-    }
-}
+use banshee_app::socket::{Client, backoff};
+use banshee_common::BANSHEE_STATUS;
+use common::recording_daemon;
 
 #[tokio::test]
 async fn a_status_call_round_trips_over_a_unix_socket() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("banshee.sock");
-    let (methods_tx, mut methods_rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(fake_daemon(path.clone(), methods_tx));
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (path, mut seen, _guard) =
+        recording_daemon(serde_json::json!({"running": true, "version": "test"})).await;
     let mut client = Client::connect(&path).await.unwrap();
     let status = client
         .call(BANSHEE_STATUS, serde_json::json!({}))
@@ -39,7 +15,8 @@ async fn a_status_call_round_trips_over_a_unix_socket() {
         .unwrap();
     assert_eq!(status["running"], true);
     assert_eq!(status["version"], "test");
-    assert_eq!(methods_rx.recv().await.unwrap(), BANSHEE_STATUS);
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_STATUS);
 }
 
 #[test]
