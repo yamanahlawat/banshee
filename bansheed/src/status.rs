@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::Path;
 use std::time::Duration;
 
@@ -86,10 +87,11 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     #[cfg(all(unix, not(target_os = "macos")))]
     if crate::dictation::is_wayland() {
         // The table dictation actually runs, so the checklist cannot name a stale tool
+        let path = crate::connect::resolved_path();
         let typer = crate::dictation::WAYLAND_TYPERS
             .into_iter()
             .map(|(binary, _)| binary)
-            .find(|binary| on_path(binary));
+            .find(|binary| on_path(binary, &path));
         match typer {
             Some(tool) => {
                 pass(&format!("wayland session: dictation types via {tool}"));
@@ -166,10 +168,9 @@ fn runs(bin: &str) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-// Walks $PATH directly: `which` is its own package on minimal systems.
-pub(crate) fn on_path(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()))
+// Walks the given PATH directly: `which` is its own package on minimal systems.
+pub(crate) fn on_path(bin: &str, path: &OsStr) -> bool {
+    crate::connect::path_dirs(path).any(|dir| dir.join(bin).is_file())
 }
 
 fn check_model(models_dir: &Path, name: &str) -> bool {

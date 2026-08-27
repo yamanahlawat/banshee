@@ -22,9 +22,9 @@ fn main() {
 mod mac {
     use std::time::Duration;
 
-    use banshee_common::{Activity, BANSHEE_STATE_CHANGED, EVENT_STATE, utils};
+    use banshee_common::{Activity, BANSHEE_HISTORY, BANSHEE_STATE_CHANGED, EVENT_STATE, utils};
     use serde_json::Value;
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
@@ -33,6 +33,8 @@ mod mac {
     use winit::window::WindowId;
 
     const QUIT_ID: &str = "quit";
+    const COPY_LAST_ID: &str = "copy-last";
+    const OPEN_ID: &str = "open";
 
     // A dead socket answers nothing, so the only way back is to ask again.
     // Nothing measured this number. It trades how long the icon can sit on a
@@ -98,7 +100,10 @@ mod mac {
         // One message for the pair, so user_event drops an unchanged picture
         // before it costs a redraw
         Device(Device),
+        History(bool),
         Quit,
+        CopyLast,
+        Copied(String),
     }
 
     #[derive(Debug, Default, PartialEq, Eq)]
@@ -116,6 +121,13 @@ mod mac {
         }
     }
 
+    fn history_enabled_of(status: &Value) -> bool {
+        status
+            .get("history_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
     // Reads as the state, then what it is listening with. A dead daemon has no
     // device to name, so the second line carries the way back instead.
     fn device_line(indicator: Indicator, device: &Device) -> String {
@@ -125,10 +137,49 @@ mod mac {
         banshee_common::microphone_label(device.open.as_deref(), device.missing.as_deref())
     }
 
+    /// One row of the menu, before it becomes a native menu item.
+    enum Row {
+        Info(String),
+        Separator,
+        Action(&'static str, String, bool),
+    }
+
+    fn copy_last_enabled(indicator: Indicator, history_enabled: bool) -> bool {
+        indicator != Indicator::NotRunning && history_enabled
+    }
+
+    fn menu_rows(indicator: Indicator, device: &Device, history_enabled: bool) -> Vec<Row> {
+        vec![
+            Row::Info(indicator.label().to_string()),
+            Row::Info(device_line(indicator, device)),
+            Row::Separator,
+            Row::Action(
+                COPY_LAST_ID,
+                "Copy last dictation".to_string(),
+                copy_last_enabled(indicator, history_enabled),
+            ),
+            Row::Action(OPEN_ID, "Open Banshee (coming soon)".to_string(), false),
+            Row::Separator,
+            Row::Action(QUIT_ID, "Quit Banshee".to_string(), true),
+        ]
+    }
+
+    #[cfg(test)]
+    fn menu_labels(indicator: Indicator, device: &Device, history_enabled: bool) -> Vec<String> {
+        menu_rows(indicator, device, history_enabled)
+            .into_iter()
+            .map(|row| match row {
+                Row::Info(text) | Row::Action(_, text, _) => text,
+                Row::Separator => "---".to_string(),
+            })
+            .collect()
+    }
+
     struct Ui {
         tray: TrayIcon,
         state_item: MenuItem,
         device_item: MenuItem,
+        copy_item: MenuItem,
         // The menu owns the native objects; dropping it empties the tray
         _menu: Menu,
     }
@@ -137,6 +188,8 @@ mod mac {
         ui: Option<Ui>,
         indicator: Indicator,
         device: Device,
+        history_enabled: bool,
+        proxy: EventLoopProxy<Message>,
     }
 
     impl App {
@@ -145,6 +198,8 @@ mod mac {
             ui.state_item.set_text(self.indicator.label());
             ui.device_item
                 .set_text(device_line(self.indicator, &self.device));
+            ui.copy_item
+                .set_enabled(copy_last_enabled(self.indicator, self.history_enabled));
             if let Err(error) = draw(&ui.tray, self.indicator) {
                 eprintln!("banshee-tray: could not draw the icon: {error}");
             }
@@ -186,6 +241,16 @@ mod mac {
                     self.device = device;
                     moved
                 }
+                Message::History(enabled) => {
+                    let moved = self.history_enabled != enabled;
+                    self.history_enabled = enabled;
+                    moved
+                }
+                Message::CopyLast => return spawn_copy_last(self.proxy.clone()),
+                Message::Copied(text) => {
+                    return copy_to_clipboard(&text)
+                        .unwrap_or_else(|error| eprintln!("banshee-tray: {error}"));
+                }
             };
             if changed {
                 self.show();
@@ -196,18 +261,34 @@ mod mac {
     }
 
     fn build_ui() -> Result<Ui, Box<dyn std::error::Error>> {
-        // Informational, so neither row takes a click
-        let state_item = MenuItem::new(Indicator::NotRunning.label(), false, None);
-        let device_item = MenuItem::new("", false, None);
-        let quit_item = MenuItem::with_id(QUIT_ID, "Quit Banshee", true, None);
+        let mut info_items: Vec<MenuItem> = Vec::new();
+        let mut copy_item: Option<MenuItem> = None;
+        let mut items: Vec<Box<dyn IsMenuItem>> = Vec::new();
+        for row in menu_rows(Indicator::NotRunning, &Device::default(), false) {
+            match row {
+                // Informational, so neither row takes a click
+                Row::Info(text) => {
+                    let item = MenuItem::new(text, false, None);
+                    info_items.push(item.clone());
+                    items.push(Box::new(item));
+                }
+                Row::Separator => items.push(Box::new(PredefinedMenuItem::separator())),
+                Row::Action(id, text, enabled) => {
+                    let item = MenuItem::with_id(id, text, enabled, None);
+                    if id == COPY_LAST_ID {
+                        copy_item = Some(item.clone());
+                    }
+                    items.push(Box::new(item));
+                }
+            }
+        }
+        let [state_item, device_item] = <[MenuItem; 2]>::try_from(info_items)
+            .map_err(|_| "menu_rows must carry exactly two info rows")?;
+        let copy_item = copy_item.ok_or("menu_rows must include the copy action")?;
 
         let menu = Menu::new();
-        menu.append_items(&[
-            &state_item,
-            &device_item,
-            &PredefinedMenuItem::separator(),
-            &quit_item,
-        ])?;
+        let refs: Vec<&dyn IsMenuItem> = items.iter().map(Box::as_ref).collect();
+        menu.append_items(&refs)?;
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu.clone()))
@@ -220,6 +301,7 @@ mod mac {
             tray,
             state_item,
             device_item,
+            copy_item,
             _menu: menu,
         })
     }
@@ -235,6 +317,7 @@ mod mac {
             if let Ok((status, mut changes)) = utils::Subscription::open(&[EVENT_STATE]).await {
                 if !send(Message::Device(Device::of(&status)))
                     || !send(Message::State(Indicator::of(Some(&status))))
+                    || !send(Message::History(history_enabled_of(&status)))
                 {
                     return;
                 }
@@ -253,6 +336,44 @@ mod mac {
             }
             tokio::time::sleep(RETRY).await;
         }
+    }
+
+    /// Reads the last spoken transcription on a worker thread and sends its
+    /// text to the main thread.
+    fn spawn_copy_last(proxy: EventLoopProxy<Message>) {
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => return eprintln!("banshee-tray: {error}"),
+            };
+            let reply = runtime.block_on(utils::call_daemon(
+                BANSHEE_HISTORY,
+                serde_json::json!({ "limit": 1 }),
+            ));
+            match reply.as_ref().ok().and_then(last_history_entry) {
+                Some(text) => {
+                    let _ = proxy.send_event(Message::Copied(text.to_string()));
+                }
+                None => eprintln!("banshee-tray: no dictation to copy"),
+            }
+        });
+    }
+
+    fn last_history_entry(reply: &Value) -> Option<&str> {
+        reply
+            .get("history")?
+            .as_array()?
+            .last()?
+            .get("text")?
+            .as_str()
+    }
+
+    fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+        arboard::Clipboard::new()?.set_text(text)?;
+        Ok(())
     }
 
     // launchd runs one job, but nothing stops the binary being started by hand,
@@ -289,8 +410,13 @@ mod mac {
 
         let menu_proxy = event_loop.create_proxy();
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            if event.id.0 == QUIT_ID {
-                let _ = menu_proxy.send_event(Message::Quit);
+            let message = match event.id.0.as_str() {
+                QUIT_ID => Some(Message::Quit),
+                COPY_LAST_ID => Some(Message::CopyLast),
+                _ => None,
+            };
+            if let Some(message) = message {
+                let _ = menu_proxy.send_event(message);
             }
         }));
 
@@ -310,6 +436,8 @@ mod mac {
             ui: None,
             indicator: Indicator::NotRunning,
             device: Device::default(),
+            history_enabled: false,
+            proxy: event_loop.create_proxy(),
         };
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -338,6 +466,57 @@ mod mac {
             Device {
                 open: open.map(str::to_string),
                 missing: missing.map(str::to_string),
+            }
+        }
+
+        #[test]
+        fn the_menu_lists_copy_and_open_between_the_device_and_quit() {
+            let labels = menu_labels(
+                Indicator::Idle,
+                &device(Some("MacBook Pro Microphone"), None),
+                true,
+            );
+            assert_eq!(
+                labels,
+                vec![
+                    "Idle",
+                    "MacBook Pro Microphone",
+                    "---",
+                    "Copy last dictation",
+                    "Open Banshee (coming soon)",
+                    "---",
+                    "Quit Banshee",
+                ]
+            );
+        }
+
+        #[test]
+        fn the_copy_row_is_disabled_when_history_is_off() {
+            fn copy_enabled(indicator: Indicator, history_enabled: bool) -> bool {
+                menu_rows(indicator, &Device::default(), history_enabled)
+                    .into_iter()
+                    .find_map(|row| match row {
+                        Row::Action(id, _, enabled) if id == COPY_LAST_ID => Some(enabled),
+                        _ => None,
+                    })
+                    .expect("menu_rows must include the copy action")
+            }
+
+            assert!(!copy_enabled(Indicator::Idle, false));
+            assert!(copy_enabled(Indicator::Idle, true));
+        }
+
+        #[test]
+        fn the_menu_carries_exactly_two_info_rows() {
+            for indicator in [Indicator::Idle, Indicator::NotRunning] {
+                let info_rows = menu_rows(indicator, &Device::default(), true)
+                    .into_iter()
+                    .filter(|row| matches!(row, Row::Info(_)))
+                    .count();
+                assert_eq!(
+                    info_rows, 2,
+                    "{indicator:?} must carry exactly two info rows"
+                );
             }
         }
 

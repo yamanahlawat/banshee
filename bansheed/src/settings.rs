@@ -143,6 +143,14 @@ pub fn configure(
             }
         }
     }
+
+    if let Some(state) = state {
+        state.record_outcome(&outcome.applied, &outcome.restart_required);
+        if persist {
+            state.set_config(std::sync::Arc::new(config));
+        }
+    }
+
     Ok(outcome)
 }
 
@@ -304,6 +312,19 @@ mod tests {
             error.to_string().contains("translate"),
             "the error must name the key: {error}"
         );
+    }
+
+    #[test]
+    fn a_key_that_needs_a_restart_becomes_pending_and_a_live_one_does_not() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        state.record_outcome(
+            &["stt.vad_threshold".to_string()],
+            &["audio.cues.enabled".to_string()],
+        );
+        assert_eq!(state.pending(), vec!["audio.cues.enabled".to_string()]);
+
+        state.record_outcome(&["audio.cues.enabled".to_string()], &[]);
+        assert!(state.pending().is_empty());
     }
 
     #[test]

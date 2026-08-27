@@ -4,6 +4,7 @@
 use banshee_common::Blocker;
 #[cfg(target_os = "macos")]
 use banshee_common::BlockerKind;
+use banshee_common::error::BansheeError;
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, PartialEq)]
@@ -37,6 +38,14 @@ impl Grant {
         match self {
             Grant::Accessibility => "accessibility",
             Grant::InputMonitoring => "input_monitoring",
+        }
+    }
+
+    /// The `revealElementKeyName` macOS publishes for this grant's pane.
+    pub fn anchor(self) -> &'static str {
+        match self {
+            Grant::Accessibility => "Privacy_Accessibility",
+            Grant::InputMonitoring => "Privacy_ListenEvent",
         }
     }
 
@@ -90,18 +99,8 @@ impl Grant {
         }
     }
 
-    /// Anchors are the `revealElementKeyName` values macOS publishes in
-    /// `Security.prefPane/Contents/Resources/PrivacyTCCServices.plist`.
     pub fn open_settings(self) {
-        let anchor = match self {
-            Grant::Accessibility => "Privacy_Accessibility",
-            Grant::InputMonitoring => "Privacy_ListenEvent",
-        };
-        let _ = std::process::Command::new("open")
-            .arg(format!(
-                "x-apple.systempreferences:com.apple.preference.security?{anchor}"
-            ))
-            .status();
+        open_anchor(self.anchor());
     }
 
     pub fn missing() -> Vec<Grant> {
@@ -110,6 +109,44 @@ impl Grant {
             .filter(|grant| grant.access() != Access::Granted)
             .collect()
     }
+}
+
+/// Anchors are the `revealElementKeyName` values macOS publishes in
+/// `Security.prefPane/Contents/Resources/PrivacyTCCServices.plist`.
+/// The microphone has a pane but no `Grant`: recording reports its own failure.
+#[cfg(target_os = "macos")]
+pub fn pane_anchor(id: &str) -> Option<&'static str> {
+    if id == "microphone" {
+        return Some("Privacy_Microphone");
+    }
+    Grant::REQUIRED
+        .into_iter()
+        .find(|grant| grant.id() == id)
+        .map(Grant::anchor)
+}
+
+#[cfg(target_os = "macos")]
+fn open_anchor(anchor: &str) {
+    let _ = std::process::Command::new("open")
+        .arg(format!(
+            "x-apple.systempreferences:com.apple.preference.security?{anchor}"
+        ))
+        .status();
+}
+
+#[cfg(target_os = "macos")]
+pub fn open_pane(id: &str) -> Result<(), BansheeError> {
+    let anchor = pane_anchor(id)
+        .ok_or_else(|| BansheeError::Rejected(format!("'{id}' is not a settings pane")))?;
+    open_anchor(anchor);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_pane(id: &str) -> Result<(), BansheeError> {
+    Err(BansheeError::Rejected(format!(
+        "'{id}': settings panes are a macOS feature"
+    )))
 }
 
 pub fn blockers() -> Vec<Blocker> {
@@ -181,5 +218,18 @@ pub fn restart_when_granted() {
                 }
             }
         });
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_pane_id_has_an_anchor_and_an_unknown_one_is_refused() {
+        assert_eq!(pane_anchor("accessibility"), Some("Privacy_Accessibility"));
+        assert_eq!(pane_anchor("input_monitoring"), Some("Privacy_ListenEvent"));
+        assert_eq!(pane_anchor("microphone"), Some("Privacy_Microphone"));
+        assert_eq!(pane_anchor("everything"), None);
     }
 }

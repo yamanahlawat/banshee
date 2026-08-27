@@ -36,26 +36,55 @@ impl TranscriptionHistory {
         Ok(())
     }
 
-    pub fn list(conn: &Connection) -> Result<Vec<TranscriptionHistory>> {
-        let mut stmt =
-            conn.prepare("SELECT id, text, timestamp FROM transcriptions ORDER BY id ASC")?;
-        let transcription_iter = stmt.query_map([], |row| {
+    pub fn list(conn: &Connection, limit: Option<u32>) -> Result<Vec<TranscriptionHistory>> {
+        let to_entry = |row: &rusqlite::Row| -> Result<TranscriptionHistory> {
             Ok(TranscriptionHistory::new(
                 row.get(0)?,
                 row.get(1)?,
                 row.get(2)?,
             ))
-        })?;
-
-        let mut transcriptions = Vec::new();
-        for transcription in transcription_iter {
-            transcriptions.push(transcription?);
+        };
+        match limit {
+            None => {
+                let mut stmt =
+                    conn.prepare("SELECT id, text, timestamp FROM transcriptions ORDER BY id ASC")?;
+                stmt.query_map([], to_entry)?.collect()
+            }
+            Some(limit) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, text, timestamp FROM transcriptions ORDER BY id DESC LIMIT ?1",
+                )?;
+                let mut newest_first: Vec<TranscriptionHistory> = stmt
+                    .query_map(rusqlite::params![limit], to_entry)?
+                    .collect::<Result<_>>()?;
+                newest_first.reverse();
+                Ok(newest_first)
+            }
         }
-        Ok(transcriptions)
     }
 
     pub fn clear(conn: &Connection) -> Result<()> {
         conn.execute("DELETE FROM transcriptions", [])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(entries: &[TranscriptionHistory]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_limit_returns_the_newest_rows_oldest_first() {
+        let conn = crate::test_support::seeded_history(&["first", "second", "third", "fourth"]);
+
+        let all = TranscriptionHistory::list(&conn, None).unwrap();
+        assert_eq!(texts(&all), vec!["first", "second", "third", "fourth"]);
+
+        let limited = TranscriptionHistory::list(&conn, Some(2)).unwrap();
+        assert_eq!(texts(&limited), vec!["third", "fourth"]);
     }
 }

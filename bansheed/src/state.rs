@@ -11,7 +11,7 @@ use banshee_common::DownloadProgress;
 use tokio::sync::{broadcast, watch};
 
 use crate::audio::cues::Cue;
-use crate::config::BargeInMode;
+use crate::config::{BargeInMode, Config};
 use crate::text_to_speech::SpeechPlayer;
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
@@ -167,6 +167,12 @@ pub struct DaemonState {
     wanted_device: Mutex<String>,
     tts_voice: OnceLock<String>,
     wanted_downloads: OnceLock<Vec<crate::models::download::Download>>,
+    // The file as last parsed. `vad_threshold`, `wanted_device` and `barge_in`
+    // beside it are live values the file may no longer agree with.
+    config: RwLock<Arc<Config>>,
+    // Keys the daemon accepted and wrote but has not applied. A restart empties
+    // it by nature; a live path clears its own key.
+    pending: Mutex<std::collections::BTreeSet<String>>,
     // Why recording is off, when it is. The microphone half clears when the
     // watchdog rebinds; the model half still needs a restart.
     recording_error: RwLock<Option<RecordingError>>,
@@ -176,6 +182,7 @@ pub struct DaemonState {
     transcriptions: Mutex<TranscriptionRing>,
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
+    transcribing: watch::Sender<bool>,
     // One counter for the whole device picture. It moves only when a setter
     // writes a value that differs, because the watchdog rewrites the same one
     // every rescan and each move wakes the push task of every subscriber.
@@ -225,6 +232,8 @@ impl DaemonState {
             wanted_device: Mutex::new(wanted_device),
             tts_voice: OnceLock::new(),
             wanted_downloads: OnceLock::new(),
+            config: RwLock::new(Arc::new(Config::default())),
+            pending: Mutex::new(std::collections::BTreeSet::new()),
             recording_error: RwLock::new(None),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
@@ -235,6 +244,7 @@ impl DaemonState {
             }),
             latest_transcription_id: watch::channel(0).0,
             recording_active: watch::channel(false).0,
+            transcribing: watch::channel(false).0,
             device_changes: watch::channel(0).0,
             downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
             downloading: AtomicBool::new(false),
@@ -448,6 +458,18 @@ impl DaemonState {
         self.recording_active.subscribe()
     }
 
+    pub fn set_transcribing(&self, on: bool) {
+        self.transcribing.send_replace(on);
+    }
+
+    pub fn is_transcribing(&self) -> bool {
+        *self.transcribing.borrow()
+    }
+
+    pub fn subscribe_transcribing(&self) -> watch::Receiver<bool> {
+        self.transcribing.subscribe()
+    }
+
     pub fn subscribe_downloads(&self) -> broadcast::Receiver<DownloadProgress> {
         self.downloads.subscribe()
     }
@@ -474,6 +496,14 @@ impl DaemonState {
 
     pub fn is_recording(&self) -> bool {
         self.recording_mode() != RecordingMode::Idle
+    }
+
+    /// True while the daemon holds the microphone open for a spoken answer.
+    pub fn is_armed(&self) -> bool {
+        matches!(
+            self.recording_mode(),
+            RecordingMode::Armed | RecordingMode::ArmedHold
+        )
     }
 
     pub fn uptime(&self) -> std::time::Duration {
@@ -583,6 +613,29 @@ impl DaemonState {
 
     pub fn set_wanted_downloads(&self, wanted: Vec<crate::models::download::Download>) {
         let _ = self.wanted_downloads.set(wanted);
+    }
+
+    pub fn config(&self) -> Arc<Config> {
+        Arc::clone(&self.config.read().unwrap())
+    }
+
+    pub fn set_config(&self, config: Arc<Config>) {
+        *self.config.write().unwrap() = config;
+    }
+
+    pub fn pending(&self) -> Vec<String> {
+        self.pending.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// One key is either applied or waiting, never both.
+    pub fn record_outcome(&self, applied: &[String], restart_required: &[String]) {
+        let mut pending = self.pending.lock().unwrap();
+        for key in applied {
+            pending.remove(key);
+        }
+        for key in restart_required {
+            pending.insert(key.clone());
+        }
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {

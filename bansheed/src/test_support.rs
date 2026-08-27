@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::config::BargeInMode;
+use crate::history::TranscriptionHistory;
 use crate::state::{ConsumerCommand, DaemonState};
 use crate::text_to_speech::{ActiveUtterance, SpeechPlayer, TtsBackend};
 
@@ -16,7 +17,11 @@ impl ActiveUtterance for Done {
 }
 
 impl TtsBackend for NullBackend {
-    fn start(&self, _text: &str) -> std::io::Result<Box<dyn ActiveUtterance>> {
+    fn start(
+        &self,
+        _text: &str,
+        _voice: Option<&str>,
+    ) -> std::io::Result<Box<dyn ActiveUtterance>> {
         Ok(Box::new(Done))
     }
 }
@@ -35,4 +40,14 @@ pub fn daemon_state(commands: std::sync::mpsc::Sender<ConsumerCommand>) -> Arc<D
         std::sync::mpsc::channel().0,
         BargeInMode::Stop,
     ))
+}
+
+/// An in-memory history holding `rows`, oldest first.
+pub fn seeded_history(rows: &[&str]) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    TranscriptionHistory::create_table(&connection).unwrap();
+    for text in rows {
+        TranscriptionHistory::insert(&connection, text).unwrap();
+    }
+    connection
 }

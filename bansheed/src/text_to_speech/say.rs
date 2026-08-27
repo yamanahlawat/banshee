@@ -6,7 +6,7 @@ use super::{ActiveUtterance, TtsBackend};
 pub struct SayBackend;
 
 impl TtsBackend for SayBackend {
-    fn start(&self, text: &str) -> std::io::Result<Box<dyn ActiveUtterance>> {
+    fn start(&self, text: &str, _voice: Option<&str>) -> std::io::Result<Box<dyn ActiveUtterance>> {
         let child = Command::new("say").arg(text).spawn()?;
         Ok(Box::new(SayUtterance { child }))
     }

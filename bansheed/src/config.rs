@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use banshee_common::{error::BansheeError, utils::get_config_path};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 // Every section denies unknown fields: TOML binds a key to whatever table
 // precedes it, so a misplaced setting parses fine and silently does nothing.
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
     pub always_on: bool,
@@ -22,14 +22,14 @@ impl Default for DaemonConfig {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum HotkeyMode {
     Hold,
     Toggle,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum BargeInMode {
     Stop,
@@ -37,7 +37,7 @@ pub enum BargeInMode {
     None,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioCuesConfig {
     pub enabled: bool,
@@ -59,7 +59,7 @@ impl Default for AudioCuesConfig {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
     pub input_device: String,
@@ -81,7 +81,7 @@ impl Default for AudioConfig {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum STTPreset {
     Fast,
@@ -112,7 +112,7 @@ fn probability<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Err
     Ok(value)
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct STTConfig {
     pub preset: STTPreset,
@@ -138,14 +138,14 @@ impl Default for STTConfig {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum TTSFallback {
     System,
     None,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct TTSConfig {
     pub voice: String,
@@ -163,7 +163,7 @@ impl Default for TTSConfig {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     pub level: String,
@@ -177,7 +177,7 @@ impl Default for LoggingConfig {
     }
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub daemon: DaemonConfig,

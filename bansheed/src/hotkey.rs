@@ -241,7 +241,10 @@ impl Pipeline {
 
         println!("Transcribing...");
         let transcribe_started = Instant::now();
-        match self.speech_to_text.transcribe(&final_data) {
+        self.state.set_transcribing(true);
+        let transcribed = self.speech_to_text.transcribe(&final_data);
+        self.state.set_transcribing(false);
+        match transcribed {
             Ok(transcription) => {
                 let audio_secs = final_data.len() as f32 / TARGET_SAMPLE_RATE as f32;
                 let elapsed = transcribe_started.elapsed().as_secs_f32();
@@ -312,20 +315,25 @@ impl Pipeline {
         let _ = self.cues.send(Cue::Disarm);
 
         let text = match answer_audio {
-            Some(audio) => match self.speech_to_text.transcribe(&audio) {
-                Ok(text) => {
-                    println!("Answer: {text}");
-                    if !text.is_empty() {
-                        save_history(&self.state, &text);
+            Some(audio) => {
+                self.state.set_transcribing(true);
+                let transcribed = self.speech_to_text.transcribe(&audio);
+                self.state.set_transcribing(false);
+                match transcribed {
+                    Ok(text) => {
+                        println!("Answer: {text}");
+                        if !text.is_empty() {
+                            save_history(&self.state, &text);
+                        }
+                        text
                     }
-                    text
+                    Err(e) => {
+                        eprintln!("Transcription failed: {e}");
+                        let _ = self.cues.send(Cue::Error);
+                        String::new()
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Transcription failed: {e}");
-                    let _ = self.cues.send(Cue::Error);
-                    String::new()
-                }
-            },
+            }
             None => {
                 let _ = self.cues.send(Cue::Error);
                 String::new()
