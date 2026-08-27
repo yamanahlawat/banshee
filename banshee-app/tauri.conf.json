@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Banshee",
+  "identifier": "com.banshee.app",
+  "build": { "frontendDist": "ui/dist", "devUrl": "http://localhost:5173", "beforeDevCommand": "npm --prefix ui run dev", "beforeBuildCommand": "npm --prefix ui run build" },
+  "app": { "windows": [{ "title": "Banshee", "width": 480, "height": 720, "minWidth": 480, "maxWidth": 480, "minHeight": 520, "resizable": true }] },
+  "bundle": { "active": true, "targets": ["app"], "macOS": { "minimumSystemVersion": "13.0" } }
+}

@@ -1,5 +1,5 @@
 [workspace]
-members = ["bansheed", "banshee-common"]
+members = ["bansheed", "banshee-common", "banshee-app"]
 resolver = "2"
 
 [workspace.package]

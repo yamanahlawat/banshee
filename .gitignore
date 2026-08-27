@@ -9,6 +9,9 @@ design
 # macOS directory metadata
 .DS_Store
 
+# Tauri build output
+banshee-app/gen/
+
 # Superpowers plans and run state
 docs/superpowers/
 .superpowers/
