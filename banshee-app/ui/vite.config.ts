@@ -10,6 +10,8 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // testing-library's auto-cleanup between tests needs real beforeEach/afterEach globals.
+    globals: true,
   },
   resolve: {
     conditions: ['browser'],

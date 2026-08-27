@@ -3,4 +3,5 @@
 html, body { margin: 0; background: var(--face); color: var(--ink); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; -webkit-font-smoothing: antialiased; }
 .caps { font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; font-weight: 600; }
 .mono { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 11px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
