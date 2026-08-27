@@ -1,0 +1,79 @@
+{
+  "running": true,
+  "version": "0.11.1",
+  "stt_model": "ggml-large-v3-turbo-q5_0.bin",
+  "vad_model": "silero_vad.onnx",
+  "audio_device": "MacBook Pro Microphone",
+  "missing_device": null,
+  "recording": false,
+  "armed": false,
+  "transcribing": false,
+  "speaking": false,
+  "uptime_seconds": 19,
+  "vad_threshold": 0.5,
+  "history_enabled": true,
+  "ready": false,
+  "blockers": [
+    {
+      "kind": "permission",
+      "id": "accessibility",
+      "name": "Accessibility",
+      "consequence": "dictation cannot type and the hotkey stays inert",
+      "fix": "grant it in System Settings > Privacy & Security > Accessibility"
+    },
+    {
+      "kind": "permission",
+      "id": "input_monitoring",
+      "name": "Input Monitoring",
+      "consequence": "the hotkey receives no key presses, with no error anywhere",
+      "fix": "grant it in System Settings > Privacy & Security > Input Monitoring"
+    }
+  ],
+  "config": {
+    "daemon": {
+      "always_on": true,
+      "save_history": true
+    },
+    "audio": {
+      "input_device": "default",
+      "hotkey": "RightCommand",
+      "hotkey_mode": "toggle",
+      "barge_in": "stop",
+      "cues": {
+        "enabled": true,
+        "start": null,
+        "stop": null,
+        "ready": null,
+        "error": null
+      }
+    },
+    "stt": {
+      "preset": "balanced",
+      "language": "en",
+      "translate": false,
+      "vad_threshold": 0.5,
+      "vocabulary": [
+        "pydantic",
+        "shadcn",
+        "pydantic ai",
+        "redis",
+        "tmux",
+        "commit",
+        "omarchy",
+        "claude",
+        "claude code",
+        "pi"
+      ],
+      "endpoint_silence_ms": 2500
+    },
+    "tts": {
+      "voice": "af_sky",
+      "speed": 1.2000000476837158,
+      "fallback": "system"
+    },
+    "logging": {
+      "level": "info"
+    }
+  },
+  "pending": []
+}

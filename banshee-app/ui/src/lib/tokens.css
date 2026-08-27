@@ -1,0 +1,6 @@
+:root { --face: #1E1F22; --ink: #E8E4DC; --dim: #9A958C; --rule: #34363B; --strip: #1A1B1E; --field: #26282C; --live: #D9A441; }
+@media (prefers-color-scheme: light) { :root { --face: #E8E4DC; --ink: #1E1F22; --dim: #5E5A53; --rule: #CFCAC0; --strip: #DEDAD1; --field: #F3F0EA; --live: #8A6508; } }
+html, body { margin: 0; background: var(--face); color: var(--ink); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; -webkit-font-smoothing: antialiased; }
+.caps { font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; font-weight: 600; }
+.mono { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 11px; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }

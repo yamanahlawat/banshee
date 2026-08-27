@@ -1,0 +1,8 @@
+{
+  "recording": true,
+  "armed": false,
+  "transcribing": false,
+  "speaking": false,
+  "audio_device": "MacBook Pro Microphone",
+  "missing_device": null
+}
