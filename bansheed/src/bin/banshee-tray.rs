@@ -33,6 +33,11 @@ mod mac {
     use winit::window::WindowId;
 
     const QUIT_ID: &str = "quit";
+    // A daemon that accepts the connection and never answers would hold this
+    // thread forever. Nothing measured this number. It trades how long a slow
+    // reply can still land against how long a click can hold a thread.
+    const COPY_WAIT: Duration = Duration::from_secs(5);
+
     const COPY_LAST_ID: &str = "copy-last";
     const OPEN_ID: &str = "open";
 
@@ -349,10 +354,16 @@ mod mac {
                 Ok(runtime) => runtime,
                 Err(error) => return eprintln!("banshee-tray: {error}"),
             };
-            let reply = runtime.block_on(utils::call_daemon(
-                BANSHEE_HISTORY,
-                serde_json::json!({ "limit": 1 }),
-            ));
+            let reply = runtime.block_on(async {
+                tokio::time::timeout(
+                    COPY_WAIT,
+                    utils::call_daemon(BANSHEE_HISTORY, serde_json::json!({ "limit": 1 })),
+                )
+                .await
+            });
+            let Ok(reply) = reply else {
+                return eprintln!("banshee-tray: the daemon did not answer in time");
+            };
             match reply.as_ref().ok().and_then(last_history_entry) {
                 Some(text) => {
                     let _ = proxy.send_event(Message::Copied(text.to_string()));

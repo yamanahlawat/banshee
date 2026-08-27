@@ -121,7 +121,9 @@ fn show_progress(progress: banshee_common::DownloadProgress) {
     } else {
         '\n'
     };
-    print!("{}{ending}", progress_line(&progress));
+    // Erase to end of line. A shorter line would otherwise leave the tail of
+    // the longer one behind it.
+    print!("{}\x1b[K{ending}", progress_line(&progress));
     let _ = std::io::stdout().flush();
 }
 

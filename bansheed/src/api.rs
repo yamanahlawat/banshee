@@ -110,11 +110,18 @@ fn optional_u64_param(
     )
 }
 
-fn disconnect_param(params: Option<&serde_json::Value>) -> bool {
-    params
-        .and_then(|p| p.get("disconnect"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+fn disconnect_param(
+    params: Option<&serde_json::Value>,
+    id: &Option<serde_json::Value>,
+) -> Result<bool, Box<JsonRpcResponse>> {
+    typed_param(
+        params,
+        "disconnect",
+        id,
+        serde_json::Value::as_bool,
+        "a boolean",
+    )
+    .map(|value| value.unwrap_or(false))
 }
 
 fn agent_param(
@@ -485,7 +492,17 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         }
         BANSHEE_HISTORY => {
             let limit = match optional_u64_param(request.params.as_ref(), "limit", &request.id) {
-                Ok(value) => value.map(|limit| limit as u32),
+                Ok(None) => None,
+                Ok(Some(limit)) => match u32::try_from(limit) {
+                    Ok(limit) => Some(limit),
+                    Err(_) => {
+                        return JsonRpcResponse::error(
+                            request.id,
+                            -32602,
+                            "'limit' must fit in 32 bits.",
+                        );
+                    }
+                },
                 Err(response) => return *response,
             };
             if let Some(db) = daemon_state.db_connection() {
@@ -548,7 +565,11 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             JsonRpcResponse::success(request.id, serde_json::json!({"agents": agents}))
         }
         BANSHEE_CONNECT_PLAN => {
-            if disconnect_param(request.params.as_ref()) {
+            let disconnect = match disconnect_param(request.params.as_ref(), &request.id) {
+                Ok(value) => value,
+                Err(response) => return *response,
+            };
+            if disconnect {
                 return JsonRpcResponse::error(
                     request.id,
                     -32602,
@@ -576,7 +597,11 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             }
         }
         BANSHEE_CONNECT_APPLY => {
-            if disconnect_param(request.params.as_ref()) {
+            let disconnect = match disconnect_param(request.params.as_ref(), &request.id) {
+                Ok(value) => value,
+                Err(response) => return *response,
+            };
+            if disconnect {
                 return JsonRpcResponse::error(
                     request.id,
                     -32602,
@@ -705,6 +730,33 @@ mod tests {
         let history = result["history"].as_array().expect("a history array");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0]["text"], "third");
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_that_is_not_a_boolean_is_refused() {
+        let state = test_state(std::sync::mpsc::channel().0);
+
+        for request in [
+            connect_plan_request(serde_json::json!({"agent": "cursor", "disconnect": "true"})),
+            connect_apply_request(serde_json::json!({"agent": "cursor", "disconnect": "true"})),
+        ] {
+            let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
+                panic!("a string disconnect must not reach the plan");
+            };
+            assert_eq!(error.code, -32602);
+            assert!(error.message.contains("disconnect"), "{}", error.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_history_limit_that_does_not_fit_is_refused() {
+        let state = state_with_history(&["first"]);
+
+        let request = history_request(serde_json::json!({ "limit": 4_294_967_296u64 }));
+        let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
+            panic!("a limit past 32 bits must not truncate");
+        };
+        assert_eq!(error.code, -32602);
     }
 
     #[tokio::test]

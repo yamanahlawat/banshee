@@ -100,7 +100,9 @@ impl Grant {
     }
 
     pub fn open_settings(self) {
-        open_anchor(self.anchor());
+        if let Err(error) = open_anchor(self.anchor()) {
+            eprintln!("{error}");
+        }
     }
 
     pub fn missing() -> Vec<Grant> {
@@ -126,20 +128,26 @@ pub fn pane_anchor(id: &str) -> Option<&'static str> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_anchor(anchor: &str) {
-    let _ = std::process::Command::new("open")
+fn open_anchor(anchor: &str) -> Result<(), BansheeError> {
+    let status = std::process::Command::new("open")
         .arg(format!(
             "x-apple.systempreferences:com.apple.preference.security?{anchor}"
         ))
-        .status();
+        .status()
+        .map_err(|error| BansheeError::Other(format!("could not run open: {error}")))?;
+    if !status.success() {
+        return Err(BansheeError::Other(format!(
+            "open refused the {anchor} pane"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 pub fn open_pane(id: &str) -> Result<(), BansheeError> {
     let anchor = pane_anchor(id)
         .ok_or_else(|| BansheeError::Rejected(format!("'{id}' is not a settings pane")))?;
-    open_anchor(anchor);
-    Ok(())
+    open_anchor(anchor)
 }
 
 #[cfg(not(target_os = "macos"))]

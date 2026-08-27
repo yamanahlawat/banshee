@@ -613,19 +613,45 @@ fn extract_path(output: &str) -> Option<OsString> {
     Some(OsString::from(path))
 }
 
+// A login profile that blocks would otherwise hold the first caller forever,
+// and every later caller behind the OnceLock. Nothing measured either number.
+// The wait trades how slow a profile may be against how long a hung one stalls
+// agent detection. The poll trades wake-ups against how late the kill lands.
+const SHELL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const SHELL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 fn login_shell_path() -> Option<OsString> {
+    use std::io::Read;
+
     let shell = std::env::var_os("SHELL")?;
     let command = format!(r#"printf '{PATH_START}%s{PATH_END}' "$PATH""#);
-    let output = std::process::Command::new(&shell)
+    let mut child = std::process::Command::new(&shell)
         .arg("-lc")
         .arg(&command)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
-        return None;
+
+    let deadline = std::time::Instant::now() + SHELL_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(SHELL_POLL);
+            }
+        }
     }
-    let text = String::from_utf8(output.stdout).ok()?;
-    extract_path(&text)
+
+    let mut printed = String::new();
+    child.stdout.take()?.read_to_string(&mut printed).ok()?;
+    extract_path(&printed)
 }
 
 fn with_fallback(shell_path: Option<OsString>) -> OsString {
