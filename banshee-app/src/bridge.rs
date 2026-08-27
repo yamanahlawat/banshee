@@ -1,4 +1,4 @@
-use crate::socket::{Client, backoff};
+use crate::socket::{Client, SOCKET_CLOSED, backoff};
 use banshee_common::{
     BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_STATE_CHANGED, BANSHEE_STATUS, EVENT_DOWNLOADS, EVENT_STATE,
     utils,
@@ -49,7 +49,7 @@ pub async fn run(app: AppHandle) {
                 let reason = result
                     .err()
                     .map(|e| e.to_string())
-                    .unwrap_or_else(|| "the daemon closed the socket".to_string());
+                    .unwrap_or_else(|| SOCKET_CLOSED.to_string());
                 let _ = app.emit("daemon:down", serde_json::json!({ "reason": reason }));
                 next_attempt(attempt, started.elapsed())
             }

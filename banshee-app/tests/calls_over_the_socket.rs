@@ -2,8 +2,28 @@ mod common;
 
 use banshee_app::calls;
 use banshee_app::socket::Client;
-use banshee_common::{BANSHEE_CONFIGURE, BANSHEE_HISTORY, BANSHEE_SPEAK};
+use banshee_common::{
+    BANSHEE_AGENTS, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_CONNECT_APPLY,
+    BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES,
+    BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_SPEAK, BANSHEE_STATUS,
+};
 use common::{recording_daemon, recording_error_daemon};
+
+#[tokio::test]
+async fn status_returns_the_reply_untouched() {
+    let (path, mut seen, _guard) =
+        recording_daemon(serde_json::json!({"running": true, "recording": false})).await;
+    let mut client = Client::connect(&path).await.unwrap();
+
+    let reply = calls::status(&mut client).await.unwrap();
+
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_STATUS);
+    assert_eq!(
+        reply,
+        serde_json::json!({"running": true, "recording": false})
+    );
+}
 
 #[tokio::test]
 async fn a_setting_is_written_with_persist_true() {
@@ -28,6 +48,58 @@ async fn a_setting_is_written_with_persist_true() {
 }
 
 #[tokio::test]
+async fn a_settings_reply_with_the_wrong_shape_is_an_error_not_an_empty_list() {
+    // "restart_required" as a string, not an array: a wrong-shaped reply
+    // must not read as "nothing needs a restart".
+    let (path, _seen, _guard) =
+        recording_daemon(serde_json::json!({"restart_required": "audio.cues.enabled"})).await;
+    let mut client = Client::connect(&path).await.unwrap();
+
+    let error = calls::set_setting(&mut client, "audio.cues.enabled", serde_json::json!(true))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, -32700);
+}
+
+#[tokio::test]
+async fn list_devices_reads_both_fields() {
+    let (path, mut seen, _guard) = recording_daemon(serde_json::json!({
+        "devices": [{"name": "Blue Yeti", "default": true}],
+        "current": "Blue Yeti",
+    }))
+    .await;
+    let mut client = Client::connect(&path).await.unwrap();
+
+    let devices = calls::list_devices(&mut client).await.unwrap();
+
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_LIST_INPUT_DEVICES);
+    assert_eq!(devices.devices.len(), 1);
+    assert_eq!(devices.devices[0].name, "Blue Yeti");
+    assert!(devices.devices[0].default);
+    assert_eq!(devices.current.as_deref(), Some("Blue Yeti"));
+}
+
+#[tokio::test]
+async fn list_voices_reads_both_fields() {
+    let (path, mut seen, _guard) = recording_daemon(serde_json::json!({
+        "voices": [{"id": "am_adam", "name": "Adam", "description": "US male"}],
+        "current": "am_adam",
+    }))
+    .await;
+    let mut client = Client::connect(&path).await.unwrap();
+
+    let voices = calls::list_voices(&mut client).await.unwrap();
+
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_LIST_VOICES);
+    assert_eq!(voices.voices.len(), 1);
+    assert_eq!(voices.voices[0].id, "am_adam");
+    assert_eq!(voices.current.as_deref(), Some("am_adam"));
+}
+
+#[tokio::test]
 #[allow(clippy::len_zero)]
 async fn a_voice_preview_speaks_one_sentence_in_that_voice() {
     let (path, mut seen, _guard) = recording_daemon(serde_json::json!({"ok": true})).await;
@@ -42,6 +114,84 @@ async fn a_voice_preview_speaks_one_sentence_in_that_voice() {
     assert!(params["text"].as_str().unwrap().len() > 0);
     // A preview must not change the configured voice
     assert!(params.get("persist").is_none());
+}
+
+#[tokio::test]
+async fn download_models_sends_no_params_and_returns_nothing() {
+    let (path, mut seen, _guard) = recording_daemon(serde_json::json!({"ok": true})).await;
+    let mut client = Client::connect(&path).await.unwrap();
+
+    calls::download_models(&mut client).await.unwrap();
+
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_DOWNLOAD_MODELS);
+}
+
+#[tokio::test]
+async fn the_agents_wrapper_key_never_reaches_a_caller() {
+    let (path, mut seen, _guard) = recording_daemon(serde_json::json!({
+        "agents": [{"id": "cursor", "name": "Cursor", "presence": "found", "note": "Ready to connect."}]
+    }))
+    .await;
+    let mut client = Client::connect(&path).await.unwrap();
+
+    let agents = calls::detect_agents(&mut client).await.unwrap();
+
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_AGENTS);
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].id, "cursor");
+}
+
+#[tokio::test]
+async fn the_changes_wrapper_key_never_reaches_a_caller() {
+    let (path, mut seen, _guard) = recording_daemon(serde_json::json!({
+        "changes": [{"path": "/Users/x/.cursor/mcp.json", "diff": "+ banshee"}]
+    }))
+    .await;
+    let mut client = Client::connect(&path).await.unwrap();
+
+    let changes = calls::plan_connect(&mut client, "cursor", false)
+        .await
+        .unwrap();
+
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_CONNECT_PLAN);
+    assert_eq!(
+        request.params.unwrap(),
+        serde_json::json!({"agent": "cursor", "disconnect": false})
+    );
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].diff, "+ banshee");
+}
+
+#[tokio::test]
+async fn a_daemon_error_reaches_the_caller_as_its_own_code_and_sentence() {
+    let (path, _seen, _guard) =
+        recording_error_daemon(-32602, "Disconnect is not available yet.").await;
+    let mut client = Client::connect(&path).await.unwrap();
+    let refused = calls::plan_connect(&mut client, "cursor", true)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, -32602);
+    assert_eq!(refused.message, "Disconnect is not available yet.");
+}
+
+#[tokio::test]
+async fn apply_connect_sends_the_same_params_plan_connect_does() {
+    let (path, mut seen, _guard) = recording_daemon(serde_json::json!({"ok": true})).await;
+    let mut client = Client::connect(&path).await.unwrap();
+
+    calls::apply_connect(&mut client, "cursor", false)
+        .await
+        .unwrap();
+
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_CONNECT_APPLY);
+    assert_eq!(
+        request.params.unwrap(),
+        serde_json::json!({"agent": "cursor", "disconnect": false})
+    );
 }
 
 #[tokio::test]
@@ -80,12 +230,29 @@ async fn a_history_call_with_a_limit_forwards_it() {
 }
 
 #[tokio::test]
-async fn a_daemon_error_reaches_the_caller_as_its_own_sentence() {
-    let (path, _seen, _guard) =
-        recording_error_daemon(-32602, "Disconnect is not available yet.").await;
+async fn clear_history_sends_no_params_and_returns_nothing() {
+    let (path, mut seen, _guard) = recording_daemon(serde_json::json!({})).await;
     let mut client = Client::connect(&path).await.unwrap();
-    let refused = calls::plan_connect(&mut client, "cursor", true)
+
+    calls::clear_history(&mut client).await.unwrap();
+
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_CLEAR_HISTORY);
+}
+
+#[tokio::test]
+async fn open_permission_pane_sends_the_id_key() {
+    let (path, mut seen, _guard) = recording_daemon(serde_json::json!({"ok": true})).await;
+    let mut client = Client::connect(&path).await.unwrap();
+
+    calls::open_permission_pane(&mut client, "input_monitoring")
         .await
-        .unwrap_err();
-    assert_eq!(refused, "Disconnect is not available yet.");
+        .unwrap();
+
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_OPEN_PERMISSION);
+    assert_eq!(
+        request.params.unwrap(),
+        serde_json::json!({"id": "input_monitoring"})
+    );
 }

@@ -1,6 +1,5 @@
 use banshee_app::socket::Client;
 use banshee_app::{bridge, commands};
-use banshee_common::utils;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
@@ -9,9 +8,11 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             tauri::async_runtime::spawn(bridge::run(app.handle().clone()));
-            let path = utils::get_socket_path().expect("a home directory");
-            let client = tauri::async_runtime::block_on(Client::connect(&path))?;
-            app.manage(Mutex::new(client));
+            // No connection is opened here: a command's first use and a
+            // reconnect after the daemon dies both run through the same
+            // `commands::ensure_connected`, so the window always opens
+            // whether or not the daemon is running yet.
+            app.manage(Mutex::new(Option::<Client>::None));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

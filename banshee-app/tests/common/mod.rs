@@ -12,6 +12,12 @@ pub struct DaemonGuard(Option<JoinHandle<()>>);
 
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
+        // A test body that already panicked is on its way out; resuming a
+        // second panic here would abort the whole binary instead of just
+        // failing this one test.
+        if std::thread::panicking() {
+            return;
+        }
         if let Some(handle) = self.0.take()
             && let Err(panic) = handle.join()
         {
