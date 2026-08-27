@@ -1,8 +1,14 @@
 /target
 
 Banshee_Specification.md
+DESIGN.md
+PRODUCT.md
 .impeccable
 design
 
 # macOS directory metadata
 .DS_Store
+
+# Superpowers plans and run state
+docs/superpowers/
+.superpowers/
