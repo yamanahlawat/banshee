@@ -54,9 +54,11 @@
           {/if}
         </li>
       {/each}
-      <li style="padding: 6px 0 2px 50px;">
-        <button type="button" style="font: inherit; font-size: 12.5px; color: var(--dim); background: transparent; border: 0; padding: 0; cursor: pointer;">{more} more in History ›</button>
-      </li>
+      {#if more > 0}
+        <li style="padding: 6px 0 2px 50px;">
+          <button type="button" style="font: inherit; font-size: 12.5px; color: var(--dim); background: transparent; border: 0; padding: 0; cursor: pointer;">{more} more in History ›</button>
+        </li>
+      {/if}
     </ol>
   {/if}
 </section>

@@ -11,9 +11,21 @@ export const STATIONS: Station[] = ['Running', 'Microphone', 'Permissions', 'Mod
 export function empty(): Daemon {
   return { status: null, live: { recording: false, speaking: false, armed: false, transcribing: false, audio_device: null, missing_device: null }, pending: new Set(), down: null, downloading: false };
 }
+const LIVE_KEYS = Object.keys(empty().live);
+
+// The status reply carries the live flags at its top level, under the same
+// names `daemon:state` pushes.
+export function liveFrom(status: Status): Partial<Live> {
+  const live: Record<string, unknown> = {};
+  for (const key of LIVE_KEYS) {
+    if (status[key] !== undefined) live[key] = status[key];
+  }
+  return live as Partial<Live>;
+}
+
 export function reduceStatus(state: Daemon, status: Status): Daemon {
   // Pending is the daemon's answer: it knows which keys it applied live.
-  return { ...state, status, pending: new Set(status.pending ?? []), down: status.running === false ? (state.down ?? 'not running') : null };
+  return { ...state, status, live: { ...state.live, ...liveFrom(status) }, pending: new Set(status.pending ?? []), down: status.running === false ? (state.down ?? 'not running') : null };
 }
 export function reduceLive(state: Daemon, live: Partial<Live>): Daemon {
   return { ...state, live: { ...state.live, ...live }, down: null };

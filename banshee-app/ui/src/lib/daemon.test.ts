@@ -7,7 +7,7 @@ import transcribing from '../fixtures/transcribing.json';
 import speaking from '../fixtures/speaking.json';
 import notRunning from '../fixtures/not-running.json';
 import pendingCues from '../fixtures/pending-cues.json';
-import { checklist, empty, lampForm, markPending, reduceLive, reduceStatus, stateWord } from './daemon';
+import { checklist, empty, lampForm, liveFrom, markPending, reduceLive, reduceStatus, stateWord } from './daemon';
 
 describe('the state word', () => {
   it('is Ready on a clear machine', () => {
@@ -83,5 +83,19 @@ describe('pending', () => {
     state = reduceStatus(state, ready);
     expect(state.pending.has('stt.language')).toBe(false);
     expect(state.pending.has('audio.cues.enabled')).toBe(false);
+  });
+});
+
+describe('the status reply carries the live flags', () => {
+  it('reports Speaking from a status read alone', () => {
+    expect(stateWord(reduceStatus(empty(), { ...ready, speaking: true }))).toBe('Speaking');
+  });
+  it('keeps what it holds for a flag the reply omits', () => {
+    const held = reduceLive(empty(), { speaking: true });
+    const { speaking: _omitted, ...withoutSpeaking } = ready;
+    expect(reduceStatus(held, withoutSpeaking as never).live.speaking).toBe(true);
+  });
+  it('takes only the live flags, not the rest of the reply', () => {
+    expect(Object.keys(liveFrom(ready)).sort()).toEqual(Object.keys(empty().live).sort());
   });
 });

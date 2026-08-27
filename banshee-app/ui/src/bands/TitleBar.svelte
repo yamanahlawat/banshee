@@ -10,8 +10,16 @@
   $: word = stateWord($daemon);
   $: form = lampForm(word);
   $: audio = $daemon.status?.config?.audio as { hotkey?: string; hotkey_mode?: string } | undefined;
+  // Before the daemon answers there is nothing to report, and a sentence with
+  // a gap where the key belongs reads as a missing word rather than a wait.
+  function hotkeyInstruction(config: typeof audio, key: string): string {
+    if (config === undefined) return '';
+    if (key === '') return 'No hotkey set';
+    return config.hotkey_mode === 'hold' ? `Hold ${key} to talk` : `Press ${key} to start and stop`;
+  }
+
   $: key = humanizeKey(String(audio?.hotkey ?? ''));
-  $: instruction = audio?.hotkey_mode === 'hold' ? `Hold ${key} to talk` : `Press ${key} to start and stop`;
+  $: instruction = hotkeyInstruction(audio, key);
 </script>
 
 <header style="display: flex; flex-direction: column; gap: 10px; padding: 14px 22px 12px; border-bottom: 1px solid var(--rule);">

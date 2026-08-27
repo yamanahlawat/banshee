@@ -15,3 +15,12 @@ it('shows landing words with no Copy button', () => {
   render(Pad, { latest: null, landing: 'Add a test for', agent: null });
   expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
 });
+it('offers Stop speaking only while the daemon speaks', async () => {
+  const { daemon } = await import('../lib/daemon');
+  const agent = { who: 'Claude Code', text: 'Open the pull request?' };
+  render(Pad, { latest: null, landing: null, agent });
+  expect(screen.queryByRole('button', { name: 'Stop speaking' })).toBeNull();
+  daemon.update((s) => ({ ...s, live: { ...s.live, speaking: true } }));
+  expect(await screen.findByRole('button', { name: 'Stop speaking' })).toBeTruthy();
+  daemon.update((s) => ({ ...s, live: { ...s.live, speaking: false } }));
+});
