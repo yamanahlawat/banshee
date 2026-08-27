@@ -97,6 +97,10 @@ pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
 pub const BANSHEE_LIST_VOICES: &str = "banshee.list_voices";
 pub const BANSHEE_DOWNLOAD_MODELS: &str = "banshee.download_models";
 pub const BANSHEE_SUBSCRIBE: &str = "banshee.subscribe";
+pub const BANSHEE_AGENTS: &str = "banshee.agents";
+pub const BANSHEE_CONNECT_PLAN: &str = "banshee.connect_plan";
+pub const BANSHEE_CONNECT_APPLY: &str = "banshee.connect_apply";
+pub const BANSHEE_OPEN_PERMISSION: &str = "banshee.open_permission";
 // Sent by the daemon, not called by a client
 pub const BANSHEE_STATE_CHANGED: &str = "banshee.state_changed";
 pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
@@ -166,6 +170,14 @@ pub enum DownloadState {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DownloadProgress {
     pub model: String,
+    /// What the file is, in the user's words. `model` stays the filename.
+    #[serde(default)]
+    pub label: String,
+    /// One-based place in this run, and how many files the run has.
+    #[serde(default)]
+    pub index: usize,
+    #[serde(default)]
+    pub count: usize,
     pub bytes: u64,
     /// None when the server sends no `Content-Length`, so a client shows a
     /// spinner rather than a bar.
@@ -194,6 +206,32 @@ pub struct Blocker {
     pub name: String,
     pub consequence: String,
     pub fix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Voice {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRow {
+    /// The slug `banshee connect <id>` takes.
+    pub id: String,
+    pub name: String,
+    /// "connected", "found" or "absent".
+    pub presence: String,
+    /// One line for the row, in the user's words.
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedChange {
+    /// The file the change writes. None when the change runs a command.
+    pub path: Option<String>,
+    /// What `banshee connect` prints for this change, unchanged.
+    pub diff: String,
 }
 
 // Whisper model configuration
@@ -309,6 +347,9 @@ mod wire_tests {
     fn progress_serializes_with_the_keys_clients_read() {
         let wire = serde_json::to_value(DownloadProgress {
             model: "ggml-base.en.bin".to_string(),
+            label: "Speech model".to_string(),
+            index: 1,
+            count: 3,
             bytes: 512,
             total: Some(1024),
             state: DownloadState::Downloading,
@@ -318,6 +359,9 @@ mod wire_tests {
             wire,
             serde_json::json!({
                 "model": "ggml-base.en.bin",
+                "label": "Speech model",
+                "index": 1,
+                "count": 3,
                 "bytes": 512,
                 "total": 1024,
                 "state": "downloading",
@@ -329,6 +373,9 @@ mod wire_tests {
     fn an_unknown_total_stays_on_the_wire_as_null() {
         let wire = serde_json::to_value(DownloadProgress {
             model: "af_sky.bin".to_string(),
+            label: "Voice".to_string(),
+            index: 1,
+            count: 1,
             bytes: 7,
             total: None,
             state: DownloadState::Failed,

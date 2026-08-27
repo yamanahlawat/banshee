@@ -9,8 +9,8 @@ use crate::state::TranscribeTarget;
 
 /// A parsed `audio.hotkey`. The parser constructs it, so a binding the
 /// listener cannot match fails the config load instead of sitting silent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(try_from = "String")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(try_from = "String", into = "String")]
 pub enum Hotkey {
     /// An ordinary key, with the chord modifiers that must be down at its press.
     Key {
@@ -272,6 +272,12 @@ fn parse_hotkey(value: &str) -> Result<Hotkey, String> {
         (false, Main::Modifier(_)) => Err(format!(
             "\"{main}\" is a modifier, and a chord ends in a key"
         )),
+    }
+}
+
+impl From<Hotkey> for String {
+    fn from(hotkey: Hotkey) -> String {
+        hotkey.to_string()
     }
 }
 
@@ -556,6 +562,23 @@ mod parse_tests {
                 "display must give the name back"
             );
             assert_eq!(hotkey(&parsed.to_string()).unwrap(), parsed);
+        }
+    }
+
+    #[test]
+    fn every_legal_form_survives_serialize_and_deserialize() {
+        let forms: Vec<&str> = MODIFIERS
+            .iter()
+            .filter(|modifier| modifier.refused.is_none())
+            .map(|modifier| modifier.name)
+            .chain(["F1", "F12", "Ctrl+Alt+D", "Cmd+7"])
+            .collect();
+
+        for text in forms {
+            let parsed = hotkey(text).unwrap();
+            let json = serde_json::to_string(&parsed).unwrap();
+            let deserialized: Hotkey = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, parsed, "{text} did not round trip");
         }
     }
 

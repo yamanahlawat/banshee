@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The daemon reports when it listens for an answer and when it transcribes.**
+  A client subscribed to `state` sees `armed` and `transcribing` beside `recording`
+  and `speaking`. `recording` still means the microphone is open, so it stays true
+  while armed. A client ranks the four in order: `transcribing`, `armed`, `recording`,
+  `speaking`.
+- **Voices have names.** `banshee voices` marks the one in use and prints
+  `* Sky  American, clear  (af_sky)` for each installed voice, instead of the bare id.
+- **Model downloads report which file, of how many, and how big.** A progress
+  event carries `label`, `index`, and `count` beside the filename and the byte counts.
+- **`banshee status` reports your settings and what waits for a restart.** The
+  reply carries the parsed `config.toml` and a sorted list of keys the daemon
+  wrote but has not applied.
+- **Agents and permission panes answer over the socket.** `banshee.agents`,
+  `banshee.connect_plan`, `banshee.connect_apply`, and `banshee.open_permission` do
+  what `banshee connect` and `banshee permissions` already do. Any client can offer
+  them with no daemon code linked in.
+- **You can hear a voice before you choose it.** `banshee.speak` takes an
+  optional `voice` for one sentence and leaves your configured voice untouched.
+- **`banshee.history` takes a `limit`.** An absent `limit` still returns every
+  row. An explicit `0` returns none.
+- **The tray menu copies your last dictation.** `Copy last dictation` puts it on
+  the clipboard. `Open Banshee (coming soon)` sits next to it, disabled, until
+  the app it opens exists.
+
+### Fixed
+
+- **The daemon and `banshee connect` now report the same agents.** The daemon
+  reads your login shell's `PATH`, so it sees the agents you have installed
+  rather than only the four system directories launchd gives it. What remains: a
+  slow shell profile delays every client, not only the first. The `PATH` resolves
+  once, behind a `OnceLock`, the first time anything needs it, and every
+  concurrent caller waits on that same call. No timeout guards the wait, because
+  nothing has measured how long a shell profile should take.
+- **A bare command name no longer counts as connected.** Banshee used to ask
+  whether `banshee-mcp-shim` resolves on `PATH`. Your agent resolves that name,
+  not Banshee, so neither the daemon nor the CLI could answer, and they answered
+  differently. An agent registered with the bare name now reads as installed and
+  not connected, and `banshee connect <agent>` rewrites the entry to the shim's
+  absolute path, which depends on no `PATH` at all. Run it once per agent. What
+  remains: if you set `CLAUDE_CONFIG_DIR` in your shell, the daemon cannot see
+  that variable and reads the default config instead, so the two can still
+  disagree for Claude Code.
+
 ## [0.11.1] - 2026-08-26
 
 ### Fixed

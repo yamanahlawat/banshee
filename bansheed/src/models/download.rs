@@ -83,9 +83,33 @@ fn other(error: reqwest::Error) -> BansheeError {
     BansheeError::Other(error.to_string())
 }
 
-fn progress(model: &str, bytes: u64, total: Option<u64>, state: DownloadState) -> DownloadProgress {
+/// What a model file is, for a person reading a progress line.
+pub fn label(file: &str) -> &'static str {
+    if crate::config::STTPreset::ALL
+        .iter()
+        .any(|preset| preset.model_name() == file)
+    {
+        "Speech model"
+    } else if file == crate::VAD_MODEL {
+        "Voice detection model"
+    } else {
+        "Voice"
+    }
+}
+
+fn progress(
+    model: &str,
+    index: usize,
+    count: usize,
+    bytes: u64,
+    total: Option<u64>,
+    state: DownloadState,
+) -> DownloadProgress {
     DownloadProgress {
         model: model.to_string(),
+        label: label(model).to_string(),
+        index,
+        count,
         bytes,
         total,
         state,
@@ -110,6 +134,8 @@ async fn fetch(
     client: &reqwest::Client,
     download: &Download,
     dir: &Path,
+    index: usize,
+    count: usize,
     on_progress: &mut impl FnMut(DownloadProgress),
 ) -> Result<(), BansheeError> {
     let part = dir.join(format!("{}.part", download.name));
@@ -146,7 +172,8 @@ async fn fetch(
 
     let mut sent = already;
     let mut reported = None;
-    let mut report = |sent, state| on_progress(progress(&download.name, sent, total, state));
+    let mut report =
+        |sent, state| on_progress(progress(&download.name, index, count, sent, total, state));
     report(sent, DownloadState::Downloading);
 
     while let Some(chunk) = response.chunk().await.map_err(other)? {
@@ -177,11 +204,20 @@ pub async fn download_all(
 
     let client = reqwest::Client::new();
     let mut failures = Vec::new();
-    for download in downloads {
+    let count = downloads.len();
+    for (position, download) in downloads.iter().enumerate() {
+        let index = position + 1;
         // One bad file must not strand the rest, and a caller counting terminal
         // notifications is owed one for every name it was given
-        if let Err(error) = fetch(&client, download, dir, on_progress).await {
-            on_progress(progress(&download.name, 0, None, DownloadState::Failed));
+        if let Err(error) = fetch(&client, download, dir, index, count, on_progress).await {
+            on_progress(progress(
+                &download.name,
+                index,
+                count,
+                0,
+                None,
+                DownloadState::Failed,
+            ));
             failures.push(format!("{}: {error}", download.name));
         }
     }
@@ -228,5 +264,49 @@ mod tests {
     fn an_unknown_or_empty_total_yields_no_percentage() {
         assert_eq!(percent(50, None), None);
         assert_eq!(percent(50, Some(0)), None, "a zero total must not divide");
+    }
+
+    #[test]
+    fn a_file_is_labelled_by_what_it_is() {
+        use super::label;
+        assert_eq!(label("ggml-large-v3-turbo-q5_0.bin"), "Speech model");
+        assert_eq!(label("silero_vad.onnx"), "Voice detection model");
+        assert_eq!(label("af_sky.bin"), "Voice");
+        assert_eq!(label("kokoro-v1.0.onnx"), "Voice");
+    }
+
+    #[test]
+    fn a_progress_report_names_the_file_its_place_and_its_size() {
+        use banshee_common::DownloadState;
+        let reported = super::progress(
+            "ggml-large-v3-turbo-q5_0.bin",
+            1,
+            3,
+            356,
+            Some(574),
+            DownloadState::Downloading,
+        );
+        assert_eq!(reported.label, "Speech model");
+        assert_eq!(reported.index, 1);
+        assert_eq!(reported.count, 3);
+        assert_eq!(reported.bytes, 356);
+        assert_eq!(reported.total, Some(574));
+        assert_eq!(super::percent(reported.bytes, reported.total), Some(62));
+    }
+
+    #[test]
+    fn an_unknown_length_stays_none() {
+        use banshee_common::DownloadState;
+        let reported = super::progress(
+            "silero_vad.onnx",
+            2,
+            3,
+            10,
+            None,
+            DownloadState::Downloading,
+        );
+        assert_eq!(reported.label, "Voice detection model");
+        assert_eq!(reported.total, None);
+        assert_eq!(super::percent(reported.bytes, reported.total), None);
     }
 }

@@ -1,4 +1,6 @@
 use banshee_common::error::BansheeError;
+use banshee_common::{AgentRow, PlannedChange};
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -30,6 +32,18 @@ impl Agent {
             Agent::Cursor => "cursor",
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
+        }
+    }
+
+    /// What a person calls the tool. `name()` stays the slug the CLI takes.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Agent::Antigravity => "Antigravity",
+            Agent::ClaudeCode => "Claude Code",
+            Agent::Codex => "Codex",
+            Agent::Cursor => "Cursor",
+            Agent::OpenCode => "OpenCode",
+            Agent::Pi => "Pi",
         }
     }
 
@@ -76,8 +90,6 @@ pub struct Env {
     pub on_path: Vec<&'static str>,
     /// The command Claude Code has registered for the banshee MCP server.
     pub claude_shim: Option<String>,
-    /// PATH resolves the bare name `banshee-mcp-shim` to `shim`.
-    pub shim_on_path: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -112,6 +124,35 @@ pub fn detect(agent: Agent, env: &Env) -> Presence {
     }
 }
 
+pub fn row(agent: Agent, env: &Env) -> AgentRow {
+    let (presence, note) = match detect(agent, env) {
+        Presence::NotInstalled { looked_for } => {
+            ("absent", format!("Not installed. Looked for {looked_for}"))
+        }
+        Presence::Installed => match plan(agent, env) {
+            Err(error) => ("found", format!("Installed, but the plan failed: {error}")),
+            Ok(changes) if changes.is_empty() => ("connected", "Connected".to_string()),
+            Ok(_) => ("found", "Installed, not connected".to_string()),
+        },
+    };
+    AgentRow {
+        id: agent.name().to_string(),
+        name: agent.display_name().to_string(),
+        presence: presence.to_string(),
+        note,
+    }
+}
+
+pub fn planned_change(change: &Change) -> PlannedChange {
+    PlannedChange {
+        path: match change {
+            Change::WriteFile { path, .. } => Some(path.display().to_string()),
+            Change::Run { .. } => None,
+        },
+        diff: render(change),
+    }
+}
+
 const PI_EXTENSION: &str = include_str!("../../integrations/pi/banshee.ts");
 
 const HOOK_SCRIPT: &str = include_str!("../../integrations/claude-code/banshee-speak-check.sh");
@@ -132,12 +173,12 @@ fn require_shim(env: &Env) -> Result<&Path, BansheeError> {
 
 pub(crate) const SHIM_NAME: &str = "banshee-mcp-shim";
 
-fn reaches_shim(registered: Option<&str>, shim: &Path, shim_on_path: bool) -> bool {
+fn reaches_shim(registered: Option<&str>, shim: &Path) -> bool {
     let Some(command) = registered else {
         return false;
     };
     if command == SHIM_NAME {
-        return shim_on_path;
+        return false;
     }
     let command = Path::new(command);
     command == shim || same_file(command, shim)
@@ -155,7 +196,7 @@ fn plan_claude(env: &Env) -> Result<Vec<Change>, BansheeError> {
     let shim_path = require_shim(env)?;
     let shim = shim_path.display().to_string();
     let mut changes = Vec::new();
-    if !reaches_shim(env.claude_shim.as_deref(), shim_path, env.shim_on_path) {
+    if !reaches_shim(env.claude_shim.as_deref(), shim_path) {
         // `claude mcp add` refuses a name it already holds, so a stale command
         // has to go first
         if env.claude_shim.is_some() {
@@ -221,26 +262,26 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
         Agent::Codex => {
             let shim = require_shim(env)?;
             rewrite(env.home.join(".codex/config.toml"), |before| {
-                with_codex_server(before, shim, env.shim_on_path)
+                with_codex_server(before, shim)
             })
         }
         Agent::Cursor => {
             let shim = require_shim(env)?;
             rewrite(env.home.join(".cursor/mcp.json"), |before| {
-                with_mcp_server(before, "mcp.json", shim, env.shim_on_path)
+                with_mcp_server(before, "mcp.json", shim)
             })
         }
         // The IDE, the `agy` CLI and the SDK share this one file
         Agent::Antigravity => {
             let shim = require_shim(env)?;
             rewrite(env.home.join(".gemini/config/mcp_config.json"), |before| {
-                with_mcp_server(before, "mcp_config.json", shim, env.shim_on_path)
+                with_mcp_server(before, "mcp_config.json", shim)
             })
         }
         Agent::OpenCode => {
             let shim = require_shim(env)?;
             rewrite(env.home.join(".config/opencode/opencode.jsonc"), |before| {
-                with_opencode_server(before, shim, env.shim_on_path)
+                with_opencode_server(before, shim)
             })
         }
         Agent::Pi => Ok(write_if_changed(
@@ -262,11 +303,7 @@ fn read_if_present(path: &Path) -> Result<Option<String>, BansheeError> {
 }
 
 // json5 reads the comments and trailing commas that serde_json refuses; the rewrite is plain JSON
-fn with_opencode_server(
-    config: Option<&str>,
-    shim: &Path,
-    shim_on_path: bool,
-) -> Result<Option<String>, BansheeError> {
+fn with_opencode_server(config: Option<&str>, shim: &Path) -> Result<Option<String>, BansheeError> {
     let mut root: serde_json::Value = match config {
         Some(text) => json5::from_str(text)
             .map_err(|error| malformed("opencode.jsonc", &format!("could not be read: {error}")))?,
@@ -292,7 +329,7 @@ fn with_opencode_server(
     let enabled = entry.get("enabled") != Some(&serde_json::Value::Bool(false));
     if enabled
         && entry.get("type") == Some(&serde_json::json!("local"))
-        && reaches_shim(command, shim, shim_on_path)
+        && reaches_shim(command, shim)
     {
         return Ok(None);
     }
@@ -335,7 +372,6 @@ fn with_mcp_server(
     config: Option<&str>,
     file: &str,
     shim: &Path,
-    shim_on_path: bool,
 ) -> Result<Option<String>, BansheeError> {
     let mut root: serde_json::Value = match config {
         Some(text) => json5::from_str(text)
@@ -354,7 +390,7 @@ fn with_mcp_server(
         .as_object_mut()
         .ok_or_else(|| malformed(file, "mcpServers.banshee is not an object"))?;
     let command = entry.get("command").and_then(serde_json::Value::as_str);
-    if reaches_shim(command, shim, shim_on_path) {
+    if reaches_shim(command, shim) {
         return Ok(None);
     }
     entry.insert(
@@ -365,11 +401,7 @@ fn with_mcp_server(
 }
 
 // toml_edit keeps the user's comments
-fn with_codex_server(
-    config: Option<&str>,
-    shim: &Path,
-    shim_on_path: bool,
-) -> Result<Option<String>, BansheeError> {
+fn with_codex_server(config: Option<&str>, shim: &Path) -> Result<Option<String>, BansheeError> {
     let mut document: toml_edit::DocumentMut = config
         .unwrap_or_default()
         .parse()
@@ -390,7 +422,7 @@ fn with_codex_server(
         .as_table_mut()
         .ok_or_else(|| malformed("config.toml", "mcp_servers.banshee is not a table"))?;
     let command = banshee.get("command").and_then(toml_edit::Item::as_str);
-    if reaches_shim(command, shim, shim_on_path) {
+    if reaches_shim(command, shim) {
         return Ok(None);
     }
     banshee["command"] = toml_edit::value(shim.display().to_string());
@@ -566,20 +598,87 @@ fn registered_claude_shim(global_config: &Path) -> Option<String> {
         .map(String::from)
 }
 
-fn path_resolves_to_shim(shim: &Path) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    let Ok(real) = std::fs::canonicalize(shim) else {
-        return false;
-    };
-    std::env::split_paths(&path)
-        .filter_map(|dir| std::fs::canonicalize(dir.join(SHIM_NAME)).ok())
-        .any(|found| found == real)
+/// An empty entry resolves against the working directory, which is never what
+/// a PATH lookup means here.
+pub(crate) fn path_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path).filter(|dir| !dir.as_os_str().is_empty())
+}
+
+const PATH_START: &str = "__BANSHEE_PATH_START__";
+const PATH_END: &str = "__BANSHEE_PATH_END__";
+
+fn extract_path(output: &str) -> Option<OsString> {
+    let after_start = output.split_once(PATH_START)?.1;
+    let path = after_start.split_once(PATH_END)?.0;
+    Some(OsString::from(path))
+}
+
+// A login profile that blocks would otherwise hold the first caller forever,
+// and every later caller behind the OnceLock. Nothing measured either number.
+// The wait trades how slow a profile may be against how long a hung one stalls
+// agent detection. The poll trades wake-ups against how late the kill lands.
+const SHELL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const SHELL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn login_shell_path() -> Option<OsString> {
+    use std::io::Read;
+
+    let shell = std::env::var_os("SHELL")?;
+    let command = format!(r#"printf '{PATH_START}%s{PATH_END}' "$PATH""#);
+    let mut child = std::process::Command::new(&shell)
+        .arg("-lc")
+        .arg(&command)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = std::time::Instant::now() + SHELL_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(SHELL_POLL);
+            }
+        }
+    }
+
+    let mut printed = String::new();
+    child.stdout.take()?.read_to_string(&mut printed).ok()?;
+    extract_path(&printed)
+}
+
+fn with_fallback(shell_path: Option<OsString>) -> OsString {
+    match shell_path {
+        Some(path) if !path.is_empty() => path,
+        _ => std::env::var_os("PATH").unwrap_or_default(),
+    }
+}
+
+pub(crate) fn resolved_path() -> OsString {
+    static RESOLVED: std::sync::OnceLock<OsString> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| with_fallback(login_shell_path()))
+        .clone()
 }
 
 impl Env {
     pub fn from_machine() -> Result<Env, BansheeError> {
+        Env::with_path(resolved_path())
+    }
+
+    #[cfg(test)]
+    fn with_shell_path(shell_path: Option<OsString>) -> Result<Env, BansheeError> {
+        Env::with_path(with_fallback(shell_path))
+    }
+
+    fn with_path(path: OsString) -> Result<Env, BansheeError> {
         let home = crate::service::home_dir()?;
         let config_dir_override = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
         // Claude Code keeps user-scope servers in ~/.claude.json unless the variable moves them
@@ -591,7 +690,6 @@ impl Env {
         let exe = std::env::current_exe()?;
         let banshee = std::fs::canonicalize(&exe)?;
         let shim = crate::service::sibling(&exe, SHIM_NAME).ok();
-        let shim_on_path = shim.as_deref().is_some_and(path_resolves_to_shim);
         // Starting Claude Code makes it rewrite its own config, so detection never spawns an agent
         let on_path = Agent::ALL
             .iter()
@@ -599,7 +697,7 @@ impl Env {
                 Signal::OnPath(binary) => Some(binary),
                 Signal::HomeDir(_) => None,
             })
-            .filter(|binary| crate::status::on_path(binary))
+            .filter(|binary| crate::status::on_path(binary, &path))
             .collect();
         Ok(Env {
             home,
@@ -608,9 +706,23 @@ impl Env {
             shim,
             on_path,
             claude_shim: registered_claude_shim(&claude_global),
-            shim_on_path,
         })
     }
+}
+
+/// Applies in order and names what is left when one fails.
+pub fn apply_all(changes: &[Change], mut written: impl FnMut(&Change)) -> Result<(), BansheeError> {
+    for (done, change) in changes.iter().enumerate() {
+        if let Err(error) = apply(change) {
+            let left: String = changes[done..].iter().map(render).collect();
+            return Err(BansheeError::Rejected(format!(
+                "{error}\n{done} of {} changes applied. Still to apply:\n{left}",
+                changes.len()
+            )));
+        }
+        written(change);
+    }
+    Ok(())
 }
 
 pub fn run(agent: Option<Agent>, yes: bool) -> Result<(), BansheeError> {
@@ -636,18 +748,11 @@ pub fn run(agent: Option<Agent>, yes: bool) -> Result<(), BansheeError> {
     if !yes && !confirm("Apply? [y/N] ")? {
         return Err(BansheeError::Rejected("Nothing written.".into()));
     }
-    for (done, change) in changes.iter().enumerate() {
-        if let Err(error) = apply(change) {
-            let left: String = changes[done..].iter().map(render).collect();
-            return Err(BansheeError::Rejected(format!(
-                "{error}\n{done} of {} changes applied. Still to apply:\n{left}",
-                changes.len()
-            )));
-        }
+    apply_all(&changes, |change| {
         if let Change::WriteFile { path, .. } = change {
             println!("wrote {}", path.display());
         }
-    }
+    })?;
     println!(
         "{} is connected. Restart it to pick up the change.",
         agent.name()
@@ -662,16 +767,8 @@ fn list(env: &Env) -> Result<(), BansheeError> {
         .max()
         .unwrap_or(0);
     for agent in Agent::ALL {
-        // One agent that cannot be planned must not hide the other rows
-        let line = match detect(agent, env) {
-            Presence::NotInstalled { looked_for } => format!("not found   ({looked_for})"),
-            Presence::Installed => match plan(agent, env) {
-                Err(error) => format!("installed   error: {error}"),
-                Ok(changes) if changes.is_empty() => "installed   connected".to_string(),
-                Ok(_) => "installed   not connected".to_string(),
-            },
-        };
-        println!("{:<width$} {line}", agent.name());
+        let row = row(agent, env);
+        println!("{:<width$} {:<10} {}", row.id, row.presence, row.note);
     }
     println!();
     println!("Connect one with: banshee connect <agent>");
@@ -699,11 +796,118 @@ mod tests {
             shim: Some(PathBuf::from("/opt/banshee/bin/banshee-mcp-shim")),
             on_path: Vec::new(),
             claude_shim: None,
-            shim_on_path: false,
         }
     }
 
+    fn installed_env(home: &std::path::Path, agent: Agent) -> Env {
+        let mut env = env_at(home);
+        match agent.signal() {
+            Signal::OnPath(binary) => env.on_path.push(binary),
+            Signal::HomeDir(dir) => std::fs::create_dir_all(home.join(dir)).unwrap(),
+        }
+        env
+    }
+
     const SHIM: &str = "/opt/banshee/bin/banshee-mcp-shim";
+
+    #[test]
+    fn detection_searches_the_resolved_path_not_the_process_path() {
+        let dir = scratch("resolved-path");
+        std::fs::write(dir.join("codex"), "").unwrap();
+
+        let env = Env::with_shell_path(Some(OsString::from(&dir))).unwrap();
+        assert_eq!(env.on_path, vec!["codex"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_banner_before_the_markers_is_not_part_of_the_path() {
+        let output = format!("Welcome to zsh\n{PATH_START}/usr/bin:/bin{PATH_END}\n");
+        assert_eq!(extract_path(&output), Some(OsString::from("/usr/bin:/bin")));
+    }
+
+    #[test]
+    fn a_missing_start_marker_yields_none() {
+        let output = format!("/usr/bin:/bin{PATH_END}");
+        assert_eq!(extract_path(&output), None);
+    }
+
+    #[test]
+    fn a_missing_end_marker_yields_none() {
+        let output = format!("{PATH_START}/usr/bin:/bin");
+        assert_eq!(extract_path(&output), None);
+    }
+
+    #[test]
+    fn an_empty_path_does_not_search_the_working_directory() {
+        assert!(
+            std::path::Path::new("Cargo.toml").is_file(),
+            "test assumes the crate root as the working directory"
+        );
+        assert!(!crate::status::on_path("Cargo.toml", &OsString::new()));
+    }
+
+    #[test]
+    fn a_resolver_that_fails_falls_back_to_the_process_path() {
+        assert_eq!(
+            with_fallback(None),
+            std::env::var_os("PATH").unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn an_empty_resolved_path_falls_back_to_the_process_path() {
+        assert_eq!(
+            with_fallback(Some(OsString::new())),
+            std::env::var_os("PATH").unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn a_row_reports_absent_installed_and_connected_apart() {
+        let home = scratch("rows");
+        let env = env_at(&home);
+        let row = row(Agent::Cursor, &env);
+        assert_eq!(row.id, "cursor");
+        assert_eq!(row.name, "Cursor");
+        assert_eq!(row.presence, "absent");
+        assert!(row.note.contains("Not installed"));
+    }
+
+    #[test]
+    fn an_installed_agent_reads_found_before_it_is_connected_and_connected_after() {
+        let home = scratch("rows-connected");
+        let env = installed_env(&home, Agent::Cursor);
+        assert_eq!(row(Agent::Cursor, &env).presence, "found");
+
+        for change in plan(Agent::Cursor, &env).unwrap() {
+            apply(&change).unwrap();
+        }
+        assert_eq!(row(Agent::Cursor, &env).presence, "connected");
+    }
+
+    #[test]
+    fn every_agent_has_a_display_name_that_is_not_its_slug() {
+        for agent in Agent::ALL {
+            assert_ne!(agent.display_name(), agent.name(), "{agent:?}");
+        }
+        assert_eq!(Agent::ClaudeCode.display_name(), "Claude Code");
+    }
+
+    #[test]
+    fn a_file_change_carries_its_path_and_a_command_does_not() {
+        let home = scratch("planned");
+        let env = installed_env(&home, Agent::Cursor);
+        let planned: Vec<_> = plan(Agent::Cursor, &env)
+            .unwrap()
+            .iter()
+            .map(planned_change)
+            .collect();
+        assert!(planned.iter().any(|change| change.path.is_some()));
+        for change in &planned {
+            assert!(!change.diff.is_empty());
+        }
+    }
 
     #[test]
     fn cursor_is_installed_when_its_dir_exists_and_the_clis_when_on_path() {
@@ -738,7 +942,7 @@ mod tests {
 
     #[test]
     fn mcp_server_is_added_to_a_missing_file() {
-        let after = with_mcp_server(None, "mcp.json", Path::new(SHIM), false)
+        let after = with_mcp_server(None, "mcp.json", Path::new(SHIM))
             .unwrap()
             .expect("a change");
         let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -752,7 +956,7 @@ mod tests {
     #[test]
     fn mcp_server_keeps_other_servers_and_key_order() {
         let before = "{\n  \"theme\": \"dark\",\n  \"mcpServers\": {\n    \"other\": { \"command\": \"x\" },\n  },\n}\n";
-        let after = with_mcp_server(Some(before), "settings.json", Path::new(SHIM), false)
+        let after = with_mcp_server(Some(before), "settings.json", Path::new(SHIM))
             .unwrap()
             .expect("a change");
         let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -767,31 +971,28 @@ mod tests {
     fn mcp_server_that_reaches_the_shim_means_no_change() {
         let absolute = format!(r#"{{"mcpServers":{{"banshee":{{"command":"{SHIM}"}}}}}}"#);
         assert_eq!(
-            with_mcp_server(Some(&absolute), "mcp.json", Path::new(SHIM), false).unwrap(),
+            with_mcp_server(Some(&absolute), "mcp.json", Path::new(SHIM)).unwrap(),
             None
         );
         let bare = r#"{"mcpServers":{"banshee":{"command":"banshee-mcp-shim"}}}"#;
-        assert_eq!(
-            with_mcp_server(Some(bare), "mcp.json", Path::new(SHIM), true).unwrap(),
-            None
-        );
         assert!(
-            with_mcp_server(Some(bare), "mcp.json", Path::new(SHIM), false)
+            with_mcp_server(Some(bare), "mcp.json", Path::new(SHIM))
                 .unwrap()
-                .is_some()
+                .is_some(),
+            "a bare name never reaches the shim"
         );
     }
 
     #[test]
     fn mcp_server_errors_name_the_file() {
-        let error = with_mcp_server(Some("[1]"), "mcp.json", Path::new(SHIM), false)
-            .expect_err("not an object");
+        let error =
+            with_mcp_server(Some("[1]"), "mcp.json", Path::new(SHIM)).expect_err("not an object");
         assert!(error.to_string().starts_with("mcp.json "), "{error}");
     }
 
     #[test]
     fn codex_server_is_added_to_a_missing_file() {
-        let after = with_codex_server(None, Path::new(SHIM), false)
+        let after = with_codex_server(None, Path::new(SHIM))
             .unwrap()
             .expect("a change");
         assert_eq!(
@@ -804,7 +1005,7 @@ mod tests {
     fn codex_server_keeps_comments_and_other_tables() {
         let before =
             "# my codex config\nmodel = \"o3\" # keep\n\n[mcp_servers.other]\ncommand = \"x\"\n";
-        let after = with_codex_server(Some(before), Path::new(SHIM), false)
+        let after = with_codex_server(Some(before), Path::new(SHIM))
             .unwrap()
             .expect("a change");
         assert!(
@@ -825,16 +1026,16 @@ mod tests {
     fn codex_server_that_reaches_the_shim_means_no_change() {
         let absolute = format!("[mcp_servers.banshee]\ncommand = \"{SHIM}\"\n");
         assert_eq!(
-            with_codex_server(Some(&absolute), Path::new(SHIM), false).unwrap(),
+            with_codex_server(Some(&absolute), Path::new(SHIM)).unwrap(),
             None
         );
         let bare = "[mcp_servers.banshee]\ncommand = \"banshee-mcp-shim\"\n";
-        assert_eq!(
-            with_codex_server(Some(bare), Path::new(SHIM), true).unwrap(),
-            None
-        );
+        let after = with_codex_server(Some(bare), Path::new(SHIM))
+            .unwrap()
+            .expect("a bare name never reaches the shim");
+        assert!(after.contains(&format!("command = \"{SHIM}\"")), "{after}");
         let stale = "[mcp_servers.banshee]\ncommand = \"/old/banshee-mcp-shim\"\nargs = []\n";
-        let after = with_codex_server(Some(stale), Path::new(SHIM), false)
+        let after = with_codex_server(Some(stale), Path::new(SHIM))
             .unwrap()
             .expect("a change");
         assert!(after.contains(&format!("command = \"{SHIM}\"")), "{after}");
@@ -851,7 +1052,7 @@ mod tests {
             "[[mcp_servers]]\ncommand = \"x\"\n",
             "[mcp_servers]\nbanshee = { command = \"x\" }\n",
         ] {
-            let error = with_codex_server(Some(before), Path::new(SHIM), false).expect_err(before);
+            let error = with_codex_server(Some(before), Path::new(SHIM)).expect_err(before);
             assert!(
                 matches!(error, BansheeError::Rejected(_)),
                 "{before}: {error}"
@@ -861,21 +1062,15 @@ mod tests {
 
     #[test]
     fn mcp_server_refuses_an_mcp_servers_that_is_not_an_object() {
-        let error = with_mcp_server(
-            Some(r#"{"mcpServers":[1]}"#),
-            "mcp.json",
-            Path::new(SHIM),
-            false,
-        )
-        .expect_err("a list is not a server map");
+        let error = with_mcp_server(Some(r#"{"mcpServers":[1]}"#), "mcp.json", Path::new(SHIM))
+            .expect_err("a list is not a server map");
         assert!(matches!(error, BansheeError::Rejected(_)), "{error}");
         assert_eq!(error.to_string(), "mcp.json mcpServers is not an object");
     }
 
     #[test]
     fn codex_errors_name_the_file() {
-        let error =
-            with_codex_server(Some("not = = toml"), Path::new(SHIM), false).expect_err("bad toml");
+        let error = with_codex_server(Some("not = = toml"), Path::new(SHIM)).expect_err("bad toml");
         assert!(error.to_string().starts_with("config.toml "), "{error}");
     }
 
@@ -913,12 +1108,11 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_shim_name_that_path_resolves_to_the_shim_is_connected() {
-        let home = scratch("claude-bare-on-path");
+    fn a_bare_shim_name_never_reaches_the_shim_even_when_registered() {
+        let home = scratch("claude-bare-registered");
         let mut env = env_at(&home);
         env.on_path.push("claude");
         env.claude_shim = Some("banshee-mcp-shim".into());
-        env.shim_on_path = true;
         let script = home.join(".claude/hooks/banshee-speak-check.sh");
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
         std::fs::write(&script, hook_script(&env.banshee)).unwrap();
@@ -930,17 +1124,41 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(plan(Agent::ClaudeCode, &env).unwrap().is_empty());
+        let changes = plan(Agent::ClaudeCode, &env).unwrap();
+        assert_eq!(
+            changes,
+            vec![
+                Change::Run {
+                    argv: ["claude", "mcp", "remove", "--scope", "user", "banshee"]
+                        .map(String::from)
+                        .to_vec()
+                },
+                Change::Run {
+                    argv: [
+                        "claude",
+                        "mcp",
+                        "add",
+                        "--scope",
+                        "user",
+                        "banshee",
+                        "--",
+                        "/opt/banshee/bin/banshee-mcp-shim"
+                    ]
+                    .map(String::from)
+                    .to_vec()
+                },
+            ],
+            "the working hook is untouched; only the shim registration is reissued"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn a_bare_shim_name_that_path_does_not_resolve_is_reissued() {
-        let home = scratch("claude-bare-off-path");
+    fn a_bare_shim_name_with_no_hook_set_up_is_still_reissued() {
+        let home = scratch("claude-bare-no-hook");
         let mut env = env_at(&home);
         env.on_path.push("claude");
         env.claude_shim = Some("banshee-mcp-shim".into());
-        env.shim_on_path = false;
         let changes = plan(Agent::ClaudeCode, &env).unwrap();
         assert!(
             matches!(&changes[0], Change::Run { argv } if argv[2] == "remove"),
@@ -950,18 +1168,13 @@ mod tests {
     }
 
     #[test]
-    fn opencode_bare_shim_name_that_path_resolves_means_no_change() {
+    fn opencode_bare_shim_name_never_means_no_change() {
         let before =
             r#"{"mcp":{"banshee":{"type":"local","enabled":true,"command":["banshee-mcp-shim"]}}}"#;
         let shim = std::path::Path::new("/opt/banshee/bin/banshee-mcp-shim");
-        assert_eq!(
-            with_opencode_server(Some(before), shim, true).unwrap(),
-            None
-        );
         assert!(
-            with_opencode_server(Some(before), shim, false)
-                .unwrap()
-                .is_some()
+            with_opencode_server(Some(before), shim).unwrap().is_some(),
+            "a bare name never reaches the shim"
         );
     }
 
@@ -1294,23 +1507,35 @@ mod tests {
         std::fs::write(&real, "").unwrap();
         let link = home.join("bin/banshee-mcp-shim");
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        assert!(reaches_shim(
-            Some(&link.display().to_string()),
-            &real,
-            false
-        ));
-        assert!(!reaches_shim(
-            Some("/nowhere/banshee-mcp-shim"),
-            &real,
-            false
-        ));
+        assert!(reaches_shim(Some(&link.display().to_string()), &real));
+        assert!(!reaches_shim(Some("/nowhere/banshee-mcp-shim"), &real));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_bare_name_never_reaches_the_shim() {
+        assert!(!reaches_shim(Some(SHIM_NAME), Path::new(SHIM)));
+    }
+
+    #[test]
+    fn an_absolute_path_to_the_shim_still_reaches_it() {
+        assert!(reaches_shim(Some(SHIM), Path::new(SHIM)));
+
+        let home = scratch("shim-still-reaches");
+        let real = home.join("app/banshee-mcp-shim");
+        std::fs::create_dir_all(home.join("app")).unwrap();
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(&real, "").unwrap();
+        let link = home.join("bin/banshee-mcp-shim");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(reaches_shim(Some(&link.display().to_string()), &real));
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn json_hosts_keep_the_entry_other_keys() {
         let before = r#"{"mcpServers":{"banshee":{"command":"/old/shim","env":{"KEEP":"me"}}}}"#;
-        let after = with_mcp_server(Some(before), "mcp.json", Path::new(SHIM), false)
+        let after = with_mcp_server(Some(before), "mcp.json", Path::new(SHIM))
             .unwrap()
             .expect("a change");
         let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -1319,7 +1544,7 @@ mod tests {
 
         let before =
             r#"{"mcp":{"banshee":{"type":"local","command":["/old/shim"],"timeout":20000}}}"#;
-        let after = with_opencode_server(Some(before), Path::new(SHIM), false)
+        let after = with_opencode_server(Some(before), Path::new(SHIM))
             .unwrap()
             .expect("a change");
         let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -1331,13 +1556,13 @@ mod tests {
     fn opencode_entry_with_no_enabled_key_counts_as_enabled() {
         let before = format!(r#"{{"mcp":{{"banshee":{{"type":"local","command":["{SHIM}"]}}}}}}"#);
         assert_eq!(
-            with_opencode_server(Some(&before), Path::new(SHIM), false).unwrap(),
+            with_opencode_server(Some(&before), Path::new(SHIM)).unwrap(),
             None
         );
         let disabled = format!(
             r#"{{"mcp":{{"banshee":{{"type":"local","enabled":false,"command":["{SHIM}"]}}}}}}"#
         );
-        let after = with_opencode_server(Some(&disabled), Path::new(SHIM), false)
+        let after = with_opencode_server(Some(&disabled), Path::new(SHIM))
             .unwrap()
             .expect("a change");
         let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -1375,7 +1600,6 @@ mod tests {
         let after = with_opencode_server(
             Some(before),
             std::path::Path::new("/opt/banshee/bin/banshee-mcp-shim"),
-            false,
         )
         .unwrap()
         .expect("a change");
@@ -1400,7 +1624,6 @@ mod tests {
         let after = with_opencode_server(
             Some(before),
             std::path::Path::new("/opt/banshee/bin/banshee-mcp-shim"),
-            false,
         )
         .unwrap()
         .expect("a change");
@@ -1417,8 +1640,7 @@ mod tests {
         assert_eq!(
             with_opencode_server(
                 Some(before),
-                std::path::Path::new("/opt/banshee/bin/banshee-mcp-shim"),
-                false
+                std::path::Path::new("/opt/banshee/bin/banshee-mcp-shim")
             )
             .unwrap(),
             None
@@ -1430,7 +1652,6 @@ mod tests {
         let after = with_opencode_server(
             None,
             std::path::Path::new("/opt/banshee/bin/banshee-mcp-shim"),
-            false,
         )
         .unwrap()
         .expect("a change");
