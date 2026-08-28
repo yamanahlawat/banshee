@@ -1,20 +1,13 @@
 import type { HistoryRow } from './tauri';
 import { sameLocalDay, toDate } from './time';
 
-const BAND_ROWS = 3;
-
-// The pad holds the newest row above the band.
-export const PAGE = BAND_ROWS + 1;
+// A refresh reads the newest rows alone. Too few is not a wrong answer: a
+// refresh that cannot find the row it last held reads the whole table again.
+export const REFRESH_ROWS = 14;
 
 // The daemon answers oldest first on both the limited and unlimited paths.
 export function newestFirst(rows: HistoryRow[]): HistoryRow[] {
   return [...rows].reverse();
-}
-
-// A limit of zero returns no rows at all, so the margin keeps this above
-// zero even before the first row of the session has landed.
-export function nextLimit(shown: number, margin = 10): number {
-  return shown + margin;
 }
 
 export function moreCount(total: number, shown: number): number {
@@ -30,9 +23,15 @@ export function countNewer(page: HistoryRow[], newestId: HistoryRow['id'] | null
 }
 
 // The band is headed "Earlier today", so a row from any earlier day belongs
-// in History instead.
-export function today(rows: HistoryRow[], now: Date): HistoryRow[] {
-  return rows.filter((row) => sameLocalDay(toDate(row.timestamp), now));
+// in History instead. The rows arrive newest first, so the first row from
+// another day ends the day and the whole table below it stays unread.
+export function today(rows: HistoryRow[], now: Date, from = 0): HistoryRow[] {
+  const kept: HistoryRow[] = [];
+  for (let i = from; i < rows.length; i++) {
+    if (!sameLocalDay(toDate(rows[i].timestamp), now)) break;
+    kept.push(rows[i]);
+  }
+  return kept;
 }
 
 export function formatCount(n: number): string {

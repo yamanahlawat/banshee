@@ -52,7 +52,7 @@
   const ACTIONABLE = ['permission', 'model'];
 </script>
 
-<section aria-label="Setup" style="padding: 18px 22px 12px; display: flex; flex-direction: column; gap: 2px; flex: 1;">
+<section aria-label="Setup" style="padding: 18px 22px 12px; display: flex; flex-direction: column; gap: 2px;">
   <span class="caps" style="color: var(--dim); margin-bottom: 8px;">Setup</span>
   <p style="margin: 0 0 10px;">{summary}</p>
   <ol style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column;">

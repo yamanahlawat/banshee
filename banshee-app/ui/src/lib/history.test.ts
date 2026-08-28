@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { countNewer, formatCount, moreCount, newestFirst, nextLimit, today } from './history';
+import { countNewer, formatCount, moreCount, newestFirst, today } from './history';
 
 describe('newestFirst', () => {
   it('puts the daemon\'s last row first', () => {
@@ -9,15 +9,6 @@ describe('newestFirst', () => {
       { id: 3, text: 'third', timestamp: '2026-08-27T11:00:00Z' },
     ];
     expect(newestFirst(rows).map((r) => r.id)).toEqual([3, 2, 1]);
-  });
-});
-
-describe('nextLimit', () => {
-  it('is never zero when nothing has landed yet', () => {
-    expect(nextLimit(0)).toBeGreaterThan(0);
-  });
-  it('grows as more rows are already shown', () => {
-    expect(nextLimit(50)).toBeGreaterThan(nextLimit(0));
   });
 });
 
@@ -51,19 +42,29 @@ describe('countNewer', () => {
 });
 
 describe('today', () => {
-  const now = new Date('2026-08-27T12:00:00Z');
+  // `today` reads the local calendar day, so noon local anchors the fixture
+  // and every offset below stays on the day its name claims in any zone.
+  const now = new Date(2026, 7, 27, 12, 0, 0);
+  const hoursBefore = (h: number) => new Date(now.getTime() - h * 3_600_000).toISOString();
   const rows = [
-    { id: 3, text: 'this morning', timestamp: '2026-08-27T06:00:00Z' },
-    { id: 2, text: 'last night', timestamp: '2026-08-26T20:00:00Z' },
-    { id: 1, text: 'last week', timestamp: '2026-08-20T09:00:00Z' },
+    { id: 3, text: 'an hour ago', timestamp: hoursBefore(1) },
+    { id: 2, text: 'this morning', timestamp: hoursBefore(4) },
+    { id: 1, text: 'last week', timestamp: hoursBefore(24 * 7) },
   ];
   it('keeps only the rows from the reader\'s own day', () => {
-    const kept = today(rows, now).map((r) => r.id);
-    expect(kept).toContain(3);
-    expect(kept).not.toContain(1);
+    expect(today(rows, now).map((r) => r.id)).toEqual([3, 2]);
   });
   it('keeps nothing when the newest row is from an earlier day', () => {
     expect(today(rows.slice(2), now)).toEqual([]);
+  });
+  it('starts where it is told, so the pad\'s own row is not counted twice', () => {
+    expect(today(rows, now, 1).map((r) => r.id)).toEqual([2]);
+  });
+  it('reads no further than the first row from another day', () => {
+    let reads = 0;
+    const counted = rows.map((row) => ({ ...row, get timestamp() { reads++; return row.timestamp; } }));
+    today(counted, now);
+    expect(reads).toBe(3);
   });
 });
 

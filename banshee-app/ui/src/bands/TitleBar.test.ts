@@ -26,6 +26,13 @@ it('says so when the daemon answers with no hotkey', () => {
   expect(screen.getByText('No hotkey set')).toBeTruthy();
 });
 
+it('never tells the user to press a key while nothing listens for it', () => {
+  daemon.set({ ...reduceStatus(empty(), ready), down: 'not running' });
+  render(TitleBar);
+  expect(screen.getByText('The key does nothing until Banshee runs')).toBeTruthy();
+  expect(screen.queryByText(/to start and stop/)).toBeNull();
+});
+
 it('never tells the user to press a key the daemon has not bound', () => {
   const pendingKey = reduceStatus(empty(), {
     ...ready,

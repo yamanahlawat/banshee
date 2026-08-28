@@ -3,9 +3,9 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ready from './fixtures/ready.json';
 import permissions from './fixtures/permissions.json';
 
-// Midday UTC is the same calendar day from -12:00 through +11:00, so the
-// band's "today" rule reads the same under any host zone.
-const NOW = new Date('2026-08-27T12:00:00Z');
+// Local noon, because `today()` reads the local calendar day. Midday UTC is
+// midnight at +12, so every offset below would straddle the day there.
+const NOW = new Date(2026, 7, 27, 12, 0, 0);
 
 function stamp(minutesAgo: number): string {
   return `${new Date(NOW.getTime() - minutesAgo * 60_000).toISOString().slice(0, 19)}Z`;
@@ -76,11 +76,20 @@ it('keeps the live region off the bands, so a redraw is not announced', async ()
   expect(container.querySelector('[aria-live]')?.getAttribute('aria-live')).toBe('polite');
 });
 
-it('renders a page of the table and counts the rest in the footer', async () => {
+it('gives the band the whole day, however many rows that is', async () => {
   render(App);
-  // Ten rows: the pad takes the newest, the band takes three, six remain.
-  expect(await screen.findByRole('button', { name: '6 more in History ›' })).toBeTruthy();
-  expect(screen.queryByText('dictation 1')).toBeNull();
+  // Ten rows, all from today: the pad takes the newest and the band takes the
+  // nine below it, so nothing is left for the footer to count.
+  expect(await screen.findByText('dictation 1')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: /more in History/ })).toBeNull();
+});
+
+it('counts only the days the band cannot hold', async () => {
+  const older = [{ id: 0, text: 'yesterday', timestamp: stamp(60 * 26) }, ...table];
+  vi.mocked(history).mockImplementation(async (limit?: number) => (limit == null ? older : older.slice(-limit)));
+  render(App);
+  expect(await screen.findByRole('button', { name: '1 more in History ›' })).toBeTruthy();
+  expect(screen.queryByText('yesterday')).toBeNull();
 });
 
 it('speaks a copy confirmation through the announcement region', async () => {
@@ -99,6 +108,25 @@ it('still listens when the daemon is not running at open', async () => {
   expect(container.querySelector('header')?.textContent).toContain('Not running');
   const events = vi.mocked(listen).mock.calls.map((c) => c[0]);
   expect(events).toEqual(['daemon:status', 'daemon:state', 'daemon:downloads', 'daemon:down']);
+});
+
+it('never prints the raw word the daemon uses for an unnamed device', async () => {
+  const noDevice = { ...ready, audio_device: null };
+  vi.mocked(status).mockResolvedValue(noDevice as never);
+  render(App);
+  await screen.findByText('Yes, open the pull request.');
+  const row = screen.getByRole('button', { name: /Microphone/ });
+  expect(row.textContent).toContain('Default');
+  expect(row.textContent).not.toContain('default');
+});
+
+it('keeps the Setup row speaking while a stopped daemon silences the rest', async () => {
+  vi.mocked(status).mockRejectedValue(new Error('no socket'));
+  vi.mocked(history).mockRejectedValue(new Error('no socket'));
+  render(App);
+  await screen.findAllByText('Not running');
+  expect(screen.getByRole('button', { name: /Setup/ }).textContent).toContain('To fix');
+  expect(screen.getByRole('button', { name: /Hotkey/ })).toHaveProperty('disabled', true);
 });
 
 it('reads the history once the daemon comes back', async () => {
@@ -211,7 +239,7 @@ it('keeps the newest dictation reachable when the fixes hold the pad', async () 
   await screen.findByRole('button', { name: /Open Accessibility settings/ });
   // The pad is not on screen, so no row is spoken for by it.
   expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
-  expect(await screen.findByRole('button', { name: '6 more in History ›' })).toBeTruthy();
+  expect(await screen.findByText('dictation 1')).toBeTruthy();
 });
 
 it('keeps the band on screen while a download runs', async () => {

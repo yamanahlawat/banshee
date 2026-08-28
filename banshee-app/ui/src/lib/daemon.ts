@@ -104,3 +104,17 @@ function stationOf(blocker: Blocker): Station {
   return 'Running';
 }
 export const daemon = writable<Daemon>(empty());
+
+export const SYSTEM_DEVICE = 'default';
+
+// The daemon names no device until it opens one, so this says which device
+// its own word stands for.
+export function deviceLabel(live: string | null): string {
+  return live ? `Default (${live})` : 'Default';
+}
+
+// The daemon holds its float settings as f32, so 1.2 reaches a client as
+// 1.2000000476837158. Every step it offers has one decimal or two.
+export function shownFloat(value: number): number {
+  return Math.round(value * 100) / 100;
+}

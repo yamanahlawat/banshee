@@ -14,7 +14,9 @@ import { daemon, empty, reduceStatus } from '../lib/daemon';
 import { forgetCopy } from '../lib/copy';
 import History from './History.svelte';
 
-const NOW = new Date('2026-08-27T12:00:00Z');
+// Local noon, because `today()` reads the local calendar day: midday UTC is
+// midnight in UTC+12 and every offset below would straddle it.
+const NOW = new Date(2026, 7, 27, 12, 0, 0);
 function stamp(minutesAgo: number): string {
   return new Date(NOW.getTime() - minutesAgo * 60_000).toISOString();
 }
@@ -80,9 +82,11 @@ it('narrows the list to dictations matching the search', async () => {
 });
 
 it('hides a dictation from an earlier day until it is searched for', async () => {
+  // The daemon answers in id order and writes each stamp as it inserts, so
+  // the older row carries the lower id.
   history.mockResolvedValue([
-    { id: 1, text: 'Rename the reducer.', timestamp: stamp(30) },
-    { id: 2, text: 'last week', timestamp: '2026-08-20T09:00:00Z' },
+    { id: 1, text: 'last week', timestamp: stamp(60 * 24 * 7) },
+    { id: 2, text: 'Rename the reducer.', timestamp: stamp(30) },
   ]);
   render(History);
   await screen.findByText('Rename the reducer.');

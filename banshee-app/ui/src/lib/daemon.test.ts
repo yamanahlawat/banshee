@@ -7,7 +7,7 @@ import transcribing from '../fixtures/transcribing.json';
 import speaking from '../fixtures/speaking.json';
 import notRunning from '../fixtures/not-running.json';
 import pendingCues from '../fixtures/pending-cues.json';
-import { STATIONS, checklist, empty, fixGroups, fixProse, lampForm, liveFrom, markPending, needleAt, reduceLive, reduceStatus, stateWord } from './daemon';
+import { STATIONS, checklist, deviceLabel, empty, fixGroups, fixProse, lampForm, liveFrom, markPending, needleAt, reduceLive, reduceStatus, shownFloat, stateWord } from './daemon';
 
 describe('the state word', () => {
   it('is Ready on a clear machine', () => {
@@ -129,3 +129,23 @@ describe('the fix groups', () => {
 });
 
 
+
+describe('deviceLabel', () => {
+  it('names the device the daemon opened for its own word', () => {
+    expect(deviceLabel('MacBook Pro Microphone')).toBe('Default (MacBook Pro Microphone)');
+  });
+  it('says the word alone before the daemon opens anything', () => {
+    expect(deviceLabel(null)).toBe('Default');
+  });
+});
+
+describe('shownFloat', () => {
+  it('drops the tail an f32 leaves on a config float', () => {
+    expect(shownFloat(1.2000000476837158)).toBe(1.2);
+    expect(shownFloat(0.550000011920929)).toBe(0.55);
+  });
+  it('leaves a value the slider can reach untouched', () => {
+    expect(shownFloat(0.5)).toBe(0.5);
+    expect(shownFloat(2)).toBe(2);
+  });
+});

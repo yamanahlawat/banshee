@@ -1,33 +1,14 @@
 <script lang="ts">
-  import { daemon } from '../lib/daemon';
   import { copy, copied } from '../lib/copy';
   import { formatTime } from '../lib/time';
-  import Filled from '../controls/Filled.svelte';
 
   export let latest: { text: string; timestamp: string } | null;
   export let landing: string | null;
-  export let agent: { who: string; text: string } | null;
 
   $: done = $copied === 'latest';
 </script>
 
-<section aria-label="Latest dictation" style="padding: 18px 22px 16px; display: flex; flex-direction: column; gap: 8px; flex: 1;">
-  {#if agent}
-    <div style="display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-left: 2px solid var(--ink); margin-bottom: 14px;">
-      <span class="caps" style="color: var(--dim);">{agent.who} asks</span>
-      <p style="margin: 0; font-size: 15px; line-height: 1.45;">{agent.text}</p>
-      {#if $daemon.live.speaking}
-        <!-- The daemon reports no agent, so App passes null and this block
-             never renders. banshee.stop_speaking has no bridge either, so
-             the button carries no press. -->
-        <div style="align-self: flex-start; margin-top: 6px;">
-          <Filled label="Stop speaking" press={() => {}} />
-        </div>
-      {:else}
-        <p style="margin: 6px 0 0; color: var(--dim);">Answer by speaking.</p>
-      {/if}
-    </div>
-  {/if}
+<section aria-label="Latest dictation" style="padding: 18px 22px 16px; display: flex; flex-direction: column; gap: 8px;">
   {#if landing !== null}
     <div style="display: flex; align-items: center; justify-content: space-between;">
       <span class="caps" style="color: var(--dim);">Landing now</span>

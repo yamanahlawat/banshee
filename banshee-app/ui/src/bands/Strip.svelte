@@ -1,18 +1,13 @@
 <script lang="ts">
-  import { daemon, stateWord } from '../lib/daemon';
   import { JOBS, OPENABLE, open, type Job } from '../lib/jobs';
   import Chevron from '../controls/Chevron.svelte';
 
   export let values: Partial<Record<Job, string>> = {};
-
-  // A daemon that is not running knows none of these, so the rows carry no
-  // value and open nothing.
-  $: running = stateWord($daemon) !== 'Not running';
 </script>
 
 <nav aria-label="Settings" style="background: var(--strip); border-top: 1px solid var(--rule); padding: 8px 22px 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px;">
   {#each JOBS as job, i (job)}
-    {@const value = running ? (values[job] ?? '') : ''}
+    {@const value = values[job] ?? ''}
     {@const on = $open === job}
     {@const openable = OPENABLE.includes(job)}
     <!-- What is open can always be closed, whatever the daemon is doing. -->

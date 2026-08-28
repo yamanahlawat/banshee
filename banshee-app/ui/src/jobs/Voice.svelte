@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { daemon } from '../lib/daemon';
+  import { daemon, shownFloat } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { previewVoice, type Voices } from '../lib/tauri';
   import { announce } from '../lib/copy';
@@ -11,7 +11,7 @@
   export let voices: Voices = { voices: [], current: null };
 
   $: tts = ($daemon.status?.config?.tts ?? {}) as Record<string, unknown>;
-  $: speed = Number(tts.speed ?? 1);
+  $: speed = shownFloat(Number(tts.speed ?? 1));
   // The config leads, so the mark moves to the voice a write just chose.
   $: current = String(tts.voice ?? voices.current ?? '');
 </script>

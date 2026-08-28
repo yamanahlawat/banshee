@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { daemon, reduceLive, reduceStatus, setupBlocked, stateWord, type Live, type Status } from './lib/daemon';
+  import { daemon, deviceLabel, reduceLive, reduceStatus, setupBlocked, stateWord, SYSTEM_DEVICE, type Live, type Status } from './lib/daemon';
   import { announcement } from './lib/copy';
-  import { countNewer, moreCount, newestFirst, nextLimit, PAGE, today } from './lib/history';
+  import { countNewer, moreCount, newestFirst, REFRESH_ROWS, today } from './lib/history';
   import { history, listen, listVoices, status, type Down, type DownloadProgress, type HistoryRow, type Voices } from './lib/tauri';
   import { agents, refresh as refreshAgents } from './lib/agents';
   import TitleBar from './bands/TitleBar.svelte';
@@ -31,7 +31,7 @@
   async function readWholeTable() {
     const all = await history();
     total = all.length;
-    rows = newestFirst(all).slice(0, PAGE);
+    rows = newestFirst(all);
     loaded = true;
   }
 
@@ -47,14 +47,14 @@
   // The daemon stores the row before it reports transcribing finished, so
   // that fall is the first moment a refetch can see the new dictation.
   async function refresh() {
-    const page = newestFirst(await history(nextLimit(PAGE)));
+    const page = newestFirst(await history(REFRESH_ROWS));
     const added = countNewer(page, rows[0]?.id ?? null);
     if (added === null) {
       await loadAll();
       return;
     }
     total += added;
-    rows = page.slice(0, PAGE);
+    rows = [...page.slice(0, added), ...rows];
   }
 
   $: landing = $daemon.live.recording ? '' : null;
@@ -63,13 +63,22 @@
   // The daemon names a voice by id, and the strip says what a person calls it.
   $: voiceName = (id: string) => voices.voices.find((v) => v.id === id)?.name ?? id;
   $: connectedAgents = $agents.filter((a) => a.presence === 'connected').length;
+  // The strip has room for the device alone, so it drops the word the panel
+  // spells out beside it.
+  $: inputDevice = String(config.audio?.input_device ?? '');
+  $: microphone = String($daemon.live.audio_device ?? '') ||
+    (inputDevice === SYSTEM_DEVICE ? deviceLabel(null) : inputDevice);
+  // A stopped daemon knows none of these. Setup is the row that has most to
+  // say without one, so it keeps its word.
+  $: live = stateWord($daemon) !== 'Not running';
+  $: whenLive = (value: string) => (live ? value : '');
   $: stripValues = {
-    Microphone: String($daemon.live.audio_device ?? config.audio?.input_device ?? ''),
-    Hotkey: humanize(String(config.audio?.hotkey ?? '')),
-    Voice: voiceName(String(config.tts?.voice ?? '')),
-    Agents: connectedAgents > 0 ? `${connectedAgents} connected` : 'None yet',
+    Microphone: whenLive(microphone),
+    Hotkey: whenLive(humanize(String(config.audio?.hotkey ?? ''))),
+    Voice: whenLive(voiceName(String(config.tts?.voice ?? ''))),
+    Agents: whenLive(connectedAgents > 0 ? `${connectedAgents} connected` : 'None yet'),
     Setup: setupBlocked($daemon) ? 'To fix' : 'All clear',
-    'More settings': 'History',
+    'More settings': whenLive('History'),
   };
   // A dead daemon fails the history read, so waiting for it would leave the
   // pad blank in the one state that most needs its fix.
@@ -78,7 +87,9 @@
   // hold no row, so when they stand in its place the band starts at the top.
   $: padHolds = setup ? 0 : 1;
   $: latest = rows[0] ?? null;
-  $: earlierRows = today(rows.slice(padHolds), new Date());
+  // The band holds the whole day, so the count below it is what History
+  // alone can reach.
+  $: earlierRows = today(rows, new Date(), padHolds);
   $: beyondTheBand = moreCount(total - padHolds, earlierRows.length);
 
   // A stopped daemon fails both reads. The bridge pushes a status once it
@@ -128,27 +139,31 @@
   });
 </script>
 
-<main style="display: flex; flex-direction: column;">
+<main style="display: flex; flex-direction: column; height: 100%;">
   <TitleBar />
   <Scale compact={word === 'Recording'} />
-  {#if $open === 'More settings'}
-    <!-- History replaces both the pad and the earlier list while it is open. -->
-    <History />
-  {:else}
-    {#if setup}
-      <SetupFixes />
+  <!-- Only this region scrolls, so the strip stays reachable however long
+       today's history runs. -->
+  <div style="flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;">
+    {#if $open === 'More settings'}
+      <!-- History replaces both the pad and the earlier list while it is open. -->
+      <History />
     {:else}
-      <Pad {latest} {landing} agent={null} />
+      {#if setup}
+        <SetupFixes />
+      {:else}
+        <Pad {latest} {landing} />
+      {/if}
+      <!-- A job opens above the strip and stands in the earlier list's place. -->
+      {#if $open !== null && BANDED.includes($open)}
+        <Job name={$open}>
+          {#if $open === 'Microphone'}<Microphone />{:else if $open === 'Hotkey'}<HotkeyJob />{:else if $open === 'Voice'}<Voice {voices} />{:else if $open === 'Agents'}<Agents />{/if}
+        </Job>
+      {:else}
+        <Earlier rows={earlierRows} more={beyondTheBand} history={loaded ? (total > 0 ? 'some' : 'empty') : 'unread'} />
+      {/if}
     {/if}
-    <!-- A job opens above the strip and stands in the earlier list's place. -->
-    {#if $open !== null && BANDED.includes($open)}
-      <Job name={$open}>
-        {#if $open === 'Microphone'}<Microphone />{:else if $open === 'Hotkey'}<HotkeyJob />{:else if $open === 'Voice'}<Voice {voices} />{:else if $open === 'Agents'}<Agents />{/if}
-      </Job>
-    {:else}
-      <Earlier rows={earlierRows} more={beyondTheBand} history={loaded ? (total > 0 ? 'some' : 'empty') : 'unread'} />
-    {/if}
-  {/if}
+  </div>
   <Strip values={stripValues} />
   <!-- The region holds only what must be spoken. On `main` it would announce
        every row the list redraws and every word the title bar swaps. -->

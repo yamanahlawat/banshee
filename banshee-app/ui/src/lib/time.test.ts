@@ -18,10 +18,11 @@ describe('formatTime', () => {
 });
 
 describe('sameLocalDay', () => {
-  it('holds for two stamps an hour apart around midday UTC', () => {
-    // Midday UTC is the same calendar day from -12:00 through +11:00, so
-    // this pair does not straddle a local midnight in any real zone.
-    expect(sameLocalDay(toDate('2026-08-26T11:00:00Z'), toDate('2026-08-26T12:00:00Z'))).toBe(true);
+  it('holds for two stamps an hour apart on one local day', () => {
+    // Anchored to local noon. Midday UTC is local midnight at +12, which is
+    // New Zealand, so a UTC pair straddles the day there.
+    const noon = new Date(2026, 7, 26, 12, 0, 0);
+    expect(sameLocalDay(new Date(noon.getTime() - 3_600_000), noon)).toBe(true);
   });
   it('separates two different days', () => {
     expect(sameLocalDay(toDate('2026-08-26T09:00:00Z'), toDate('2026-08-27T09:00:00Z'))).toBe(false);

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { daemon } from '../lib/daemon';
+  import { daemon, deviceLabel, shownFloat, SYSTEM_DEVICE } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { listDevices, type Devices } from '../lib/tauri';
   import Row from '../controls/Row.svelte';
@@ -35,7 +35,7 @@
   $: if (adding && field) field.focus();
 
   $: stt = ($daemon.status?.config?.stt ?? {}) as Record<string, unknown>;
-  $: threshold = Number(stt.vad_threshold ?? 0.5);
+  $: threshold = shownFloat(Number(stt.vad_threshold ?? 0.5));
   $: band = BANDS.find((b) => threshold < b.upTo)?.word ?? 'High';
   $: silence = Number(stt.endpoint_silence_ms ?? 2500);
   $: vocabulary = (stt.vocabulary ?? []) as string[];
@@ -44,6 +44,10 @@
   $: current = String(
     ($daemon.status?.config?.audio?.input_device as string) ?? $daemon.live.audio_device ?? '',
   );
+  $: choices = [
+    { value: SYSTEM_DEVICE, label: deviceLabel($daemon.live.audio_device ?? null) },
+    ...devices.devices.map((d) => ({ value: d.name, label: d.name })),
+  ];
 
   onMount(async () => {
     try {
@@ -58,7 +62,7 @@
   <Picker
     label="Input"
     value={current}
-    options={devices.devices.map((d) => ({ value: d.name, label: d.name }))}
+    options={choices}
     change={(next) => write('audio.input_device', next)}
   />
 </Row>

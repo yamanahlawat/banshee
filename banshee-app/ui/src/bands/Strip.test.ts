@@ -1,7 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { beforeEach, expect, it } from 'vitest';
 import ready from '../fixtures/ready.json';
-import notRunning from '../fixtures/not-running.json';
 import { daemon, empty, reduceStatus } from '../lib/daemon';
 import { open } from '../lib/jobs';
 import Strip from './Strip.svelte';
@@ -36,11 +35,10 @@ it('closes the job a second press names again', async () => {
   expect(row.getAttribute('aria-expanded')).toBe('false');
 });
 
-it('strips the values and shuts the rows when the daemon is not running', () => {
-  daemon.set({ ...reduceStatus(empty(), notRunning), down: 'not running' });
-  render(Strip, { values });
+it('shuts a row whose value its owner withheld', () => {
+  render(Strip, { values: { ...values, Hotkey: '' } });
   expect(screen.queryByText('Right Option')).toBeNull();
-  expect(screen.getByRole('button', { name: /Microphone/ })).toHaveProperty('disabled', true);
+  expect(screen.getByRole('button', { name: /Hotkey/ })).toHaveProperty('disabled', true);
 });
 
 it('never reports a row open when it has no panel at all', () => {
@@ -61,10 +59,10 @@ it('reports a row shut, not absent, when its panel has no value yet', () => {
   }
 });
 
-it('keeps an open job closable after the daemon stops', async () => {
-  render(Strip, { values });
+it('keeps an open job closable after its value goes away', async () => {
+  const { rerender } = render(Strip, { values });
   await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
-  daemon.set({ ...reduceStatus(empty(), notRunning), down: 'not running' });
+  await rerender({ values: { ...values, Microphone: '' } });
 
   const row = screen.getByRole('button', { name: /Microphone/ });
   expect(row).toHaveProperty('disabled', false);
