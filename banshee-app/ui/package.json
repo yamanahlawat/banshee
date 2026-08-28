@@ -17,6 +17,7 @@
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
     "@testing-library/svelte": "^5.4.2",
     "@tsconfig/svelte": "^5.0.4",
+    "axe-core": "^4.13.0",
     "jsdom": "^30.0.1",
     "svelte-check": "^4.0.0",
     "typescript": "^5.6.3",
