@@ -69,7 +69,7 @@
     <p style="margin: 0; color: var(--dim);">Nothing saved yet</p>
   {:else}
     <div style="display: flex; align-items: center; gap: 10px;">
-      <label style="flex: 1; display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 10px; border: 1.5px solid var(--ink); border-radius: 6px; background: var(--field);">
+      <div style="flex: 1; display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 10px; border: 1.5px solid var(--ink); border-radius: 6px; background: var(--field);">
         <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
           <circle cx="6" cy="6" r="4.5" fill="none" stroke="var(--ink)" stroke-width="1.5" />
           <path d="M9.5 9.5 L13 13" stroke="var(--ink)" stroke-width="1.5" stroke-linecap="round" />
@@ -81,7 +81,7 @@
           aria-label="Search history"
           style="flex: 1; border: 0; background: transparent; font: inherit; color: var(--ink);"
         />
-      </label>
+      </div>
       <Action label="Clear all" press={() => { confirming = true; }} />
     </div>
 

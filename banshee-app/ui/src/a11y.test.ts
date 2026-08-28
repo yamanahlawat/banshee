@@ -1,64 +1,150 @@
-import { render } from '@testing-library/svelte';
+import { render, screen } from '@testing-library/svelte';
 import axe from 'axe-core';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ready from './fixtures/ready.json';
-import permissions from './fixtures/permissions.json';
-import recording from './fixtures/recording.json';
-import { daemon, empty, reduceLive, reduceStatus } from './lib/daemon';
+import permissionsFixture from './fixtures/permissions.json';
+import recordingLive from './fixtures/recording.json';
+import { daemon, empty } from './lib/daemon';
 import { OPENABLE, open } from './lib/jobs';
 
-// One saved dictation is enough for the history panel to render its search
-// field and its row controls, which is the ground the gate needs to cover.
-const { ONE_ROW } = vi.hoisted(() => ({
-  ONE_ROW: [{ id: 1, text: 'Yes.', timestamp: '2026-08-27T11:30:00.000Z' }],
-}));
+// `axe.run` builds its tree synchronously from whatever is in the DOM at the
+// moment it is called. Every onMount here suspends at its first `await`, so
+// a render() followed immediately by axe.run() only ever inspects the
+// pre-data skeleton: no loaded row, no fetched device, no fetched voice, no
+// fetched agent. Every run below awaits a query that is false until its
+// state's own async chain has actually landed, so settling the mount and
+// proving something rendered are the same act, per state and per panel.
 
-vi.mock('./lib/tauri', () => ({
-  status: vi.fn().mockResolvedValue(ready),
-  history: vi.fn().mockResolvedValue(ONE_ROW),
+// The daemon answers oldest first; `newestFirst` in App.svelte reverses it.
+// OLDER lands in the Earlier band once NEWER already sits in the pad, so
+// OLDER's text is one line every state (ready, permissions, recording) can
+// show once its own history() call has actually resolved.
+const { OLDER, NEWER } = vi.hoisted(() => {
+  const now = Date.now();
+  return {
+    OLDER: { id: 2, text: 'Open the pull request.', timestamp: new Date(now - 60 * 60_000).toISOString() },
+    NEWER: { id: 1, text: 'Yes.', timestamp: new Date(now - 30 * 60_000).toISOString() },
+  };
+});
+
+const {
+  status,
+  history,
+  listen,
+  copyText,
+  listDevices,
+  listVoices,
+  detectAgents,
+  setSetting,
+  previewVoice,
+  planConnect,
+  applyConnect,
+  clearHistory,
+  downloadModels,
+  openPermissionPane,
+} = vi.hoisted(() => ({
+  status: vi.fn(),
+  history: vi.fn(),
   listen: vi.fn().mockResolvedValue(() => {}),
   copyText: vi.fn().mockResolvedValue(undefined),
-  listDevices: vi.fn().mockResolvedValue({ devices: [], current: null }),
-  listVoices: vi.fn().mockResolvedValue({ voices: [], current: null }),
-  detectAgents: vi.fn().mockResolvedValue([]),
+  listDevices: vi.fn(),
+  listVoices: vi.fn(),
+  detectAgents: vi.fn(),
   setSetting: vi.fn().mockResolvedValue([]),
   previewVoice: vi.fn().mockResolvedValue(undefined),
   planConnect: vi.fn().mockResolvedValue([]),
   applyConnect: vi.fn().mockResolvedValue(undefined),
   clearHistory: vi.fn().mockResolvedValue(undefined),
+  downloadModels: vi.fn().mockResolvedValue(undefined),
+  openPermissionPane: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('./lib/tauri', () => ({
+  status,
+  history,
+  listen,
+  copyText,
+  listDevices,
+  listVoices,
+  detectAgents,
+  setSetting,
+  previewVoice,
+  planConnect,
+  applyConnect,
+  clearHistory,
+  downloadModels,
+  openPermissionPane,
 }));
 import App from './App.svelte';
 
-afterEach(() => open.set(null));
+beforeEach(() => {
+  daemon.set(empty());
+  open.set(null);
+  status.mockReset().mockResolvedValue(ready);
+  history.mockReset().mockResolvedValue([OLDER, NEWER]);
+  listDevices.mockReset().mockResolvedValue({ devices: [], current: null });
+  listVoices.mockReset().mockResolvedValue({ voices: [], current: null });
+  detectAgents.mockReset().mockResolvedValue([]);
+});
 
-const states = {
-  ready: reduceStatus(empty(), ready),
-  permissions: reduceStatus(empty(), permissions),
-  recording: reduceLive(reduceStatus(empty(), ready), recording),
-};
+afterEach(() => open.set(null));
 
 // jsdom has no layout engine, so axe cannot compute colour contrast; the
 // palette is verified by hand instead. Left enabled, the rule only makes
 // axe probe a canvas jsdom does not implement, and logs a warning for it.
 const RUN_OPTIONS = { rules: { 'color-contrast': { enabled: false } } };
 
-for (const [name, state] of Object.entries(states)) {
-  it(`has no axe violations in the ${name} state`, async () => {
-    daemon.set(state);
-    const { container } = render(App);
-    const results = await axe.run(container, RUN_OPTIONS);
-    expect(results.violations).toEqual([]);
-  });
-}
+it('has no axe violations in the ready state', async () => {
+  const { container } = render(App);
+  await screen.findByText(OLDER.text);
+  expect((await axe.run(container, RUN_OPTIONS)).violations).toEqual([]);
+});
 
-// A job panel only renders while `$open` names it, so the three states above
-// never reach inside one. Each openable panel gets its own run.
+it('has no axe violations in the permissions state', async () => {
+  status.mockResolvedValue(permissionsFixture);
+  const { container } = render(App);
+  await screen.findByText(OLDER.text);
+  expect((await axe.run(container, RUN_OPTIONS)).violations).toEqual([]);
+});
+
+it('has no axe violations in the recording state', async () => {
+  // The live flags travel on the same status reply the app already reads,
+  // so merging the recorded fixtures reaches "recording" through the real
+  // reducer path instead of writing to the store by hand.
+  status.mockResolvedValue({ ...ready, ...recordingLive });
+  const { container } = render(App);
+  await screen.findByText(OLDER.text);
+  expect((await axe.run(container, RUN_OPTIONS)).violations).toEqual([]);
+});
+
+// A job panel only renders while `$open` names it, and each one fetches its
+// own data, so the three states above never reach the content inside one.
+// Each proof is a query that only succeeds once that panel's own fetch has
+// landed; a control that exists in the empty state proves nothing.
+const PANEL_PROOF: Record<string, () => Promise<unknown>> = {
+  Microphone: () => screen.findByRole('option', { name: 'MacBook Pro Microphone' }),
+  // The strip always shows the same humanized value in its own row, so the
+  // job's copy of it is not the only match once data has landed.
+  Hotkey: () => screen.findAllByText('Right Command'),
+  Voice: () => screen.findAllByText('Sky'),
+  Agents: () => screen.findByText('Cursor'),
+  'More settings': () => screen.findByText(OLDER.text),
+};
+
 for (const name of OPENABLE) {
   it(`has no axe violations with the ${name} panel open`, async () => {
-    daemon.set(states.ready);
+    if (name === 'Microphone') {
+      listDevices.mockResolvedValue({ devices: [{ name: 'MacBook Pro Microphone', default: true }], current: 'MacBook Pro Microphone' });
+    }
+    if (name === 'Voice') {
+      listVoices.mockResolvedValue({ voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }], current: 'af_sky' });
+    }
+    if (name === 'Agents') {
+      detectAgents.mockResolvedValue([{ id: 'cursor', name: 'Cursor', presence: 'found', note: 'Found' }]);
+    }
     open.set(name);
     const { container } = render(App);
-    const results = await axe.run(container, RUN_OPTIONS);
-    expect(results.violations).toEqual([]);
+    await PANEL_PROOF[name]();
+    expect((await axe.run(container, RUN_OPTIONS)).violations).toEqual([]);
   });
 }
