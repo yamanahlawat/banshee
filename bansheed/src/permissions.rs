@@ -168,6 +168,8 @@ pub fn blockers() -> Vec<Blocker> {
                 name: grant.name().to_string(),
                 consequence: grant.consequence().to_string(),
                 fix: grant.fix().to_string(),
+                // A grant is a switch in System Settings, not a command.
+                command: None,
             })
             .collect()
     }

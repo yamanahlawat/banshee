@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { daemon, reduceLive, reduceStatus, stateWord, type Live, type Status } from './lib/daemon';
+  import { daemon, reduceLive, reduceStatus, setupBlocked, stateWord, type Live, type Status } from './lib/daemon';
   import { announcement } from './lib/copy';
-  import { countNewer, newestFirst, nextLimit, PAGE, today } from './lib/history';
+  import { countNewer, moreCount, newestFirst, nextLimit, PAGE, today } from './lib/history';
   import { history, listen, status, type Down, type DownloadProgress, type HistoryRow } from './lib/tauri';
   import TitleBar from './bands/TitleBar.svelte';
+  import Scale from './bands/Scale.svelte';
+  import SetupFixes from './bands/SetupFixes.svelte';
   import Pad from './bands/Pad.svelte';
   import Earlier from './bands/Earlier.svelte';
 
@@ -44,12 +46,17 @@
     rows = page.slice(0, PAGE);
   }
 
-  // The pad already shows the newest row, so the earlier list starts below it.
-  $: latest = rows[0] ?? null;
-  $: earlierRows = today(rows.slice(1), new Date());
-  $: earlierTotal = Math.max(total - 1, 0);
   $: landing = $daemon.live.recording ? '' : null;
   $: word = stateWord($daemon);
+  // A dead daemon fails the history read, so waiting for it would leave the
+  // pad blank in the one state that most needs its fix.
+  $: setup = setupBlocked($daemon) || (loaded && total === 0);
+  // The pad holds the newest row, so the band starts below it. The fixes
+  // hold no row, so when they stand in its place the band starts at the top.
+  $: padHolds = setup ? 0 : 1;
+  $: latest = rows[0] ?? null;
+  $: earlierRows = today(rows.slice(padHolds), new Date());
+  $: beyondTheBand = moreCount(total - padHolds, earlierRows.length);
 
   // A stopped daemon fails both reads. The bridge pushes a status once it
   // reaches the daemon, so the window reports Not running and waits.
@@ -88,8 +95,13 @@
 
 <main style="display: flex; flex-direction: column;">
   <TitleBar />
-  <Pad {latest} {landing} agent={null} />
-  <Earlier rows={earlierRows} total={earlierTotal} />
+  <Scale compact={word === 'Recording'} />
+  {#if setup}
+    <SetupFixes />
+  {:else}
+    <Pad {latest} {landing} agent={null} />
+  {/if}
+  <Earlier rows={earlierRows} more={beyondTheBand} history={loaded ? (total > 0 ? 'some' : 'empty') : 'unread'} />
   <!-- The region holds only what must be spoken. On `main` it would announce
        every row the list redraws and every word the title bar swaps. -->
   <span class="sr" aria-live="polite">{word}{$announcement ? `. ${$announcement}` : ''}</span>

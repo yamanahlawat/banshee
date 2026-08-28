@@ -7,7 +7,7 @@ import transcribing from '../fixtures/transcribing.json';
 import speaking from '../fixtures/speaking.json';
 import notRunning from '../fixtures/not-running.json';
 import pendingCues from '../fixtures/pending-cues.json';
-import { checklist, empty, lampForm, liveFrom, markPending, reduceLive, reduceStatus, stateWord } from './daemon';
+import { STATIONS, checklist, empty, fixGroups, fixProse, lampForm, liveFrom, markPending, needleAt, reduceLive, reduceStatus, stateWord } from './daemon';
 
 describe('the state word', () => {
   it('is Ready on a clear machine', () => {
@@ -99,3 +99,33 @@ describe('the status reply carries the live flags', () => {
     expect(Object.keys(liveFrom(ready)).sort()).toEqual(Object.keys(empty().live).sort());
   });
 });
+
+describe('the needle', () => {
+  it('rests on the first station that is not clear', () => {
+    expect(needleAt(checklist(reduceStatus(empty(), permissions)))).toBe(
+      STATIONS.indexOf('Permissions'),
+    );
+  });
+  it('reaches Try it on a machine with nothing to fix', () => {
+    expect(needleAt(checklist(reduceStatus(empty(), ready)))).toBe(STATIONS.indexOf('Try it'));
+  });
+  it('rests on Running when the daemon is down', () => {
+    const down = { ...reduceStatus(empty(), permissions), down: 'not running' };
+    expect(needleAt(checklist(down))).toBe(STATIONS.indexOf('Running'));
+  });
+});
+
+describe('the fix groups', () => {
+  const model = (id: string) => ({ kind: 'model', id, name: id, consequence: 'c', fix: 'run: banshee setup' });
+  const grant = (id: string) => ({ kind: 'permission', id, name: id, consequence: 'c', fix: 'grant it' });
+  it('puts every missing model under the one row that downloads them all', () => {
+    const groups = fixGroups([model('a.bin'), model('b.onnx')]);
+    expect(groups.length).toBe(1);
+    expect(groups[0].length).toBe(2);
+  });
+  it('keeps a permission on its own row, because each names its own pane', () => {
+    expect(fixGroups([grant('accessibility'), grant('input_monitoring')]).length).toBe(2);
+  });
+});
+
+

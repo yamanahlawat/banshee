@@ -206,6 +206,10 @@ pub struct Blocker {
     pub name: String,
     pub consequence: String,
     pub fix: String,
+    /// The command that clears this blocker, where one exists. `fix` says the
+    /// same thing in a sentence; this is the part a client can run or copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,6 +303,22 @@ mod wire_tests {
     };
 
     #[test]
+    fn a_blocker_that_names_a_command_puts_it_on_the_wire() {
+        let blocker = Blocker {
+            kind: BlockerKind::Model,
+            id: "silero_vad.onnx".to_string(),
+            name: "silero_vad.onnx".to_string(),
+            consequence: "recording does not work".to_string(),
+            fix: "run: banshee setup".to_string(),
+            command: Some("banshee setup".to_string()),
+        };
+        let wire = serde_json::to_value(&blocker).unwrap();
+        assert_eq!(wire["command"], "banshee setup");
+    }
+
+    /// A grant has no command, and the key stays off the wire rather than
+    /// reaching a client as a null it has to test for.
+    #[test]
     fn a_blocker_serializes_with_the_keys_clients_read() {
         let blocker = Blocker {
             kind: BlockerKind::Permission,
@@ -306,6 +326,7 @@ mod wire_tests {
             name: "Input Monitoring".to_string(),
             consequence: "the hotkey receives no key presses".to_string(),
             fix: "grant it in System Settings".to_string(),
+            command: None,
         };
         let wire = serde_json::to_value(&blocker).unwrap();
         assert_eq!(

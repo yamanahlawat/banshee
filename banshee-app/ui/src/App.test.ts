@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ready from './fixtures/ready.json';
+import permissions from './fixtures/permissions.json';
 
 // Midday UTC is the same calendar day from -12:00 through +11:00, so the
 // band's "today" rule reads the same under any host zone.
@@ -22,17 +23,26 @@ vi.mock('./lib/tauri', () => ({
   history: vi.fn(),
   listen: vi.fn(),
   copyText: vi.fn(),
+  downloadModels: vi.fn(),
+  openPermissionPane: vi.fn(),
 }));
 import { history, listen, status } from './lib/tauri';
 import { daemon, empty } from './lib/daemon';
+import { forgetCopy } from './lib/copy';
 import App from './App.svelte';
 
-beforeEach(() => {
+beforeEach(async () => {
+  // A previous test's mount can still be in flight, and it writes to the same
+  // module-level store. Let it land before this test resets that store.
+  await new Promise((resolve) => setTimeout(resolve, 0));
   // Only `Date` is faked: real timers keep the async waits below working.
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(NOW);
   vi.clearAllMocks();
+  // Every store here is module-level, so one test's copy would otherwise
+  // still read as copied in the next.
   daemon.set(empty());
+  forgetCopy();
   vi.mocked(status).mockResolvedValue(ready);
   vi.mocked(history).mockImplementation(async (limit?: number) => (limit == null ? table : table.slice(-limit)));
   vi.mocked(listen).mockResolvedValue(() => {});
@@ -51,7 +61,9 @@ it('keeps the live region off the bands, so a redraw is not announced', async ()
   const { container } = render(App);
   await screen.findByText('Yes, open the pull request.');
   expect(container.querySelector('main')?.hasAttribute('aria-live')).toBe(false);
-  expect(container.querySelector('.sr')?.getAttribute('aria-live')).toBe('polite');
+  // `.sr` is a shared utility class, so the region is named by its role here.
+  expect(container.querySelectorAll('[aria-live]').length).toBe(1);
+  expect(container.querySelector('[aria-live]')?.getAttribute('aria-live')).toBe('polite');
 });
 
 it('renders a page of the table and counts the rest in the footer', async () => {
@@ -66,7 +78,7 @@ it('speaks a copy confirmation through the announcement region', async () => {
   const copyButton = await screen.findByRole('button', { name: 'Copy' });
   await fireEvent.click(copyButton);
   // Pad renders its own visible "Copied", so this reads the region alone.
-  expect(container.querySelector('.sr')?.textContent).toContain('Copied');
+  expect(container.querySelector('[aria-live]')?.textContent).toContain('Copied');
 });
 
 it('still listens when the daemon is not running at open', async () => {
@@ -150,4 +162,54 @@ it('reads the table once when the first read and a status push race', async () =
   await screen.findByText('Yes, open the pull request.');
   const wholeTableReads = vi.mocked(history).mock.calls.filter((c) => c[0] == null).length;
   expect(wholeTableReads).toBe(1);
+});
+
+it('puts the fixes where the pad goes until the machine can record', async () => {
+  vi.mocked(status).mockResolvedValue(permissions);
+  render(App);
+  expect(await screen.findByRole('button', { name: /Open Accessibility settings/ })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+});
+
+it('gives the pad back once nothing blocks the machine and a dictation exists', async () => {
+  render(App);
+  expect(await screen.findByRole('button', { name: 'Copy' })).toBeTruthy();
+  expect(screen.queryByText('Setup')).toBeNull();
+});
+
+it('shows the fixes on a clear machine that has never recorded', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  // Naming the summary, because a landmark called Setup also belongs to the
+  // scale, and `Nothing saved yet` shows before the history read lands.
+  expect(await screen.findByText(/Nothing left to fix/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+});
+
+it('shows the fix, not an empty pad, when the daemon is down at open', async () => {
+  vi.mocked(status).mockRejectedValue(new Error('no socket'));
+  vi.mocked(history).mockRejectedValue(new Error('no socket'));
+  render(App);
+  expect(await screen.findByText('Banshee is not running.')).toBeTruthy();
+  expect(screen.getByText('banshee start')).toBeTruthy();
+});
+
+it('keeps the newest dictation reachable when the fixes hold the pad', async () => {
+  vi.mocked(status).mockResolvedValue(permissions);
+  render(App);
+  await screen.findByRole('button', { name: /Open Accessibility settings/ });
+  // The pad is not on screen, so no row is spoken for by it.
+  expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
+  expect(await screen.findByRole('button', { name: '6 more in History ›' })).toBeTruthy();
+});
+
+it('keeps the band on screen while a download runs', async () => {
+  vi.mocked(status).mockResolvedValue(permissions);
+  render(App);
+  await screen.findByRole('button', { name: /Open Accessibility settings/ });
+  const push = vi.mocked(listen).mock.calls.find((c) => c[0] === 'daemon:status')?.[1];
+  push?.({ payload: { ...ready, blockers: [] } } as never);
+  const downloads = vi.mocked(listen).mock.calls.find((c) => c[0] === 'daemon:downloads')?.[1];
+  downloads?.({ payload: { state: 'downloading' } } as never);
+  expect(await screen.findByText(/Downloading what Banshee needs/)).toBeTruthy();
 });

@@ -114,6 +114,12 @@ impl RecordingError {
         self.to_string().trim_end_matches('.').to_string()
     }
 
+    pub fn command(&self) -> Option<&'static str> {
+        match self {
+            RecordingError::Microphone(_) | RecordingError::Model(_) => Some("banshee start"),
+        }
+    }
+
     pub fn fix(&self) -> &'static str {
         match self {
             // The watchdog rescans after a fault, so most microphones recover
@@ -675,6 +681,23 @@ impl DaemonState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A client offers the command behind a Copy button, so `command` has to
+    /// be the command the sentence names, not a near miss.
+    #[test]
+    fn a_recording_error_names_the_same_command_its_sentence_does() {
+        for error in [
+            RecordingError::Microphone(String::new()),
+            RecordingError::Model(String::new()),
+        ] {
+            let command = error.command().expect("both faults name a command");
+            assert!(
+                error.fix().ends_with(command),
+                "`{}` does not end with `{command}`",
+                error.fix()
+            );
+        }
+    }
 
     // A watchdog rescans after a fault, but `start_recording` returning Err
     // spawns none, so that one microphone fault needs a restart.

@@ -2,10 +2,13 @@
   import type { HistoryRow } from '../lib/tauri';
   import { copy, copied } from '../lib/copy';
   import { formatTime } from '../lib/time';
-  import { moreCount } from '../lib/history';
 
   export let rows: HistoryRow[];
-  export let total: number;
+  // Everything History holds that this band does not show.
+  export let more: number;
+  // `unread` is not `empty`: a daemon the window never reached says nothing
+  // about whether anything was ever recorded.
+  export let history: 'unread' | 'empty' | 'some' = 'unread';
 
   let expanded = new Set<string | number>();
 
@@ -16,16 +19,20 @@
     expanded = next;
   }
 
-  $: more = moreCount(total, rows.length);
 </script>
 
 <section aria-label="Earlier today" style="border-top: 1px solid var(--rule); padding: 12px 22px 8px;">
   <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; gap: 12px;">
     <span class="caps" style="color: var(--dim);">Earlier today</span>
   </div>
-  {#if total === 0}
+  {#if history === 'unread'}
+    <p style="margin: 0; color: var(--dim);">History unread</p>
+  {:else if history === 'empty'}
     <p style="margin: 0; color: var(--dim);">Nothing saved yet</p>
   {:else}
+    {#if rows.length === 0}
+      <p style="margin: 0 0 6px; color: var(--dim);">Nothing said today</p>
+    {/if}
     <ol style="margin: 0; padding: 0; list-style: none;">
       {#each rows as row, i (row.id)}
         <li style="display: grid; grid-template-columns: 40px minmax(0, 1fr) 28px; gap: 10px; align-items: center; padding: 6px 0; border-top: {i ? '1px solid var(--rule)' : '0'};">

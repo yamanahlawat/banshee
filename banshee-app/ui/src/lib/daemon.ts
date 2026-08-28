@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-export type Blocker = { kind: string; id: string; name: string; consequence: string; fix: string };
+export type Blocker = { kind: string; id: string; name: string; consequence: string; fix: string; command?: string };
 export type Status = Record<string, unknown> & { running: boolean; blockers?: Blocker[]; config?: Record<string, Record<string, unknown>>; pending?: string[] };
 export type Live = { recording: boolean; speaking: boolean; armed: boolean; transcribing: boolean; audio_device: string | null; missing_device: string | null };
 export type Daemon = { status: Status | null; live: Live; pending: Set<string>; down: string | null; downloading: boolean };
@@ -61,6 +61,42 @@ export function checklist(state: Daemon) {
     return { station, state: own.length ? ('blocked' as const) : ('clear' as const), blockers: own };
   });
 }
+// Which stations hold the pad shut. A download in progress still holds it,
+// or the band would vanish under the button that started it. A microphone
+// does not: the history it recorded is still worth showing.
+export function setupBlocked(state: Daemon): boolean {
+  return checklist(state).some(
+    (row) =>
+      (row.state === 'blocked' || row.state === 'working') && row.station !== 'Microphone',
+  );
+}
+
+// The needle rests on the first station that is not clear. `Try it` is never
+// clear, so it catches the needle on a machine with nothing left to fix.
+export function needleAt(rows: { state: string }[]): number {
+  const at = rows.findIndex((row) => row.state !== 'clear');
+  return at === -1 ? rows.length - 1 : at;
+}
+
+// The daemon writes the same command twice, as prose and as a field. A
+// sentence that only restates the command line below it is worth dropping.
+export function fixProse(blocker: Blocker): string | null {
+  if (blocker.command === undefined || !blocker.fix.endsWith(blocker.command)) return blocker.fix;
+  const lead = blocker.fix.slice(0, -blocker.command.length);
+  return /^(?:run|restart|start)(?: it)?:\s*$/.test(lead) ? null : blocker.fix;
+}
+
+// Every missing model is downloaded by one call, so the blockers that share
+// that call belong under one row. A permission names its own pane.
+export function fixGroups(blockers: Blocker[]): Blocker[][] {
+  const groups = new Map<string, Blocker[]>();
+  for (const blocker of blockers) {
+    const key = blocker.kind === 'model' ? 'model' : blocker.id;
+    groups.set(key, [...(groups.get(key) ?? []), blocker]);
+  }
+  return [...groups.values()];
+}
+
 function stationOf(blocker: Blocker): Station {
   if (blocker.kind === 'permission') return 'Permissions';
   if (blocker.kind === 'model') return 'Models';

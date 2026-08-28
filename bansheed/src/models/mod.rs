@@ -58,6 +58,7 @@ pub fn blockers(names: &[&str]) -> Vec<Blocker> {
             id: name,
             consequence: "recording, dictation, and ask_user do not work".to_string(),
             fix: "run: banshee setup".to_string(),
+            command: Some("banshee setup".to_string()),
         })
         .collect()
 }

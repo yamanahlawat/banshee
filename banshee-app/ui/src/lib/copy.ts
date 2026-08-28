@@ -5,6 +5,26 @@ export const copied = writable<string | null>(null);
 export const announcement = writable('');
 
 let timer: ReturnType<typeof setTimeout> | undefined;
+const HELD_MS = 1500;
+
+// The timer below outlives the copy that armed it, so anything resetting
+// these stores has to disarm it too.
+export function forgetCopy(): void {
+  clearTimeout(timer);
+  copied.set(null);
+  announcement.set('');
+}
+
+// The region speaks a change, so a message has to leave again before the
+// same one can be spoken twice.
+export function announce(message: string): void {
+  clearTimeout(timer);
+  announcement.set(message);
+  timer = setTimeout(() => {
+    copied.set(null);
+    announcement.set('');
+  }, HELD_MS);
+}
 
 export async function copy(text: string, id: string): Promise<void> {
   // A live region speaks a change, not a value, so the same word twice is
@@ -23,5 +43,5 @@ export async function copy(text: string, id: string): Promise<void> {
   timer = setTimeout(() => {
     copied.set(null);
     announcement.set('');
-  }, 1500);
+  }, HELD_MS);
 }
