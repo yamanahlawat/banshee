@@ -2,6 +2,7 @@
   import type { HistoryRow } from '../lib/tauri';
   import { copy, copied } from '../lib/copy';
   import { formatTime } from '../lib/time';
+  import { formatCount } from '../lib/history';
   import { open } from '../lib/jobs';
 
   export let rows: HistoryRow[];
@@ -68,7 +69,7 @@
             type="button"
             onclick={() => open.set('More settings')}
             style="font: inherit; font-size: 12.5px; color: var(--dim); background: transparent; border: 0; padding: 0; cursor: pointer;"
-          >{more} more in History ›</button>
+          >{formatCount(more)} more in History ›</button>
         </li>
       {/if}
     </ol>

@@ -30,8 +30,9 @@ it('offers no footer when the band shows everything', () => {
 it('says the day is empty rather than leaving a count with no rows above it', () => {
   render(Earlier, { rows: [], more: 1836, history: 'some' });
   expect(screen.getByText('Nothing said today')).toBeTruthy();
-  // The count is still the way into a history that is not empty.
-  expect(screen.getByRole('button', { name: '1836 more in History ›' })).toBeTruthy();
+  // The count is still the way into a history that is not empty, and large
+  // enough here to need the same thousands separator History itself uses.
+  expect(screen.getByRole('button', { name: '1,836 more in History ›' })).toBeTruthy();
 });
 
 it('keeps the never-recorded line distinct from the nothing-today line', () => {
