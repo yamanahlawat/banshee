@@ -25,3 +25,15 @@ it('says so when the daemon answers with no hotkey', () => {
   render(TitleBar);
   expect(screen.getByText('No hotkey set')).toBeTruthy();
 });
+
+it('never tells the user to press a key the daemon has not bound', () => {
+  const pendingKey = reduceStatus(empty(), {
+    ...ready,
+    pending: ['audio.hotkey'],
+    config: { ...ready.config, audio: { ...ready.config.audio, hotkey: 'Ctrl+Cmd+M' } },
+  });
+  daemon.set(pendingKey);
+  render(TitleBar);
+  expect(screen.getByText('Restart Banshee to use Ctrl + Cmd + M')).toBeTruthy();
+  expect(screen.queryByText(/to start and stop/)).toBeNull();
+});

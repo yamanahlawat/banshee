@@ -1,25 +1,24 @@
 <script lang="ts">
   import { daemon, lampForm, stateWord } from '../lib/daemon';
   import Lamp from '../controls/Lamp.svelte';
-
-  // The daemon reports hotkeys with no spaces, e.g. RightCommand.
-  function humanizeKey(key: string): string {
-    return key.replace(/([a-z0-9])([A-Z])/g, '$1 $2');
-  }
+  import { humanize } from '../lib/hotkey';
 
   $: word = stateWord($daemon);
   $: form = lampForm(word);
   $: audio = $daemon.status?.config?.audio as { hotkey?: string; hotkey_mode?: string } | undefined;
   // Before the daemon answers there is nothing to report, and a sentence with
   // a gap where the key belongs reads as a missing word rather than a wait.
-  function hotkeyInstruction(config: typeof audio, key: string): string {
+  // A key the daemon has not bound yet does nothing, so the sentence says
+  // that instead of naming a key the user would press in vain.
+  function hotkeyInstruction(config: typeof audio, key: string, waiting: boolean): string {
     if (config === undefined) return '';
     if (key === '') return 'No hotkey set';
+    if (waiting) return `Restart Banshee to use ${key}`;
     return config.hotkey_mode === 'hold' ? `Hold ${key} to talk` : `Press ${key} to start and stop`;
   }
 
-  $: key = humanizeKey(String(audio?.hotkey ?? ''));
-  $: instruction = hotkeyInstruction(audio, key);
+  $: key = humanize(String(audio?.hotkey ?? ''));
+  $: instruction = hotkeyInstruction(audio, key, $daemon.pending.has('audio.hotkey'));
 </script>
 
 <header style="display: flex; flex-direction: column; gap: 10px; padding: 14px 22px 12px; border-bottom: 1px solid var(--rule);">

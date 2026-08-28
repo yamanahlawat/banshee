@@ -25,10 +25,12 @@ vi.mock('./lib/tauri', () => ({
   copyText: vi.fn(),
   downloadModels: vi.fn(),
   openPermissionPane: vi.fn(),
+  listVoices: vi.fn(),
 }));
-import { history, listen, status } from './lib/tauri';
+import { history, listen, listVoices, status } from './lib/tauri';
 import { daemon, empty } from './lib/daemon';
 import { forgetCopy } from './lib/copy';
+import { open } from './lib/jobs';
 import App from './App.svelte';
 
 beforeEach(async () => {
@@ -42,10 +44,12 @@ beforeEach(async () => {
   // Every store here is module-level, so one test's copy would otherwise
   // still read as copied in the next.
   daemon.set(empty());
+  open.set(null);
   forgetCopy();
   vi.mocked(status).mockResolvedValue(ready);
   vi.mocked(history).mockImplementation(async (limit?: number) => (limit == null ? table : table.slice(-limit)));
   vi.mocked(listen).mockResolvedValue(() => {});
+  vi.mocked(listVoices).mockResolvedValue({ voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }], current: 'af_sky' });
 });
 
 afterEach(() => vi.useRealTimers());
@@ -172,9 +176,10 @@ it('puts the fixes where the pad goes until the machine can record', async () =>
 });
 
 it('gives the pad back once nothing blocks the machine and a dictation exists', async () => {
-  render(App);
+  const { container } = render(App);
   expect(await screen.findByRole('button', { name: 'Copy' })).toBeTruthy();
-  expect(screen.queryByText('Setup')).toBeNull();
+  // The strip carries a Setup row of its own, so the band is named here.
+  expect(container.querySelector('section[aria-label="Setup"]')).toBeNull();
 });
 
 it('shows the fixes on a clear machine that has never recorded', async () => {
@@ -212,4 +217,36 @@ it('keeps the band on screen while a download runs', async () => {
   const downloads = vi.mocked(listen).mock.calls.find((c) => c[0] === 'daemon:downloads')?.[1];
   downloads?.({ payload: { state: 'downloading' } } as never);
   expect(await screen.findByText(/Downloading what Banshee needs/)).toBeTruthy();
+});
+
+it('opens a job in the earlier list\'s place, and gives it back on close', async () => {
+  render(App);
+  await screen.findByText('Yes, open the pull request.');
+  expect(screen.getByText('Earlier today')).toBeTruthy();
+
+  await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
+  expect(await screen.findByRole('button', { name: 'Change key' })).toBeTruthy();
+  expect(screen.queryByText('Earlier today')).toBeNull();
+
+  await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
+  expect(await screen.findByText('Earlier today')).toBeTruthy();
+});
+
+it('names the strip values from the daemon, not from a default', async () => {
+  render(App);
+  await screen.findByText('Yes, open the pull request.');
+  expect(screen.getByText('Right Command')).toBeTruthy();
+  expect(screen.getByText('All clear')).toBeTruthy();
+});
+
+it('names the voice the way a person does, not by its id', async () => {
+  render(App);
+  expect(await screen.findByText('Sky')).toBeTruthy();
+  expect(screen.queryByText('af_sky')).toBeNull();
+});
+
+it('keeps the history when the voice list fails', async () => {
+  vi.mocked(listVoices).mockRejectedValue(new Error('no voices'));
+  render(App);
+  expect(await screen.findByText('Yes, open the pull request.')).toBeTruthy();
 });

@@ -3,18 +3,26 @@
   import { daemon, reduceLive, reduceStatus, setupBlocked, stateWord, type Live, type Status } from './lib/daemon';
   import { announcement } from './lib/copy';
   import { countNewer, moreCount, newestFirst, nextLimit, PAGE, today } from './lib/history';
-  import { history, listen, status, type Down, type DownloadProgress, type HistoryRow } from './lib/tauri';
+  import { history, listen, listVoices, status, type Down, type DownloadProgress, type HistoryRow, type Voices } from './lib/tauri';
   import TitleBar from './bands/TitleBar.svelte';
   import Scale from './bands/Scale.svelte';
   import SetupFixes from './bands/SetupFixes.svelte';
   import Pad from './bands/Pad.svelte';
   import Earlier from './bands/Earlier.svelte';
+  import Strip from './bands/Strip.svelte';
+  import Job from './bands/Job.svelte';
+  import Microphone from './jobs/Microphone.svelte';
+  import HotkeyJob from './jobs/Hotkey.svelte';
+  import Voice from './jobs/Voice.svelte';
+  import { OPENABLE, open } from './lib/jobs';
+  import { humanize } from './lib/hotkey';
 
   let rows: HistoryRow[] = [];
   let total = 0;
   let wasTranscribing = false;
   let loaded = false;
   let loading: Promise<void> | null = null;
+  let voices: Voices = { voices: [], current: null };
 
   // One unlimited read on open is the only source for the total.
   async function readWholeTable() {
@@ -48,6 +56,15 @@
 
   $: landing = $daemon.live.recording ? '' : null;
   $: word = stateWord($daemon);
+  $: config = ($daemon.status?.config ?? {}) as Record<string, Record<string, unknown>>;
+  // The daemon names a voice by id, and the strip says what a person calls it.
+  $: voiceName = (id: string) => voices.voices.find((v) => v.id === id)?.name ?? id;
+  $: stripValues = {
+    Microphone: String($daemon.live.audio_device ?? config.audio?.input_device ?? ''),
+    Hotkey: humanize(String(config.audio?.hotkey ?? '')),
+    Voice: voiceName(String(config.tts?.voice ?? '')),
+    Setup: setupBlocked($daemon) ? 'To fix' : 'All clear',
+  };
   // A dead daemon fails the history read, so waiting for it would leave the
   // pad blank in the one state that most needs its fix.
   $: setup = setupBlocked($daemon) || (loaded && total === 0);
@@ -90,6 +107,13 @@
     await listen<DownloadProgress>('daemon:downloads', (e) => daemon.update((s) => ({ ...s, downloading: e.payload.state === 'downloading' })));
     await listen<Down>('daemon:down', (e) => daemon.update((s) => ({ ...s, down: e.payload.reason })));
     await readDaemon();
+    // The strip only needs this to name a voice, so its failure must not
+    // reach the status and the history beside it.
+    try {
+      voices = await listVoices();
+    } catch {
+      voices = { voices: [], current: null };
+    }
   });
 </script>
 
@@ -101,7 +125,15 @@
   {:else}
     <Pad {latest} {landing} agent={null} />
   {/if}
-  <Earlier rows={earlierRows} more={beyondTheBand} history={loaded ? (total > 0 ? 'some' : 'empty') : 'unread'} />
+  <!-- A job opens above the strip and stands in the earlier list's place. -->
+  {#if $open !== null && OPENABLE.includes($open)}
+    <Job name={$open}>
+      {#if $open === 'Microphone'}<Microphone />{:else if $open === 'Hotkey'}<HotkeyJob />{:else}<Voice {voices} />{/if}
+    </Job>
+  {:else}
+    <Earlier rows={earlierRows} more={beyondTheBand} history={loaded ? (total > 0 ? 'some' : 'empty') : 'unread'} />
+  {/if}
+  <Strip values={stripValues} />
   <!-- The region holds only what must be spoken. On `main` it would announce
        every row the list redraws and every word the title bar swaps. -->
   <span class="sr" aria-live="polite">{word}{$announcement ? `. ${$announcement}` : ''}</span>
