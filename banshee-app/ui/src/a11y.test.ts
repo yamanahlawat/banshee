@@ -7,24 +7,13 @@ import recordingLive from './fixtures/recording.json';
 import { daemon, empty } from './lib/daemon';
 import { OPENABLE, open } from './lib/jobs';
 
-// `axe.run` builds its tree synchronously from whatever is in the DOM at the
-// moment it is called. Every onMount here suspends at its first `await`, so
-// a render() followed immediately by axe.run() only ever inspects the
-// pre-data skeleton: no loaded row, no fetched device, no fetched voice, no
-// fetched agent. Every run below awaits a query that is false until its
-// state's own async chain has actually landed, so settling the mount and
-// proving something rendered are the same act, per state and per panel.
+// `axe.run` builds its tree synchronously from the DOM it is handed, and
+// every onMount here suspends at its first await. So each run below first
+// awaits a query that stays false until that state's own fetch has landed.
 
-// The daemon answers oldest first; `newestFirst` in App.svelte reverses it.
-// Both fixtures anchor to a fixed hour of `now`'s local calendar day, not an
-// elapsed offset, because `today()` (App.svelte, History.svelte) filters by
-// local day via `sameLocalDay`, not by how long ago the row was made, since a
-// relative offset crosses into yesterday for the run's first hour of every
-// local day. `padHolds` decides how many of these two rows the pad claims
-// before the rest reach the Earlier band (1 normally, 0 when setup replaces
-// the pad), but with two rows OLDER always has a seat left in the band, so
-// its text is the one line every state can show once its own history() call
-// has actually resolved.
+// `today()` filters by local day, so both rows anchor to a fixed hour of
+// now's own day rather than to an elapsed offset. Two rows leave OLDER a
+// seat in the band whether or not the pad claims one.
 const { OLDER, NEWER } = vi.hoisted(() => {
   const now = new Date();
   const localHour = (hour: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, 0, 0).toISOString();
@@ -124,13 +113,9 @@ it('has no axe violations in the recording state', async () => {
   expect((await axe.run(container, RUN_OPTIONS)).violations).toEqual([]);
 });
 
-// A job panel only renders while `$open` names it, so the three states
-// above never reach the content inside one. Each proof only succeeds once
-// that panel's data has actually landed: Microphone, Agents and History
-// each resolve that from their own fetch; Hotkey fetches nothing and reads
-// `$daemon.status.config` directly, so its proof needs App's own status()
-// to resolve; Voice takes its list as a prop that App fetches via
-// listVoices(). A control that exists in the empty state proves nothing.
+// A panel renders only while `$open` names it, so each proof waits on data
+// that panel alone can hold. A control that exists in the empty state
+// proves nothing.
 const PANEL_PROOF: Record<string, () => Promise<unknown>> = {
   Microphone: () => screen.findByRole('option', { name: 'MacBook Pro Microphone' }),
   // The strip always shows the same humanized value in its own row, so the

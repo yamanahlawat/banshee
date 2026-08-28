@@ -27,6 +27,14 @@ it('offers no footer when the band shows everything', () => {
   expect(screen.queryByRole('button', { name: /more in History/ })).toBeNull();
 });
 
+it('says whether a row is expanded, the way the History list does', async () => {
+  render(Earlier, { rows, more: 0, history: 'some' });
+  const row = screen.getAllByRole('button', { name: /Show the whole dictation from/ })[0];
+  expect(row.getAttribute('aria-expanded')).toBe('false');
+  await fireEvent.click(row);
+  expect(screen.getByRole('button', { name: 'Collapse' }).getAttribute('aria-expanded')).toBe('true');
+});
+
 it('says the day is empty rather than leaving a count with no rows above it', () => {
   render(Earlier, { rows: [], more: 1836, history: 'some' });
   expect(screen.getByText('Nothing said today')).toBeTruthy();

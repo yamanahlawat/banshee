@@ -2,6 +2,7 @@
   import { daemon } from '../lib/daemon';
   import { copy, copied } from '../lib/copy';
   import { formatTime } from '../lib/time';
+  import Filled from '../controls/Filled.svelte';
 
   export let latest: { text: string; timestamp: string } | null;
   export let landing: string | null;
@@ -16,10 +17,12 @@
       <span class="caps" style="color: var(--dim);">{agent.who} asks</span>
       <p style="margin: 0; font-size: 15px; line-height: 1.45;">{agent.text}</p>
       {#if $daemon.live.speaking}
-        <button
-          type="button"
-          style="font: inherit; background: var(--ink); color: var(--face); border: 1.5px solid var(--ink); border-radius: 6px; padding: 5px 12px; font-size: 13px; font-weight: 600; min-height: 28px; cursor: pointer; align-self: flex-start; margin-top: 6px;"
-        >Stop speaking</button>
+        <!-- The daemon reports no agent, so App passes null and this block
+             never renders. banshee.stop_speaking has no bridge either, so
+             the button carries no press. -->
+        <div style="align-self: flex-start; margin-top: 6px;">
+          <Filled label="Stop speaking" press={() => {}} />
+        </div>
       {:else}
         <p style="margin: 6px 0 0; color: var(--dim);">Answer by speaking.</p>
       {/if}

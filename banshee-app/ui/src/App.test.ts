@@ -27,8 +27,11 @@ vi.mock('./lib/tauri', () => ({
   openPermissionPane: vi.fn(),
   listVoices: vi.fn(),
   detectAgents: vi.fn(),
+  planConnect: vi.fn(),
+  applyConnect: vi.fn(),
 }));
-import { detectAgents, history, listen, listVoices, status } from './lib/tauri';
+import { applyConnect, detectAgents, history, listen, listVoices, planConnect, status } from './lib/tauri';
+import { agents } from './lib/agents';
 import { daemon, empty } from './lib/daemon';
 import { forgetCopy } from './lib/copy';
 import { open } from './lib/jobs';
@@ -46,6 +49,7 @@ beforeEach(async () => {
   // still read as copied in the next.
   daemon.set(empty());
   open.set(null);
+  agents.set([]);
   forgetCopy();
   vi.mocked(status).mockResolvedValue(ready);
   vi.mocked(history).mockImplementation(async (limit?: number) => (limit == null ? table : table.slice(-limit)));
@@ -275,6 +279,26 @@ it('opens the Agents panel from its strip row', async () => {
   await screen.findByText('Yes, open the pull request.');
   await fireEvent.click(screen.getByRole('button', { name: /^Agents/ }));
   expect(await screen.findByText(/Coding agents found on this Mac/)).toBeTruthy();
+});
+
+it('counts a connect made in the panel above it, without reopening the window', async () => {
+  const cursor = { id: 'cursor', name: 'Cursor', presence: 'found', note: 'Installed, not connected' };
+  let detected = [cursor];
+  vi.mocked(detectAgents).mockImplementation(async () => detected);
+  vi.mocked(planConnect).mockResolvedValue([{ path: '~/.cursor/mcp.json', diff: '+ "banshee": {' }]);
+  vi.mocked(applyConnect).mockImplementation(async () => {
+    detected = [{ ...cursor, presence: 'connected', note: 'Connected' }];
+  });
+  render(App);
+  await screen.findByText('Yes, open the pull request.');
+  expect(await screen.findByText('None yet')).toBeTruthy();
+
+  await fireEvent.click(screen.getByRole('button', { name: /^Agents/ }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'Connect' }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'Apply' }));
+
+  expect(await screen.findByText('1 connected')).toBeTruthy();
+  expect(screen.queryByText('None yet')).toBeNull();
 });
 
 it('opens History in place of both the pad and the earlier band, and restores both on close', async () => {

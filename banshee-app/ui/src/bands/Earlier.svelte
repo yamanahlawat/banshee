@@ -37,16 +37,18 @@
     {/if}
     <ol style="margin: 0; padding: 0; list-style: none;">
       {#each rows as row, i (row.id)}
+        {@const open = expanded.has(row.id)}
         <li style="display: grid; grid-template-columns: 40px minmax(0, 1fr) 28px; gap: 10px; align-items: center; padding: 6px 0; border-top: {i ? '1px solid var(--rule)' : '0'};">
           <span class="mono" style="color: var(--dim);">{formatTime(row.timestamp)}</span>
           <button
             type="button"
-            aria-label={`Show the whole dictation from ${formatTime(row.timestamp)}`}
+            aria-expanded={open}
+            aria-label={open ? 'Collapse' : `Show the whole dictation from ${formatTime(row.timestamp)}`}
             onclick={() => toggleRow(row.id)}
-            style="font: inherit; text-align: left; padding: 0; border: 0; background: transparent; color: var(--ink); cursor: pointer; {expanded.has(row.id) ? 'white-space: normal;' : 'white-space: nowrap; overflow: hidden; text-overflow: ellipsis;'}"
+            style="font: inherit; text-align: left; padding: 0; border: 0; background: transparent; color: var(--ink); cursor: pointer; {open ? 'white-space: normal;' : 'white-space: nowrap; overflow: hidden; text-overflow: ellipsis;'}"
           >{row.text}</button>
           {#if $copied === `history:${row.id}`}
-            <span style="font-size: 12px; font-weight: 600; color: var(--ink); display: inline-flex; align-items: center; justify-content: center; min-height: 28px;">Copied</span>
+            <span role="status" style="font-size: 12px; font-weight: 600; color: var(--ink); display: inline-flex; align-items: center; justify-content: center; min-height: 28px;">Copied</span>
           {:else}
             <button
               type="button"

@@ -3,7 +3,8 @@
   import { daemon, reduceLive, reduceStatus, setupBlocked, stateWord, type Live, type Status } from './lib/daemon';
   import { announcement } from './lib/copy';
   import { countNewer, moreCount, newestFirst, nextLimit, PAGE, today } from './lib/history';
-  import { detectAgents, history, listen, listVoices, status, type AgentRow, type Down, type DownloadProgress, type HistoryRow, type Voices } from './lib/tauri';
+  import { history, listen, listVoices, status, type Down, type DownloadProgress, type HistoryRow, type Voices } from './lib/tauri';
+  import { agents, refresh as refreshAgents } from './lib/agents';
   import TitleBar from './bands/TitleBar.svelte';
   import Scale from './bands/Scale.svelte';
   import SetupFixes from './bands/SetupFixes.svelte';
@@ -16,7 +17,7 @@
   import Voice from './jobs/Voice.svelte';
   import Agents from './jobs/Agents.svelte';
   import History from './jobs/History.svelte';
-  import { OPENABLE, open } from './lib/jobs';
+  import { BANDED, open } from './lib/jobs';
   import { humanize } from './lib/hotkey';
 
   let rows: HistoryRow[] = [];
@@ -25,7 +26,6 @@
   let loaded = false;
   let loading: Promise<void> | null = null;
   let voices: Voices = { voices: [], current: null };
-  let agents: AgentRow[] = [];
 
   // One unlimited read on open is the only source for the total.
   async function readWholeTable() {
@@ -62,7 +62,7 @@
   $: config = ($daemon.status?.config ?? {}) as Record<string, Record<string, unknown>>;
   // The daemon names a voice by id, and the strip says what a person calls it.
   $: voiceName = (id: string) => voices.voices.find((v) => v.id === id)?.name ?? id;
-  $: connectedAgents = agents.filter((a) => a.presence === 'connected').length;
+  $: connectedAgents = $agents.filter((a) => a.presence === 'connected').length;
   $: stripValues = {
     Microphone: String($daemon.live.audio_device ?? config.audio?.input_device ?? ''),
     Hotkey: humanize(String(config.audio?.hotkey ?? '')),
@@ -98,6 +98,16 @@
     }
   }
 
+  // The strip only needs this to name a voice, so its failure must not reach
+  // the status and the history beside it.
+  async function readVoices() {
+    try {
+      voices = await listVoices();
+    } catch {
+      voices = { voices: [], current: null };
+    }
+  }
+
   onMount(async () => {
     // The listeners come first, or a stopped daemon leaves the window deaf
     // to the push that says it came back.
@@ -113,20 +123,8 @@
     await listen<DownloadProgress>('daemon:downloads', (e) => daemon.update((s) => ({ ...s, downloading: e.payload.state === 'downloading' })));
     await listen<Down>('daemon:down', (e) => daemon.update((s) => ({ ...s, down: e.payload.reason })));
     await readDaemon();
-    // The strip only needs this to name a voice, so its failure must not
-    // reach the status and the history beside it.
-    try {
-      voices = await listVoices();
-    } catch {
-      voices = { voices: [], current: null };
-    }
-    // The strip only needs this to count connected agents, so its failure
-    // must not reach the status and the history beside it either.
-    try {
-      agents = await detectAgents();
-    } catch {
-      agents = [];
-    }
+    // Neither read needs the other, and each holds its own fallback.
+    await Promise.all([readVoices(), refreshAgents()]);
   });
 </script>
 
@@ -143,7 +141,7 @@
       <Pad {latest} {landing} agent={null} />
     {/if}
     <!-- A job opens above the strip and stands in the earlier list's place. -->
-    {#if $open !== null && OPENABLE.includes($open)}
+    {#if $open !== null && BANDED.includes($open)}
       <Job name={$open}>
         {#if $open === 'Microphone'}<Microphone />{:else if $open === 'Hotkey'}<HotkeyJob />{:else if $open === 'Voice'}<Voice {voices} />{:else if $open === 'Agents'}<Agents />{/if}
       </Job>

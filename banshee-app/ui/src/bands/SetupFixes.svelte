@@ -3,6 +3,7 @@
   import { announce } from '../lib/copy';
   import { downloadModels, openPermissionPane } from '../lib/tauri';
   import Command from '../controls/Command.svelte';
+  import Filled from '../controls/Filled.svelte';
 
   // A dead daemon cannot act on anything the last status reported, so the
   // one thing it can still be told stands alone.
@@ -63,11 +64,7 @@
         <p style="margin: 0;">Without {group.length > 1 ? 'them' : 'it'}, {blocker.consequence}.</p>
         {#if ACTIONABLE.includes(blocker.kind)}
         <div style="display: flex; align-items: center; gap: 12px;">
-          <button
-            type="button"
-            onclick={() => act(blocker)}
-            style="font: inherit; background: var(--ink); color: var(--face); border: 1.5px solid var(--ink); border-radius: 6px; padding: 5px 12px; font-size: 13px; font-weight: 600; min-height: 28px; cursor: pointer;"
-          >{blocker.kind === 'model' ? 'Download models' : `Open ${blocker.name} settings`}</button>
+          <Filled label={blocker.kind === 'model' ? 'Download models' : `Open ${blocker.name} settings`} press={() => act(blocker)} />
           {#if blocker.kind === 'permission'}
             <span style="color: var(--dim);">Turn on Banshee in the list that opens.</span>
           {/if}
