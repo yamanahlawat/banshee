@@ -18,7 +18,7 @@ import { OPENABLE, open } from './lib/jobs';
 // The daemon answers oldest first; `newestFirst` in App.svelte reverses it.
 // Both fixtures anchor to a fixed hour of `now`'s local calendar day, not an
 // elapsed offset, because `today()` (App.svelte, History.svelte) filters by
-// local day via `sameLocalDay`, not by how long ago the row was made — a
+// local day via `sameLocalDay`, not by how long ago the row was made, since a
 // relative offset crosses into yesterday for the run's first hour of every
 // local day. `padHolds` decides how many of these two rows the pad claims
 // before the rest reach the Earlier band (1 normally, 0 when setup replaces
