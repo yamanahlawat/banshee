@@ -16,14 +16,21 @@ import { OPENABLE, open } from './lib/jobs';
 // proving something rendered are the same act, per state and per panel.
 
 // The daemon answers oldest first; `newestFirst` in App.svelte reverses it.
-// OLDER lands in the Earlier band once NEWER already sits in the pad, so
-// OLDER's text is one line every state (ready, permissions, recording) can
-// show once its own history() call has actually resolved.
+// Both fixtures anchor to a fixed hour of `now`'s local calendar day, not an
+// elapsed offset, because `today()` (App.svelte, History.svelte) filters by
+// local day via `sameLocalDay`, not by how long ago the row was made — a
+// relative offset crosses into yesterday for the run's first hour of every
+// local day. `padHolds` decides how many of these two rows the pad claims
+// before the rest reach the Earlier band (1 normally, 0 when setup replaces
+// the pad), but with two rows OLDER always has a seat left in the band, so
+// its text is the one line every state can show once its own history() call
+// has actually resolved.
 const { OLDER, NEWER } = vi.hoisted(() => {
-  const now = Date.now();
+  const now = new Date();
+  const localHour = (hour: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, 0, 0).toISOString();
   return {
-    OLDER: { id: 2, text: 'Open the pull request.', timestamp: new Date(now - 60 * 60_000).toISOString() },
-    NEWER: { id: 1, text: 'Yes.', timestamp: new Date(now - 30 * 60_000).toISOString() },
+    OLDER: { id: 2, text: 'Open the pull request.', timestamp: localHour(9) },
+    NEWER: { id: 1, text: 'Yes.', timestamp: localHour(10) },
   };
 });
 
@@ -109,18 +116,21 @@ it('has no axe violations in the permissions state', async () => {
 
 it('has no axe violations in the recording state', async () => {
   // The live flags travel on the same status reply the app already reads,
-  // so merging the recorded fixtures reaches "recording" through the real
-  // reducer path instead of writing to the store by hand.
+  // so merging the recorded fixtures reaches the recording state through
+  // the real reducer path.
   status.mockResolvedValue({ ...ready, ...recordingLive });
   const { container } = render(App);
   await screen.findByText(OLDER.text);
   expect((await axe.run(container, RUN_OPTIONS)).violations).toEqual([]);
 });
 
-// A job panel only renders while `$open` names it, and each one fetches its
-// own data, so the three states above never reach the content inside one.
-// Each proof is a query that only succeeds once that panel's own fetch has
-// landed; a control that exists in the empty state proves nothing.
+// A job panel only renders while `$open` names it, so the three states
+// above never reach the content inside one. Each proof only succeeds once
+// that panel's data has actually landed: Microphone, Agents and History
+// each resolve that from their own fetch; Hotkey fetches nothing and reads
+// `$daemon.status.config` directly, so its proof needs App's own status()
+// to resolve; Voice takes its list as a prop that App fetches via
+// listVoices(). A control that exists in the empty state proves nothing.
 const PANEL_PROOF: Record<string, () => Promise<unknown>> = {
   Microphone: () => screen.findByRole('option', { name: 'MacBook Pro Microphone' }),
   // The strip always shows the same humanized value in its own row, so the
