@@ -1,6 +1,8 @@
-import { render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen } from '@testing-library/svelte';
 import { expect, it, vi } from 'vitest';
 vi.mock('../lib/tauri', () => ({ copyText: vi.fn().mockResolvedValue(null) }));
+import { get } from 'svelte/store';
+import { open } from '../lib/jobs';
 import Earlier from './Earlier.svelte';
 
 const rows = [
@@ -11,6 +13,13 @@ const rows = [
 it('counts what the band does not show', () => {
   render(Earlier, { rows, more: 7, history: 'some' });
   expect(screen.getByRole('button', { name: '7 more in History ›' })).toBeTruthy();
+});
+
+it('opens History when the count line is pressed', async () => {
+  open.set(null);
+  render(Earlier, { rows, more: 7, history: 'some' });
+  await fireEvent.click(screen.getByRole('button', { name: '7 more in History ›' }));
+  expect(get(open)).toBe('More settings');
 });
 
 it('offers no footer when the band shows everything', () => {

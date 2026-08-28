@@ -26,8 +26,9 @@ vi.mock('./lib/tauri', () => ({
   downloadModels: vi.fn(),
   openPermissionPane: vi.fn(),
   listVoices: vi.fn(),
+  detectAgents: vi.fn(),
 }));
-import { history, listen, listVoices, status } from './lib/tauri';
+import { detectAgents, history, listen, listVoices, status } from './lib/tauri';
 import { daemon, empty } from './lib/daemon';
 import { forgetCopy } from './lib/copy';
 import { open } from './lib/jobs';
@@ -50,6 +51,7 @@ beforeEach(async () => {
   vi.mocked(history).mockImplementation(async (limit?: number) => (limit == null ? table : table.slice(-limit)));
   vi.mocked(listen).mockResolvedValue(() => {});
   vi.mocked(listVoices).mockResolvedValue({ voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }], current: 'af_sky' });
+  vi.mocked(detectAgents).mockResolvedValue([]);
 });
 
 afterEach(() => vi.useRealTimers());
@@ -249,4 +251,45 @@ it('keeps the history when the voice list fails', async () => {
   vi.mocked(listVoices).mockRejectedValue(new Error('no voices'));
   render(App);
   expect(await screen.findByText('Yes, open the pull request.')).toBeTruthy();
+});
+
+it('counts connected agents in the strip, not merely detected ones', async () => {
+  vi.mocked(detectAgents).mockResolvedValue([
+    { id: 'claude-code', name: 'Claude Code', presence: 'connected', note: 'Connected' },
+    { id: 'cursor', name: 'Cursor', presence: 'found', note: 'Installed, not connected' },
+  ]);
+  render(App);
+  await screen.findByText('Yes, open the pull request.');
+  expect(await screen.findByText('1 connected')).toBeTruthy();
+});
+
+it('reads None yet when no agent is connected', async () => {
+  render(App);
+  await screen.findByText('Yes, open the pull request.');
+  expect(await screen.findByText('None yet')).toBeTruthy();
+});
+
+it('opens the Agents panel from its strip row', async () => {
+  vi.mocked(detectAgents).mockResolvedValue([{ id: 'cursor', name: 'Cursor', presence: 'found', note: 'Installed, not connected' }]);
+  render(App);
+  await screen.findByText('Yes, open the pull request.');
+  await fireEvent.click(screen.getByRole('button', { name: /^Agents/ }));
+  expect(await screen.findByText(/Coding agents found on this Mac/)).toBeTruthy();
+});
+
+it('opens History in place of both the pad and the earlier band, and restores both on close', async () => {
+  render(App);
+  await screen.findByText('Yes, open the pull request.');
+  expect(screen.getByRole('button', { name: 'Copy' })).toBeTruthy();
+  expect(screen.getByText('Earlier today')).toBeTruthy();
+
+  await fireEvent.click(screen.getByRole('button', { name: /More settings/ }));
+  expect(await screen.findByRole('searchbox', { name: 'Search history' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+  expect(screen.queryByText('Earlier today')).toBeNull();
+
+  await fireEvent.click(screen.getByRole('button', { name: /More settings/ }));
+  expect(await screen.findByRole('button', { name: 'Copy' })).toBeTruthy();
+  expect(screen.getByText('Earlier today')).toBeTruthy();
+  expect(screen.queryByRole('searchbox', { name: 'Search history' })).toBeNull();
 });

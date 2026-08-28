@@ -3,7 +3,7 @@
   import { daemon, reduceLive, reduceStatus, setupBlocked, stateWord, type Live, type Status } from './lib/daemon';
   import { announcement } from './lib/copy';
   import { countNewer, moreCount, newestFirst, nextLimit, PAGE, today } from './lib/history';
-  import { history, listen, listVoices, status, type Down, type DownloadProgress, type HistoryRow, type Voices } from './lib/tauri';
+  import { detectAgents, history, listen, listVoices, status, type AgentRow, type Down, type DownloadProgress, type HistoryRow, type Voices } from './lib/tauri';
   import TitleBar from './bands/TitleBar.svelte';
   import Scale from './bands/Scale.svelte';
   import SetupFixes from './bands/SetupFixes.svelte';
@@ -14,6 +14,8 @@
   import Microphone from './jobs/Microphone.svelte';
   import HotkeyJob from './jobs/Hotkey.svelte';
   import Voice from './jobs/Voice.svelte';
+  import Agents from './jobs/Agents.svelte';
+  import History from './jobs/History.svelte';
   import { OPENABLE, open } from './lib/jobs';
   import { humanize } from './lib/hotkey';
 
@@ -23,6 +25,7 @@
   let loaded = false;
   let loading: Promise<void> | null = null;
   let voices: Voices = { voices: [], current: null };
+  let agents: AgentRow[] = [];
 
   // One unlimited read on open is the only source for the total.
   async function readWholeTable() {
@@ -59,11 +62,14 @@
   $: config = ($daemon.status?.config ?? {}) as Record<string, Record<string, unknown>>;
   // The daemon names a voice by id, and the strip says what a person calls it.
   $: voiceName = (id: string) => voices.voices.find((v) => v.id === id)?.name ?? id;
+  $: connectedAgents = agents.filter((a) => a.presence === 'connected').length;
   $: stripValues = {
     Microphone: String($daemon.live.audio_device ?? config.audio?.input_device ?? ''),
     Hotkey: humanize(String(config.audio?.hotkey ?? '')),
     Voice: voiceName(String(config.tts?.voice ?? '')),
+    Agents: connectedAgents > 0 ? `${connectedAgents} connected` : 'None yet',
     Setup: setupBlocked($daemon) ? 'To fix' : 'All clear',
+    'More settings': 'History',
   };
   // A dead daemon fails the history read, so waiting for it would leave the
   // pad blank in the one state that most needs its fix.
@@ -114,24 +120,36 @@
     } catch {
       voices = { voices: [], current: null };
     }
+    // The strip only needs this to count connected agents, so its failure
+    // must not reach the status and the history beside it either.
+    try {
+      agents = await detectAgents();
+    } catch {
+      agents = [];
+    }
   });
 </script>
 
 <main style="display: flex; flex-direction: column;">
   <TitleBar />
   <Scale compact={word === 'Recording'} />
-  {#if setup}
-    <SetupFixes />
+  {#if $open === 'More settings'}
+    <!-- History replaces both the pad and the earlier list while it is open. -->
+    <History />
   {:else}
-    <Pad {latest} {landing} agent={null} />
-  {/if}
-  <!-- A job opens above the strip and stands in the earlier list's place. -->
-  {#if $open !== null && OPENABLE.includes($open)}
-    <Job name={$open}>
-      {#if $open === 'Microphone'}<Microphone />{:else if $open === 'Hotkey'}<HotkeyJob />{:else}<Voice {voices} />{/if}
-    </Job>
-  {:else}
-    <Earlier rows={earlierRows} more={beyondTheBand} history={loaded ? (total > 0 ? 'some' : 'empty') : 'unread'} />
+    {#if setup}
+      <SetupFixes />
+    {:else}
+      <Pad {latest} {landing} agent={null} />
+    {/if}
+    <!-- A job opens above the strip and stands in the earlier list's place. -->
+    {#if $open !== null && OPENABLE.includes($open)}
+      <Job name={$open}>
+        {#if $open === 'Microphone'}<Microphone />{:else if $open === 'Hotkey'}<HotkeyJob />{:else if $open === 'Voice'}<Voice {voices} />{:else if $open === 'Agents'}<Agents />{/if}
+      </Job>
+    {:else}
+      <Earlier rows={earlierRows} more={beyondTheBand} history={loaded ? (total > 0 ? 'some' : 'empty') : 'unread'} />
+    {/if}
   {/if}
   <Strip values={stripValues} />
   <!-- The region holds only what must be spoken. On `main` it would announce

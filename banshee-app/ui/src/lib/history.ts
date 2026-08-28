@@ -34,3 +34,9 @@ export function countNewer(page: HistoryRow[], newestId: HistoryRow['id'] | null
 export function today(rows: HistoryRow[], now: Date): HistoryRow[] {
   return rows.filter((row) => sameLocalDay(toDate(row.timestamp), now));
 }
+
+// A daemon that has run for months holds thousands of dictations, and a raw
+// digit string reads as a wall of numbers without this.
+export function formatCount(n: number): string {
+  return n.toLocaleString('en-US');
+}

@@ -2,6 +2,7 @@
   import type { HistoryRow } from '../lib/tauri';
   import { copy, copied } from '../lib/copy';
   import { formatTime } from '../lib/time';
+  import { open } from '../lib/jobs';
 
   export let rows: HistoryRow[];
   // Everything History holds that this band does not show.
@@ -63,7 +64,11 @@
       {/each}
       {#if more > 0}
         <li style="padding: 6px 0 2px 50px;">
-          <button type="button" style="font: inherit; font-size: 12.5px; color: var(--dim); background: transparent; border: 0; padding: 0; cursor: pointer;">{more} more in History ›</button>
+          <button
+            type="button"
+            onclick={() => open.set('More settings')}
+            style="font: inherit; font-size: 12.5px; color: var(--dim); background: transparent; border: 0; padding: 0; cursor: pointer;"
+          >{more} more in History ›</button>
         </li>
       {/if}
     </ol>

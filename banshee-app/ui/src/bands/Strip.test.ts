@@ -43,11 +43,20 @@ it('strips the values and shuts the rows when the daemon is not running', () => 
   expect(screen.getByRole('button', { name: /Microphone/ })).toHaveProperty('disabled', true);
 });
 
-it('never reports a row open when nothing opens behind it', () => {
+it('never reports a row open when it has no panel at all', () => {
   render(Strip, { values });
-  for (const name of [/More settings/, /Setup/, /Agents/]) {
+  const setup = screen.getByRole('button', { name: /Setup/ });
+  expect(setup.getAttribute('aria-expanded')).toBeNull();
+  expect(setup).toHaveProperty('disabled', true);
+});
+
+it('reports a row shut, not absent, when its panel has no value yet', () => {
+  // Agents and More settings are openable, but this fixture gives them no
+  // value, so they stay silent until App.svelte computes one.
+  render(Strip, { values });
+  for (const name of [/More settings/, /Agents/]) {
     const row = screen.getByRole('button', { name });
-    expect(row.getAttribute('aria-expanded')).toBeNull();
+    expect(row.getAttribute('aria-expanded')).toBe('false');
     expect(row).toHaveProperty('disabled', true);
   }
 });

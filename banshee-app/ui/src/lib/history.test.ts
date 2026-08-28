@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { countNewer, moreCount, newestFirst, nextLimit, today } from './history';
+import { countNewer, formatCount, moreCount, newestFirst, nextLimit, today } from './history';
 
 describe('newestFirst', () => {
   it('puts the daemon\'s last row first', () => {
@@ -64,5 +64,14 @@ describe('today', () => {
   });
   it('keeps nothing when the newest row is from an earlier day', () => {
     expect(today(rows.slice(2), now)).toEqual([]);
+  });
+});
+
+describe('formatCount', () => {
+  it('reads a small count plainly', () => {
+    expect(formatCount(7)).toBe('7');
+  });
+  it('marks the thousands the way the artboard does', () => {
+    expect(formatCount(2314)).toBe('2,314');
   });
 });
