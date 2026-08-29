@@ -107,6 +107,14 @@ export const daemon = writable<Daemon>(empty());
 
 export const SYSTEM_DEVICE = 'default';
 
+/// What Banshee is listening with, the rule `microphone_label` holds for the
+/// tray, `banshee status` and the start message. The configured name is what
+/// the user asked for, not what is open, so naming it here would claim a
+/// microphone the daemon never got.
+export function microphoneInUse(open: string | null): string {
+  return open ?? 'No microphone';
+}
+
 // The daemon names no device until it opens one, so this says which device
 // its own word stands for.
 export function deviceLabel(live: string | null): string {

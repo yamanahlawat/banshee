@@ -62,3 +62,17 @@ it('opens with an empty picker rather than throwing when the daemon is gone', as
   render(Microphone);
   expect(await screen.findByLabelText('Input')).toBeTruthy();
 });
+
+// A microphone that comes or goes must move the list without the panel being
+// reopened.
+it('reads the devices again when the daemon reports a different one', async () => {
+  render(Microphone);
+  await vi.waitFor(() => expect(vi.mocked(listDevices)).toHaveBeenCalled());
+  const reads = vi.mocked(listDevices).mock.calls.length;
+
+  daemon.update((held) => ({ ...held, live: { ...held.live, audio_device: 'Studio Mic' } }));
+
+  await vi.waitFor(() =>
+    expect(vi.mocked(listDevices).mock.calls.length).toBe(reads + 1),
+  );
+});

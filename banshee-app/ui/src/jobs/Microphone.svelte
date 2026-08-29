@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { daemon, deviceLabel, shownFloat, SYSTEM_DEVICE } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { listDevices, type Devices } from '../lib/tauri';
@@ -19,6 +18,8 @@
   const QUIET = [1000, 1500, 2500, 4000];
 
   let devices: Devices = { devices: [], current: null };
+  let seenOpen: string | null | undefined;
+  let seenMissing: string | null | undefined;
   let adding = false;
   let field: HTMLInputElement | undefined;
 
@@ -48,13 +49,23 @@
     ...devices.devices.map((d) => ({ value: d.name, label: d.name })),
   ];
 
-  onMount(async () => {
+  // A device that is neither open nor awaited still needs the panel reopened:
+  // nothing reports one arriving.
+  $: followTheDevices($daemon.live.audio_device, $daemon.live.missing_device);
+
+  async function followTheDevices(open: string | null, missing: string | null) {
+    if (open === seenOpen && missing === seenMissing) return;
+    seenOpen = open;
+    seenMissing = missing;
     try {
-      devices = await listDevices();
+      const read = await listDevices();
+      // A second change can start while this one is in flight, and the older
+      // read must not land on top of the newer one.
+      if (open === seenOpen && missing === seenMissing) devices = read;
     } catch {
       devices = { devices: [], current: null };
     }
-  });
+  }
 </script>
 
 <Row name="Input" command={`banshee config set audio.input_device "${current}"`} pending={$daemon.pending.has('audio.input_device')}>

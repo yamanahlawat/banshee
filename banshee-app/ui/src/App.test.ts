@@ -119,6 +119,22 @@ it('still listens when the daemon is not running at open', async () => {
   ]);
 });
 
+it('names no microphone while the daemon holds none, not the one asked for', async () => {
+  const waiting = {
+    ...ready,
+    audio_device: null,
+    missing_device: 'OnePlus Buds 3',
+    config: { ...ready.config, audio: { ...ready.config.audio, input_device: 'OnePlus Buds 3' } },
+  };
+  vi.mocked(status).mockResolvedValue(waiting as never);
+  render(App);
+  await screen.findByText('Yes, open the pull request.');
+
+  const row = screen.getByRole('button', { name: /Microphone/ });
+  expect(row.textContent).toContain('No microphone');
+  expect(row.textContent).not.toContain('OnePlus Buds 3');
+});
+
 it('keeps the Setup row speaking while a stopped daemon silences the rest', async () => {
   vi.mocked(status).mockRejectedValue(new Error('no socket'));
   vi.mocked(history).mockRejectedValue(new Error('no socket'));

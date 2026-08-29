@@ -7,7 +7,7 @@ import transcribing from '../fixtures/transcribing.json';
 import speaking from '../fixtures/speaking.json';
 import notRunning from '../fixtures/not-running.json';
 import pendingCues from '../fixtures/pending-cues.json';
-import { STATIONS, checklist, deviceLabel, empty, fixGroups, fixProse, lampForm, liveFrom, markPending, needleAt, reduceLive, reduceStatus, shownFloat, stateWord } from './daemon';
+import { STATIONS, checklist, deviceLabel, empty, microphoneInUse, fixGroups, fixProse, lampForm, liveFrom, markPending, needleAt, reduceLive, reduceStatus, shownFloat, stateWord } from './daemon';
 
 describe('the state word', () => {
   it('is Ready on a clear machine', () => {
@@ -129,6 +129,17 @@ describe('the fix groups', () => {
 });
 
 
+
+// The cases `microphone_label` covers, so the two cannot drift apart.
+describe('microphoneInUse', () => {
+  it('names the device the daemon opened', () => {
+    expect(microphoneInUse('MacBook Pro Microphone')).toBe('MacBook Pro Microphone');
+  });
+
+  it('says none rather than the device that was asked for', () => {
+    expect(microphoneInUse(null)).toBe('No microphone');
+  });
+});
 
 describe('deviceLabel', () => {
   it('names the device the daemon opened for its own word', () => {

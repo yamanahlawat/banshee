@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { daemon, deviceLabel, reduceLive, reduceStatus, setupBlocked, stateWord, SYSTEM_DEVICE, type Live, type Status } from './lib/daemon';
+  import { daemon, microphoneInUse, reduceLive, reduceStatus, setupBlocked, stateWord, type Live, type Status } from './lib/daemon';
   import { announcement } from './lib/copy';
   import { followSaveHistory, moreCount, readAll, readNewest, table, today } from './lib/history';
   import { listen, listVoices, startDaemon, status, type Down, type DownloadProgress, type Voices } from './lib/tauri';
@@ -31,11 +31,7 @@
   // The daemon names a voice by id, and the strip says what a person calls it.
   $: voiceName = (id: string) => voices.voices.find((v) => v.id === id)?.name ?? id;
   $: connectedAgents = $agents.filter((a) => a.presence === 'connected').length;
-  // The strip has room for the device alone, so it drops the word the panel
-  // spells out beside it.
-  $: inputDevice = String(config.audio?.input_device ?? '');
-  $: microphone = String($daemon.live.audio_device ?? '') ||
-    (inputDevice === SYSTEM_DEVICE ? deviceLabel(null) : inputDevice);
+  $: microphone = microphoneInUse($daemon.live.audio_device);
   // A stopped daemon knows none of these. Setup is the row that has most to
   // say without one, so it keeps its word.
   $: live = stateWord($daemon) !== 'Not running';
