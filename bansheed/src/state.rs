@@ -47,6 +47,9 @@ pub enum ConsumerCommand {
     // the next transcription
     Discard,
     Ask(AskCommand),
+    // The vocabulary the next transcription leans on. The listener holds the
+    // engine, so a write reaches it the same way a rebind does.
+    Retune(Option<String>),
     // A new stream opened, so the old ring is dead. The rate comes with it:
     // devices do not share one.
     Rebind {
@@ -689,6 +692,13 @@ impl DaemonState {
         self.barge_in
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Hands the listener the prompt the next transcription leans on. The
+    /// listener takes one command at a time, so this never lands part-way
+    /// through a dictation.
+    pub fn set_vocabulary(&self, prompt: Option<String>) -> bool {
+        self.commands.send(ConsumerCommand::Retune(prompt)).is_ok()
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {

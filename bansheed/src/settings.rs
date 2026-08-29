@@ -19,6 +19,7 @@ enum Live {
     Cues,
     SaveHistory,
     Tts,
+    Vocabulary,
 }
 
 fn live(key: &str) -> Option<Live> {
@@ -31,6 +32,9 @@ fn live(key: &str) -> Option<Live> {
         // `tts.fallback` is not here: it decides what to do when Kokoro will
         // not load, which is settled once, at startup.
         "tts.voice" | "tts.speed" => Some(Live::Tts),
+        // `stt.preset` is not here: it names the model file, and swapping that
+        // is a load the daemon cannot yet report the progress of.
+        "stt.vocabulary" => Some(Live::Vocabulary),
         _ => None,
     }
 }
@@ -74,6 +78,11 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
         // The next utterance reads both, so neither reloads the model. The
         // system fallback takes neither, and says so.
         Live::Tts => state.set_tts(&config.tts),
+        // A listener that has gone leaves the words unread, so say so rather
+        // than report a prompt nothing holds
+        Live::Vocabulary => state.set_vocabulary(
+            crate::speech_to_text::whisper::build_initial_prompt(&config.stt.vocabulary),
+        ),
     }
 }
 
@@ -468,6 +477,39 @@ mod tests {
             "one write, one reconfigure"
         );
         assert_eq!(outcome.applied.len(), 2, "both keys are in effect");
+    }
+
+    // The listener holds the engine, so the write is a command it takes at the
+    // next quiet moment, never part-way through a dictation.
+    #[test]
+    fn a_vocabulary_write_reaches_the_listener_that_holds_the_engine() {
+        let (commands, taken) = std::sync::mpsc::channel();
+        let state = crate::test_support::daemon_state(commands);
+
+        let outcome = super::configure(
+            Some(&state),
+            &assignments(&[("stt.vocabulary", vec!["banshee", "tokio"].into())]),
+            false,
+        )
+        .expect("a known key and a legal value must apply");
+
+        match taken.try_recv() {
+            Ok(crate::state::ConsumerCommand::Retune(prompt)) => {
+                assert_eq!(prompt.as_deref(), Some("banshee, tokio"));
+            }
+            other => panic!("the listener was handed no prompt: {:?}", other.is_ok()),
+        }
+        assert_eq!(outcome.applied, vec!["stt.vocabulary".to_string()]);
+    }
+
+    // `stt.preset` names the model file. Swapping it is a load of seconds that
+    // nothing reports the progress of yet.
+    #[test]
+    fn the_transcription_preset_still_needs_a_restart() {
+        assert_eq!(
+            startup_only(&assignments(&[("stt.preset", "quality".into())])),
+            Some(&"stt.preset".to_string())
+        );
     }
 
     #[test]

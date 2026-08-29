@@ -90,6 +90,7 @@ pub fn hotkey_listener(
                         sample_rate,
                     };
                 }
+                ConsumerCommand::Retune(prompt) => pipeline.speech_to_text.set_prompt(prompt),
                 ConsumerCommand::Shutdown => break,
             }
         }

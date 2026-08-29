@@ -9,7 +9,7 @@ fn is_hallucination(no_speech_prob: f32, avg_logprob: f32) -> bool {
     no_speech_prob > NO_SPEECH_PROB_GATE && avg_logprob < AVG_LOGPROB_GATE
 }
 
-fn build_initial_prompt(vocabulary: &[String]) -> Option<String> {
+pub fn build_initial_prompt(vocabulary: &[String]) -> Option<String> {
     if vocabulary.is_empty() {
         return None;
     }
@@ -57,6 +57,13 @@ impl WhisperEngine {
             context,
             initial_prompt: build_initial_prompt(vocabulary),
         })
+    }
+
+    /// The words the next transcription leans on. Only the prompt moves: the
+    /// model behind it is what `stt.preset` names, and that one still needs a
+    /// restart.
+    pub fn set_prompt(&mut self, prompt: Option<String>) {
+        self.initial_prompt = prompt;
     }
 
     pub fn transcribe(&self, audio_data: &[f32]) -> Result<String, BansheeError> {
