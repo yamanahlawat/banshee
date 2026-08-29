@@ -198,7 +198,7 @@ pub struct DaemonState {
     speech: Arc<SpeechPlayer>,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
     cues: std::sync::mpsc::Sender<Cue>,
-    barge_in: BargeInMode,
+    barge_in: Mutex<BargeInMode>,
     // Start and stop can be separate RPC calls, so this cannot live on a stack
     pending_dictate: AtomicBool,
     // enigo posts to the same HID stream rdev listens at, so while this is
@@ -257,7 +257,7 @@ impl DaemonState {
             speech: Arc::new(speech),
             commands,
             cues,
-            barge_in,
+            barge_in: Mutex::new(barge_in),
             pending_dictate: AtomicBool::new(false),
             typing: AtomicBool::new(false),
             push_to_talk_deadline: AtomicU64::new(0),
@@ -277,14 +277,14 @@ impl DaemonState {
         }
         if self.try_transition(RecordingMode::Armed, RecordingMode::ArmedHold) {
             // Manual override of an armed session: hold to answer
-            if matches!(self.barge_in, BargeInMode::Stop) {
+            if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
             let _ = self.cues.send(Cue::RecordStart);
             true
         } else if self.try_transition(RecordingMode::Idle, RecordingMode::PushToTalk) {
             // Silence the daemon's own voice before the mic opens
-            if matches!(self.barge_in, BargeInMode::Stop) {
+            if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
             self.push_to_talk_deadline.store(
@@ -642,6 +642,24 @@ impl DaemonState {
         for key in restart_required {
             pending.insert(key.clone());
         }
+    }
+
+    // A record start reads this, so a write between two dictations changes
+    // what the next one does.
+    pub fn barge_in(&self) -> BargeInMode {
+        *self.locked_barge_in()
+    }
+
+    pub fn set_barge_in(&self, mode: BargeInMode) {
+        *self.locked_barge_in() = mode;
+    }
+
+    // A mode has no invariant a panic can break, and a panic here would stop
+    // every later dictation reading it, so the value stands
+    fn locked_barge_in(&self) -> std::sync::MutexGuard<'_, BargeInMode> {
+        self.barge_in
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {

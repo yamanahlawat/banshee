@@ -14,12 +14,14 @@ pub type Assignments = BTreeMap<String, serde_json::Value>;
 enum Live {
     VadThreshold,
     InputDevice,
+    BargeIn,
 }
 
 fn live(key: &str) -> Option<Live> {
     match key {
         "stt.vad_threshold" => Some(Live::VadThreshold),
         "audio.input_device" => Some(Live::InputDevice),
+        "audio.barge_in" => Some(Live::BargeIn),
         _ => None,
     }
 }
@@ -137,10 +139,14 @@ pub fn configure(
                 state.set_wanted_device(config.audio.input_device.clone());
                 outcome.applied.push(key.clone());
             }
-            // A live key needs a restart too when no daemon runs
-            (Some(Live::VadThreshold) | Some(Live::InputDevice), None) | (None, _) => {
-                outcome.restart_required.push(key.clone())
+            // Read at every record start, so the next dictation obeys it
+            (Some(Live::BargeIn), Some(state)) => {
+                state.set_barge_in(config.audio.barge_in);
+                outcome.applied.push(key.clone());
             }
+            // A live key needs a restart too when no daemon runs
+            (Some(Live::VadThreshold) | Some(Live::InputDevice) | Some(Live::BargeIn), None)
+            | (None, _) => outcome.restart_required.push(key.clone()),
         }
     }
 
@@ -248,6 +254,28 @@ mod tests {
             None,
             "the daemon rereads this one, so applying it without a write does change something"
         );
+    }
+
+    // The weaker sibling tests only ask whether a key is in the live set. This
+    // one asks whether the write reached the daemon that is running.
+    #[test]
+    fn a_barge_in_write_reaches_the_running_daemon() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        assert!(matches!(state.barge_in(), crate::config::BargeInMode::Stop));
+
+        let outcome = super::configure(
+            Some(&state),
+            &assignments(&[("audio.barge_in", "none".into())]),
+            false,
+        )
+        .expect("a known key and a legal value must apply");
+
+        assert!(
+            matches!(state.barge_in(), crate::config::BargeInMode::None),
+            "the next dictation must obey the new value, not the old one"
+        );
+        assert_eq!(outcome.applied, vec!["audio.barge_in".to_string()]);
+        assert!(outcome.restart_required.is_empty());
     }
 
     #[test]
