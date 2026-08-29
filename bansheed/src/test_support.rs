@@ -42,6 +42,22 @@ pub fn daemon_state(commands: std::sync::mpsc::Sender<ConsumerCommand>) -> Arc<D
     ))
 }
 
+/// A daemon state whose history holds `rows`, oldest first.
+pub fn daemon_state_with_history(rows: &[&str]) -> Arc<DaemonState> {
+    Arc::new(DaemonState::new(
+        "0.0.0",
+        "stt",
+        "vad",
+        0.5,
+        "default".to_string(),
+        Some(seeded_history(rows)),
+        SpeechPlayer::new(Box::new(NullBackend)),
+        std::sync::mpsc::channel().0,
+        crate::audio::cues::Cues::silent(),
+        BargeInMode::Stop,
+    ))
+}
+
 /// An in-memory history holding `rows`, oldest first.
 pub fn seeded_history(rows: &[&str]) -> rusqlite::Connection {
     let connection = rusqlite::Connection::open_in_memory().unwrap();

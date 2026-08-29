@@ -16,6 +16,7 @@ enum Live {
     InputDevice,
     BargeIn,
     Cues,
+    SaveHistory,
 }
 
 fn live(key: &str) -> Option<Live> {
@@ -24,8 +25,17 @@ fn live(key: &str) -> Option<Live> {
         "audio.input_device" => Some(Live::InputDevice),
         "audio.barge_in" => Some(Live::BargeIn),
         "audio.cues.enabled" => Some(Live::Cues),
+        "daemon.save_history" => Some(Live::SaveHistory),
         _ => None,
     }
+}
+
+/// The history file the config now asks for, or `None` when it asks for none.
+fn history_for(config: &Config) -> Result<Option<rusqlite::Connection>, BansheeError> {
+    if !config.daemon.save_history {
+        return Ok(None);
+    }
+    crate::history::open().map(Some)
 }
 
 /// The daemon serves a task per connection, so two calls can otherwise read
@@ -151,12 +161,25 @@ pub fn configure(
                 state.set_cues_enabled(config.audio.cues.enabled);
                 outcome.applied.push(key.clone());
             }
+            // Opening the file is the whole of the setting, so a failure to open
+            // one leaves the key unapplied rather than half applied
+            (Some(Live::SaveHistory), Some(state)) => match history_for(&config) {
+                Ok(connection) => {
+                    state.set_history(connection);
+                    outcome.applied.push(key.clone());
+                }
+                Err(error) => {
+                    eprintln!("Failed to open the history file: {error}");
+                    outcome.restart_required.push(key.clone());
+                }
+            },
             // A live key needs a restart too when no daemon runs
             (
                 Some(Live::VadThreshold)
                 | Some(Live::InputDevice)
                 | Some(Live::BargeIn)
-                | Some(Live::Cues),
+                | Some(Live::Cues)
+                | Some(Live::SaveHistory),
                 None,
             )
             | (None, _) => outcome.restart_required.push(key.clone()),
@@ -308,6 +331,29 @@ mod tests {
             "the next cue must be heard, without a restart"
         );
         assert_eq!(outcome.applied, vec!["audio.cues.enabled".to_string()]);
+        assert!(outcome.restart_required.is_empty());
+    }
+
+    // Only the off direction runs here: turning history on opens the real file
+    // under the home directory, which a test must not create. The on direction
+    // is verified against a running daemon.
+    #[test]
+    fn a_save_history_write_reaches_the_running_daemon() {
+        let state = crate::test_support::daemon_state_with_history(&["one"]);
+        assert!(state.history_enabled());
+
+        let outcome = super::configure(
+            Some(&state),
+            &assignments(&[("daemon.save_history", false.into())]),
+            false,
+        )
+        .expect("a known key and a legal value must apply");
+
+        assert!(
+            !state.history_enabled(),
+            "the next dictation must not be kept, without a restart"
+        );
+        assert_eq!(outcome.applied, vec!["daemon.save_history".to_string()]);
         assert!(outcome.restart_required.is_empty());
     }
 

@@ -167,7 +167,7 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "speaking": daemon_state.speech().is_speaking(),
         "uptime_seconds": daemon_state.uptime().as_secs(),
         "vad_threshold": daemon_state.vad_threshold(),
-        "history_enabled": daemon_state.db_connection().is_some(),
+        "history_enabled": daemon_state.history_enabled(),
         // Stated, so no client invents a narrower definition of ready
         "ready": blockers.is_empty(),
         "blockers": blockers,
@@ -505,52 +505,29 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 },
                 Err(response) => return *response,
             };
-            if let Some(db) = daemon_state.db_connection() {
-                match db.lock() {
-                    Ok(connection) => {
-                        match crate::history::TranscriptionHistory::list(&connection, limit) {
-                            Ok(history) => JsonRpcResponse::success(
-                                request.id,
-                                serde_json::json!({ "history": history }),
-                            ),
-                            Err(e) => JsonRpcResponse::error(
-                                request.id,
-                                -32603,
-                                format!("Failed to retrieve history: {e}"),
-                            ),
-                        }
-                    }
-                    Err(e) => JsonRpcResponse::error(
-                        request.id,
-                        -32603,
-                        format!("Failed to lock database connection: {e}"),
-                    ),
+            match daemon_state
+                .with_history(|c| crate::history::TranscriptionHistory::list(c, limit))
+            {
+                Some(Ok(history)) => {
+                    JsonRpcResponse::success(request.id, serde_json::json!({ "history": history }))
                 }
-            } else {
-                JsonRpcResponse::error(request.id, -32003, "History is not enabled.")
+                Some(Err(e)) => JsonRpcResponse::error(
+                    request.id,
+                    -32603,
+                    format!("Failed to retrieve history: {e}"),
+                ),
+                None => JsonRpcResponse::error(request.id, -32003, "History is not enabled."),
             }
         }
         BANSHEE_CLEAR_HISTORY => {
-            if let Some(db) = daemon_state.db_connection() {
-                match db.lock() {
-                    Ok(connection) => {
-                        match crate::history::TranscriptionHistory::clear(&connection) {
-                            Ok(_) => JsonRpcResponse::success(request.id, serde_json::json!({})),
-                            Err(e) => JsonRpcResponse::error(
-                                request.id,
-                                -32003,
-                                format!("Failed to clear history: {e}"),
-                            ),
-                        }
-                    }
-                    Err(e) => JsonRpcResponse::error(
-                        request.id,
-                        -32603,
-                        format!("Failed to lock database connection: {e}"),
-                    ),
-                }
-            } else {
-                JsonRpcResponse::error(request.id, -32003, "History is not enabled.")
+            match daemon_state.with_history(crate::history::TranscriptionHistory::clear) {
+                Some(Ok(())) => JsonRpcResponse::success(request.id, serde_json::json!({})),
+                Some(Err(e)) => JsonRpcResponse::error(
+                    request.id,
+                    -32003,
+                    format!("Failed to clear history: {e}"),
+                ),
+                None => JsonRpcResponse::error(request.id, -32003, "History is not enabled."),
             }
         }
         BANSHEE_AGENTS => {
@@ -701,25 +678,9 @@ mod tests {
         }
     }
 
-    fn state_with_history(rows: &[&str]) -> Arc<DaemonState> {
-        let connection = crate::test_support::seeded_history(rows);
-        Arc::new(DaemonState::new(
-            "0.0.0",
-            "stt",
-            "vad",
-            0.5,
-            "default".to_string(),
-            Some(std::sync::Mutex::new(connection)),
-            crate::text_to_speech::SpeechPlayer::default(),
-            std::sync::mpsc::channel().0,
-            crate::audio::cues::Cues::silent(),
-            crate::config::BargeInMode::Stop,
-        ))
-    }
-
     #[tokio::test]
     async fn history_honours_a_limit() {
-        let state = state_with_history(&["first", "second", "third"]);
+        let state = crate::test_support::daemon_state_with_history(&["first", "second", "third"]);
 
         let request = history_request(serde_json::json!({ "limit": 1 }));
         let response = dispatch(request, &state).await;
@@ -750,7 +711,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_history_limit_that_does_not_fit_is_refused() {
-        let state = state_with_history(&["first"]);
+        let state = crate::test_support::daemon_state_with_history(&["first"]);
 
         let request = history_request(serde_json::json!({ "limit": 4_294_967_296u64 }));
         let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
@@ -761,7 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn history_takes_an_explicit_zero_literally() {
-        let state = state_with_history(&["first", "second", "third"]);
+        let state = crate::test_support::daemon_state_with_history(&["first", "second", "third"]);
 
         let request = history_request(serde_json::json!({ "limit": 0 }));
         let response = dispatch(request, &state).await;

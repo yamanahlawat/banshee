@@ -184,7 +184,7 @@ pub struct DaemonState {
     recording_error: RwLock<Option<RecordingError>>,
     recording: AtomicU8,
     started_at: Instant,
-    db_connection: Option<Mutex<rusqlite::Connection>>,
+    db_connection: Mutex<Option<rusqlite::Connection>>,
     transcriptions: Mutex<TranscriptionRing>,
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
@@ -222,7 +222,7 @@ impl DaemonState {
         vad_model: &'static str,
         initial_vad_threshold: f32,
         wanted_device: String,
-        db_connection: Option<Mutex<rusqlite::Connection>>,
+        db_connection: Option<rusqlite::Connection>,
         speech: SpeechPlayer,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
         cues: Cues,
@@ -243,7 +243,7 @@ impl DaemonState {
             recording_error: RwLock::new(None),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
-            db_connection,
+            db_connection: Mutex::new(db_connection),
             transcriptions: Mutex::new(TranscriptionRing {
                 next_id: 0,
                 entries: VecDeque::with_capacity(TRANSCRIPTION_RING_CAPACITY),
@@ -685,8 +685,28 @@ impl DaemonState {
         f32::from_bits(bits)
     }
 
-    pub fn db_connection(&self) -> Option<&Mutex<rusqlite::Connection>> {
-        self.db_connection.as_ref()
+    /// Runs `job` against the history file, or answers `None` when history is
+    /// off. The one place that holds the lock, so no caller repeats the two
+    /// steps that stand between it and the table.
+    pub fn with_history<T>(&self, job: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
+        let held = self
+            .db_connection
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        held.as_ref().map(job)
+    }
+
+    pub fn history_enabled(&self) -> bool {
+        self.with_history(|_| ()).is_some()
+    }
+
+    /// Opening and closing the file is the whole of `daemon.save_history`, so a
+    /// write between two dictations decides whether the next one is kept.
+    pub fn set_history(&self, connection: Option<rusqlite::Connection>) {
+        *self
+            .db_connection
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = connection;
     }
 
     /// Called from the real time audio thread, so it must not lock or allocate.
@@ -709,6 +729,23 @@ impl DaemonState {
 
 #[cfg(test)]
 mod tests {
+    // The off direction alone would pass a `set_history` that always stores
+    // nothing, so this asks whether a reopened file is reached.
+    #[test]
+    fn history_turned_back_on_is_written_to_again() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        assert!(!state.history_enabled(), "this state starts with none");
+
+        state.set_history(Some(crate::test_support::seeded_history(&["kept"])));
+
+        assert!(state.history_enabled());
+        let rows = state
+            .with_history(|c| crate::history::TranscriptionHistory::list(c, None))
+            .expect("history is on, so the job must run")
+            .expect("the table must be readable");
+        assert_eq!(rows.len(), 1, "the reopened file must be the one read");
+    }
+
     use super::*;
 
     /// A client offers the command behind a Copy button, so `command` has to

@@ -476,10 +476,9 @@ fn store(state: &DaemonState, transcription: Option<&str>) {
 }
 
 fn save_history(state: &DaemonState, transcription: &str) {
-    if let Some(db) = state.db_connection()
-        && let Ok(connection) = db.lock()
-        && let Err(e) = crate::history::TranscriptionHistory::insert(&connection, transcription)
-    {
+    let stored =
+        state.with_history(|c| crate::history::TranscriptionHistory::insert(c, transcription));
+    if let Some(Err(e)) = stored {
         eprintln!("Failed to insert transcription into database: {e}");
     }
 }

@@ -21,19 +21,14 @@ mod test_support;
 mod text_to_speech;
 
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use args::{Cli, CommandType};
-use banshee_common::{
-    SileroVADConfig, Voice, WhisperConfig,
-    error::BansheeError,
-    utils::{self, get_db_path},
-};
+use banshee_common::{SileroVADConfig, Voice, WhisperConfig, error::BansheeError, utils};
 use clap::Parser;
 
 use crate::{
     config::Config,
-    history::TranscriptionHistory,
     speech_to_text::{vad::VADEngine, whisper::WhisperEngine},
     state::RecordingError,
 };
@@ -290,14 +285,7 @@ async fn main() -> Result<(), BansheeError> {
             let (socket_path, listener) = daemon::claim()?;
             permissions::restart_when_granted();
             let db_connection = if config.daemon.save_history {
-                let db_path = get_db_path().ok_or_else(|| {
-                    BansheeError::Other("Failed to get database path".to_string())
-                })?;
-                let connection = rusqlite::Connection::open(db_path)
-                    .map_err(|e| BansheeError::Other(e.to_string()))?;
-                TranscriptionHistory::create_table(&connection)
-                    .map_err(|e| BansheeError::Other(e.to_string()))?;
-                Some(Mutex::new(connection))
+                Some(history::open()?)
             } else {
                 None
             };
