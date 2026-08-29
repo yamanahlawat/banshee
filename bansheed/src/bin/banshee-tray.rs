@@ -240,6 +240,7 @@ mod mac {
                 // the only way to let go of the microphone and the hotkey
                 // without a terminal.
                 Message::Quit => {
+                    close_the_window().unwrap_or_else(|e| eprintln!("banshee-tray: {e}"));
                     stop_the_daemon().unwrap_or_else(|e| eprintln!("banshee-tray: {e}"));
                     return event_loop.exit();
                 }
@@ -405,8 +406,18 @@ mod mac {
         Ok(())
     }
 
-    // Not `open -b com.banshee.app`: on this bundle it exits 0 and starts
-    // nothing. The window is this binary's sibling, so run it directly.
+    // The window runs as its own process and can come from Spotlight rather
+    // than from Open Banshee, so the tray holds no handle for it.
+    fn close_the_window() -> Result<(), Box<dyn std::error::Error>> {
+        std::process::Command::new("/usr/bin/pkill")
+            .args(["-x", "banshee-app"])
+            .status()?;
+        Ok(())
+    }
+
+    // Not `open`, which resolves the bundle id and starts nothing when a
+    // second Banshee.app is registered under it. The window is this binary's
+    // sibling, so run it directly.
     fn open_the_window() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::process::CommandExt;
 

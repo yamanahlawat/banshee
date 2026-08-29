@@ -31,6 +31,23 @@ pub fn sibling_command(name: &str) -> Result<std::process::Command, BansheeError
     Ok(std::process::Command::new(sibling(&exe, name)?))
 }
 
+/// launchd's names for the two login jobs. The daemon binary installs them and
+/// the window starts them, so the spelling is shared.
+pub const DAEMON_AGENT: &str = "com.banshee.daemon";
+pub const TRAY_AGENT: &str = "com.banshee.tray";
+
+/// What launchctl calls one job of the logged-in user.
+pub fn launchd_target(label: &str) -> String {
+    format!("gui/{}/{label}", uid())
+}
+
+pub fn uid() -> u32 {
+    unsafe extern "C" {
+        fn getuid() -> u32;
+    }
+    unsafe { getuid() }
+}
+
 pub fn get_socket_path() -> Option<PathBuf> {
     let base_path = dirs::home_dir()?;
     Some(base_path.join(".banshee").join("banshee.sock"))

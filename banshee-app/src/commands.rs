@@ -336,37 +336,57 @@ pub async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), Comman
         })
 }
 
-/// Runs a `banshee` subcommand from the bundle this window ships in. The
-/// socket exists only while the daemon runs, so it cannot carry the call that
-/// starts one.
-pub fn run_cli(subcommand: &str) -> Result<(), CommandError> {
-    let fail = |message: String| CommandError {
+fn failed(message: String) -> CommandError {
+    CommandError {
         code: -32603,
         message,
         transport: false,
         sent: false,
-    };
+    }
+}
+
+/// Runs a `banshee` subcommand from the bundle this window ships in. The
+/// socket exists only while the daemon runs, so it cannot carry the call that
+/// starts one.
+pub fn run_cli(subcommand: &str) -> Result<(), CommandError> {
     let status = utils::sibling_command("banshee")
-        .map_err(|error| fail(error.to_string()))?
+        .map_err(|error| failed(error.to_string()))?
         .arg(subcommand)
         .status()
-        .map_err(|error| fail(error.to_string()))?;
+        .map_err(|error| failed(error.to_string()))?;
     if status.success() {
         return Ok(());
     }
-    Err(fail(format!("banshee {subcommand} did not finish")))
+    Err(failed(format!("banshee {subcommand} did not finish")))
+}
+
+/// Starts one login job. kickstart leaves a job that already runs alone, so a
+/// daemon part-way through loading its models survives this. It fails when the
+/// job was never bootstrapped, and the subcommand that installs it runs only
+/// then, because installing tears a running job down.
+fn ensure_running(label: &str, install: &str) -> Result<(), CommandError> {
+    let target = utils::launchd_target(label);
+    let started = std::process::Command::new("launchctl")
+        .args(["kickstart", &target])
+        .status()
+        .map_err(|error| failed(error.to_string()))?;
+    if started.success() {
+        return Ok(());
+    }
+    run_cli(install)
+}
+
+/// Puts the menu bar icon up. Not a second copy of the binary, which the
+/// icon's own lock refuses while launchd keeps retrying it.
+pub fn open_the_tray() -> Result<(), CommandError> {
+    ensure_running(utils::TRAY_AGENT, "tray")
 }
 
 // `banshee start` waits on launchd, so running it on a worker thread would
 // hold that thread and stall every other command the window sends.
 #[tauri::command]
 pub async fn start_daemon() -> Result<(), CommandError> {
-    tauri::async_runtime::spawn_blocking(|| run_cli("start"))
+    tauri::async_runtime::spawn_blocking(|| ensure_running(utils::DAEMON_AGENT, "start"))
         .await
-        .map_err(|error| CommandError {
-            code: -32603,
-            message: error.to_string(),
-            transport: false,
-            sent: false,
-        })?
+        .map_err(|error| failed(error.to_string()))?
 }

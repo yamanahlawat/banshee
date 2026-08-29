@@ -27,10 +27,11 @@ vi.mock('./lib/tauri', () => ({
   openPermissionPane: vi.fn(),
   listVoices: vi.fn(),
   detectAgents: vi.fn(),
+  startDaemon: vi.fn(() => Promise.resolve()),
   planConnect: vi.fn(),
   applyConnect: vi.fn(),
 }));
-import { applyConnect, detectAgents, history, listen, listVoices, planConnect, status } from './lib/tauri';
+import { applyConnect, detectAgents, history, listen, listVoices, planConnect, startDaemon, status } from './lib/tauri';
 import { agents } from './lib/agents';
 import { daemon, empty } from './lib/daemon';
 import { forgetCopy } from './lib/copy';
@@ -107,7 +108,13 @@ it('still listens when the daemon is not running at open', async () => {
   await screen.findAllByText('Not running');
   expect(container.querySelector('header')?.textContent).toContain('Not running');
   const events = vi.mocked(listen).mock.calls.map((c) => c[0]);
-  expect(events).toEqual(['daemon:status', 'daemon:state', 'daemon:downloads', 'daemon:down']);
+  expect(events).toEqual([
+    'daemon:status',
+    'daemon:state',
+    'daemon:downloads',
+    'daemon:down',
+    'app:reopened',
+  ]);
 });
 
 it('never prints the raw word the daemon uses for an unnamed device', async () => {
@@ -127,6 +134,37 @@ it('keeps the Setup row speaking while a stopped daemon silences the rest', asyn
   await screen.findAllByText('Not running');
   expect(screen.getByRole('button', { name: /Setup/ }).textContent).toContain('To fix');
   expect(screen.getByRole('button', { name: /Hotkey/ })).toHaveProperty('disabled', true);
+});
+
+// The window starts the daemon, so it routinely reads before the daemon can
+// answer. A read that failed then must not stay failed.
+it('reads the voices and the agents again once the daemon comes back', async () => {
+  vi.mocked(status).mockRejectedValueOnce(new Error('no socket'));
+  vi.mocked(listVoices).mockRejectedValueOnce(new Error('no socket'));
+  vi.mocked(detectAgents).mockRejectedValueOnce(new Error('no socket'));
+  render(App);
+  await screen.findAllByText('Not running');
+  expect(vi.mocked(listVoices)).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(detectAgents)).toHaveBeenCalledTimes(1);
+
+  const push = vi.mocked(listen).mock.calls.find((c) => c[0] === 'daemon:status')?.[1];
+  push?.({ payload: ready } as never);
+  await screen.findByText('Yes, open the pull request.');
+
+  expect(vi.mocked(listVoices)).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(detectAgents)).toHaveBeenCalledTimes(2);
+});
+
+it('starts the daemon again when a second open reaches this window', async () => {
+  vi.mocked(status).mockRejectedValueOnce(new Error('no socket'));
+  render(App);
+  await screen.findAllByText('Not running');
+  expect(vi.mocked(startDaemon)).toHaveBeenCalledTimes(1);
+
+  vi.mocked(status).mockRejectedValueOnce(new Error('no socket'));
+  const reopen = vi.mocked(listen).mock.calls.find((c) => c[0] === 'app:reopened')?.[1];
+  reopen?.({ payload: undefined } as never);
+  await vi.waitFor(() => expect(vi.mocked(startDaemon)).toHaveBeenCalledTimes(2));
 });
 
 it('reads the history once the daemon comes back', async () => {

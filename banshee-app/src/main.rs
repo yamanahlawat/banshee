@@ -2,6 +2,16 @@ use banshee_app::commands::{Daemon, NO_HOME_DIR};
 use banshee_app::{bridge, commands};
 use tauri::{Emitter, Manager};
 
+// Opening a menu bar app is what puts its icon up. Off this thread, because
+// launchd can take seconds and the window must not wait for it.
+fn start_the_icon() {
+    std::thread::spawn(|| {
+        if let Err(error) = commands::open_the_tray() {
+            eprintln!("banshee-app: the menu bar icon did not start: {error:?}");
+        }
+    });
+}
+
 fn main() {
     tauri::Builder::default()
         // The tray opens the window by running this binary, so a second press
@@ -13,19 +23,14 @@ fn main() {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
+            // A second open reaches this process rather than a new one, so
+            // neither the setup below nor the window's mount runs again.
+            start_the_icon();
+            let _ = app.emit("app:reopened", ());
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            // Opening Banshee starts Banshee: the icon and the daemon both.
-            // Each does nothing when its target already runs. Off this thread,
-            // because launchd takes seconds the window must not wait for.
-            std::thread::spawn(|| {
-                for subcommand in ["tray", "start"] {
-                    if let Err(error) = commands::run_cli(subcommand) {
-                        eprintln!("banshee-app: banshee {subcommand} failed: {error:?}");
-                    }
-                }
-            });
+            start_the_icon();
             // No connection is opened here: a command's first use and a
             // reconnect after the daemon dies both run through the same
             // `commands::ensure_connected`, so the window always opens

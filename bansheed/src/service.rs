@@ -35,12 +35,14 @@ mod launchd {
 
     use banshee_common::error::BansheeError;
 
+    use banshee_common::utils::{DAEMON_AGENT, TRAY_AGENT, launchd_target, uid};
+
     use super::{Agent, home_dir, sibling};
 
     fn label(agent: Agent) -> &'static str {
         match agent {
-            Agent::Daemon => "com.banshee.daemon",
-            Agent::Tray => "com.banshee.tray",
+            Agent::Daemon => DAEMON_AGENT,
+            Agent::Tray => TRAY_AGENT,
         }
     }
 
@@ -95,18 +97,9 @@ mod launchd {
             log = log.display(),
         );
 
-        // A loaded, unchanged job only needs starting, and kickstart leaves a
-        // running one alone. A bootout would kill the agent's children, and the
-        // icon's child is the window that asked for this.
-        let target = format!("gui/{}/{label}", uid());
-        if std::fs::read_to_string(&plist).is_ok_and(|held| held == content)
-            && launchctl(&["print", &target]).is_ok()
-        {
-            return launchctl(&["kickstart", &target]);
-        }
-
-        // Reinstall must be idempotent: unload any previous copy before loading
-        let _ = launchctl(&["bootout", &format!("gui/{}/{label}", uid())]);
+        // Install means make this binary the one that runs, so a live job is
+        // torn down even when the plist is identical.
+        let _ = launchctl(&["bootout", &launchd_target(label)]);
         std::fs::write(&plist, content)?;
         // bootout is asynchronous and bootstrap fails while the old job is
         // still tearing down, so retry the bootstrap itself
@@ -127,7 +120,7 @@ mod launchd {
 
     fn remove_agent(label: &str) -> Result<bool, BansheeError> {
         let plist = agent_path(&home_dir()?, label);
-        let _ = launchctl(&["bootout", &format!("gui/{}/{label}", uid())]);
+        let _ = launchctl(&["bootout", &launchd_target(label)]);
         if plist.exists() {
             std::fs::remove_file(&plist)?;
             return Ok(true);
@@ -176,13 +169,6 @@ mod launchd {
                 String::from_utf8_lossy(&output.stderr).trim()
             )))
         }
-    }
-
-    fn uid() -> u32 {
-        unsafe extern "C" {
-            fn getuid() -> u32;
-        }
-        unsafe { getuid() }
     }
 }
 
