@@ -107,6 +107,7 @@ mod mac {
         Device(Device),
         History(bool),
         Quit,
+        Open,
         CopyLast,
         Copied(String),
     }
@@ -163,7 +164,7 @@ mod mac {
                 "Copy last dictation".to_string(),
                 copy_last_enabled(indicator, history_enabled),
             ),
-            Row::Action(OPEN_ID, "Open Banshee (coming soon)".to_string(), false),
+            Row::Action(OPEN_ID, "Open Banshee".to_string(), true),
             Row::Separator,
             Row::Action(QUIT_ID, "Quit Banshee".to_string(), true),
         ]
@@ -235,7 +236,13 @@ mod mac {
             // the reconnect loop repeats itself once a cycle while the daemon is
             // down, so an unchanged value must not reach show()
             let changed = match message {
-                Message::Quit => return event_loop.exit(),
+                // The row says Quit Banshee, so it stops Banshee. This menu is
+                // the only way to let go of the microphone and the hotkey
+                // without a terminal.
+                Message::Quit => {
+                    stop_the_daemon().unwrap_or_else(|e| eprintln!("banshee-tray: {e}"));
+                    return event_loop.exit();
+                }
                 Message::State(indicator) => {
                     let moved = self.indicator != indicator;
                     self.indicator = indicator;
@@ -250,6 +257,10 @@ mod mac {
                     let moved = self.history_enabled != enabled;
                     self.history_enabled = enabled;
                     moved
+                }
+                Message::Open => {
+                    return open_the_window()
+                        .unwrap_or_else(|error| eprintln!("banshee-tray: {error}"));
                 }
                 Message::CopyLast => return spawn_copy_last(self.proxy.clone()),
                 Message::Copied(text) => {
@@ -387,6 +398,26 @@ mod mac {
         Ok(())
     }
 
+    // A stop over the socket leaves the login agent installed, so the daemon
+    // is down now and back at the next login.
+    fn stop_the_daemon() -> Result<(), Box<dyn std::error::Error>> {
+        utils::sibling_command("banshee")?.arg("stop").status()?;
+        Ok(())
+    }
+
+    // Not `open -b com.banshee.app`: on this bundle it exits 0 and starts
+    // nothing. The window is this binary's sibling, so run it directly.
+    fn open_the_window() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::CommandExt;
+
+        // Its own process group, or it dies with this one. launchd signals
+        // the whole group when it boots the job out, and a reinstall does.
+        utils::sibling_command("banshee-app")?
+            .process_group(0)
+            .spawn()?;
+        Ok(())
+    }
+
     // launchd runs one job, but nothing stops the binary being started by hand,
     // and a second process means a second icon. The lock lives as long as the
     // process does and the kernel drops it however the process dies.
@@ -424,6 +455,7 @@ mod mac {
             let message = match event.id.0.as_str() {
                 QUIT_ID => Some(Message::Quit),
                 COPY_LAST_ID => Some(Message::CopyLast),
+                OPEN_ID => Some(Message::Open),
                 _ => None,
             };
             if let Some(message) = message {
@@ -494,7 +526,7 @@ mod mac {
                     "MacBook Pro Microphone",
                     "---",
                     "Copy last dictation",
-                    "Open Banshee (coming soon)",
+                    "Open Banshee",
                     "---",
                     "Quit Banshee",
                 ]
@@ -515,6 +547,22 @@ mod mac {
 
             assert!(!copy_enabled(Indicator::Idle, false));
             assert!(copy_enabled(Indicator::Idle, true));
+        }
+
+        // A stopped daemon is the state the window has most to say about: it
+        // names the fix and prints the command that applies it.
+        #[test]
+        fn the_open_row_stays_live_even_when_the_daemon_is_not() {
+            for indicator in [Indicator::Idle, Indicator::NotRunning] {
+                let open = menu_rows(indicator, &Device::default(), false)
+                    .into_iter()
+                    .find_map(|row| match row {
+                        Row::Action(id, _, enabled) if id == OPEN_ID => Some(enabled),
+                        _ => None,
+                    })
+                    .expect("menu_rows must include the open action");
+                assert!(open, "{indicator:?} must still offer the window");
+            }
         }
 
         #[test]

@@ -11,7 +11,8 @@ local Whisper for listening, a local neural voice for speaking, no cloud, no
 API keys, no audio ever leaving your laptop.
 
 It's also a straight-up local dictation tool: hold a hotkey, speak, and the
-text lands in whatever app you're focused on. Pure Rust, offline, always on.
+text lands in whatever app you're focused on. A Rust daemon and CLI, a Tauri
+window, offline, always on.
 
 ## Demo
 
@@ -117,6 +118,12 @@ it reports.
 The daemon runs at every login, restarts if it crashes, and logs to
 `~/.banshee/daemon.log`. `banshee stop` pauses it until the next login;
 `banshee serve` runs it in the foreground for debugging.
+
+Choose **Open Banshee** from the menu bar for a window that does the same jobs:
+what you last said with a button to copy it, the day's dictations, and the
+microphone, hotkey, voice and agent settings. Every job in it is a command the
+CLI already has, and the window shows you which one. Quit it and dictation
+carries on; it holds nothing the daemon needs.
 
 With the daemon running, the global hotkeys are:
 

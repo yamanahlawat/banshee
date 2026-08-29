@@ -3,6 +3,6 @@
   "productName": "Banshee",
   "identifier": "com.banshee.app",
   "build": { "frontendDist": "ui/dist", "devUrl": "http://localhost:5173", "beforeDevCommand": { "script": "npm run dev", "cwd": "ui" }, "beforeBuildCommand": { "script": "npm run build", "cwd": "ui" } },
-  "app": { "windows": [{ "title": "Banshee", "width": 480, "height": 720, "minWidth": 480, "maxWidth": 480, "minHeight": 520, "resizable": true }] },
+  "app": { "windows": [{ "title": "Banshee", "width": 480, "height": 720, "minWidth": 480, "maxWidth": 480, "minHeight": 520, "resizable": true, "maximizable": false }] },
   "bundle": { "active": true, "targets": ["app"], "macOS": { "minimumSystemVersion": "13.0" } }
 }

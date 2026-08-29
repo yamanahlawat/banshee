@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Banshee has a window.** Choose `Open Banshee` from the menu bar to set up
+  dictation, copy what you said, and change any setting. Everything it does, the
+  CLI still does, and the window prints the command beside each job. It needs no
+  new permission and holds nothing the daemon needs: quit it and dictation
+  carries on.
 - **The daemon reports when it listens for an answer and when it transcribes.**
   A client subscribed to `state` sees `armed` and `transcribing` beside `recording`
   and `speaking`. `recording` still means the microphone is open, so it stays true

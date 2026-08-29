@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatTime, sameLocalDay, toDate } from './time';
+import { formatTime, formatWhen, sameLocalDay, toDate } from './time';
 
 describe('formatTime', () => {
   // Two spellings of one instant must read alike. This holds under any host
@@ -26,5 +26,25 @@ describe('sameLocalDay', () => {
   });
   it('separates two different days', () => {
     expect(sameLocalDay(toDate('2026-08-26T09:00:00Z'), toDate('2026-08-27T09:00:00Z'))).toBe(false);
+  });
+});
+
+describe('formatWhen', () => {
+  const now = new Date(2026, 7, 29, 0, 3, 0);
+  const at = (y: number, m: number, d: number, h: number, min: number) =>
+    new Date(y, m, d, h, min).toISOString();
+
+  it('gives the clock alone for a row from the reader\'s own day', () => {
+    expect(formatWhen(at(2026, 7, 29, 0, 1), now)).toBe('00:01');
+  });
+  it('names yesterday, so 23:58 is not read as a minute ago', () => {
+    expect(formatWhen(at(2026, 7, 28, 23, 58), now)).toBe('Yesterday 23:58');
+  });
+  it('dates anything older', () => {
+    expect(formatWhen(at(2026, 7, 20, 9, 14), now)).toBe('20 Aug 09:14');
+  });
+  it('counts back by the calendar, so a clock change cannot skip a day', () => {
+    const firstOfMarch = new Date(2026, 2, 1, 0, 30, 0);
+    expect(formatWhen(at(2026, 1, 28, 22, 0), firstOfMarch)).toBe('Yesterday 22:00');
   });
 });

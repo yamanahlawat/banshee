@@ -6,8 +6,9 @@ vi.mock('../lib/tauri', () => ({
   openPermissionPane: vi.fn().mockResolvedValue(null),
   downloadModels: vi.fn().mockResolvedValue(null),
   copyText: vi.fn().mockResolvedValue(null),
+  startDaemon: vi.fn().mockResolvedValue(null),
 }));
-import { openPermissionPane } from '../lib/tauri';
+import { openPermissionPane, startDaemon } from '../lib/tauri';
 import SetupFixes from './SetupFixes.svelte';
 
 beforeEach(() => {
@@ -122,4 +123,14 @@ it('offers no button it cannot wire, since the window cannot spawn a daemon', ()
   render(SetupFixes);
   expect(screen.queryByRole('button', { name: /^Open |^Download / })).toBeNull();
   expect(screen.getByRole('button', { name: 'Copy command' })).toBeTruthy();
+});
+
+// The window is the only surface a non-terminal user has, so a stopped daemon
+// must offer more than a command to copy.
+it('starts the daemon from the window, not from a command the reader must retype', async () => {
+  daemon.set({ ...empty(), down: 'not running' });
+  render(SetupFixes);
+  const start = await screen.findByRole('button', { name: 'Start Banshee' });
+  await fireEvent.click(start);
+  expect(startDaemon).toHaveBeenCalledOnce();
 });

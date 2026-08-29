@@ -11,7 +11,10 @@ VERSION := $(shell grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 
 .PHONY: install
 install:
-	cargo build --release
+	cargo build --release --workspace --exclude banshee-app
+	# Last, and never followed by a plain `cargo build`: that rebuilds the app
+	# without the frontend and leaves it pointing at the dev server.
+	cd banshee-app && cargo tauri build --no-bundle
 	mkdir -p "$(APP_DIR)" "$(BIN_DIR)"
 	./scripts/bundle.sh target/release "$(APP)" "$(IDENTITY)" "$(VERSION)"
 	ln -sf "$(BANSHEE)" "$(BIN_DIR)/banshee"

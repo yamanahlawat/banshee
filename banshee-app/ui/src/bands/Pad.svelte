@@ -1,11 +1,12 @@
 <script lang="ts">
   import { copy, copied } from '../lib/copy';
-  import { formatTime } from '../lib/time';
+  import { formatWhen } from '../lib/time';
 
   export let latest: { text: string; timestamp: string } | null;
   export let landing: string | null;
 
   $: done = $copied === 'latest';
+  $: when = latest ? formatWhen(latest.timestamp, new Date()) : '';
 </script>
 
 <section aria-label="Latest dictation" style="padding: 18px 22px 16px; display: flex; flex-direction: column; gap: 8px;">
@@ -16,7 +17,7 @@
     <p style="margin: 0; font-size: 17px; line-height: 1.5; text-wrap: pretty;">{landing}<span aria-hidden="true" style="display: inline-block; width: 2px; height: 1em; background: var(--ink); vertical-align: text-bottom; margin-left: 2px;"></span></p>
   {:else if latest}
     <div style="display: flex; align-items: center; justify-content: space-between;">
-      <span class="caps" style="color: var(--dim);">Latest · {formatTime(latest.timestamp)}</span>
+      <span class="caps" style="color: var(--dim);">Latest · {when}</span>
       {#if done}
         <span style="font-size: 12px; font-weight: 600; color: var(--ink); display: inline-flex; align-items: center; min-height: 28px; padding: 0 10px;">Copied</span>
       {:else}

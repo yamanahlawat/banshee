@@ -9,7 +9,7 @@
     <key>CFBundleIdentifier</key>
     <string>com.banshee.app</string>
     <key>CFBundleExecutable</key>
-    <string>banshee-tray</string>
+    <string>banshee-app</string>
     <key>CFBundleIconFile</key>
     <string>banshee</string>
     <key>CFBundlePackageType</key>
@@ -20,8 +20,6 @@
     <string>__VERSION__</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
-    <key>LSUIElement</key>
-    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>

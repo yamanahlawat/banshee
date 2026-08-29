@@ -1,7 +1,7 @@
 <script lang="ts">
   import { daemon, fixGroups, fixProse, type Blocker } from '../lib/daemon';
   import { announce } from '../lib/copy';
-  import { downloadModels, openPermissionPane } from '../lib/tauri';
+  import { downloadModels, openPermissionPane, startDaemon } from '../lib/tauri';
   import Command from '../controls/Command.svelte';
   import Filled from '../controls/Filled.svelte';
 
@@ -39,17 +39,21 @@
 
   $: summary = summaryFor($daemon.down, groups.length, $daemon.downloading);
 
+  // One entry per kind the window can act on. A kind absent here carries its
+  // command and no button, which is what a blocker the window cannot fix gets.
+  const FIXES: Record<string, { label: (b: Blocker) => string; run: (b: Blocker) => Promise<void> }> = {
+    daemon: { label: () => 'Start Banshee', run: () => startDaemon() },
+    model: { label: () => 'Download models', run: () => downloadModels() },
+    permission: { label: (b) => `Open ${b.name} settings`, run: (b) => openPermissionPane(b.id) },
+  };
+
   async function act(blocker: Blocker) {
     try {
-      await (blocker.kind === 'model' ? downloadModels() : openPermissionPane(blocker.id));
+      await FIXES[blocker.kind].run(blocker);
     } catch (error) {
       announce((error as { message?: string })?.message || 'That did not work');
     }
   }
-
-  // Nothing in the window can spawn the daemon, so a row that cannot act
-  // offers the command alone.
-  const ACTIONABLE = ['permission', 'model'];
 </script>
 
 <section aria-label="Setup" style="padding: 18px 22px 12px; display: flex; flex-direction: column; gap: 2px;">
@@ -62,9 +66,9 @@
       <li style="display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: {i ? '1px solid var(--rule)' : '0'}; min-width: 0;">
         <span style="font-weight: 600;">{group.map((b) => b.name).join(', ')}</span>
         <p style="margin: 0;">Without {group.length > 1 ? 'them' : 'it'}, {blocker.consequence}.</p>
-        {#if ACTIONABLE.includes(blocker.kind)}
+        {#if FIXES[blocker.kind]}
         <div style="display: flex; align-items: center; gap: 12px;">
-          <Filled label={blocker.kind === 'model' ? 'Download models' : `Open ${blocker.name} settings`} press={() => act(blocker)} />
+          <Filled label={FIXES[blocker.kind].label(blocker)} press={() => act(blocker)} />
           {#if blocker.kind === 'permission'}
             <span style="color: var(--dim);">Turn on Banshee in the list that opens.</span>
           {/if}

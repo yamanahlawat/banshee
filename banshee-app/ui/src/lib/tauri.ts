@@ -53,3 +53,7 @@ export function openPermissionPane(id: string): Promise<void> {
 export function copyText(text: string): Promise<void> {
   return invoke('copy_text', { text });
 }
+
+export function startDaemon(): Promise<void> {
+  return invoke('start_daemon');
+}

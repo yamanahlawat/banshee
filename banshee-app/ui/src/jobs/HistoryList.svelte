@@ -108,6 +108,11 @@
         </li>
       {/each}
     </ol>
+    <!-- Unsearched the list holds today alone, so a day with nothing said
+         leaves it empty and the search above is the way to the rest. -->
+    {#if needle === '' && filtered.length === 0}
+      <p style="margin: 0; color: var(--dim);">Nothing said today. Search to reach what is older.</p>
+    {/if}
     {#if needle === ''}
       <p class="caps" style="margin: 0; color: var(--dim);">Today · {formatCount(olderCount)} older</p>
     {:else}

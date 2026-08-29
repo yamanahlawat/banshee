@@ -335,3 +335,38 @@ pub async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), Comman
             sent: true,
         })
 }
+
+/// Runs a `banshee` subcommand from the bundle this window ships in. The
+/// socket exists only while the daemon runs, so it cannot carry the call that
+/// starts one.
+pub fn run_cli(subcommand: &str) -> Result<(), CommandError> {
+    let fail = |message: String| CommandError {
+        code: -32603,
+        message,
+        transport: false,
+        sent: false,
+    };
+    let status = utils::sibling_command("banshee")
+        .map_err(|error| fail(error.to_string()))?
+        .arg(subcommand)
+        .status()
+        .map_err(|error| fail(error.to_string()))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(fail(format!("banshee {subcommand} did not finish")))
+}
+
+// `banshee start` waits on launchd, so running it on a worker thread would
+// hold that thread and stall every other command the window sends.
+#[tauri::command]
+pub async fn start_daemon() -> Result<(), CommandError> {
+    tauri::async_runtime::spawn_blocking(|| run_cli("start"))
+        .await
+        .map_err(|error| CommandError {
+            code: -32603,
+            message: error.to_string(),
+            transport: false,
+            sent: false,
+        })?
+}

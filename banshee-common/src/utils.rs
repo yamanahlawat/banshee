@@ -1,11 +1,35 @@
 use dirs;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::UnixStream;
 
 use crate::error::BansheeError;
 use crate::{BANSHEE_SUBSCRIBE, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+
+/// A binary that ships beside this one, inside the same `Banshee.app`. A
+/// symlink reaches the CLI, so canonicalize finds the directory it lives in.
+pub fn sibling(exe: &Path, name: &str) -> Result<PathBuf, BansheeError> {
+    let real = std::fs::canonicalize(exe)?;
+    let found = real
+        .parent()
+        .ok_or_else(|| BansheeError::Other("banshee is not inside a directory".into()))?
+        .join(name);
+    if !found.exists() {
+        return Err(BansheeError::Other(format!(
+            "{} not found; reinstall so {name} ships beside the CLI",
+            found.display()
+        )));
+    }
+    Ok(found)
+}
+
+/// The sibling above, ready to run. Both binaries in the bundle reach the
+/// others this way.
+pub fn sibling_command(name: &str) -> Result<std::process::Command, BansheeError> {
+    let exe = std::env::current_exe()?;
+    Ok(std::process::Command::new(sibling(&exe, name)?))
+}
 
 pub fn get_socket_path() -> Option<PathBuf> {
     let base_path = dirs::home_dir()?;

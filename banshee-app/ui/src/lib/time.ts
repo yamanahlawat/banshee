@@ -11,6 +11,18 @@ export function formatTime(stamp: string): string {
   return `${hh}:${mm}`;
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// A clock time alone reads as today. One minute after midnight the newest
+// dictation is yesterday's, and it must not say 23:58 and nothing more.
+export function formatWhen(stamp: string, now: Date): string {
+  const at = toDate(stamp);
+  if (sameLocalDay(at, now)) return formatTime(stamp);
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (sameLocalDay(at, yesterday)) return `Yesterday ${formatTime(stamp)}`;
+  return `${at.getDate()} ${MONTHS[at.getMonth()]} ${formatTime(stamp)}`;
+}
+
 // The day the reader is in, not the day UTC is in.
 export function sameLocalDay(a: Date, b: Date): boolean {
   return (

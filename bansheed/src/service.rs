@@ -1,8 +1,9 @@
 // Start-at-login behind a neutral surface: launchd on macOS, systemd on Linux.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use banshee_common::error::BansheeError;
+use banshee_common::utils::sibling;
 
 /// What can be set to start at login. The platform arms decide what they can
 /// honour, so a new entry is one variant rather than a new pair of functions.
@@ -23,25 +24,8 @@ impl Agent {
     }
 }
 
-// current_exe returns the symlink, so canonicalize first or a symlinked CLI
-// searches the wrong directory.
 pub(crate) fn home_dir() -> Result<PathBuf, BansheeError> {
     dirs::home_dir().ok_or_else(|| BansheeError::Other("home dir not found".into()))
-}
-
-pub(crate) fn sibling(exe: &Path, name: &str) -> Result<PathBuf, BansheeError> {
-    let real = std::fs::canonicalize(exe)?;
-    let found = real
-        .parent()
-        .ok_or_else(|| BansheeError::Other("banshee is not inside a directory".into()))?
-        .join(name);
-    if !found.exists() {
-        return Err(BansheeError::Other(format!(
-            "{} not found; reinstall so {name} ships beside the CLI",
-            found.display()
-        )));
-    }
-    Ok(found)
 }
 
 #[cfg(target_os = "macos")]
@@ -110,6 +94,16 @@ mod launchd {
 "#,
             log = log.display(),
         );
+
+        // A loaded, unchanged job only needs starting, and kickstart leaves a
+        // running one alone. A bootout would kill the agent's children, and the
+        // icon's child is the window that asked for this.
+        let target = format!("gui/{}/{label}", uid());
+        if std::fs::read_to_string(&plist).is_ok_and(|held| held == content)
+            && launchctl(&["print", &target]).is_ok()
+        {
+            return launchctl(&["kickstart", &target]);
+        }
 
         // Reinstall must be idempotent: unload any previous copy before loading
         let _ = launchctl(&["bootout", &format!("gui/{}/{label}", uid())]);
