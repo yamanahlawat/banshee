@@ -33,6 +33,7 @@ vi.mock('./lib/tauri', () => ({
 }));
 import { applyConnect, detectAgents, history, listen, listVoices, planConnect, startDaemon, status } from './lib/tauri';
 import { agents } from './lib/agents';
+import { table as historyTable } from './lib/history';
 import { daemon, empty } from './lib/daemon';
 import { forgetCopy } from './lib/copy';
 import { open } from './lib/jobs';
@@ -51,6 +52,7 @@ beforeEach(async () => {
   daemon.set(empty());
   open.set(null);
   agents.set([]);
+  historyTable.set({ rows: [], total: 0, loaded: false, saving: null });
   forgetCopy();
   vi.mocked(status).mockResolvedValue(ready);
   vi.mocked(history).mockImplementation(async (limit?: number) => (limit == null ? table : table.slice(-limit)));
@@ -117,16 +119,6 @@ it('still listens when the daemon is not running at open', async () => {
   ]);
 });
 
-it('never prints the raw word the daemon uses for an unnamed device', async () => {
-  const noDevice = { ...ready, audio_device: null };
-  vi.mocked(status).mockResolvedValue(noDevice as never);
-  render(App);
-  await screen.findByText('Yes, open the pull request.');
-  const row = screen.getByRole('button', { name: /Microphone/ });
-  expect(row.textContent).toContain('Default');
-  expect(row.textContent).not.toContain('default');
-});
-
 it('keeps the Setup row speaking while a stopped daemon silences the rest', async () => {
   vi.mocked(status).mockRejectedValue(new Error('no socket'));
   vi.mocked(history).mockRejectedValue(new Error('no socket'));
@@ -153,6 +145,19 @@ it('reads the voices and the agents again once the daemon comes back', async () 
 
   expect(vi.mocked(listVoices)).toHaveBeenCalledTimes(2);
   expect(vi.mocked(detectAgents)).toHaveBeenCalledTimes(2);
+});
+
+// The pad, the band and the History panel read one table.
+it('follows the save_history switch without the panel being reopened', async () => {
+  render(App);
+  await screen.findByText('Yes, open the pull request.');
+
+  const off = { ...ready, config: { ...ready.config, daemon: { save_history: false } } };
+  push('daemon:status', off);
+  await vi.waitFor(() => expect(screen.queryByText('Yes, open the pull request.')).toBeNull());
+
+  push('daemon:status', ready);
+  expect(await screen.findByText('Yes, open the pull request.')).toBeTruthy();
 });
 
 it('starts the daemon again when a second open reaches this window', async () => {

@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
-import { countNewer, formatCount, moreCount, newestFirst, today } from './history';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { history } = vi.hoisted(() => ({ history: vi.fn() }));
+vi.mock('./tauri', () => ({ history }));
+
+import { get } from 'svelte/store';
+import { countNewer, forget, formatCount, moreCount, newestFirst, readNewest, table, today } from './history';
 
 describe('newestFirst', () => {
   it('puts the daemon\'s last row first', () => {
@@ -74,5 +79,33 @@ describe('formatCount', () => {
   });
   it('marks the thousands the way the artboard does', () => {
     expect(formatCount(2314)).toBe('2,314');
+  });
+});
+
+describe('readNewest', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    table.set({
+      rows: [{ id: 2, text: 'second', timestamp: '2026-08-27T10:00:00Z' }],
+      total: 2,
+      loaded: true,
+      saving: true,
+    });
+  });
+
+  it('does not put back rows a clear removed while it was reading', async () => {
+    let release: (rows: unknown[]) => void = () => {};
+    // Every read after the clear finds the daemon holding nothing.
+    history
+      .mockReturnValueOnce(new Promise((resolve) => (release = resolve)))
+      .mockResolvedValue([]);
+
+    const reading = readNewest();
+    forget();
+    release([{ id: 2, text: 'second', timestamp: '2026-08-27T10:00:00Z' }]);
+    await reading;
+
+    expect(get(table).rows).toEqual([]);
+    expect(get(table).total).toBe(0);
   });
 });

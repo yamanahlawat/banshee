@@ -12,6 +12,7 @@ vi.mock('../lib/tauri', () => ({ history, clearHistory, copyText, setSetting, st
 import ready from '../fixtures/ready.json';
 import { daemon, empty, reduceStatus } from '../lib/daemon';
 import { forgetCopy } from '../lib/copy';
+import { table as historyTable } from '../lib/history';
 import History from './History.svelte';
 
 // Local noon, because `today()` reads the local calendar day: midday UTC is
@@ -27,6 +28,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(NOW);
   vi.clearAllMocks();
+  historyTable.set({ rows: [], total: 0, loaded: false, saving: null });
   forgetCopy();
   clearHistory.mockResolvedValue(null);
   copyText.mockResolvedValue(undefined);

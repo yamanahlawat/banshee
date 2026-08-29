@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import { daemon, deviceLabel, reduceLive, reduceStatus, setupBlocked, stateWord, SYSTEM_DEVICE, type Live, type Status } from './lib/daemon';
   import { announcement } from './lib/copy';
-  import { countNewer, moreCount, newestFirst, REFRESH_ROWS, today } from './lib/history';
-  import { history, listen, listVoices, startDaemon, status, type Down, type DownloadProgress, type HistoryRow, type Voices } from './lib/tauri';
+  import { followSaveHistory, moreCount, readAll, readNewest, table, today } from './lib/history';
+  import { listen, listVoices, startDaemon, status, type Down, type DownloadProgress, type Voices } from './lib/tauri';
   import { agents, refresh as readAgents } from './lib/agents';
   import TitleBar from './bands/TitleBar.svelte';
   import Scale from './bands/Scale.svelte';
@@ -20,44 +20,10 @@
   import { BANDED, open } from './lib/jobs';
   import { humanize } from './lib/hotkey';
 
-  let rows: HistoryRow[] = [];
-  let total = 0;
   let wasTranscribing = false;
-  let loaded = false;
-  let loading: Promise<void> | null = null;
   let voices: Voices = { voices: [], current: null };
   let voicesRead = false;
   let agentsRead = false;
-
-  // One unlimited read on open is the only source for the total.
-  async function readWholeTable() {
-    const all = await history();
-    total = all.length;
-    rows = newestFirst(all);
-    loaded = true;
-  }
-
-  // The first read and the bridge's own status push both reach this while
-  // neither has finished, so they share one read of the table.
-  function loadAll(): Promise<void> {
-    loading ??= readWholeTable().finally(() => {
-      loading = null;
-    });
-    return loading;
-  }
-
-  // The daemon stores the row before it reports transcribing finished, so
-  // that fall is the first moment a refetch can see the new dictation.
-  async function refresh() {
-    const page = newestFirst(await history(REFRESH_ROWS));
-    const added = countNewer(page, rows[0]?.id ?? null);
-    if (added === null) {
-      await loadAll();
-      return;
-    }
-    total += added;
-    rows = [...page.slice(0, added), ...rows];
-  }
 
   $: landing = $daemon.live.recording ? '' : null;
   $: word = stateWord($daemon);
@@ -84,15 +50,18 @@
   };
   // A dead daemon fails the history read, so waiting for it would leave the
   // pad blank in the one state that most needs its fix.
-  $: setup = setupBlocked($daemon) || (loaded && total === 0);
+  $: setup = setupBlocked($daemon) || ($table.loaded && $table.total === 0);
   // The pad holds the newest row, so the band starts below it. The fixes
   // hold no row, so when they stand in its place the band starts at the top.
   $: padHolds = setup ? 0 : 1;
-  $: latest = rows[0] ?? null;
+  $: latest = $table.rows[0] ?? null;
   // The band holds the whole day, so the count below it is what History
   // alone can reach.
-  $: earlierRows = today(rows, new Date(), padHolds);
-  $: beyondTheBand = moreCount(total - padHolds, earlierRows.length);
+  $: earlierRows = today($table.rows, new Date(), padHolds);
+  $: beyondTheBand = moreCount($table.total - padHolds, earlierRows.length);
+  // The daemon refuses the read outright while this is off, so the table
+  // follows the switch rather than waiting for the panel to be opened again.
+  $: if ($daemon.status) followSaveHistory(config.daemon?.save_history !== false);
 
   // A stopped daemon fails both reads. The bridge pushes a status once it
   // reaches the daemon, so the window reports Not running and waits.
@@ -102,9 +71,6 @@
       // A window opened mid-dictation has to know a fall is coming.
       wasTranscribing = initial.transcribing === true;
       daemon.update((s) => reduceStatus(s, initial));
-      // A reopen reaches a window that already holds the table, so it asks for
-      // the newest rows rather than reading every one again.
-      await (loaded ? refresh() : loadAll());
     } catch (error) {
       // The command's own sentence names the cause; "not running" is only
       // the fallback when it carries none.
@@ -113,7 +79,11 @@
       // Opening Banshee starts Banshee, and this is the first moment the
       // window knows it must. Starting one that already runs would replace it.
       startDaemon().catch(() => {});
+      return;
     }
+    // The daemon refuses the history read outright while `save_history` is
+    // off, and that must not report a running daemon as down.
+    await ($table.loaded ? readNewest() : readAll()).catch(() => {});
   }
 
   // The strip only needs these to name a voice and count the agents, so a
@@ -146,12 +116,12 @@
     // to the push that says it came back.
     await listen<Status>('daemon:status', (e) => {
       daemon.update((s) => reduceStatus(s, e.payload));
-      if (!loaded) loadAll();
+      if (!$table.loaded) readAll().catch(() => {});
       readTheRest();
     });
     await listen<Partial<Live>>('daemon:state', (e) => {
       daemon.update((s) => reduceLive(s, e.payload));
-      if (e.payload.transcribing === false && wasTranscribing) refresh();
+      if (e.payload.transcribing === false && wasTranscribing) readNewest().catch(() => {});
       if (e.payload.transcribing !== undefined) wasTranscribing = e.payload.transcribing;
     });
     await listen<DownloadProgress>('daemon:downloads', (e) => daemon.update((s) => ({ ...s, downloading: e.payload.state === 'downloading' })));
@@ -185,7 +155,7 @@
           {#if $open === 'Microphone'}<Microphone />{:else if $open === 'Hotkey'}<HotkeyJob />{:else if $open === 'Voice'}<Voice {voices} />{:else if $open === 'Agents'}<Agents />{/if}
         </Job>
       {:else}
-        <Earlier rows={earlierRows} more={beyondTheBand} history={loaded ? (total > 0 ? 'some' : 'empty') : 'unread'} />
+        <Earlier rows={earlierRows} more={beyondTheBand} history={$table.loaded ? ($table.total > 0 ? 'some' : 'empty') : 'unread'} />
       {/if}
     {/if}
   </div>

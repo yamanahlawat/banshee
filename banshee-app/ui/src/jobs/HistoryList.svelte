@@ -1,27 +1,18 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { clearHistory, history, type HistoryRow } from '../lib/tauri';
-  import { formatCount, newestFirst, today } from '../lib/history';
+  import { clearHistory } from '../lib/tauri';
+  import { forget, formatCount, readAll, table, today } from '../lib/history';
   import { copy, copied } from '../lib/copy';
   import { formatTime } from '../lib/time';
   import Action from '../controls/Action.svelte';
   import Filled from '../controls/Filled.svelte';
 
-  let rows: HistoryRow[] = [];
-  let loaded = false;
   let query = '';
   let confirming = false;
   let expanded = new Set<string | number>();
 
-  onMount(async () => {
-    try {
-      rows = newestFirst(await history());
-    } catch {
-      rows = [];
-    } finally {
-      loaded = true;
-    }
-  });
+  // The pad and the earlier band read the same table, so an unread one is
+  // filled here rather than kept as a second copy of it.
+  $: if (!$table.loaded) readAll().catch(() => {});
 
   function toggleRow(id: string | number) {
     const next = new Set(expanded);
@@ -32,11 +23,12 @@
 
   async function clearAll() {
     await clearHistory();
-    rows = [];
+    forget();
     confirming = false;
   }
 
   $: needle = query.trim().toLowerCase();
+  $: rows = $table.rows;
   $: todays = today(rows, new Date());
   // Unsearched, the list is today's dictations only, matching the caption
   // below it. A search reaches the whole table.
@@ -45,7 +37,7 @@
 </script>
 
 <section aria-label="History" style="padding: 14px 22px 8px; display: flex; flex-direction: column; gap: 10px; flex: 1;">
-  {#if loaded && rows.length === 0}
+  {#if rows.length === 0}
     <p style="margin: 0; color: var(--dim);">Nothing saved yet</p>
   {:else}
     <div style="display: flex; align-items: center; gap: 10px;">
