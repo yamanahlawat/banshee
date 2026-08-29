@@ -89,7 +89,7 @@
   <Segmented
     label="When you speak while Banshee speaks"
     active={bargeIn}
-    options={[{ value: 'stop', label: 'Stop' }, { value: 'duck', label: 'Lower it' }, { value: 'none', label: 'Ignore' }]}
+    options={[{ value: 'stop', label: 'Stop' }, { value: 'none', label: 'Ignore' }]}
     change={(next) => write('audio.barge_in', next, (message) => (refusal = message))}
   />
 </Row>

@@ -1,10 +1,10 @@
-// The daemon's own name for each modifier. Whether it binds one is its own
-// answer and turns on the platform, so a name here is not a promise.
+// The daemon's own name for each modifier, and every name here is one it
+// binds on macOS. RightControl is absent because rdev never maps it there.
+// A second copy of the daemon's table, until `status` reports its own.
 const MODIFIERS: Record<string, string> = {
   AltRight: 'RightOption',
   AltLeft: 'LeftOption',
   ControlLeft: 'LeftControl',
-  ControlRight: 'RightControl',
   MetaLeft: 'LeftCommand',
   MetaRight: 'RightCommand',
 };

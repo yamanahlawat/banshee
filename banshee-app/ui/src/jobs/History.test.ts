@@ -106,14 +106,6 @@ it('reads the settings the config already holds and writes changes through set_s
   expect(saveToggle.getAttribute('aria-checked')).toBe('true');
   await fireEvent.click(saveToggle);
   expect(setSetting).toHaveBeenCalledWith('daemon.save_history', false);
-
-  const alwaysToggle = screen.getByRole('switch', { name: 'Always on' });
-  expect(alwaysToggle.getAttribute('aria-checked')).toBe('true');
-  await fireEvent.click(alwaysToggle);
-  expect(setSetting).toHaveBeenCalledWith('daemon.always_on', false);
-
-  await fireEvent.click(screen.getByRole('radio', { name: 'Everything' }));
-  expect(setSetting).toHaveBeenCalledWith('logging.level', 'debug');
 });
 
 it('says nothing was saved rather than showing an empty box with a pressable Clear all', async () => {

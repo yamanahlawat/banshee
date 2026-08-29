@@ -9,7 +9,6 @@
   import Slider from '../controls/Slider.svelte';
   import Action from '../controls/Action.svelte';
   import Segmented from '../controls/Segmented.svelte';
-  import Toggle from '../controls/Toggle.svelte';
 
   // The word beside the slider, so the number is never the only reading.
   const BANDS = [
@@ -91,18 +90,6 @@
     options={[{ value: 'fast', label: 'Fast' }, { value: 'balanced', label: 'Balanced' }, { value: 'quality', label: 'Quality' }]}
     change={(next) => write('stt.preset', next)}
   />
-</Row>
-
-<Row name="Language" command={`banshee config set stt.language ${String(stt.language ?? 'en')}`} pending={$daemon.pending.has('stt.language')}>
-  <Picker
-    label="Language"
-    wide={false}
-    value={String(stt.language ?? 'en')}
-    options={[{ value: 'en', label: 'English' }, { value: 'auto', label: 'Detect' }]}
-    change={(next) => write('stt.language', next)}
-  />
-  <Toggle on={stt.translate === true} label="Translate to English" change={(next) => write('stt.translate', next)} />
-  <span>Translate to English</span>
 </Row>
 
 <Row
