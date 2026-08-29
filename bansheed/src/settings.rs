@@ -15,6 +15,7 @@ enum Live {
     VadThreshold,
     InputDevice,
     BargeIn,
+    Cues,
 }
 
 fn live(key: &str) -> Option<Live> {
@@ -22,6 +23,7 @@ fn live(key: &str) -> Option<Live> {
         "stt.vad_threshold" => Some(Live::VadThreshold),
         "audio.input_device" => Some(Live::InputDevice),
         "audio.barge_in" => Some(Live::BargeIn),
+        "audio.cues.enabled" => Some(Live::Cues),
         _ => None,
     }
 }
@@ -144,8 +146,19 @@ pub fn configure(
                 state.set_barge_in(config.audio.barge_in);
                 outcome.applied.push(key.clone());
             }
+            // The player reads this as each cue reaches it
+            (Some(Live::Cues), Some(state)) => {
+                state.set_cues_enabled(config.audio.cues.enabled);
+                outcome.applied.push(key.clone());
+            }
             // A live key needs a restart too when no daemon runs
-            (Some(Live::VadThreshold) | Some(Live::InputDevice) | Some(Live::BargeIn), None)
+            (
+                Some(Live::VadThreshold)
+                | Some(Live::InputDevice)
+                | Some(Live::BargeIn)
+                | Some(Live::Cues),
+                None,
+            )
             | (None, _) => outcome.restart_required.push(key.clone()),
         }
     }
@@ -275,6 +288,26 @@ mod tests {
             "the next dictation must obey the new value, not the old one"
         );
         assert_eq!(outcome.applied, vec!["audio.barge_in".to_string()]);
+        assert!(outcome.restart_required.is_empty());
+    }
+
+    #[test]
+    fn a_cues_write_reaches_the_running_daemon() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        assert!(!state.cues_enabled());
+
+        let outcome = super::configure(
+            Some(&state),
+            &assignments(&[("audio.cues.enabled", true.into())]),
+            false,
+        )
+        .expect("a known key and a legal value must apply");
+
+        assert!(
+            state.cues_enabled(),
+            "the next cue must be heard, without a restart"
+        );
+        assert_eq!(outcome.applied, vec!["audio.cues.enabled".to_string()]);
         assert!(outcome.restart_required.is_empty());
     }
 

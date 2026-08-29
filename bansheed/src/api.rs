@@ -712,7 +712,7 @@ mod tests {
             Some(std::sync::Mutex::new(connection)),
             crate::text_to_speech::SpeechPlayer::default(),
             std::sync::mpsc::channel().0,
-            std::sync::mpsc::channel().0,
+            crate::audio::cues::Cues::silent(),
             crate::config::BargeInMode::Stop,
         ))
     }
@@ -1252,7 +1252,7 @@ mod tests {
             None,
             speech,
             std::sync::mpsc::channel().0,
-            std::sync::mpsc::channel().0,
+            crate::audio::cues::Cues::silent(),
             crate::config::BargeInMode::Stop,
         ));
 

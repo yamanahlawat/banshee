@@ -37,7 +37,7 @@ pub fn daemon_state(commands: std::sync::mpsc::Sender<ConsumerCommand>) -> Arc<D
         None,
         SpeechPlayer::new(Box::new(NullBackend)),
         commands,
-        std::sync::mpsc::channel().0,
+        crate::audio::cues::Cues::silent(),
         BargeInMode::Stop,
     ))
 }

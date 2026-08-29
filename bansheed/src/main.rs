@@ -64,7 +64,7 @@ fn start_recording(
     daemon_state: &Arc<state::DaemonState>,
     config: &Config,
     command_receiver: std::sync::mpsc::Receiver<state::ConsumerCommand>,
-    cues: std::sync::mpsc::Sender<audio::cues::Cue>,
+    cues: audio::cues::Cues,
 ) -> Result<Recording, RecordingError> {
     // Startup selects through the same function the watchdog tick uses, so a
     // device that is absent at boot falls back rather than leaving capture dead
@@ -304,7 +304,7 @@ async fn main() -> Result<(), BansheeError> {
 
             let (speech_backend, live_voice) = text_to_speech::select_backend(&config.tts)?;
             let (commands, command_receiver) = std::sync::mpsc::channel();
-            let cue_sender = audio::cues::start_cue_player(config.audio.cues.enabled);
+            let cues = audio::cues::start_cue_player(config.audio.cues.enabled);
             let daemon_state = Arc::new(state::DaemonState::new(
                 env!("CARGO_PKG_VERSION"),
                 config.stt.preset.model_name(),
@@ -314,7 +314,7 @@ async fn main() -> Result<(), BansheeError> {
                 db_connection,
                 text_to_speech::SpeechPlayer::new(speech_backend),
                 commands,
-                cue_sender.clone(),
+                cues.clone(),
                 config.audio.barge_in,
             ));
 
@@ -326,30 +326,29 @@ async fn main() -> Result<(), BansheeError> {
 
             // The watchdog owns the stream past daemon::run: stopping it stops
             // capture, and the thread is the only thing left to join
-            let recording =
-                match start_recording(&daemon_state, &config, command_receiver, cue_sender) {
-                    Ok(started) => {
-                        let watchdog = audio::watchdog::spawn(
-                            Arc::clone(&daemon_state),
-                            started.stream,
-                            started.open,
-                            started.missing,
-                        );
-                        Some((watchdog, started.thread))
-                    }
-                    // A missing mic or model leaves the daemon useful rather than
-                    // exiting, which the supervisor reads as a crash and retries
-                    Err(error) => {
-                        eprintln!("Recording is unavailable: {error}");
-                        eprintln!(
-                            "The daemon is up: speak, status, and history still work. \
+            let recording = match start_recording(&daemon_state, &config, command_receiver, cues) {
+                Ok(started) => {
+                    let watchdog = audio::watchdog::spawn(
+                        Arc::clone(&daemon_state),
+                        started.stream,
+                        started.open,
+                        started.missing,
+                    );
+                    Some((watchdog, started.thread))
+                }
+                // A missing mic or model leaves the daemon useful rather than
+                // exiting, which the supervisor reads as a crash and retries
+                Err(error) => {
+                    eprintln!("Recording is unavailable: {error}");
+                    eprintln!(
+                        "The daemon is up: speak, status, and history still work. \
                              Recording, dictation, and ask_user do not."
-                        );
-                        eprintln!("Run `banshee status` for the fix.");
-                        daemon_state.set_recording_error(error);
-                        None
-                    }
-                };
+                    );
+                    eprintln!("Run `banshee status` for the fix.");
+                    daemon_state.set_recording_error(error);
+                    None
+                }
+            };
             // After the pipeline, so a press always reaches record_start: with
             // no pipeline it answers with the error cue rather than nothing
             hotkey::start_global_hotkey(

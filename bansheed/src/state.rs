@@ -10,7 +10,7 @@ use std::{
 use banshee_common::DownloadProgress;
 use tokio::sync::{broadcast, watch};
 
-use crate::audio::cues::Cue;
+use crate::audio::cues::{Cue, Cues};
 use crate::config::{BargeInMode, Config};
 use crate::text_to_speech::SpeechPlayer;
 
@@ -197,7 +197,7 @@ pub struct DaemonState {
     downloading: AtomicBool,
     speech: Arc<SpeechPlayer>,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
-    cues: std::sync::mpsc::Sender<Cue>,
+    cues: Cues,
     barge_in: Mutex<BargeInMode>,
     // Start and stop can be separate RPC calls, so this cannot live on a stack
     pending_dictate: AtomicBool,
@@ -225,7 +225,7 @@ impl DaemonState {
         db_connection: Option<Mutex<rusqlite::Connection>>,
         speech: SpeechPlayer,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
-        cues: std::sync::mpsc::Sender<Cue>,
+        cues: Cues,
         barge_in: BargeInMode,
     ) -> Self {
         Self {
@@ -272,7 +272,7 @@ impl DaemonState {
         // The hotkey arrives here too, so a deaf daemon answers a press with the
         // error cue. Arming a session nothing can transcribe would be silent.
         if self.recording_error.read().unwrap().is_some() {
-            let _ = self.cues.send(Cue::Error);
+            self.cues.send(Cue::Error);
             return false;
         }
         if self.try_transition(RecordingMode::Armed, RecordingMode::ArmedHold) {
@@ -280,7 +280,7 @@ impl DaemonState {
             if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
-            let _ = self.cues.send(Cue::RecordStart);
+            self.cues.send(Cue::RecordStart);
             true
         } else if self.try_transition(RecordingMode::Idle, RecordingMode::PushToTalk) {
             // Silence the daemon's own voice before the mic opens
@@ -295,7 +295,7 @@ impl DaemonState {
                 matches!(action, TranscribeTarget::Dictate),
                 std::sync::atomic::Ordering::Relaxed,
             );
-            let _ = self.cues.send(Cue::RecordStart);
+            self.cues.send(Cue::RecordStart);
             println!("Recording started...");
             true
         } else {
@@ -308,7 +308,7 @@ impl DaemonState {
     pub fn record_stop(&self) {
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             println!("Recording stopped");
-            let _ = self.cues.send(Cue::RecordStop);
+            self.cues.send(Cue::RecordStop);
             let action = if self
                 .pending_dictate
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -319,7 +319,7 @@ impl DaemonState {
             };
             let _ = self.commands.send(ConsumerCommand::Transcribe(action));
         } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
-            let _ = self.cues.send(Cue::RecordStop);
+            self.cues.send(Cue::RecordStop);
         }
     }
 
@@ -349,7 +349,7 @@ impl DaemonState {
         } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
             // The armed session keeps its audio; only the manual hold ends.
             // This cue answers the start cue the hold played.
-            let _ = self.cues.send(Cue::RecordStop);
+            self.cues.send(Cue::RecordStop);
         }
     }
 
@@ -646,6 +646,17 @@ impl DaemonState {
 
     // A record start reads this, so a write between two dictations changes
     // what the next one does.
+    // The player reads this as each cue reaches it, so a write between two
+    // dictations decides whether the next one is heard.
+    pub fn set_cues_enabled(&self, on: bool) {
+        self.cues.set_enabled(on);
+    }
+
+    #[cfg(test)]
+    pub fn cues_enabled(&self) -> bool {
+        self.cues.enabled()
+    }
+
     pub fn barge_in(&self) -> BargeInMode {
         *self.locked_barge_in()
     }
@@ -744,7 +755,7 @@ mod tests {
             None,
             crate::text_to_speech::SpeechPlayer::default(),
             commands,
-            std::sync::mpsc::channel().0,
+            crate::audio::cues::Cues::silent(),
             BargeInMode::Stop,
         );
         (state, requests)

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use rdev::listen;
 
-use crate::audio::cues::Cue;
+use crate::audio::cues::{Cue, Cues};
 use crate::audio::utils::{StreamingResampler, resample_audio};
 use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
 use crate::config::HotkeyMode;
@@ -50,7 +50,7 @@ pub struct Pipeline {
     pub speech_to_text: WhisperEngine,
     pub vad: VADEngine,
     pub state: Arc<DaemonState>,
-    pub cues: mpsc::Sender<Cue>,
+    pub cues: Cues,
     pub endpoint_silence_ms: u64,
 }
 
@@ -176,7 +176,7 @@ impl Pipeline {
                 Ok(data) => data,
                 Err(e) => {
                     eprintln!("Error: {e}");
-                    let _ = self.cues.send(Cue::Error);
+                    self.cues.send(Cue::Error);
                     return;
                 }
             };
@@ -229,13 +229,13 @@ impl Pipeline {
                 "Only detected speech in {:.2}% of the audio. Skipping transcription.",
                 speech_ratio * 100.0
             );
-            let _ = self.cues.send(Cue::Error);
+            self.cues.send(Cue::Error);
             return;
         }
 
         if speech_chunks < 2 {
             println!("No speech detected in the audio. Skipping transcription.");
-            let _ = self.cues.send(Cue::Error);
+            self.cues.send(Cue::Error);
             return;
         }
 
@@ -266,7 +266,7 @@ impl Pipeline {
                 // Whisper can return nothing for noise; skip before it reaches the ring or clipboard
                 if transcription.is_empty() {
                     println!("Empty transcription. Skipping.");
-                    let _ = self.cues.send(Cue::Error);
+                    self.cues.send(Cue::Error);
                     return;
                 }
 
@@ -274,7 +274,7 @@ impl Pipeline {
                 match action {
                     TranscribeTarget::Mailbox => {
                         self.state.push_transcription(transcription);
-                        let _ = self.cues.send(Cue::Ready);
+                        self.cues.send(Cue::Ready);
                     }
                     TranscribeTarget::Dictate => {
                         println!("Dictating: {}", transcription);
@@ -283,11 +283,11 @@ impl Pipeline {
                         self.state.set_typing(false);
                         match typed {
                             Ok(_) => {
-                                let _ = self.cues.send(Cue::Ready);
+                                self.cues.send(Cue::Ready);
                             }
                             Err(e) => {
                                 eprintln!("Failed to type text: {:?}", e);
-                                let _ = self.cues.send(Cue::Error);
+                                self.cues.send(Cue::Error);
                             }
                         }
                     }
@@ -295,7 +295,7 @@ impl Pipeline {
             }
             Err(error) => {
                 eprintln!("Transcription failed: {error}");
-                let _ = self.cues.send(Cue::Error);
+                self.cues.send(Cue::Error);
             }
         }
     }
@@ -304,7 +304,7 @@ impl Pipeline {
     fn ask(&mut self, ask: AskCommand) {
         // The ring holds echo captured while the question played
         self.source.discard();
-        let _ = self.cues.send(Cue::Arm);
+        self.cues.send(Cue::Arm);
         // Let the arm cue leave the speaker before the VAD listens
         thread::sleep(CUE_SETTLE);
         self.source.discard();
@@ -313,7 +313,7 @@ impl Pipeline {
 
         // Close the mic before the slow transcription; every exit disarms
         self.state.set_recording_mode(RecordingMode::Idle);
-        let _ = self.cues.send(Cue::Disarm);
+        self.cues.send(Cue::Disarm);
 
         let text = match answer_audio {
             Some(audio) => {
@@ -328,13 +328,13 @@ impl Pipeline {
                     }
                     Err(e) => {
                         eprintln!("Transcription failed: {e}");
-                        let _ = self.cues.send(Cue::Error);
+                        self.cues.send(Cue::Error);
                         String::new()
                     }
                 }
             }
             None => {
-                let _ = self.cues.send(Cue::Error);
+                self.cues.send(Cue::Error);
                 String::new()
             }
         };
