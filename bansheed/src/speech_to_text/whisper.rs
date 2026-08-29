@@ -9,7 +9,7 @@ fn is_hallucination(no_speech_prob: f32, avg_logprob: f32) -> bool {
     no_speech_prob > NO_SPEECH_PROB_GATE && avg_logprob < AVG_LOGPROB_GATE
 }
 
-pub fn build_initial_prompt(vocabulary: &[String]) -> Option<String> {
+fn build_initial_prompt(vocabulary: &[String]) -> Option<String> {
     if vocabulary.is_empty() {
         return None;
     }
@@ -23,6 +23,21 @@ pub struct WhisperEngine {
 
 impl WhisperEngine {
     pub fn new(whisper_config: WhisperConfig, vocabulary: &[String]) -> Result<Self, BansheeError> {
+        Ok(Self {
+            context: Self::open(whisper_config)?,
+            initial_prompt: build_initial_prompt(vocabulary),
+        })
+    }
+
+    /// Puts a different model behind the engine, keeping the words it leans on.
+    /// The new context is built before the old one is dropped, so a load that
+    /// fails leaves the engine transcribing with what it already had.
+    pub fn reload(&mut self, whisper_config: WhisperConfig) -> Result<(), BansheeError> {
+        self.context = Self::open(whisper_config)?;
+        Ok(())
+    }
+
+    fn open(whisper_config: WhisperConfig) -> Result<WhisperContext, BansheeError> {
         let models_path = get_models_path().ok_or_else(|| {
             BansheeError::Other(
                 "Could not find home directory. Cannot initialize Whisper engine.".to_string(),
@@ -48,22 +63,15 @@ impl WhisperEngine {
         let mut context_params = WhisperContextParameters::default();
         context_params.flash_attn(true);
 
-        let context = WhisperContext::new_with_params(whisper_model_path_str, context_params)
-            .map_err(|e| {
-                BansheeError::Other(format!("Failed to initialize Whisper context: {:?}", e))
-            })?;
-
-        Ok(Self {
-            context,
-            initial_prompt: build_initial_prompt(vocabulary),
+        WhisperContext::new_with_params(whisper_model_path_str, context_params).map_err(|e| {
+            BansheeError::Other(format!("Failed to initialize Whisper context: {:?}", e))
         })
     }
 
-    /// The words the next transcription leans on. Only the prompt moves: the
-    /// model behind it is what `stt.preset` names, and that one still needs a
-    /// restart.
-    pub fn set_prompt(&mut self, prompt: Option<String>) {
-        self.initial_prompt = prompt;
+    /// The words the next transcription leans on. The model behind them does
+    /// not move, so this costs nothing.
+    pub fn set_vocabulary(&mut self, words: &[String]) {
+        self.initial_prompt = build_initial_prompt(words);
     }
 
     pub fn transcribe(&self, audio_data: &[f32]) -> Result<String, BansheeError> {

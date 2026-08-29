@@ -309,7 +309,6 @@ async fn main() -> Result<(), BansheeError> {
             if let Some(voice) = live_voice {
                 daemon_state.set_tts_voice(voice);
             }
-            daemon_state.set_wanted_downloads(models::download::wanted(&config));
             daemon_state.set_config(Arc::clone(&config));
 
             // The watchdog owns the stream past daemon::run: stopping it stops

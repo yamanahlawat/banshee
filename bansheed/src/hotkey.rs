@@ -90,7 +90,20 @@ pub fn hotkey_listener(
                         sample_rate,
                     };
                 }
-                ConsumerCommand::Retune(prompt) => pipeline.speech_to_text.set_prompt(prompt),
+                ConsumerCommand::Retune(words) => pipeline.speech_to_text.set_vocabulary(&words),
+                // The load takes seconds and holds this thread. Nothing is lost:
+                // a press queues behind it and the ring still holds the audio.
+                ConsumerCommand::Reload(model) => {
+                    match pipeline
+                        .speech_to_text
+                        .reload(banshee_common::WhisperConfig::new(model))
+                    {
+                        Ok(()) => pipeline.state.set_stt_model(model),
+                        Err(error) => {
+                            eprintln!("banshee: the transcription model did not load: {error}")
+                        }
+                    }
+                }
                 ConsumerCommand::Shutdown => break,
             }
         }

@@ -432,7 +432,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 }
             };
             let missing =
-                crate::models::download::still_missing(daemon_state.wanted_downloads(), &dir);
+                crate::models::download::still_missing(&daemon_state.wanted_downloads(), &dir);
             if missing.is_empty() {
                 return JsonRpcResponse::success(
                     request.id,

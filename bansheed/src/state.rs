@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, OnceLock, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64},
     },
     time::{Duration, Instant},
@@ -47,9 +47,12 @@ pub enum ConsumerCommand {
     // the next transcription
     Discard,
     Ask(AskCommand),
-    // The vocabulary the next transcription leans on. The listener holds the
-    // engine, so a write reaches it the same way a rebind does.
-    Retune(Option<String>),
+    // The listener owns the engine, so both of these reach it the way a rebind
+    // does. A push-to-talk leaves that thread idle until the key is released,
+    // so either can land while the microphone is open. The ring holds the audio,
+    // so the dictation that follows is whole.
+    Retune(Vec<String>),
+    Reload(&'static str),
     // A new stream opened, so the old ring is dead. The rate comes with it:
     // devices do not share one.
     Rebind {
@@ -164,7 +167,10 @@ fn replace_if_new(field: &RwLock<Option<String>>, name: Option<String>) -> bool 
 
 pub struct DaemonState {
     version: &'static str,
-    stt_model: &'static str,
+    // The model the listener has loaded, not the one the file names. The
+    // window reads the blockers built from this, so a preset that was asked
+    // for and never loaded must not clear them.
+    stt_model: RwLock<&'static str>,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: RwLock<Option<String>>,
@@ -176,7 +182,8 @@ pub struct DaemonState {
     wanted_device: Mutex<String>,
     // Follows a live `tts.voice`, so the voice reported is the one now loaded
     tts_voice: RwLock<Option<String>>,
-    wanted_downloads: OnceLock<Vec<crate::models::download::Download>>,
+    // What the config asks the daemon to hold.
+    wanted_downloads: RwLock<Vec<crate::models::download::Download>>,
     // The file as last parsed. `vad_threshold`, `wanted_device` and `barge_in`
     // beside it are live values the file may no longer agree with.
     config: RwLock<Arc<Config>>,
@@ -234,14 +241,14 @@ impl DaemonState {
     ) -> Self {
         Self {
             version,
-            stt_model,
+            stt_model: RwLock::new(stt_model),
             vad_model,
             vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
             audio_device: RwLock::new(None),
             missing_device: RwLock::new(None),
             wanted_device: Mutex::new(wanted_device),
             tts_voice: RwLock::new(None),
-            wanted_downloads: OnceLock::new(),
+            wanted_downloads: RwLock::new(Vec::new()),
             config: RwLock::new(Arc::new(Config::default())),
             pending: Mutex::new(std::collections::BTreeSet::new()),
             recording_error: RwLock::new(None),
@@ -524,8 +531,19 @@ impl DaemonState {
         self.version
     }
 
-    pub fn stt_model(&self) -> &str {
-        self.stt_model
+    pub fn stt_model(&self) -> &'static str {
+        *self
+            .stt_model
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// The listener records what it loaded, as the speech backend does.
+    pub fn set_stt_model(&self, model: &'static str) {
+        *self
+            .stt_model
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = model;
     }
 
     pub fn vad_model(&self) -> &str {
@@ -634,19 +652,35 @@ impl DaemonState {
 
     /// Every file this daemon's own config needs. Set before the socket
     /// accepts, so a caller never sees it unset.
-    pub fn wanted_downloads(&self) -> &[crate::models::download::Download] {
-        self.wanted_downloads.get().map_or(&[], Vec::as_slice)
+    pub fn wanted_downloads(&self) -> Vec<crate::models::download::Download> {
+        self.wanted_downloads
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
+    /// Tests need a list of their own, because what is missing otherwise
+    /// depends on which models the machine happens to hold.
+    #[cfg(test)]
     pub fn set_wanted_downloads(&self, wanted: Vec<crate::models::download::Download>) {
-        let _ = self.wanted_downloads.set(wanted);
+        *self
+            .wanted_downloads
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = wanted;
     }
 
     pub fn config(&self) -> Arc<Config> {
         Arc::clone(&self.config.read().unwrap())
     }
 
+    /// The models the daemon wants are determined by the config that names
+    /// them, so they are rewritten here and nowhere else.
     pub fn set_config(&self, config: Arc<Config>) {
+        *self
+            .wanted_downloads
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) =
+            crate::models::download::wanted(&config);
         *self.config.write().unwrap() = config;
     }
 
@@ -694,11 +728,12 @@ impl DaemonState {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    /// Hands the listener the prompt the next transcription leans on. The
-    /// listener takes one command at a time, so this never lands part-way
-    /// through a dictation.
-    pub fn set_vocabulary(&self, prompt: Option<String>) -> bool {
-        self.commands.send(ConsumerCommand::Retune(prompt)).is_ok()
+    pub fn set_vocabulary(&self, words: Vec<String>) -> bool {
+        self.commands.send(ConsumerCommand::Retune(words)).is_ok()
+    }
+
+    pub fn load_stt_model(&self, model: &'static str) -> bool {
+        self.commands.send(ConsumerCommand::Reload(model)).is_ok()
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {
@@ -757,6 +792,67 @@ impl DaemonState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_models_wanted_follow_the_preset_the_config_names() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        let mut config = Config::default();
+        config.stt.preset = crate::config::STTPreset::Fast;
+        state.set_config(std::sync::Arc::new(config));
+        let named = |state: &DaemonState| {
+            state
+                .wanted_downloads()
+                .iter()
+                .map(|d| d.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(named(&state).contains(&"ggml-base.en.bin".to_string()));
+
+        let mut config = Config::default();
+        config.stt.preset = crate::config::STTPreset::Quality;
+        state.set_config(std::sync::Arc::new(config));
+
+        let after = named(&state);
+        assert!(after.contains(&"ggml-large-v3-q5_0.bin".to_string()));
+        assert!(
+            !after.contains(&"ggml-base.en.bin".to_string()),
+            "the window must stop asking for the model the daemon left behind"
+        );
+    }
+
+    #[test]
+    fn a_preset_change_hands_the_listener_the_model_to_load() {
+        let (commands, taken) = std::sync::mpsc::channel();
+        let state = crate::test_support::daemon_state(commands);
+
+        assert!(state.load_stt_model("ggml-large-v3-q5_0.bin"));
+
+        match taken.try_recv() {
+            Ok(ConsumerCommand::Reload(model)) => assert_eq!(model, "ggml-large-v3-q5_0.bin"),
+            _ => panic!("the listener was handed no model"),
+        }
+    }
+
+    // A listener that has gone cannot load anything, and saying otherwise would
+    // report a preset in effect that nothing runs.
+    #[test]
+    fn a_preset_change_with_no_listener_is_not_reported_as_taken() {
+        let (commands, gone) = std::sync::mpsc::channel();
+        let state = crate::test_support::daemon_state(commands);
+        drop(gone);
+
+        assert!(!state.load_stt_model("ggml-large-v3-q5_0.bin"));
+    }
+
+    #[test]
+    fn the_model_reported_is_the_one_the_listener_loaded() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        assert_eq!(state.stt_model(), "stt");
+
+        state.set_stt_model("ggml-large-v3-q5_0.bin");
+
+        assert_eq!(state.stt_model(), "ggml-large-v3-q5_0.bin");
+    }
+
     // The off direction alone would pass a `set_history` that always stores
     // nothing, so this asks whether a reopened file is reached.
     #[test]
@@ -873,7 +969,7 @@ mod tests {
         state.set_audio_device(Some("OnePlus Buds 3".to_string()));
         assert_eq!(state.audio_device().as_deref(), Some("OnePlus Buds 3"));
 
-        // The OnceLock discarded this. A rebind depends on it landing.
+        // A rebind depends on a second write landing.
         state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
         assert_eq!(
             state.audio_device().as_deref(),

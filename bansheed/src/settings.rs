@@ -20,6 +20,7 @@ enum Live {
     SaveHistory,
     Tts,
     Vocabulary,
+    Preset,
 }
 
 fn live(key: &str) -> Option<Live> {
@@ -32,9 +33,8 @@ fn live(key: &str) -> Option<Live> {
         // `tts.fallback` is not here: it decides what to do when Kokoro will
         // not load, which is settled once, at startup.
         "tts.voice" | "tts.speed" => Some(Live::Tts),
-        // `stt.preset` is not here: it names the model file, and swapping that
-        // is a load the daemon cannot yet report the progress of.
         "stt.vocabulary" => Some(Live::Vocabulary),
+        "stt.preset" => Some(Live::Preset),
         _ => None,
     }
 }
@@ -80,10 +80,25 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
         Live::Tts => state.set_tts(&config.tts),
         // A listener that has gone leaves the words unread, so say so rather
         // than report a prompt nothing holds
-        Live::Vocabulary => state.set_vocabulary(
-            crate::speech_to_text::whisper::build_initial_prompt(&config.stt.vocabulary),
-        ),
+        Live::Vocabulary => state.set_vocabulary(config.stt.vocabulary.clone()),
+        Live::Preset => apply_preset(state, config.stt.preset.model_name()),
     }
+}
+
+/// Loads a different Whisper model, unless one is already behind the engine or
+/// the file is still to download. A model still to download is minutes, not the
+/// seconds a swap takes, so this leaves it unapplied rather than promise a
+/// preset nothing loaded.
+fn apply_preset(state: &DaemonState, model: &'static str) -> bool {
+    if state.stt_model() == model {
+        return true;
+    }
+    let absent = crate::models::missing(&[model]);
+    if !absent.is_empty() {
+        eprintln!("banshee: {model} is not downloaded yet, so the preset is unchanged");
+        return false;
+    }
+    state.load_stt_model(model)
 }
 
 /// The history file the config now asks for, or `None` when it asks for none.
@@ -479,8 +494,6 @@ mod tests {
         assert_eq!(outcome.applied.len(), 2, "both keys are in effect");
     }
 
-    // The listener holds the engine, so the write is a command it takes at the
-    // next quiet moment, never part-way through a dictation.
     #[test]
     fn a_vocabulary_write_reaches_the_listener_that_holds_the_engine() {
         let (commands, taken) = std::sync::mpsc::channel();
@@ -495,21 +508,56 @@ mod tests {
 
         match taken.try_recv() {
             Ok(crate::state::ConsumerCommand::Retune(prompt)) => {
-                assert_eq!(prompt.as_deref(), Some("banshee, tokio"));
+                assert_eq!(prompt, vec!["banshee".to_string(), "tokio".to_string()]);
             }
             other => panic!("the listener was handed no prompt: {:?}", other.is_ok()),
         }
         assert_eq!(outcome.applied, vec!["stt.vocabulary".to_string()]);
     }
 
-    // `stt.preset` names the model file. Swapping it is a load of seconds that
-    // nothing reports the progress of yet.
     #[test]
-    fn the_transcription_preset_still_needs_a_restart() {
-        assert_eq!(
-            startup_only(&assignments(&[("stt.preset", "quality".into())])),
-            Some(&"stt.preset".to_string())
-        );
+    fn a_preset_write_reaches_the_listener_that_holds_the_engine() {
+        let (commands, taken) = std::sync::mpsc::channel();
+        let state = crate::test_support::daemon_state(commands);
+
+        let outcome = super::configure(
+            Some(&state),
+            &assignments(&[("stt.preset", "balanced".into())]),
+            false,
+        )
+        .expect("a known key and a legal value must apply");
+
+        // The model is the one the daemon already runs on a real machine, so
+        // this asserts what the arm decided rather than what is on this disk.
+        match (taken.try_recv(), outcome.applied.is_empty()) {
+            (Ok(crate::state::ConsumerCommand::Reload(model)), false) => {
+                assert_eq!(model, "ggml-large-v3-turbo-q5_0.bin");
+            }
+            (Err(_), true) => {
+                assert_eq!(outcome.restart_required, vec!["stt.preset".to_string()]);
+            }
+            _ => panic!("the arm handed over a model and reported nothing, or the reverse"),
+        }
+    }
+
+    // Every click on the segmented control writes the key, the active one
+    // included. Without the guard each of those costs a multi-second load and
+    // holds two models at once.
+    #[test]
+    fn a_preset_already_behind_the_engine_loads_nothing() {
+        let (commands, taken) = std::sync::mpsc::channel();
+        let state = crate::test_support::daemon_state(commands);
+        state.set_stt_model("ggml-large-v3-turbo-q5_0.bin");
+
+        let outcome = super::configure(
+            Some(&state),
+            &assignments(&[("stt.preset", "balanced".into())]),
+            false,
+        )
+        .expect("a known key and a legal value must apply");
+
+        assert!(taken.try_recv().is_err(), "the model was already loaded");
+        assert_eq!(outcome.applied, vec!["stt.preset".to_string()]);
     }
 
     #[test]
