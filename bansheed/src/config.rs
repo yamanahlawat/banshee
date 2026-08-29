@@ -112,6 +112,18 @@ fn probability<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Err
     Ok(value)
 }
 
+// Below 0.5 an utterance drags, above 2.0 it slurs. The window's slider offers
+// this range, and the file has to refuse what the slider cannot ask for.
+fn rate<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let value = f32::deserialize(deserializer)?;
+    if !(0.5..=2.0).contains(&value) {
+        return Err(serde::de::Error::custom(format!(
+            "must be between 0.5 and 2.0, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct STTConfig {
@@ -149,6 +161,7 @@ pub enum TTSFallback {
 #[serde(default, deny_unknown_fields)]
 pub struct TTSConfig {
     pub voice: String,
+    #[serde(deserialize_with = "rate")]
     pub speed: f32,
     pub fallback: TTSFallback,
 }

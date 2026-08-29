@@ -171,7 +171,8 @@ pub struct DaemonState {
     // What `audio.input_device` asks for. The watchdog reads it and rebuilds
     // capture when it differs from the device it opened.
     wanted_device: Mutex<String>,
-    tts_voice: OnceLock<String>,
+    // Follows a live `tts.voice`, so the voice reported is the one now loaded
+    tts_voice: RwLock<Option<String>>,
     wanted_downloads: OnceLock<Vec<crate::models::download::Download>>,
     // The file as last parsed. `vad_threshold`, `wanted_device` and `barge_in`
     // beside it are live values the file may no longer agree with.
@@ -236,7 +237,7 @@ impl DaemonState {
             audio_device: RwLock::new(None),
             missing_device: RwLock::new(None),
             wanted_device: Mutex::new(wanted_device),
-            tts_voice: OnceLock::new(),
+            tts_voice: RwLock::new(None),
             wanted_downloads: OnceLock::new(),
             config: RwLock::new(Arc::new(Config::default())),
             pending: Mutex::new(std::collections::BTreeSet::new()),
@@ -603,12 +604,29 @@ impl DaemonState {
 
     /// The voice the speech backend actually loaded, which `config.toml` may no
     /// longer agree with.
-    pub fn tts_voice(&self) -> Option<&str> {
-        self.tts_voice.get().map(String::as_str)
+    pub fn tts_voice(&self) -> Option<String> {
+        self.tts_voice
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    /// True when the backend took the change. The voice the window marks as
+    /// current comes from the backend, not from the file, so a backend that
+    /// speaks in something else is never reported as speaking in this.
+    pub fn set_tts(&self, tts: &crate::config::TTSConfig) -> bool {
+        let Some(voice) = self.speech.reconfigure(tts) else {
+            return false;
+        };
+        self.set_tts_voice(voice);
+        true
     }
 
     pub fn set_tts_voice(&self, voice: String) {
-        let _ = self.tts_voice.set(voice);
+        *self
+            .tts_voice
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(voice);
     }
 
     /// Every file this daemon's own config needs. Set before the socket
@@ -1070,12 +1088,14 @@ mod tests {
         let state = test_state();
         assert_eq!(state.tts_voice(), None);
         state.set_tts_voice("af_sky".to_string());
-        assert_eq!(state.tts_voice(), Some("af_sky"));
+        assert_eq!(state.tts_voice().as_deref(), Some("af_sky"));
+
         state.set_tts_voice("am_adam".to_string());
+
         assert_eq!(
-            state.tts_voice(),
-            Some("af_sky"),
-            "a second write must not replace what is already loaded"
+            state.tts_voice().as_deref(),
+            Some("am_adam"),
+            "a live voice change must move the voice the window marks as current"
         );
     }
 

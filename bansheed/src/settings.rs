@@ -11,12 +11,14 @@ use crate::state::DaemonState;
 /// Dotted `section.field` keys, spelled as `config.toml` spells them.
 pub type Assignments = BTreeMap<String, serde_json::Value>;
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Live {
     VadThreshold,
     InputDevice,
     BargeIn,
     Cues,
     SaveHistory,
+    Tts,
 }
 
 fn live(key: &str) -> Option<Live> {
@@ -26,7 +28,52 @@ fn live(key: &str) -> Option<Live> {
         "audio.barge_in" => Some(Live::BargeIn),
         "audio.cues.enabled" => Some(Live::Cues),
         "daemon.save_history" => Some(Live::SaveHistory),
+        // `tts.fallback` is not here: it decides what to do when Kokoro will
+        // not load, which is settled once, at startup.
+        "tts.voice" | "tts.speed" => Some(Live::Tts),
         _ => None,
+    }
+}
+
+/// Puts one live setting into effect, and answers whether the daemon took it.
+/// One arm per `Live` variant and no catch-all, so a variant without an arm
+/// does not compile.
+fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
+    match variant {
+        Live::VadThreshold => {
+            state.set_vad_threshold(config.stt.vad_threshold);
+            true
+        }
+        // The watchdog reads this on its next tick and rebinds capture
+        Live::InputDevice => {
+            state.set_wanted_device(config.audio.input_device.clone());
+            true
+        }
+        // Read at every record start, so the next dictation obeys it
+        Live::BargeIn => {
+            state.set_barge_in(config.audio.barge_in);
+            true
+        }
+        // The player reads this as each cue reaches it
+        Live::Cues => {
+            state.set_cues_enabled(config.audio.cues.enabled);
+            true
+        }
+        // Opening the file is the whole of the setting, so a failure to open
+        // one leaves the key unapplied rather than half applied
+        Live::SaveHistory => match history_for(config) {
+            Ok(connection) => {
+                state.set_history(connection);
+                true
+            }
+            Err(error) => {
+                eprintln!("Failed to open the history file: {error}");
+                false
+            }
+        },
+        // The next utterance reads both, so neither reloads the model. The
+        // system fallback takes neither, and says so.
+        Live::Tts => state.set_tts(&config.tts),
     }
 }
 
@@ -138,51 +185,24 @@ pub fn configure(
     }
 
     let mut outcome = Outcome::default();
+    // A key names its variant, and a variant applies once however many of its
+    // keys one call carries. Without the memo `tts.voice` and `tts.speed`
+    // together would reconfigure the backend twice with the same pair.
+    let mut done: BTreeMap<Live, bool> = BTreeMap::new();
     for key in assignments.keys() {
-        // One arm per `Live` variant and no catch-all over them, so a variant
-        // without an arm does not compile
         match (live(key), state) {
-            (Some(Live::VadThreshold), Some(state)) => {
-                state.set_vad_threshold(config.stt.vad_threshold);
-                outcome.applied.push(key.clone());
-            }
-            // The watchdog reads this on its next tick and rebinds capture
-            (Some(Live::InputDevice), Some(state)) => {
-                state.set_wanted_device(config.audio.input_device.clone());
-                outcome.applied.push(key.clone());
-            }
-            // Read at every record start, so the next dictation obeys it
-            (Some(Live::BargeIn), Some(state)) => {
-                state.set_barge_in(config.audio.barge_in);
-                outcome.applied.push(key.clone());
-            }
-            // The player reads this as each cue reaches it
-            (Some(Live::Cues), Some(state)) => {
-                state.set_cues_enabled(config.audio.cues.enabled);
-                outcome.applied.push(key.clone());
-            }
-            // Opening the file is the whole of the setting, so a failure to open
-            // one leaves the key unapplied rather than half applied
-            (Some(Live::SaveHistory), Some(state)) => match history_for(&config) {
-                Ok(connection) => {
-                    state.set_history(connection);
+            (Some(variant), Some(state)) => {
+                let honoured = *done
+                    .entry(variant)
+                    .or_insert_with(|| apply(variant, state, &config));
+                if honoured {
                     outcome.applied.push(key.clone());
-                }
-                Err(error) => {
-                    eprintln!("Failed to open the history file: {error}");
+                } else {
                     outcome.restart_required.push(key.clone());
                 }
-            },
+            }
             // A live key needs a restart too when no daemon runs
-            (
-                Some(Live::VadThreshold)
-                | Some(Live::InputDevice)
-                | Some(Live::BargeIn)
-                | Some(Live::Cues)
-                | Some(Live::SaveHistory),
-                None,
-            )
-            | (None, _) => outcome.restart_required.push(key.clone()),
+            _ => outcome.restart_required.push(key.clone()),
         }
     }
 
@@ -355,6 +375,107 @@ mod tests {
         );
         assert_eq!(outcome.applied, vec!["daemon.save_history".to_string()]);
         assert!(outcome.restart_required.is_empty());
+    }
+
+    #[test]
+    fn a_voice_write_reaches_the_running_daemon() {
+        let (state, spoken) = crate::test_support::daemon_state_recording_tts();
+        assert_eq!(state.tts_voice(), None);
+
+        let outcome = super::configure(
+            Some(&state),
+            &assignments(&[("tts.voice", "am_adam".into())]),
+            false,
+        )
+        .expect("a known key and a legal value must apply");
+
+        assert_eq!(
+            spoken
+                .lock()
+                .unwrap()
+                .last()
+                .map(|(voice, _)| voice.clone()),
+            Some("am_adam".to_string()),
+            "the next utterance must be spoken in the new voice"
+        );
+        assert_eq!(
+            state.tts_voice().as_deref(),
+            Some("am_adam"),
+            "the window marks the current voice from this"
+        );
+        assert_eq!(outcome.applied, vec!["tts.voice".to_string()]);
+        assert!(outcome.restart_required.is_empty());
+    }
+
+    #[test]
+    fn a_speed_write_reaches_the_running_daemon() {
+        let (state, spoken) = crate::test_support::daemon_state_recording_tts();
+
+        let outcome = super::configure(
+            Some(&state),
+            &assignments(&[("tts.speed", 1.5.into())]),
+            false,
+        )
+        .expect("a known key and a legal value must apply");
+
+        assert_eq!(
+            spoken.lock().unwrap().last().map(|(_, speed)| *speed),
+            Some(1.5),
+            "the next utterance must be spoken at the new rate"
+        );
+        assert_eq!(outcome.applied, vec!["tts.speed".to_string()]);
+    }
+
+    // A backend that cannot take the voice must not be reported as speaking in
+    // it, or the window marks a voice nothing will ever use.
+    #[test]
+    fn a_backend_that_refuses_the_voice_is_not_reported_as_applied() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+        let outcome = super::configure(
+            Some(&state),
+            &assignments(&[("tts.voice", "am_adam".into())]),
+            false,
+        )
+        .expect("a known key and a legal value must reach the backend");
+
+        assert!(
+            outcome.applied.is_empty(),
+            "the null backend takes no voice"
+        );
+        assert_eq!(outcome.restart_required, vec!["tts.voice".to_string()]);
+        assert_eq!(
+            state.tts_voice(),
+            None,
+            "no voice is in use, so none is named"
+        );
+    }
+
+    #[test]
+    fn the_voice_and_the_speed_together_reach_the_backend_once() {
+        let (state, spoken) = crate::test_support::daemon_state_recording_tts();
+
+        let outcome = super::configure(
+            Some(&state),
+            &assignments(&[("tts.voice", "am_adam".into()), ("tts.speed", 1.5.into())]),
+            false,
+        )
+        .expect("two known keys and legal values must apply");
+
+        assert_eq!(
+            spoken.lock().unwrap().len(),
+            1,
+            "one write, one reconfigure"
+        );
+        assert_eq!(outcome.applied.len(), 2, "both keys are in effect");
+    }
+
+    #[test]
+    fn the_tts_fallback_still_needs_a_restart() {
+        assert_eq!(
+            startup_only(&assignments(&[("tts.fallback", "system".into())])),
+            Some(&"tts.fallback".to_string())
+        );
     }
 
     #[test]
