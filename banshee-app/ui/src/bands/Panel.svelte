@@ -1,15 +1,25 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+
   // A job takes over the body rather than opening beside it, so the window
   // never has two things competing for the same attention, and so first run
   // has somewhere whole to land later.
   export let name: string;
   export let close: () => void;
+
+  let title: HTMLHeadingElement;
+
+  // The body this replaced held the control that opened it, so the keyboard
+  // has to be brought across or it is left on a node that is gone.
+  onMount(() => title.focus());
 </script>
 
 <section class="panel" aria-label={name}>
   <div class="head">
-    <h1 class="title">{name}</h1>
-    <button class="close" on:click={close}>Done</button>
+    <!-- h2, not h1: a panel replaces the record rather than sitting inside it,
+         and the window's name is the title bar's. -->
+    <h2 class="title" tabindex="-1" bind:this={title}>{name}</h2>
+    <button class="close caps" on:click={close}>Done</button>
   </div>
   <div class="content">
     <slot />
@@ -30,6 +40,12 @@
     padding: 0 var(--gutter) 20px;
   }
 
+  /* Focused only to carry the keyboard in, so it takes no ring: a reader who
+     moved nothing would be told a heading is a control. */
+  .title:focus {
+    outline: none;
+  }
+
   .title {
     margin: 0;
     font-variation-settings: 'wght' 750, 'wdth' 108;
@@ -39,11 +55,6 @@
   }
 
   .close {
-    font-family: var(--mono);
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
     color: var(--ink);
     background: transparent;
     border: 1px solid var(--ink);

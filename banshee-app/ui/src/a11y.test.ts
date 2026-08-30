@@ -85,7 +85,7 @@ it('the conversation carries no accessibility violations', async () => {
 it('a blocked machine carries none either', async () => {
   vi.mocked(status).mockResolvedValue(permissions);
   const { container } = render(App);
-  await screen.findAllByRole('button', { name: 'Open System Settings' });
+  await screen.findAllByRole('button', { name: /^Open System Settings for / });
   expect(await violations(container)).toEqual([]);
 });
 

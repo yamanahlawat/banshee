@@ -5,18 +5,23 @@
   export let total: number;
   export let saving: boolean;
   export let open: () => void;
+  export let id: string;
 </script>
 
 <div class="ledger">
-  <button class="state mono btn-underline" on:click={open}>
-    {saving ? (total > 0 ? `${formatCount(total)} saved` : 'Nothing saved yet') : 'Not saving'}
-    <span class="sr">— open what Banshee keeps</span>
-  </button>
+  <!-- The brief already calls this line the record's header. Saying so in the
+       markup is what lets a screen reader jump to it. -->
+  <h2>
+    <button {id} class="state caps mono btn-underline" on:click={open}>
+      {saving ? (total > 0 ? `${formatCount(total)} saved` : 'Nothing saved yet') : 'Not saving'}
+      <span class="sr">— open what Banshee keeps</span>
+    </button>
+  </h2>
 
   <SaveSwitch {saving} />
 
   {#if saving && total > 1}
-    <span class="hint mono">&#8984;F to find</span>
+    <span class="hint caps mono">&#8984;F to find</span>
   {/if}
 </div>
 
@@ -30,13 +35,12 @@
     border-bottom: 1px solid var(--rule);
   }
 
-  .state,
-  .hint {
-    font-family: var(--mono);
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+  /* Flex, so the heading takes the button's height instead of adding a line
+     box of its own and pushing the rule down. */
+  h2 {
+    display: flex;
+    margin: 0;
+    font: inherit;
   }
 
   .state {

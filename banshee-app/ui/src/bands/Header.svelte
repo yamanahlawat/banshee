@@ -28,6 +28,10 @@
     flex: none;
   }
 
+  .state {
+    color: var(--accent);
+  }
+
   .mark {
     display: flex;
     color: var(--ink);

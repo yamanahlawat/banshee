@@ -98,16 +98,36 @@ export function percent(bytes: number, total: number | null): number | null {
   return Math.min(100, Math.floor((bytes / total) * 100));
 }
 
-/// One line for the file in flight. A daemon that sends no count has no place
-/// to report, so the file names itself instead.
+/// A daemon that sends no count has no place to report, so the file names
+/// itself instead.
+function names(progress: Progress): string {
+  return progress.label && progress.count ? `${progress.label}, ${progress.index} of ${progress.count}` : progress.model;
+}
+
+/// One line for the file in flight.
 export function downloadLine(progress: Progress): string {
   const done = percent(progress.bytes, progress.total);
-  const named = progress.label && progress.count ? `${progress.label}, ${progress.index} of ${progress.count}` : progress.model;
+  const named = names(progress);
   // The run carries on to the next file, so a failure that says nothing leaves
   // a person clicking Download again with no idea what went wrong.
   if (progress.state === 'failed') return `${named} · failed`;
   if (done === null) return `${named} · ${Math.round(progress.bytes / 1_048_576)} MB`;
   return `${named} · ${done}%`;
+}
+
+/// The daemon reports each percent, and a live region reads every change it is
+/// given, so the line on screen and the line said aloud cannot be one string.
+/// This one holds still between quarters.
+const SPOKEN_STEP = 25;
+
+export function spokenProgress(progress: Progress): string {
+  if (progress.state === 'failed') return downloadLine(progress);
+  const done = percent(progress.bytes, progress.total);
+  const named = names(progress);
+  // No length to measure against is no progress to say, so the file is named
+  // and nothing further changes until the next one starts.
+  if (done === null) return named;
+  return `${named} · ${Math.floor(done / SPOKEN_STEP) * SPOKEN_STEP}%`;
 }
 
 /// The daemon blocks on two files and fetches four, so the blocking two land

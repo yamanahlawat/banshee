@@ -97,7 +97,7 @@ it('draws an empty history rather than leaving the body blank', async () => {
 it('says what a blocker stops and offers the pane that clears it', async () => {
   vi.mocked(status).mockResolvedValue(permissions);
   render(App);
-  const open = await screen.findAllByRole('button', { name: 'Open System Settings' });
+  const open = await screen.findAllByRole('button', { name: /^Open System Settings for / });
   await fireEvent.click(open[0]);
   expect(vi.mocked(openPermissionPane)).toHaveBeenCalled();
 });
@@ -254,18 +254,21 @@ it('holds the place words will take while the microphone is open', async () => {
   await waitFor(() =>
     expect(screen.getByText('Recording. What you say will appear here.')).toBeTruthy(),
   );
-  // NOT COVERED HERE: that the caret does not animate. jsdom answers `none` for
-  // animationName whatever the stylesheet declares, so an assertion on it proves
-  // nothing. The absence of keyframes outside Mark.svelte holds that line.
-  const caret = container.querySelector('[data-mode="recording"] .caret');
-  expect(caret).toBeTruthy();
+  // The sentence is the row's own text, not something only a screen reader is
+  // given. A 3px bar said nothing to a reader, and told recording and working
+  // apart by hue alone.
+  const pending = container.querySelector('.turn');
+  expect(pending?.querySelector('.sr')).toBeNull();
+  expect(pending?.querySelector('.caret')).toBeNull();
 
   daemon.update((s) => ({ ...s, live: { ...s.live, recording: false, transcribing: true } }));
   await waitFor(() => expect(screen.getByText('Working out what you said.')).toBeTruthy());
 
   // Speaking produces no turn, so it must not hold a place for one.
   daemon.update((s) => ({ ...s, live: { ...s.live, transcribing: false, speaking: true } }));
-  await waitFor(() => expect(container.querySelector('.caret')).toBeNull());
+  await waitFor(() =>
+    expect(screen.queryByText('Working out what you said.')).toBeNull(),
+  );
 });
 
 it('offers a way back when the daemon has stopped', async () => {
@@ -603,13 +606,13 @@ it('keeps a permission reachable while a download runs', async () => {
     ],
   });
   render(App);
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Open System Settings' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('button', { name: /^Open System Settings for / })).toBeTruthy());
 
   pushes.get('daemon:downloads')?.({
     payload: { model: 'ggml.bin', label: 'Speech model', index: 1, count: 4, bytes: 1, total: 2, state: 'downloading' },
   });
   await waitFor(() => expect(screen.getByText("Getting Banshee's models")).toBeTruthy());
-  expect(screen.getByRole('button', { name: 'Open System Settings' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: /^Open System Settings for / })).toBeTruthy();
 });
 
 // A refused call answers -32005 rather than throwing on the wire, and an
@@ -726,4 +729,97 @@ it('offers detection among the languages', async () => {
   const picker = await screen.findByRole('combobox', { name: 'Language' });
   expect(screen.getByRole('option', { name: 'Detect it' })).toBeTruthy();
   expect((picker as HTMLSelectElement).value).toBe('auto');
+});
+
+// A panel replaces the whole body. The control that opened it is destroyed by
+// the click it is answering, so the keyboard is left on a node that is gone.
+it('puts the keyboard in a panel when it opens, and back where it came from', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const opener = screen.getByRole('button', { name: /^Microphone/ });
+  opener.focus();
+  await fireEvent.click(opener);
+
+  const title = await screen.findByRole('heading', { name: 'Microphone' });
+  expect(document.activeElement).toBe(title);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Microphone/ })));
+});
+
+// The ledger sits in the body it opens over, so the way back is the control's
+// name and not the node, which no longer exists.
+it('gives the keyboard back to the ledger after the record closes', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const opener = screen.getByRole('button', { name: /saved/ });
+  opener.focus();
+  await fireEvent.click(opener);
+  await screen.findByRole('heading', { name: 'Record' });
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: /saved/ })));
+});
+
+// Escape closes a panel too, and leaves the keyboard in the same place a click
+// on Done would.
+it('gives the keyboard back when Escape closes a panel', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const opener = screen.getByRole('button', { name: /^Voice/ });
+  opener.focus();
+  await fireEvent.click(opener);
+  expect(document.activeElement).toBe(await screen.findByRole('heading', { name: 'Voice' }));
+
+  await fireEvent.keyDown(window, { key: 'Escape' });
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Voice/ })));
+});
+
+// With no heading anywhere, a screen reader has no way to reach the record but
+// to walk the whole window.
+it('carries a heading for the record', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  expect(screen.getAllByRole('heading').length).toBeGreaterThan(0);
+});
+
+// The device picker keeps a row for a device that is not there. The language
+// picker had no such guard, so a code Whisper's table does not name left a
+// `select` whose value matched no option, which draws as an empty control.
+it('keeps a row for a language the daemon did not name', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'cy' } },
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
+
+  const picker = await screen.findByRole('combobox', { name: 'Language' });
+  expect((picker as HTMLSelectElement).value).toBe('cy');
+});
+
+// A swallowed failure left the same empty control with nothing to explain it.
+it('says when the language list did not arrive', async () => {
+  vi.mocked(listLanguages).mockRejectedValue(new Error('no such method'));
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
+
+  await waitFor(() => expect(screen.getByText(/could not list the languages/)).toBeTruthy());
+});
+
+// The key sat on the same ink underline the pickers use, so it read as a field
+// to type into while being a span.
+it('lets the hotkey be changed by the key it names', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
+
+  const key = await screen.findByRole('button', { name: /Right Command — change the hotkey/ });
+  await fireEvent.click(key);
+  await waitFor(() => expect(screen.getByText('Press a key')).toBeTruthy());
 });

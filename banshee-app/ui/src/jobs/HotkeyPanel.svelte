@@ -76,7 +76,10 @@
 <svelte:window on:keydown={onKeyDown} on:keyup={onKeyUp} />
 
 <Field name="Hold to talk" pending={$daemon.pending.has('audio.hotkey')}>
-  <span class="key">{recording ? 'Press a key' : humanize(key) || 'Not set'}</span>
+  <button class="key" on:click={() => (recording ? stop() : begin())}>
+    {recording ? 'Press a key' : humanize(key) || 'Not set'}
+    <span class="sr">— change the hotkey</span>
+  </button>
   <button class="btn" on:click={() => (recording ? stop() : begin())}>
     {recording ? 'Cancel' : 'Change'}
   </button>
@@ -131,13 +134,25 @@
 </Field>
 
 <style>
+  /* A button, because this underline is the one the pickers wear and it has to
+     mean the same thing on both: press here to change what it says. */
   .key {
     font-family: var(--mono);
     font-size: 13px;
+    text-align: left;
     color: var(--ink);
+    background: transparent;
+    border: 0;
     border-bottom: 1px solid var(--ink);
+    border-radius: 0;
     padding: 6px 0;
     flex: 1;
+    cursor: pointer;
+  }
+
+  .key:hover {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
   }
 
   .refusal {

@@ -44,9 +44,10 @@
 
   // Whisper's own list, so the window cannot offer a code the engine refuses.
   // It does not move while the panel is open.
+  let languagesArrived = true;
   listLanguages()
     .then((got) => (spoken = got))
-    .catch(() => {});
+    .catch(() => (languagesArrived = false));
 
   // Ordered by request: a slow earlier read must not overwrite a later one.
   let reading = 0;
@@ -85,6 +86,21 @@
   // the loaded build holds no other language. Working it out from the preset
   // name would be a second rule for one fact, in a second language.
   $: englishOnly = $daemon.status?.english_only === true;
+  // Whisper's table names what it can hear, and a code it does not name still
+  // needs its row: a `select` whose value matches no option draws as an empty
+  // control, which reads as broken software. The input device guards the same
+  // way, a few lines down.
+  $: languagesOffered =
+    language === 'auto' || spoken.languages.some((one) => one.code === language)
+      ? spoken.languages
+      : [{ code: language, name: language }, ...spoken.languages];
+
+  $: languageNote = !languagesArrived
+    ? 'Banshee could not list the languages it knows. The one set here still applies.'
+    : englishOnly
+      ? 'Fast hears English only. Choose Balanced or Quality above to speak another language.'
+      : 'The language you speak. Naming it beats detecting it.';
+
   // `endpoint_silence_ms` is a plain u64 in the daemon, so a hand-edited config
   // can hold a value none of these offer.
   $: offered = QUIET.includes(silence) ? QUIET : [silence, ...QUIET];
@@ -159,9 +175,7 @@
      language out, and the two read as one decision only if they sit together. -->
 <Field
   name="Language"
-  note={englishOnly
-    ? 'Fast hears English only. Choose Balanced or Quality above to speak another language.'
-    : 'The language you speak. Naming it beats detecting it.'}
+  note={languageNote}
   pending={$waitsOnARestart.has('stt.language')}
 >
   <Picker
@@ -174,7 +188,7 @@
          so it belongs in the list a person picks from. Whisper's own table
          holds only real languages. -->
     <option value="auto">Detect it</option>
-    {#each spoken.languages as option (option.code)}
+    {#each languagesOffered as option (option.code)}
       <option value={option.code}>{option.name}</option>
     {/each}
   </Picker>
@@ -228,9 +242,13 @@
 </Field>
 
 <style>
+  /* Centred, not stretched. A wrapped flex line sizes its items to the tallest,
+     so chips sharing a line with the taller input grew to match it and the
+     field showed two chip heights at once. */
   .chips {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: 6px;
     width: 100%;
   }

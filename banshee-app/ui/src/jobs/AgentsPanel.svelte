@@ -72,7 +72,7 @@
     {#each $agents as agent (agent.id)}
       <div class="row">
         <span class="name">{agent.name}</span>
-        <span class="presence" class:on={agent.presence === 'connected'}>
+        <span class="presence caps" class:on={agent.presence === 'connected'}>
           {SAYS[agent.presence] ?? agent.presence}
         </span>
         {#if agent.presence === 'found'}
@@ -87,6 +87,10 @@
 {/if}
 
 <style>
+  .caps {
+    color: var(--accent);
+  }
+
   .lede {
     max-width: 520px;
     margin: 0 0 20px;
@@ -115,11 +119,10 @@
     min-width: 0;
   }
 
+  /* Both states are named here, because this row is the one place the caps type
+     is not the accent by default: the accent is what connected means. */
   .presence {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+    color: var(--ink);
   }
 
   .presence.on {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     downloadLine,
+    spokenProgress,
     fixGroups,
     fixProse,
     type Blocker,
@@ -46,6 +47,9 @@
         return {
           title: first.name,
           label: 'Open System Settings',
+          // Every permission blocker draws this button. Heard one after the
+          // other, the names are the same button twice.
+          pane: first.name,
           run: () => openPermissionPane(first.id),
           // The download brings no grant, so this keeps its place beside one.
           settledByADownload: false,
@@ -55,6 +59,7 @@
         return {
           title: 'Banshee needs its models',
           label: 'Download',
+          pane: '',
           run: downloadModels,
           settledByADownload: true,
           // The preset decides which speech model is fetched, so it is worth
@@ -69,12 +74,13 @@
           // the last resort it is.
           title: microphone ? 'The microphone is not working' : 'Banshee needs a restart',
           label: microphone ? 'Restart anyway' : 'Restart Banshee',
+          pane: '',
           run: restart,
           settledByADownload: true,
           chooses: false,
         };
       default:
-        return { title: first.name, label: null, run: null, settledByADownload: false, chooses: false };
+        return { title: first.name, label: null, pane: '', run: null, settledByADownload: false, chooses: false };
     }
   }
 
@@ -95,11 +101,14 @@
      Settings whatever else is arriving. -->
 {#if download}
   <section class="blocker">
-    <span class="caps">Getting Banshee's models</span>
+    <h2 class="caps">Getting Banshee's models</h2>
     <div class="actions">
       <button class="btn" disabled>Downloading</button>
     </div>
-    <p class="progress mono" aria-live="polite">{downloadLine(download)}</p>
+    <p class="progress mono">{downloadLine(download)}</p>
+    <!-- The daemon reports each percent, and a live region reads every change
+         it is given, so what is said aloud steps in quarters instead. -->
+    <span class="sr" aria-live="polite">{spokenProgress(download)}</span>
   </section>
 {/if}
 
@@ -108,7 +117,7 @@
   {#if !(download && fix.settledByADownload)}
     {@const prose = fixProse(group[0])}
     <section class="blocker">
-      <span class="caps">{fix.title}</span>
+      <h2 class="caps">{fix.title}</h2>
       <p class="consequence">Until this is done, {group[0].consequence}.</p>
       {#if prose}<p class="fix">{prose}</p>{/if}
 
@@ -130,7 +139,10 @@
 
       {#if fix.label}
         <div class="actions">
-          <button class="btn" on:click={run(fix)} disabled={busy}>{fix.label}</button>
+          <button class="btn" on:click={run(fix)} disabled={busy}>
+            {fix.label}
+            {#if fix.pane}<span class="sr">for {fix.pane}</span>{/if}
+          </button>
         </div>
       {/if}
     </section>
@@ -138,6 +150,15 @@
 {/each}
 
 <style>
+  h2,
+  .label {
+    color: var(--accent);
+  }
+
+  h2 {
+    margin: 0;
+  }
+
   /* An absence is drawn, not omitted: the thing that is missing takes up the
      place it will fill once it arrives. */
   .blocker {

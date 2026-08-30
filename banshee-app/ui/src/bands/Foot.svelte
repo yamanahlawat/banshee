@@ -3,21 +3,46 @@
   // Four values, and the brief holds it to four. This band reports what
   // Banshee is set to. It is a status line that can be opened, not the
   // window's navigation, which is what went wrong with the strip it replaces.
-  export let values: { label: string; value: string; pending?: boolean }[];
-  export let open: (label: string) => void;
+  export let values: { id: string; label: string; value: string; pending?: boolean }[];
+  export let open: (label: string, id: string) => void;
   export let active: string | null = null;
+
+  // A cell is a quarter of 480pt, so a device name is often cut. The whole of
+  // it is in the DOM either way, and a screen reader reads it whole, so this
+  // is for the eye alone: a tooltip on a value that fits would be noise, and a
+  // description read back after the name it has already said.
+  function clipped(node: HTMLElement, value: string) {
+    let text = value;
+    const mark = () => {
+      if (node.scrollWidth > node.clientWidth) node.title = text;
+      else node.removeAttribute('title');
+    };
+    mark();
+    // Until Archivo lands the widths are the fallback's, so a value that fits
+    // at first paint may not once the real face is measured.
+    document.fonts?.ready?.then(mark);
+    return {
+      update(next: string) {
+        text = next;
+        mark();
+      },
+    };
+  }
 </script>
 
 <footer class="band">
   {#each values as row (row.label)}
     <button
+      id={row.id}
       class="cell"
       class:on={active === row.label}
       aria-pressed={active === row.label}
-      on:click={() => open(row.label)}
+      on:click={() => open(row.label, row.id)}
     >
       <span class="caps">{row.label}</span>
-      <span class="mono value" class:pending={row.pending}>{row.value || '—'}</span>
+      <span class="mono value" class:pending={row.pending} use:clipped={row.value}>
+        {row.value || '—'}
+      </span>
       {#if row.pending}<span class="sr">{RESTART_SAYS}</span>{/if}
     </button>
   {/each}
@@ -32,6 +57,10 @@
     background: var(--foot);
     border-top: 1px solid var(--rule);
     flex: none;
+  }
+
+  .caps {
+    color: var(--accent);
   }
 
   .cell {

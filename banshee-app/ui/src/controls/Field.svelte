@@ -15,6 +15,10 @@
 </div>
 
 <style>
+  .caps {
+    color: var(--accent);
+  }
+
   /* Separation by void, not by rule. */
   .field {
     margin-bottom: 26px;

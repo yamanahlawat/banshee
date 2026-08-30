@@ -10,46 +10,24 @@
   } as const;
 </script>
 
-<article class="turn" data-mode={mode}>
+<!-- The sentence is drawn, not hidden. A bar held the place instead, which said
+     nothing to a reader and told the two modes apart by hue alone. A turn is
+     genuinely on its way here, so this is a place kept rather than a presence
+     invented. -->
+<article class="turn">
   <span class="mono time" aria-hidden="true">{time}</span>
-  <p class="text">
-    <span class="sr">{SAYS[mode]}</span>
-    <span class="caret" aria-hidden="true"></span>
-  </p>
+  <p class="text">{SAYS[mode]}</p>
 </article>
 
 <style>
-  .turn {
-    display: grid;
-    grid-template-columns: 52px 1fr;
-    column-gap: 12px;
-    padding: 0 var(--gutter);
-    margin-bottom: 20px;
-  }
-
-  .time {
-    font-size: 11px;
-    line-height: 1.6;
-    color: var(--accent);
-    padding-top: 3px;
-  }
-
+  /* Banshee's own voice, so the agent cut, and dim because this is a readout
+     and not a turn anyone said. */
   .text {
     margin: 0;
+    max-width: 520px;
+    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
     font-size: 15px;
-    line-height: 1.4;
+    line-height: 1.45;
+    color: var(--dim);
   }
-
-  .caret {
-    display: inline-block;
-    width: 3px;
-    height: 0.82em;
-    vertical-align: -0.08em;
-    background: var(--accent);
-  }
-
-  [data-mode='transcribing'] .caret {
-    background: var(--dim);
-  }
-
 </style>

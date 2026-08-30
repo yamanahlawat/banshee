@@ -83,6 +83,21 @@ const ANSWERS: Record<string, () => unknown> = {
     ],
     current: 'OnePlus Buds 3',
   }),
+  // Whisper's own order: English first, the rest by how much training data each
+  // had. A short slice of it, because the preview needs a list and not the list.
+  list_languages: () => ({
+    languages: [
+      { code: 'en', name: 'English' },
+      { code: 'zh', name: 'Chinese' },
+      { code: 'de', name: 'German' },
+      { code: 'es', name: 'Spanish' },
+      { code: 'ru', name: 'Russian' },
+      { code: 'ko', name: 'Korean' },
+      { code: 'fr', name: 'French' },
+      { code: 'ja', name: 'Japanese' },
+      { code: 'hi', name: 'Hindi' },
+    ],
+  }),
   list_voices: () => ({
     voices: [
       { id: 'af_sky', name: 'Sky', description: 'American, clear' },

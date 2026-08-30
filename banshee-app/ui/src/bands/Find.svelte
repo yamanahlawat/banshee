@@ -22,7 +22,7 @@
   <span class="readout" aria-live="polite">
     {query.trim() === '' ? '' : `${matches} found`}
   </span>
-  <button class="dismiss" aria-label="Close find" on:click={close}>Esc</button>
+  <button class="dismiss caps" aria-label="Close find" on:click={close}>Esc</button>
 </div>
 
 <style>
@@ -38,11 +38,12 @@
   .field {
     flex: 1;
     min-width: 0;
+    /* A pointer's height, for the same reason the sliders carry one. */
+    padding: 3px 0;
     font-size: 13px;
     color: var(--ink);
     background: transparent;
     border: 0;
-    padding: 0;
     -webkit-appearance: none;
     appearance: none;
   }
@@ -58,10 +59,6 @@
 
 
   .dismiss {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
     color: var(--ink);
     background: transparent;
     border: 1px solid var(--rule);

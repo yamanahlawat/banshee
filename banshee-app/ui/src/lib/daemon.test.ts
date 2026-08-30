@@ -19,6 +19,7 @@ import {
   markPending,
   microphoneInUse,
   percent,
+  spokenProgress,
   reduceLive,
   reduceStatus,
   shownFloat,
@@ -185,4 +186,28 @@ it('says when a file failed rather than showing its last percentage', () => {
   expect(
     downloadLine({ label: 'Voice detection', model: 'silero_vad.onnx', index: 2, count: 4, bytes: 0, total: null, state: 'failed' }),
   ).toBe('Voice detection, 2 of 4 · failed');
+});
+
+// The daemon reports each percent and a live region reads every change it is
+// given, so an 862 MB run would speak about eight hundred times. What is said
+// aloud steps in quarters and holds the same words between two steps.
+it('says a download aloud in quarters, and the same words in between', () => {
+  const tick = { label: 'Speech model', model: 'ggml-x.bin', index: 1, count: 4, total: 100, state: 'downloading' as const };
+  expect(spokenProgress({ ...tick, bytes: 26 })).toBe(spokenProgress({ ...tick, bytes: 49 }));
+  expect(spokenProgress({ ...tick, bytes: 26 })).not.toBe(spokenProgress({ ...tick, bytes: 51 }));
+  expect(spokenProgress({ ...tick, bytes: 51 })).toBe('Speech model, 1 of 4 · 50%');
+});
+
+// A failure is the one report a person has to hear when it happens, not at the
+// next quarter.
+it('says a failed file aloud whatever the percentage', () => {
+  expect(spokenProgress({ model: 'silero_vad.onnx', bytes: 3, total: 100, state: 'failed' })).toBe('silero_vad.onnx · failed');
+});
+
+// With no length to measure against there is no progress to say, so the file
+// names itself once and then holds still.
+it('names the file once when the server sent no length', () => {
+  const tick = { model: 'kokoro.onnx', total: null, state: 'downloading' as const };
+  expect(spokenProgress({ ...tick, bytes: 5 * 1_048_576 })).toBe('kokoro.onnx');
+  expect(spokenProgress({ ...tick, bytes: 90 * 1_048_576 })).toBe('kokoro.onnx');
 });

@@ -19,7 +19,7 @@
     <!-- Floated, not given a column: a column would charge 68px to every line
          of every turn for a control showing on one of them. -->
     {#if id}
-      <button class="copy" on:click={() => copy(text, id)}>
+      <button class="copy caps" on:click={() => copy(text, id)}>
         {$copied === id ? 'Copied' : 'Copy'}
         <span class="sr">{speaker === 'agent' ? 'what Banshee said' : 'what you said'} at {time}</span>
       </button>
@@ -31,23 +31,8 @@
 </article>
 
 <style>
-  .turn {
-    display: grid;
-    grid-template-columns: 52px 1fr;
-    column-gap: 12px;
-    padding: 0 var(--gutter);
-    margin-bottom: 20px;
-  }
-
   .col {
     min-width: 0;
-  }
-
-  .time {
-    font-size: 11px;
-    line-height: 1.6;
-    color: var(--accent);
-    padding-top: 3px;
   }
 
   .text {
@@ -87,26 +72,34 @@
     padding-top: 8px;
   }
 
+  /* Short enough to clear the first line box on its own. At 28px it overlapped
+     the second one too, so every paragraph in the window stepped outward two
+     lines down for a control that is not even drawn. */
   .copy {
+    position: relative;
     float: right;
-    margin: 0 0 4px 14px;
+    margin: 0 0 0 14px;
+    line-height: 1;
     /* Fixed width for the longer of the two labels, so confirming a copy cannot
        widen the float and rewrap the paragraph around it. */
     width: 68px;
     text-align: center;
-    font-family: var(--mono);
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
     color: var(--ink);
     background: transparent;
     border: 1px solid var(--ink);
     border-radius: 0;
-    padding: 4px 4px;
+    padding: 3px 4px;
     cursor: pointer;
     opacity: 0;
     pointer-events: none;
+  }
+
+  /* The visible box is now under a pointer's size, so the box that answers a
+     click grows behind it, as it does on the underlined controls. */
+  .copy::after {
+    content: '';
+    position: absolute;
+    inset: -4px -2px;
   }
 
   .turn:hover .copy,

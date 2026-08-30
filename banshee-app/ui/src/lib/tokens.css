@@ -148,19 +148,39 @@ body {
   background: var(--dim);
 }
 
+/* A turn and a pending turn share this. Each held its own copy, which is how
+   two rows that must line up come to drift. */
+.turn {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  column-gap: 12px;
+  padding: 0 var(--gutter);
+  margin-bottom: 20px;
+}
+
+.turn .time {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--accent);
+  padding-top: 3px;
+}
+
 .mono {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum' 1;
 }
 
-.caps {
+/* The type role, exactly as DESIGN.md declares it, which names no colour. Half
+   the controls that take this type are ink and half are accent, so the colour
+   is the caller's line and this is the other five. */
+.caps,
+.btn {
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--accent);
 }
 
 .sr {
@@ -184,7 +204,9 @@ body {
   appearance: none;
   flex: 1;
   min-width: 0;
-  height: 14px;
+  /* A pointer's height. An input grows no pseudo-element, so unlike the text
+     buttons this one cannot keep a small box and a large hit area. */
+  height: 24px;
   background: transparent;
 }
 
@@ -213,11 +235,6 @@ body {
 }
 
 .btn {
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
   color: var(--ground);
   background: var(--ink);
   border: 1px solid var(--ink);
@@ -239,6 +256,7 @@ body {
 /* A text button that marks itself with a rule rather than a box. The colour is
    the site's, so a caller sets only that. */
 .btn-underline {
+  position: relative;
   background: transparent;
   border: 0;
   border-bottom: 1px solid transparent;
@@ -246,6 +264,17 @@ body {
   padding: 0 0 1px;
   cursor: pointer;
   flex: none;
+}
+
+/* The rule sits on the label and the label is 11px, so padding the button to a
+   pointer's size would push the rule off the word it underlines. The box that
+   answers a click grows behind the label instead, and the rule stays put. */
+.btn-underline::after {
+  content: '';
+  position: absolute;
+  /* Against the padding box, which stops above the 1px rule, so the two edges
+     are not the same distance from the label. Measured to 25.8px tall. */
+  inset: -5px -2px;
 }
 
 .btn-underline:hover:not(:disabled) {
@@ -269,14 +298,19 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /* The remove control carries the right padding, so the box that answers a
+     click reaches the chip's own edge on three sides. */
+  min-height: 26px;
+  padding: 0 0 0 8px;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--ink);
   border: 1px solid var(--rule);
-  padding: 4px 8px;
 }
 
 .chip button {
+  align-self: stretch;
+  width: 26px;
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1;

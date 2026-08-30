@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import {
     daemon,
     downloadLine,
@@ -50,6 +50,21 @@
   let agentsRead = false;
   type Job = 'Microphone' | 'Hotkey' | 'Voice' | 'Agents' | 'Record';
   let job: Job | null = null;
+
+  // A panel takes over the body, so an opener standing in that body is
+  // destroyed by the click it is answering. The way back is the opener's id
+  // and never the node, which no longer exists by the time it is wanted.
+  const RETURNS_TO = { ledger: 'ledger', absence: 'nothing-yet' };
+  let cameFrom = '';
+
+  async function openJob(next: Job | null, from = '') {
+    cameFrom = next === null ? cameFrom : from;
+    job = next;
+    if (next !== null) return;
+    await tick();
+    document.getElementById(cameFrom)?.focus();
+    cameFrom = '';
+  }
   let query = '';
   let finding = false;
   // One instant for the whole paint, so two rows cannot straddle midnight.
@@ -73,12 +88,12 @@
     if (keysClaimed()) return;
     if ((event.metaKey || event.ctrlKey) && event.key === 'f') {
       event.preventDefault();
-      job = null;
+      openJob(null);
       finding = true;
       return;
     }
     if (event.key !== 'Escape') return;
-    if (job !== null) job = null;
+    if (job !== null) openJob(null);
     else if (finding) closeFind();
   }
 
@@ -151,23 +166,25 @@
   // is never applied live. Marking it pending is the only way the foot can stop
   // naming a key the daemon is not listening for. `audio.input_device` always
   // applies, so the microphone has no such state.
-  $: footValues = ((): { label: Job; value: string; pending?: boolean }[] => {
+  $: footValues = ((): { id: string; label: Job; value: string; pending?: boolean }[] => {
     const voice = String(config.tts?.voice ?? '');
     const said = (value: string) => (live ? value : '');
     const waits = (...keys: string[]) => live && keys.some((key) => $waitsOnARestart.has(key));
     return [
-      { label: 'Microphone', value: said(microphoneInUse($daemon.live.audio_device)) },
+      { id: 'job-microphone', label: 'Microphone', value: said(microphoneInUse($daemon.live.audio_device)) },
       {
+        id: 'job-hotkey',
         label: 'Hotkey',
         value: said(humanize(String(config.audio?.hotkey ?? ''))),
         pending: waits('audio.hotkey', 'audio.hotkey_mode'),
       },
       {
+        id: 'job-voice',
         label: 'Voice',
         value: said(voices.voices.find((v) => v.id === voice)?.name ?? voice),
         pending: waits('tts.voice', 'tts.speed'),
       },
-      { label: 'Agents', value: said(connected > 0 ? `${connected} connected` : 'None yet') },
+      { id: 'job-agents', label: 'Agents', value: said(connected > 0 ? `${connected} connected` : 'None yet') },
     ];
   })();
 
@@ -272,7 +289,7 @@
 
   <div class="body">
     {#if job}
-      <Panel name={job} close={() => (job = null)}>
+      <Panel name={job} close={() => openJob(null)}>
         {#if job === 'Record'}
           <TheRecord saving={savingHistory} />
         {:else if job === 'Microphone'}
@@ -313,9 +330,10 @@
 
       {#if live && !finding && ($table.total > 0 || !savingHistory)}
         <Ledger
+          id={RETURNS_TO.ledger}
           total={$table.total}
           saving={savingHistory}
-          open={() => (job = 'Record')}
+          open={() => openJob('Record', RETURNS_TO.ledger)}
         />
       {/if}
 
@@ -358,7 +376,8 @@
           label="Nothing said yet"
           detail="Hold the hotkey and speak. What you say lands in whatever app has focus, and shows up here."
           action="What Banshee keeps"
-          act={() => (job = 'Record')}
+          id={RETURNS_TO.absence}
+          act={() => openJob('Record', RETURNS_TO.absence)}
         />
       {/if}
     {/if}
@@ -368,7 +387,7 @@
   <Foot
     values={footValues}
     active={job}
-    open={(name) => (job = job === name ? null : (name as Job))}
+    open={(name, id) => openJob(job === name ? null : (name as Job), id)}
   />
 
   <span class="sr" aria-live="polite">{word}{$announcement ? `. ${$announcement}` : ''}</span>

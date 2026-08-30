@@ -4,13 +4,14 @@
   export let action = '';
   export let act: (() => void) | null = null;
   export let busy = false;
+  export let id = '';
 </script>
 
 <div class="absence">
   <h2 class="label">{label}</h2>
   {#if detail}<p class="detail">{detail}</p>{/if}
   {#if action && act}
-    <button class="btn" on:click={act} disabled={busy}>{action}</button>
+    <button {id} class="btn" on:click={act} disabled={busy}>{action}</button>
   {/if}
 </div>
 
