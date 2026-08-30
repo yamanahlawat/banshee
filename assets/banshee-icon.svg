@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <title>Banshee</title>
-  <!-- Ink and bone, no gradient. The menu bar states are pure shape, and the
-       app icon says the same thing louder rather than something else. -->
-  <path d="M284 100 H740 A184 184 0 0 1 924 284 V740 A184 184 0 0 1 740 924 H284 A184 184 0 0 1 100 740 V284 A184 184 0 0 1 284 100 Z" fill="#0B0B0F"/>
+  <!-- The accent as ground, bone as figure. The shroud is never the accent: in
+       the window that fill means recording. -->
+  <path d="M284 100 H740 A184 184 0 0 1 924 284 V740 A184 184 0 0 1 740 924 H284 A184 184 0 0 1 100 740 V284 A184 184 0 0 1 284 100 Z" fill="#8A2A0D"/>
   <g transform="translate(512 520) scale(6.6) translate(-50 -51)">
-    <path d="M21 70 L24 46 C24 27 34 14 50 14 C66 14 76 27 76 46 L79 70 C79 80 72 88 64 86 C57 84 55 72 50 72 C45 72 43 84 36 86 C28 88 21 80 21 70 Z" fill="#FAFAFA"/>
+    <path d="M21 70 L24 46 C24 27 34 14 50 14 C66 14 76 27 76 46 L79 70 C79 80 72 88 64 86 C57 84 55 72 50 72 C45 72 43 84 36 86 C28 88 21 80 21 70 Z" fill="#F2EFE9"/>
   </g>
 </svg>

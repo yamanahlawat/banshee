@@ -2,8 +2,8 @@
   <title>Banshee</title>
   <!-- Full bleed: macOS masks the tile, so the ground runs to the edge.
        The rounded banshee-icon.svg serves the README, which has no mask. -->
-  <rect x="0" y="0" width="1024" height="1024" fill="#0B0B0F"/>
+  <rect x="0" y="0" width="1024" height="1024" fill="#8A2A0D"/>
   <g transform="translate(512 520) scale(6.6) translate(-50 -51)">
-    <path d="M21 70 L24 46 C24 27 34 14 50 14 C66 14 76 27 76 46 L79 70 C79 80 72 88 64 86 C57 84 55 72 50 72 C45 72 43 84 36 86 C28 88 21 80 21 70 Z" fill="#FAFAFA"/>
+    <path d="M21 70 L24 46 C24 27 34 14 50 14 C66 14 76 27 76 46 L79 70 C79 80 72 88 64 86 C57 84 55 72 50 72 C45 72 43 84 36 86 C28 88 21 80 21 70 Z" fill="#F2EFE9"/>
   </g>
 </svg>
