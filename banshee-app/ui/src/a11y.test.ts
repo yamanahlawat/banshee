@@ -21,7 +21,15 @@ const ROWS = vi.hoisted(() => {
 
 vi.mock('./lib/tauri', async () => (await import('./lib/tauri.mock')).mockTauri());
 
-import { detectAgents, history, listen, listDevices, listVoices, status } from './lib/tauri';
+import {
+  detectAgents,
+  history,
+  listen,
+  listDevices,
+  listLanguages,
+  listVoices,
+  status,
+} from './lib/tauri';
 import { agents } from './lib/agents';
 import { table as historyTable } from './lib/history';
 import { forgetKeys } from './lib/keys';
@@ -52,6 +60,12 @@ beforeEach(async () => {
   vi.mocked(listDevices).mockResolvedValue({
     devices: [{ name: 'MacBook Pro Microphone', default: true }],
     current: 'MacBook Pro Microphone',
+  });
+  vi.mocked(listLanguages).mockResolvedValue({
+    languages: [
+      { code: 'en', name: 'English' },
+      { code: 'hi', name: 'Hindi' },
+    ],
   });
   vi.mocked(listVoices).mockResolvedValue({
     voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }],

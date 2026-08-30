@@ -32,6 +32,8 @@ fn assemble(
                 RecordingError::Model(_) => BlockerKind::Model,
                 RecordingError::Microphone(_) => BlockerKind::Pipeline,
             },
+            role: None,
+            remedy: Some(banshee_common::Remedy::Restart),
             id: "recording_pipeline".to_string(),
             name: "Recording pipeline".to_string(),
             consequence: error.consequence(),
@@ -52,6 +54,8 @@ mod tests {
     fn blocker(kind: BlockerKind, id: &str) -> Blocker {
         Blocker {
             kind,
+            role: None,
+            remedy: None,
             id: id.to_string(),
             name: id.to_string(),
             consequence: "recording does not work".to_string(),
@@ -68,6 +72,14 @@ mod tests {
     /// A client that routes by kind sends a model fault to its models step.
     /// Calling it a pipeline fault hides it behind whatever handles the
     /// microphone.
+    /// A client routes on `command`, so this literal is a wire contract.
+    #[test]
+    fn a_dead_pipeline_names_the_command_a_client_routes_on() {
+        let error = RecordingError::Model("missing file.".to_string());
+        let blockers = assemble(vec![], vec![], Some(&error));
+        assert_eq!(blockers[0].command.as_deref(), Some("banshee start"));
+    }
+
     #[test]
     fn a_model_that_will_not_load_reports_as_a_model_fault() {
         let error = RecordingError::Model("missing file.".to_string());

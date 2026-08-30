@@ -163,6 +163,8 @@ pub fn blockers() -> Vec<Blocker> {
         Grant::missing()
             .into_iter()
             .map(|grant| Blocker {
+                role: None,
+                remedy: Some(banshee_common::Remedy::Grant),
                 kind: BlockerKind::Permission,
                 id: grant.id().to_string(),
                 name: grant.name().to_string(),

@@ -21,6 +21,7 @@ enum Live {
     Tts,
     Vocabulary,
     Preset,
+    Speech,
 }
 
 fn live(key: &str) -> Option<Live> {
@@ -34,6 +35,8 @@ fn live(key: &str) -> Option<Live> {
         // not load, which is settled once, at startup.
         "tts.voice" | "tts.speed" => Some(Live::Tts),
         "stt.vocabulary" => Some(Live::Vocabulary),
+        // Whisper reads both per utterance, so neither moves the model.
+        "stt.language" | "stt.translate" => Some(Live::Speech),
         "stt.preset" => Some(Live::Preset),
         _ => None,
     }
@@ -82,6 +85,7 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
         // than report a prompt nothing holds
         Live::Vocabulary => state.set_vocabulary(config.stt.vocabulary.clone()),
         Live::Preset => apply_preset(state, config.stt.preset.model_name()),
+        Live::Speech => state.set_speech((&config.stt).into()),
     }
 }
 
@@ -113,7 +117,7 @@ fn history_for(config: &Config) -> Result<Option<rusqlite::Connection>, BansheeE
 /// the same file before either writes and one setting is lost.
 static WRITING: Mutex<()> = Mutex::new(());
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Outcome {
     pub applied: Vec<String>,
     pub restart_required: Vec<String>,
@@ -170,9 +174,74 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
     Ok((rendered, validated))
 }
 
+/// A code the engine cannot read is refused here, where a person is there to
+/// see why. `Config` reads the same field liberally, because a file written
+/// before anything read it can hold anything.
+fn refuse_unknown_language(assignments: &Assignments) -> Result<(), BansheeError> {
+    match assignments
+        .get("stt.language")
+        .and_then(|value| value.as_str())
+    {
+        Some(value) if !crate::config::known_language(value) => {
+            Err(BansheeError::Rejected(format!(
+                "'{value}' is not a language Whisper knows. Use a code like en, de or hi, or auto"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Applying one of these without writing it would report success and change nothing.
 fn startup_only(assignments: &Assignments) -> Option<&String> {
     assignments.keys().find(|key| live(key).is_none())
+}
+
+/// Asks again for the live settings that refused while their file was missing.
+/// The preset and the voice both answer no while their model is absent, and a
+/// download is the only thing that changes that answer.
+pub fn reapply_pending(state: &DaemonState) {
+    // The same lock `configure` holds: a write landing between the snapshot and
+    // `record_outcome` would be applied from the older config and struck off,
+    // leaving the daemon on the old setting with nothing marked waiting. A
+    // download runs on its own task, so this is never re-entrant.
+    let _writing = WRITING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let config = state.config();
+    let waiting: Vec<String> = state.pending();
+    let outcome = apply_each(state, &config, waiting.iter());
+    // A key that still refuses is left where it was, not moved or cleared, and
+    // a key with no live apply is not this function's to answer for.
+    state.record_outcome(&outcome.applied, &[]);
+}
+
+/// A variant applies once however many of its keys one call carries: without
+/// the memo, `tts.voice` and `tts.speed` together would reconfigure the backend
+/// twice with the same pair.
+fn apply_each<'a>(
+    state: &DaemonState,
+    config: &Config,
+    keys: impl Iterator<Item = &'a String>,
+) -> Outcome {
+    let mut outcome = Outcome::default();
+    let mut done: BTreeMap<Live, bool> = BTreeMap::new();
+    for key in keys {
+        match live(key) {
+            Some(variant) => {
+                let honoured = *done
+                    .entry(variant)
+                    .or_insert_with(|| apply(variant, state, config));
+                if honoured {
+                    outcome.applied.push(key.clone());
+                } else {
+                    outcome.restart_required.push(key.clone());
+                }
+            }
+            None => outcome.restart_required.push(key.clone()),
+        }
+    }
+    outcome
 }
 
 /// Pass no `state` when no daemon is running: nothing to apply live, and no
@@ -187,6 +256,8 @@ pub fn configure(
             "'{key}' is read when the daemon starts, so it needs persist: true"
         )));
     }
+
+    refuse_unknown_language(assignments)?;
 
     let _writing = WRITING
         .lock()
@@ -208,27 +279,15 @@ pub fn configure(
         std::fs::rename(&staged, &path)?;
     }
 
-    let mut outcome = Outcome::default();
-    // A key names its variant, and a variant applies once however many of its
-    // keys one call carries. Without the memo `tts.voice` and `tts.speed`
-    // together would reconfigure the backend twice with the same pair.
-    let mut done: BTreeMap<Live, bool> = BTreeMap::new();
-    for key in assignments.keys() {
-        match (live(key), state) {
-            (Some(variant), Some(state)) => {
-                let honoured = *done
-                    .entry(variant)
-                    .or_insert_with(|| apply(variant, state, &config));
-                if honoured {
-                    outcome.applied.push(key.clone());
-                } else {
-                    outcome.restart_required.push(key.clone());
-                }
-            }
-            // A live key needs a restart too when no daemon runs
-            _ => outcome.restart_required.push(key.clone()),
-        }
-    }
+    // A live key needs a restart too when no daemon runs, so with no state
+    // every key is one.
+    let outcome = match state {
+        Some(state) => apply_each(state, &config, assignments.keys()),
+        None => Outcome {
+            applied: Vec::new(),
+            restart_required: assignments.keys().cloned().collect(),
+        },
+    };
 
     if let Some(state) = state {
         state.record_outcome(&outcome.applied, &outcome.restart_required);
@@ -323,11 +382,46 @@ mod tests {
         assert!(rendered.contains("[audio.cues]"), "{rendered}");
     }
 
+    /// Whisper reads the language and the task per utterance, so a write moves
+    /// the next dictation and no model reloads.
+    #[test]
+    fn the_spoken_language_applies_without_a_restart() {
+        assert_eq!(
+            startup_only(&assignments(&[("stt.language", "de".into())])),
+            None
+        );
+        assert_eq!(
+            startup_only(&assignments(&[("stt.translate", true.into())])),
+            None
+        );
+    }
+
+    /// A code the engine does not know is refused where a person is there to
+    /// read why. The config's own reader falls back to English instead, so a
+    /// file written before the field was read cannot stop the daemon.
+    #[test]
+    fn a_language_the_engine_does_not_know_is_refused_at_the_boundary() {
+        let error = super::configure(
+            None,
+            &assignments(&[("stt.language", "klingon".into())]),
+            false,
+        )
+        .expect_err("an unknown code must not be written");
+        assert!(error.to_string().contains("klingon"), "{error}");
+        assert!(error.to_string().contains("auto"), "{error}");
+    }
+
+    #[test]
+    fn a_language_the_engine_knows_is_written() {
+        super::configure(None, &assignments(&[("stt.language", "de".into())]), false)
+            .expect("de is a language whisper knows");
+    }
+
     #[test]
     fn a_startup_setting_needs_a_write_to_mean_anything() {
         assert_eq!(
-            startup_only(&assignments(&[("stt.language", "de".into())])),
-            Some(&"stt.language".to_string())
+            startup_only(&assignments(&[("audio.hotkey", "F6".into())])),
+            Some(&"audio.hotkey".to_string())
         );
         assert_eq!(
             startup_only(&assignments(&[("stt.vad_threshold", 0.6.into())])),
@@ -630,6 +724,45 @@ mod tests {
             error.to_string().contains("translate"),
             "the error must name the key: {error}"
         );
+    }
+
+    /// A download is the only thing that turns a refusal into a yes, so a
+    /// setting chosen before its file arrives has nothing else to wait for.
+    #[test]
+    fn a_setting_that_was_waiting_on_a_file_applies_once_the_download_ends() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        // `audio.cues.enabled` is live and needs no file, so it stands in for a
+        // key whose apply succeeds the moment it is asked again.
+        state.record_outcome(&[], &["audio.cues.enabled".to_string()]);
+        assert_eq!(state.pending(), vec!["audio.cues.enabled".to_string()]);
+
+        super::reapply_pending(&state);
+        assert!(
+            state.pending().is_empty(),
+            "a key that applies must stop waiting"
+        );
+    }
+
+    /// A model that is still absent answers no again, and the key keeps its
+    /// place rather than being cleared as though it had worked.
+    #[test]
+    fn a_setting_whose_file_is_still_missing_keeps_waiting() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        state.record_outcome(&[], &["stt.preset".to_string()]);
+
+        super::reapply_pending(&state);
+        assert_eq!(state.pending(), vec!["stt.preset".to_string()]);
+    }
+
+    /// Nothing else in `pending` is a live key, and a restart-only key has no
+    /// apply to run.
+    #[test]
+    fn a_restart_only_key_is_left_alone() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        state.record_outcome(&[], &["audio.hotkey".to_string()]);
+
+        super::reapply_pending(&state);
+        assert_eq!(state.pending(), vec!["audio.hotkey".to_string()]);
     }
 
     #[test]

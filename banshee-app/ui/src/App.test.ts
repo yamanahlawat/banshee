@@ -22,9 +22,13 @@ import {
   detectAgents,
   history,
   listen,
+  listLanguages,
   listVoices,
   listDevices,
+  downloadModels,
   openPermissionPane,
+  restartDaemon,
+  setSetting,
   startDaemon,
   status,
 } from './lib/tauri';
@@ -34,6 +38,9 @@ import { daemon, empty, reduceStatus } from './lib/daemon';
 import { forgetCopy } from './lib/copy';
 import { forgetKeys } from './lib/keys';
 import App from './App.svelte';
+
+// The daemon's pushes, captured so a test can deliver one.
+const pushes = new Map<string, (event: { payload: unknown }) => void>();
 
 beforeEach(async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -47,8 +54,18 @@ beforeEach(async () => {
   forgetKeys();
   vi.mocked(status).mockResolvedValue(ready);
   vi.mocked(history).mockResolvedValue(rows);
-  vi.mocked(listen).mockResolvedValue(() => {});
+  pushes.clear();
+  vi.mocked(listen).mockImplementation((name: string, handler: unknown) => {
+    pushes.set(name, handler as (event: { payload: unknown }) => void);
+    return Promise.resolve(() => {});
+  });
   vi.mocked(listDevices).mockResolvedValue({ devices: [], current: null });
+  vi.mocked(listLanguages).mockResolvedValue({
+    languages: [
+      { code: 'en', name: 'English' },
+      { code: 'hi', name: 'Hindi' },
+    ],
+  });
   vi.mocked(listVoices).mockResolvedValue({
     voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }],
     current: 'af_sky',
@@ -159,6 +176,76 @@ it('says what Banshee does with your words without being asked', async () => {
   expect(screen.getByRole('button', { name: /saved/ })).toBeTruthy();
 });
 
+it('marks a foot value the daemon has not taken', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['audio.hotkey'] });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  // The daemon reports no bound key, so the foot names the configured one. The
+  // mark is the only thing that stops it reading as the key in force.
+  //
+  // The class carries the dashed rule. jsdom resolves no scoped stylesheet, so
+  // the class is the only part of the visual mark a test here can see.
+  expect(screen.getByText('Right Command').classList.contains('pending')).toBe(true);
+  expect(screen.getByText('— set, and in effect when Banshee restarts')).toBeTruthy();
+});
+
+it('leaves a foot value unmarked when the daemon has taken it', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  expect(screen.getByText('Right Command').classList.contains('pending')).toBe(false);
+  expect(screen.queryByText('— set, and in effect when Banshee restarts')).toBeNull();
+});
+
+it('marks the saving switch the daemon has not taken', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['daemon.save_history'] });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  // The switch carries the mark, and the find hint keeps its own place.
+  const swtch = screen.getByRole('button', {
+    name: /Stop saving.*in effect when Banshee restarts/,
+  });
+  expect(swtch.classList.contains('pending')).toBe(true);
+});
+
+it('restarts from the header rather than naming a command', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['audio.hotkey'] });
+  render(App);
+
+  // `audio.hotkey` is never applied live, so the only way out is a new process.
+  // The window can do that, so the notice is the control.
+  const notice = await screen.findByRole('button', { name: 'Restart to apply' });
+  await fireEvent.click(notice);
+  expect(vi.mocked(restartDaemon)).toHaveBeenCalled();
+});
+
+it('asks for a restart in the header, which a panel does not cover', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['audio.hotkey'] });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Restart to apply')).toBeTruthy());
+
+  // The ledger scrolls away and a job takes the body; the header does neither.
+  await fireEvent.click(screen.getByRole('button', { name: /Hotkey/ }));
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Hotkey' })).toBeTruthy());
+  expect(screen.getByText('Restart to apply')).toBeTruthy();
+});
+
+it('asks for no restart when the daemon has taken everything', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  expect(screen.queryByText('Restart to apply')).toBeNull();
+});
+
+it('follows what the daemon says about history, not what the config asked for', async () => {
+  // The two disagree when the history file will not open: the write landed in
+  // the config and the daemon kept its old connection.
+  vi.mocked(status).mockResolvedValue({ ...ready, history_enabled: false });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start saving' })).toBeTruthy());
+  expect(screen.queryByRole('button', { name: 'Stop saving' })).toBeNull();
+});
+
 it('holds the place words will take while the microphone is open', async () => {
   const { container } = render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
@@ -254,9 +341,389 @@ it('empties the record when the daemon says it is no longer saving', async () =>
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
-  const off = { ...ready, config: { ...ready.config, daemon: { save_history: false } } };
+  // The daemon reports both once it takes the switch.
+  const off = {
+    ...ready,
+    history_enabled: false,
+    config: { ...ready.config, daemon: { save_history: false } },
+  };
   daemon.update((s) => reduceStatus(s, off));
   // The daemon refuses the read outright while this is off.
   await waitFor(() => expect(screen.getByText('Nothing is kept')).toBeTruthy());
   expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
+});
+
+it('asks which speech model to fetch before it fetches one', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, ready: false, download_megabytes: 860, blockers: [{ kind: 'model', id: 'ggml-large-v3-turbo-q5_0.bin', name: 'ggml-large-v3-turbo-q5_0.bin', role: 'speech', remedy: 'download', consequence: 'recording, dictation, and ask_user do not work', fix: 'run: banshee setup', command: 'banshee setup' }] });
+  render(App);
+
+  // The preset decides what the run costs, and nothing else asks. The daemon
+  // answers with what is still missing rather than a fixed total.
+  await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Speech model' })).toBeTruthy());
+  expect(screen.getByRole('radio', { name: 'Balanced' }).getAttribute('aria-checked')).toBe('true');
+  expect(screen.getByText(/About 860 MB to fetch/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy();
+
+  // The daemon blocks on two files and the run fetches four, so a count here
+  // contradicts the `1 of 4` the progress line shows a moment later.
+  expect(screen.getByText('Banshee needs its models')).toBeTruthy();
+  expect(screen.queryByText(/files are missing|file is missing/)).toBeNull();
+});
+
+it('offers a restart, not a download, when the files are already there', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, ready: false, blockers: [{ kind: 'model', id: 'recording_pipeline', name: 'Recording pipeline', remedy: 'restart', consequence: 'a model would not load', fix: 'restart it: banshee start', command: 'banshee start' }] });
+  render(App);
+
+  // The daemon calls this a model fault, but its fix is `banshee start`. Routing
+  // on the kind offered Download for files that are on disk.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Restart Banshee' })).toBeTruthy());
+  expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
+
+  // Every file is on disk in this state, so counting it as a missing file lies.
+  expect(screen.getByText('Banshee needs a restart')).toBeTruthy();
+  expect(screen.queryByText(/file is missing|files are missing/)).toBeNull();
+  expect(screen.queryByRole('radiogroup', { name: 'Speech model' })).toBeNull();
+
+  // `startDaemon` runs `launchctl kickstart`, which leaves a running job alone.
+  // This blocker is offered while the daemon runs, so only a restart clears it.
+  vi.mocked(status).mockResolvedValue({ ...ready, blockers: [] });
+  await fireEvent.click(screen.getByRole('button', { name: 'Restart Banshee' }));
+  expect(vi.mocked(restartDaemon)).toHaveBeenCalled();
+  expect(vi.mocked(startDaemon)).not.toHaveBeenCalled();
+
+  // Nothing pushes a blocker change, so a restart that does not re-read leaves
+  // the box asking for the restart it has just been given.
+  await waitFor(() =>
+    expect(screen.queryByRole('button', { name: 'Restart Banshee' })).toBeNull(),
+  );
+});
+
+it('says which file is downloading and how far it has come', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, ready: false, blockers: [{ kind: 'model', id: 'ggml-large-v3-turbo-q5_0.bin', name: 'ggml-large-v3-turbo-q5_0.bin', role: 'speech', remedy: 'download', consequence: 'recording, dictation, and ask_user do not work', fix: 'run: banshee setup', command: 'banshee setup' }] });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
+
+  pushes.get('daemon:downloads')?.({
+    payload: { model: 'ggml.bin', label: 'Speech model', index: 1, count: 4, bytes: 40, total: 100, state: 'downloading' },
+  });
+  await waitFor(() => expect(screen.getByText('Speech model, 1 of 4 · 40%')).toBeTruthy());
+
+  // The two blocking files land before the other two, so the daemon starts
+  // asking for a restart while the run is still going. One thing is happening,
+  // and the box says which.
+  expect(screen.getByText("Getting Banshee's models")).toBeTruthy();
+  expect(screen.queryByRole('radiogroup', { name: 'Speech model' })).toBeNull();
+
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    blockers: [{ kind: 'model', id: 'recording_pipeline', name: 'Recording pipeline', remedy: 'restart', consequence: 'a model would not load', fix: 'restart it: banshee start', command: 'banshee start' }],
+  });
+  daemon.update((state) => reduceStatus(state, { ...ready, running: true, blockers: [{ kind: 'model', id: 'recording_pipeline', name: 'Recording pipeline', remedy: 'restart', consequence: 'a model would not load', fix: 'restart it: banshee start', command: 'banshee start' }] }));
+  await waitFor(() => expect(screen.getByText('Speech model, 1 of 4 · 40%')).toBeTruthy());
+  expect(screen.queryByRole('button', { name: 'Restart Banshee' })).toBeNull();
+});
+
+it('re-reads the daemon when a download ends, so the box stops asking', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, ready: false, blockers: [{ kind: 'model', id: 'ggml-large-v3-turbo-q5_0.bin', name: 'ggml-large-v3-turbo-q5_0.bin', role: 'speech', remedy: 'download', consequence: 'recording, dictation, and ask_user do not work', fix: 'run: banshee setup', command: 'banshee setup' }] });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
+
+  // Files landing changes what the daemon is blocked on, and no other push
+  // says so.
+  vi.mocked(status).mockResolvedValue({ ...ready, blockers: [] });
+  pushes.get('daemon:downloads')?.({ payload: { model: 'ggml.bin', bytes: 100, total: 100, state: 'done' } });
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Download' })).toBeNull());
+});
+
+it('offers nothing to stop before anything has been said', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
+
+  // The ledger and the absence would state one emptiness twice, and the switch
+  // would offer to stop a thing that has never started.
+  expect(screen.queryByRole('button', { name: 'Stop saving' })).toBeNull();
+  expect(screen.queryByText(/Nothing saved yet/)).toBeNull();
+});
+
+it('still says so when it is keeping nothing, which is the claim', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, history_enabled: false });
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start saving' })).toBeTruthy());
+});
+
+it('offers no command to copy, because every fix is a button', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    blockers: [{ kind: 'model', id: 'ggml.bin', name: 'ggml.bin', role: 'speech', remedy: 'download', consequence: 'x', fix: 'run: banshee setup', command: 'banshee setup' }],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
+  expect(screen.queryByRole('button', { name: 'banshee setup' })).toBeNull();
+});
+
+// Choosing a preset marks it pending at once, because the daemon cannot load a
+// model that is not on disk. A restart reads the same config and fails the same
+// way, so the notice would be advice that cannot work.
+it('does not ask for a restart while the files it needs are still missing', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    pending: ['stt.preset'],
+    blockers: [{ kind: 'model', id: 'ggml-large-v3-turbo-q5_0.bin', name: 'ggml-large-v3-turbo-q5_0.bin', role: 'speech', remedy: 'download', consequence: 'recording, dictation, and ask_user do not work', fix: 'run: banshee setup', command: 'banshee setup' }],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
+  expect(screen.queryByRole('button', { name: 'Restart to apply' })).toBeNull();
+});
+
+it('asks for a restart once the files are there and a setting still waits', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['stt.preset'] });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Restart to apply' })).toBeTruthy());
+});
+
+// The voice files arrive with the download, and the last one a run fetches is a
+// voice, so the list read at startup is answered before any of them exist.
+it('reads the voices again once their files have landed', async () => {
+  vi.mocked(listVoices).mockResolvedValue({ voices: [], current: null });
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    blockers: [{ kind: 'model', id: 'ggml.bin', name: 'ggml.bin', role: 'speech', remedy: 'download', consequence: 'x', fix: 'run: banshee setup', command: 'banshee setup' }],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
+  expect(screen.getByText('af_sky')).toBeTruthy();
+
+  vi.mocked(status).mockResolvedValue({ ...ready, blockers: [] });
+  vi.mocked(listVoices).mockResolvedValue({
+    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }],
+    current: 'af_sky',
+  });
+  pushes.get('daemon:downloads')?.({
+    payload: { model: 'af_sky.bin', label: 'Voice', index: 4, count: 4, bytes: 1, total: 1, state: 'done' },
+  });
+
+  // The foot names the voice, rather than the file the daemon fetched.
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+});
+
+// A window that can only offer what is on disk cannot offer a choice at all.
+it('offers every voice, and fetches the one that is chosen', async () => {
+  vi.mocked(listVoices).mockResolvedValue({
+    current: 'af_sky',
+    voices: [
+      { id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true },
+      { id: 'bm_george', name: 'George', description: 'British, steady', downloaded: false },
+    ],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /Voice/ }));
+
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Voice' })).toBeTruthy());
+  expect(screen.getByText('George')).toBeTruthy();
+
+  // Nothing to play until the file is here.
+  expect(screen.getByRole('button', { name: 'Preview George' }).hasAttribute('disabled')).toBe(true);
+  expect(screen.getByRole('button', { name: 'Preview Sky' }).hasAttribute('disabled')).toBe(false);
+
+  await fireEvent.change(screen.getByRole('radio', { name: /George/ }));
+  await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'bm_george'));
+  expect(vi.mocked(downloadModels)).toHaveBeenCalled();
+});
+
+it('does not fetch a voice that is already here', async () => {
+  vi.mocked(listVoices).mockResolvedValue({
+    current: 'bm_george',
+    voices: [
+      { id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true },
+      { id: 'bm_george', name: 'George', description: 'British, steady', downloaded: true },
+    ],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /Voice/ }));
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Voice' })).toBeTruthy());
+
+  await fireEvent.change(screen.getByRole('radio', { name: /Sky/ }));
+  await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'af_sky'));
+  expect(vi.mocked(downloadModels)).not.toHaveBeenCalled();
+});
+
+// Choosing a voice that is not here writes it, and the daemon refuses until the
+// file lands, so `tts.voice` is pending for the second the fetch takes. A
+// restart is not the remedy: the daemon applies it when the run ends.
+it('does not ask for a restart while the file it waits on is still arriving', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['tts.voice'] });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Restart to apply' })).toBeTruthy());
+
+  pushes.get('daemon:downloads')?.({
+    payload: { model: 'bm_george.bin', label: 'Voice', index: 1, count: 1, bytes: 1, total: 2, state: 'downloading' },
+  });
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Restart to apply' })).toBeNull());
+});
+
+// A run reports once per file. A download writes no history, so the record
+// cannot have moved and only the status is worth asking for again.
+it('does not re-read the record for every file a download finishes', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    blockers: [{ kind: 'model', id: 'ggml.bin', name: 'ggml.bin', role: 'speech', remedy: 'download', consequence: 'x', fix: 'run: banshee setup', command: 'banshee setup' }],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
+
+  const readsAtStart = vi.mocked(history).mock.calls.length;
+  for (let file = 1; file <= 3; file++) {
+    pushes.get('daemon:downloads')?.({
+      payload: { model: `f${file}.bin`, index: file, count: 4, bytes: 1, total: 1, state: 'done' },
+    });
+  }
+  await waitFor(() => expect(vi.mocked(status).mock.calls.length).toBeGreaterThan(1));
+  expect(vi.mocked(history).mock.calls.length).toBe(readsAtStart);
+});
+
+// A grant is made in System Settings whatever else is arriving. Hiding it
+// behind a download leaves no route to the pane for the length of the fetch,
+// and a first run is exactly when both are outstanding.
+it('keeps a permission reachable while a download runs', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    blockers: [
+      { kind: 'permission', id: 'input_monitoring', name: 'Input Monitoring', consequence: 'the hotkey receives no key presses', fix: 'grant it in System Settings' },
+      { kind: 'model', id: 'ggml.bin', name: 'ggml.bin', role: 'speech', remedy: 'download', consequence: 'x', fix: 'run: banshee setup', command: 'banshee setup' },
+    ],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Open System Settings' })).toBeTruthy());
+
+  pushes.get('daemon:downloads')?.({
+    payload: { model: 'ggml.bin', label: 'Speech model', index: 1, count: 4, bytes: 1, total: 2, state: 'downloading' },
+  });
+  await waitFor(() => expect(screen.getByText("Getting Banshee's models")).toBeTruthy());
+  expect(screen.getByRole('button', { name: 'Open System Settings' })).toBeTruthy();
+});
+
+// A refused call answers -32005 rather than throwing on the wire, and an
+// unhandled rejection leaves the button looking inert with nothing said.
+it('says so when an action is refused', async () => {
+  vi.mocked(downloadModels).mockRejectedValue(new Error('A download is already running.'));
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    blockers: [{ kind: 'model', id: 'ggml.bin', name: 'ggml.bin', role: 'speech', remedy: 'download', consequence: 'x', fix: 'run: banshee setup', command: 'banshee setup' }],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Download' }));
+  await waitFor(() => expect(screen.getByText(/Download did not work/)).toBeTruthy());
+});
+
+// `audio.hotkey` is read once at startup and no arriving file answers it, so a
+// download must not quiet the notice that says so.
+it('still asks for a restart for a key no download can settle', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    pending: ['audio.hotkey'],
+    blockers: [{ kind: 'model', id: 'ggml.bin', name: 'ggml.bin', role: 'speech', remedy: 'download', consequence: 'x', fix: 'run: banshee setup', command: 'banshee setup' }],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Restart to apply' })).toBeTruthy());
+});
+
+// Whisper translates one way only, any language in and English out, so the
+// answer control means nothing until a language other than English is set.
+it('offers a language, and asks what to answer in only once it can mean something', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'en' } },
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
+  await waitFor(() => expect(screen.getByRole('combobox', { name: 'Language' })).toBeTruthy());
+
+  expect(screen.queryByRole('radiogroup', { name: 'Answer in' })).toBeNull();
+
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'hi' } },
+  });
+  daemon.update((state) => reduceStatus(state, {
+    ...ready,
+    running: true,
+    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'hi' } },
+  }));
+  await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Answer in' })).toBeTruthy());
+});
+
+// The English-only build holds no other language, so a control that looked
+// live would quietly do nothing.
+it('will not offer a language the fast model cannot hear', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    english_only: true,
+    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'fast', language: 'en' } },
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
+
+  const picker = await screen.findByRole('combobox', { name: 'Language' });
+  expect(picker.hasAttribute('disabled')).toBe(true);
+  expect(screen.getByText(/Fast hears English only/)).toBeTruthy();
+});
+
+// The ledger is the only route to the Record panel and it stands down while the
+// record is empty, so a fresh install could not reach the saving switch at all.
+it('reaches what Banshee keeps before anything has been said', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'What Banshee keeps' }));
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Record' })).toBeTruthy());
+  expect(screen.getByRole('button', { name: /Stop saving/ })).toBeTruthy();
+});
+
+// A microphone fault and a model fault carry the same command, and restarting
+// does nothing for a device that is not plugged in.
+it('does not call an unplugged microphone a restart', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    blockers: [{ kind: 'pipeline', id: 'recording_pipeline', name: 'Recording pipeline', remedy: 'restart', consequence: 'the microphone would not open: no device', fix: 'connect the microphone, grant it in Privacy & Security, or fix [audio] input_device. If recording does not recover on its own, restart: banshee start', command: 'banshee start' }],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByText('The microphone is not working')).toBeTruthy());
+
+  expect(screen.queryByText('Banshee needs a restart')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Restart anyway' })).toBeTruthy();
+  expect(screen.getByText(/connect the microphone/)).toBeTruthy();
+});
+
+// `auto` is a value the config takes and the engine reads as detect it, so a
+// picker that cannot show it misreports the daemon and cannot set it back.
+it('offers detection among the languages', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'auto' } },
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
+
+  const picker = await screen.findByRole('combobox', { name: 'Language' });
+  expect(screen.getByRole('option', { name: 'Detect it' })).toBeTruthy();
+  expect((picker as HTMLSelectElement).value).toBe('auto');
 });

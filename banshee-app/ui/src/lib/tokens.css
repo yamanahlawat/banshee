@@ -212,34 +212,6 @@ body {
   white-space: nowrap;
 }
 
-.seg {
-  display: flex;
-  border: 1px solid var(--ink);
-}
-
-.seg button {
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink);
-  background: transparent;
-  border: 0;
-  border-right: 1px solid var(--ink);
-  padding: 8px 12px;
-  cursor: pointer;
-}
-
-.seg button:last-child {
-  border-right: 0;
-}
-
-.seg button[aria-pressed='true'] {
-  background: var(--ink);
-  color: var(--ground);
-}
-
 .btn {
   font-family: var(--mono);
   font-size: 11px;
@@ -261,6 +233,26 @@ body {
 
 .btn:disabled {
   opacity: 0.55;
+  cursor: default;
+}
+
+/* A text button that marks itself with a rule rather than a box. The colour is
+   the site's, so a caller sets only that. */
+.btn-underline {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  padding: 0 0 1px;
+  cursor: pointer;
+  flex: none;
+}
+
+.btn-underline:hover:not(:disabled) {
+  border-bottom-color: currentcolor;
+}
+
+.btn-underline:disabled {
   cursor: default;
 }
 

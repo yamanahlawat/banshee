@@ -91,6 +91,7 @@ pub fn hotkey_listener(
                     };
                 }
                 ConsumerCommand::Retune(words) => pipeline.speech_to_text.set_vocabulary(&words),
+                ConsumerCommand::Speak(speech) => pipeline.speech_to_text.set_speech(speech),
                 // The load takes seconds and holds this thread. Nothing is lost:
                 // a press queues behind it and the ring still holds the audio.
                 ConsumerCommand::Reload(model) => {

@@ -80,6 +80,7 @@ fn start_recording(
     let speech_to_text = WhisperEngine::new(
         WhisperConfig::new(config.stt.preset.model_name()),
         &config.stt.vocabulary,
+        (&config.stt).into(),
     )
     .map_err(|e| model_failure(daemon_state, e.to_string()))?;
     let vad = VADEngine::new(SileroVADConfig::new(VAD_MODEL))
@@ -420,22 +421,27 @@ async fn main() -> Result<(), BansheeError> {
                         .and_then(|voice| voice.as_str())
                         .map(str::to_string),
                 ),
-                // A voice gets chosen before there is a daemon to ask
+                // A voice gets chosen before there is a daemon to ask. These
+                // came off the disk, so every one of them is here.
                 Err(error) if daemon_is_down(&error) => (
                     models::installed_voices()
                         .iter()
-                        .map(|id| text_to_speech::voices::describe(id))
+                        .map(|id| text_to_speech::voices::describe(id, true))
                         .collect(),
                     None,
                 ),
                 Err(error) => fail(&error),
             };
 
-            if voices.is_empty() {
+            // The daemon names every voice it can describe, so what this has to
+            // print is the ones that are here: `banshee voices` promises that
+            // every name it lists works today.
+            let held: Vec<&Voice> = voices.iter().filter(|voice| voice.downloaded).collect();
+            if held.is_empty() {
                 println!("No voices found. Download one with: banshee setup");
                 return Ok(());
             }
-            for voice in &voices {
+            for voice in held {
                 let marker = if current.as_deref() == Some(voice.id.as_str()) {
                     "*"
                 } else {

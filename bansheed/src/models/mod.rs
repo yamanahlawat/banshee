@@ -53,7 +53,11 @@ pub fn blockers(names: &[&str]) -> Vec<Blocker> {
         .into_iter()
         .map(|name| Blocker {
             kind: BlockerKind::Model,
-            // A model has no friendlier name than its filename
+            // A model has no friendlier name than its filename, so which file
+            // it is rides beside it: a client cannot tell the speech model from
+            // the voice detector without re-deriving the daemon's own rule.
+            role: Some(crate::models::download::role(&name)),
+            remedy: Some(banshee_common::Remedy::Download),
             name: name.clone(),
             id: name,
             consequence: "recording, dictation, and ask_user do not work".to_string(),
@@ -61,6 +65,28 @@ pub fn blockers(names: &[&str]) -> Vec<Blocker> {
             command: Some("banshee setup".to_string()),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod blocker_tests {
+    /// A client routes on `command`, so the literal is a wire contract and not
+    /// an implementation detail of the sentence beside it.
+    #[test]
+    fn a_missing_model_names_the_command_a_client_routes_on() {
+        let blockers = super::blockers(&["no-such-model-9f3a.bin"]);
+        assert_eq!(blockers[0].command.as_deref(), Some("banshee setup"));
+    }
+
+    /// Only the daemon holds the list of speech models, so a client that has to
+    /// tell one from the voice detector reads this rather than the filename.
+    /// Which files are on disk decides nothing here: the role rides along
+    /// whatever the blocker names.
+    #[test]
+    fn a_model_blocker_says_what_the_file_is() {
+        const ABSENT: &str = "no-such-model-9f3a.bin";
+        let blockers = super::blockers(&[ABSENT]);
+        assert_eq!(blockers[0].role, Some(super::download::role(ABSENT)));
+    }
 }
 
 #[cfg(test)]

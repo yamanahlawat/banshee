@@ -1,7 +1,8 @@
 use std::path::Path;
+use std::time::Duration;
 
 use banshee_common::{
-    DownloadProgress, DownloadState, KokoroTTSConfig, SileroVADConfig, WhisperConfig,
+    DownloadProgress, DownloadState, FileRole, KokoroTTSConfig, SileroVADConfig, WhisperConfig,
     error::BansheeError, utils::get_models_path,
 };
 use tokio::io::AsyncWriteExt;
@@ -34,8 +35,25 @@ fn milestone(bytes: u64, total: Option<u64>) -> u64 {
 
 #[derive(Clone)]
 pub struct Download {
+    /// What the server sends for this file, measured on 2026-08-30. Shown as
+    /// "about", because it is upstream's to change and nothing here checks.
+    pub megabytes: u64,
     pub name: String,
     pub url: String,
+}
+
+/// Every preset also pulls these three. Measured on disk on 2026-08-30.
+const KOKORO_MEGABYTES: u64 = 311;
+const DETECTOR_MEGABYTES: u64 = 2;
+const VOICE_MEGABYTES: u64 = 1;
+
+/// The published `Content-Length` of each speech model, measured 2026-08-30.
+fn speech_megabytes(file: &str) -> u64 {
+    match file {
+        "ggml-base.en.bin" => 141,
+        "ggml-large-v3-q5_0.bin" => 1031,
+        _ => 547,
+    }
 }
 
 /// Every file this config needs, and where to fetch it.
@@ -46,22 +64,34 @@ pub fn wanted(config: &Config) -> Vec<Download> {
     let kokoro = KokoroTTSConfig::new(&config.tts.voice);
     vec![
         Download {
+            megabytes: speech_megabytes(&whisper.model_name),
             name: whisper.model_name,
             url: whisper.download_url,
         },
         Download {
+            megabytes: DETECTOR_MEGABYTES,
             name: vad.model_name,
             url: vad.download_url,
         },
         Download {
+            megabytes: KOKORO_MEGABYTES,
             name: kokoro.model_name,
             url: kokoro.model_url,
         },
         Download {
+            megabytes: VOICE_MEGABYTES,
             name: kokoro.voice_name,
             url: kokoro.voice_url,
         },
     ]
+}
+
+/// Zero once every file is here, which is what a client shows after setup.
+pub fn pending_megabytes(wanted: &[Download], dir: &Path) -> u64 {
+    still_missing(wanted, dir)
+        .iter()
+        .map(|download| download.megabytes)
+        .sum()
 }
 
 /// The files in `wanted` that `dir` does not already hold.
@@ -83,17 +113,31 @@ fn other(error: reqwest::Error) -> BansheeError {
     BansheeError::Other(error.to_string())
 }
 
-/// What a model file is, for a person reading a progress line.
-pub fn label(file: &str) -> &'static str {
+/// Only the daemon holds the preset table, so a client that has to tell the
+/// speech model from the voice asks this rather than reading the filename.
+pub fn role(file: &str) -> FileRole {
     if crate::config::STTPreset::ALL
         .iter()
         .any(|preset| preset.model_name() == file)
     {
-        "Speech model"
+        FileRole::Speech
     } else if file == crate::VAD_MODEL {
-        "Voice detection model"
+        FileRole::Detector
+    } else if file == banshee_common::KOKORO_MODEL {
+        FileRole::Engine
     } else {
-        "Voice"
+        FileRole::Voice
+    }
+}
+
+/// The same fact in the user's words, for a progress line. Derived from the
+/// role, so rewording this cannot move what a client routes on.
+pub fn label(file: &str) -> &'static str {
+    match role(file) {
+        FileRole::Speech => "Speech model",
+        FileRole::Detector => "Voice detection model",
+        FileRole::Engine => "Speech engine",
+        FileRole::Voice => "Voice",
     }
 }
 
@@ -193,6 +237,21 @@ async fn fetch(
     Ok(())
 }
 
+/// reqwest sets no timeout of its own, so a connect that never completes holds
+/// the run for ever and strands every file behind it. A connect to these hosts
+/// measured 6-34 ms, so ten seconds is far past a slow link and still bounded.
+///
+/// The read timeout is the gap between chunks, not the whole transfer: a total
+/// timeout would refuse a 574 MB file on any slow connection. Nothing measured
+/// that gap. It trades how slow a link may be against how long a stall hides.
+fn build_client() -> Result<reqwest::Client, BansheeError> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .map_err(other)
+}
+
 /// The partial file of a failed download stays on disk, so the next call
 /// continues it rather than starting over.
 pub async fn download_all(
@@ -202,7 +261,7 @@ pub async fn download_all(
 ) -> Result<(), BansheeError> {
     tokio::fs::create_dir_all(dir).await?;
 
-    let client = reqwest::Client::new();
+    let client = build_client()?;
     let mut failures = Vec::new();
     let count = downloads.len();
     for (position, download) in downloads.iter().enumerate() {
@@ -225,6 +284,36 @@ pub async fn download_all(
         Ok(())
     } else {
         Err(BansheeError::Other(failures.join("; ")))
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::{pending_megabytes, wanted};
+    use crate::config::{Config, STTPreset};
+
+    /// The window shows this instead of summing a file list it does not hold,
+    /// so it has to follow the preset rather than a fixed total.
+    #[test]
+    fn the_speech_model_decides_most_of_a_first_run() {
+        let dir = std::path::Path::new("/no-such-models-dir-9f3a");
+        let mut config = Config::default();
+
+        config.stt.preset = STTPreset::Fast;
+        let fast = pending_megabytes(&wanted(&config), dir);
+        config.stt.preset = STTPreset::Quality;
+        let quality = pending_megabytes(&wanted(&config), dir);
+
+        assert!(quality > fast * 2, "fast {fast}, quality {quality}");
+    }
+
+    /// Nothing left to fetch costs nothing, which is what a client shows once
+    /// setup is done.
+    #[test]
+    fn a_run_with_nothing_missing_costs_nothing() {
+        let dir = std::env::temp_dir();
+        let held: Vec<super::Download> = Vec::new();
+        assert_eq!(pending_megabytes(&held, &dir), 0);
     }
 }
 
@@ -272,7 +361,7 @@ mod tests {
         assert_eq!(label("ggml-large-v3-turbo-q5_0.bin"), "Speech model");
         assert_eq!(label("silero_vad.onnx"), "Voice detection model");
         assert_eq!(label("af_sky.bin"), "Voice");
-        assert_eq!(label("kokoro-v1.0.onnx"), "Voice");
+        assert_eq!(label("kokoro-v1.0.onnx"), "Speech engine");
     }
 
     #[test]

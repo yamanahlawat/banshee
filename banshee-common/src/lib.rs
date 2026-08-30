@@ -95,6 +95,7 @@ pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
 pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
 pub const BANSHEE_LIST_VOICES: &str = "banshee.list_voices";
+pub const BANSHEE_LIST_LANGUAGES: &str = "banshee.list_languages";
 pub const BANSHEE_DOWNLOAD_MODELS: &str = "banshee.download_models";
 pub const BANSHEE_SUBSCRIBE: &str = "banshee.subscribe";
 pub const BANSHEE_AGENTS: &str = "banshee.agents";
@@ -204,6 +205,13 @@ pub struct Blocker {
     pub kind: BlockerKind,
     pub id: String,
     pub name: String,
+    /// Which file this is, for a client that has to tell one from another.
+    /// Absent on a blocker that names no file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<FileRole>,
+    /// What clears it. A daemon older than this field names only a `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<Remedy>,
     pub consequence: String,
     pub fix: String,
     /// The command that clears this blocker, where one exists. `fix` says the
@@ -212,11 +220,50 @@ pub struct Blocker {
     pub command: Option<String>,
 }
 
+/// What a model file is. The prose beside it is for reading; this is what a
+/// client routes on, so rewording one cannot move the other.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileRole {
+    Speech,
+    Detector,
+    Engine,
+    Voice,
+}
+
+/// What clears a blocker. `kind` says which part is at fault and `command` is
+/// the line a person could run; neither answers this.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Remedy {
+    Download,
+    Restart,
+    Grant,
+}
+
+/// A language Whisper can read, as the engine itself spells it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Language {
+    /// What `stt.language` carries, as in `en` or `hi`.
+    pub code: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Voice {
     pub id: String,
     pub name: String,
     pub description: String,
+    /// Whether the file is on this machine. A client that can fetch one offers
+    /// every voice; one that cannot shows only the voices that work today.
+    /// Absent from a daemon older than this field, which listed only what it
+    /// held, so the voices it names are all installed.
+    #[serde(default = "yes")]
+    pub downloaded: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,11 +330,14 @@ pub struct KokoroTTSConfig {
     pub voice_url: String,
 }
 
+/// The engine every voice speaks through, which is not itself a voice.
+pub const KOKORO_MODEL: &str = "kokoro-v1.0.onnx";
+
 impl KokoroTTSConfig {
     pub fn new(voice: &str) -> Self {
         const KOKORO_REPO: &str = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231";
         Self {
-            model_name: "kokoro-v1.0.onnx".to_string(),
+            model_name: KOKORO_MODEL.to_string(),
             model_url: format!("{KOKORO_REPO}/onnx/model.onnx"),
             voice_name: format!("{voice}.bin"),
             voice_url: format!("{KOKORO_REPO}/voices/{voice}.bin"),
@@ -306,6 +356,8 @@ mod wire_tests {
     fn a_blocker_that_names_a_command_puts_it_on_the_wire() {
         let blocker = Blocker {
             kind: BlockerKind::Model,
+            role: None,
+            remedy: None,
             id: "silero_vad.onnx".to_string(),
             name: "silero_vad.onnx".to_string(),
             consequence: "recording does not work".to_string(),
@@ -322,6 +374,8 @@ mod wire_tests {
     fn a_blocker_serializes_with_the_keys_clients_read() {
         let blocker = Blocker {
             kind: BlockerKind::Permission,
+            role: None,
+            remedy: None,
             id: "input_monitoring".to_string(),
             name: "Input Monitoring".to_string(),
             consequence: "the hotkey receives no key presses".to_string(),

@@ -5,9 +5,9 @@ use banshee_common::error::BansheeError;
 use banshee_common::{
     BANSHEE_AGENTS, BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE,
     BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS,
-    BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES,
-    BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_SPEAK,
-    BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
+    BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_LANGUAGES,
+    BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP,
+    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -168,6 +168,19 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "uptime_seconds": daemon_state.uptime().as_secs(),
         "vad_threshold": daemon_state.vad_threshold(),
         "history_enabled": daemon_state.history_enabled(),
+        // The English-only build reads English whatever `stt.language` says.
+        // Stated here rather than worked out from the preset name by every
+        // client that has to know.
+        // The window shows this rather than summing a file list it does not
+        // hold: only the daemon knows which files are already here.
+        "download_megabytes": crate::models::download::models_dir()
+            .map(|dir| {
+                crate::models::download::pending_megabytes(&daemon_state.wanted_downloads(), &dir)
+            })
+            .unwrap_or(0),
+        "english_only": crate::speech_to_text::whisper::english_only(
+            daemon_state.config().stt.preset.model_name(),
+        ),
         // Stated, so no client invents a narrower definition of ready
         "ready": blockers.is_empty(),
         "blockers": blockers,
@@ -457,25 +470,49 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             let dir = dir.clone();
             let slot = slot;
             tokio::spawn(async move {
-                let mut report = |progress| state.report_download(progress);
-                if let Err(error) =
-                    crate::models::download::download_all(&dir, &missing, &mut report).await
                 {
-                    eprintln!("Download failed: {error}");
+                    let mut report = |progress| state.report_download(progress);
+                    if let Err(error) =
+                        crate::models::download::download_all(&dir, &missing, &mut report).await
+                    {
+                        eprintln!("Download failed: {error}");
+                    }
                 }
+                // The files these settings were waiting for are here now, so a
+                // preset or a voice chosen before its model arrived takes
+                // effect rather than waiting for a restart with nothing to do.
+                crate::settings::reapply_pending(&state);
                 drop(slot);
             });
             response
         }
-        BANSHEE_LIST_VOICES => JsonRpcResponse::success(
+        // Every voice this build can name, and whether each is here. A client
+        // that can fetch one needs the whole list to offer a choice; one that
+        // cannot filters to the installed ones itself.
+        BANSHEE_LIST_VOICES => {
+            let installed = crate::models::installed_voices();
+            let mut ids: Vec<String> = crate::text_to_speech::voices::catalogue()
+                .map(str::to_string)
+                .collect();
+            for id in &installed {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+            let voices: Vec<_> = ids
+                .iter()
+                .map(|id| crate::text_to_speech::voices::describe(id, installed.contains(id)))
+                .collect();
+            JsonRpcResponse::success(
+                request.id,
+                serde_json::json!({ "voices": voices, "current": daemon_state.tts_voice() }),
+            )
+        }
+        // The engine's own list, so a client offering a choice cannot drift
+        // from what the engine will accept.
+        BANSHEE_LIST_LANGUAGES => JsonRpcResponse::success(
             request.id,
-            serde_json::json!({
-                "voices": crate::models::installed_voices()
-                    .iter()
-                    .map(|id| crate::text_to_speech::voices::describe(id))
-                    .collect::<Vec<_>>(),
-                "current": daemon_state.tts_voice(),
-            }),
+            serde_json::json!({ "languages": crate::speech_to_text::languages::all() }),
         ),
         BANSHEE_LIST_INPUT_DEVICES => JsonRpcResponse::success(
             request.id,
@@ -1056,6 +1093,7 @@ mod tests {
         // Something to fetch, or the call answers "nothing to do" and never
         // reaches the slot at all
         state.set_wanted_downloads(vec![crate::models::download::Download {
+            megabytes: 1,
             name: "no-such-model-9f3a.bin".to_string(),
             url: "https://example.invalid/no-such-model-9f3a.bin".to_string(),
         }]);

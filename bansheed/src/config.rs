@@ -101,6 +101,31 @@ impl STTPreset {
     }
 }
 
+fn language<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    Ok(spoken_or_english(value))
+}
+
+/// A language the engine reads, or the config's own word for detect it, which
+/// is not in the engine's table. Both sides of the liberal-read strict-write
+/// split ask this, so it is asked once.
+pub fn known_language(value: &str) -> bool {
+    value == "auto" || whisper_rs::get_lang_id(value).is_some()
+}
+
+/// A code Whisper does not know, read as English rather than refused. Nothing
+/// read this field before, so a config written then can hold anything, and a
+/// daemon that exits on it is a daemon launchd restarts for ever. `banshee
+/// config set` refuses the same value at the boundary, where a person is there
+/// to read why.
+fn spoken_or_english(value: String) -> String {
+    if known_language(&value) {
+        return value;
+    }
+    eprintln!("banshee: '{value}' is not a language Whisper knows, so English is read instead");
+    "en".to_string()
+}
+
 // Out of range no probability ever matches, so VAD stops firing with no error
 fn probability<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
     let value = f32::deserialize(deserializer)?;
@@ -128,6 +153,10 @@ fn rate<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
 #[serde(default, deny_unknown_fields)]
 pub struct STTConfig {
     pub preset: STTPreset,
+    /// A Whisper language code, or `auto` to detect it. The English-only build
+    /// holds no other language, so `preset = "fast"` reads English whatever
+    /// this says.
+    #[serde(deserialize_with = "language")]
     pub language: String,
     pub translate: bool,
     #[serde(deserialize_with = "probability")]
@@ -176,20 +205,6 @@ impl Default for TTSConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-#[serde(default, deny_unknown_fields)]
-pub struct LoggingConfig {
-    pub level: String,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: "info".to_string(),
-        }
-    }
-}
-
 #[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -197,7 +212,11 @@ pub struct Config {
     pub audio: AudioConfig,
     pub stt: STTConfig,
     pub tts: TTSConfig,
-    pub logging: LoggingConfig,
+    /// Parsed so a `config.toml` that carries it still loads, and never written
+    /// back or reported, so it does not read as a setting.
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code, reason = "parsed only so an older config still loads")]
+    logging: Option<toml::Value>,
 }
 
 impl Config {
@@ -219,6 +238,32 @@ impl Config {
     pub fn load() -> Result<Self, BansheeError> {
         let contents = Config::read(&Config::path()?)?;
         Ok(toml::from_str(&contents)?)
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    /// Nothing read this field before, so a config written then can hold any
+    /// string. Exiting on one is a daemon launchd restarts for ever.
+    #[test]
+    fn an_unknown_code_reads_as_english_rather_than_stopping_the_daemon() {
+        let config: super::Config =
+            toml::from_str("[stt]\nlanguage = \"en-US\"\n").expect("an old config must load");
+        assert_eq!(config.stt.language, "en");
+    }
+
+    #[test]
+    fn a_code_the_engine_knows_is_kept() {
+        let config: super::Config = toml::from_str("[stt]\nlanguage = \"hi\"\n").unwrap();
+        assert_eq!(config.stt.language, "hi");
+    }
+
+    /// `auto` is the config's own word for detect it and is not in the engine's
+    /// table, so it has to survive the same check.
+    #[test]
+    fn auto_survives() {
+        let config: super::Config = toml::from_str("[stt]\nlanguage = \"auto\"\n").unwrap();
+        assert_eq!(config.stt.language, "auto");
     }
 }
 

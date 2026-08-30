@@ -1,3 +1,7 @@
+/// What a dashed mark says to anyone listening, in one place, so the wording
+/// cannot differ between the marks that carry it.
+export const RESTART_SAYS = '— set, and in effect when Banshee restarts';
+
 import { writable } from 'svelte/store';
 import { copyText } from './tauri';
 

@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { daemon, shownFloat } from '../lib/daemon';
+  import { daemon, shownFloat, waitsOnARestart } from '../lib/daemon';
   import { write } from '../lib/settings';
-  import { previewVoice, type Voices } from '../lib/tauri';
+  import { downloadModels, previewVoice, type Voice, type Voices } from '../lib/tauri';
   import { announce } from '../lib/copy';
   import Field from '../controls/Field.svelte';
   import Segmented from '../controls/Segmented.svelte';
@@ -13,27 +13,40 @@
   // The config leads, so the mark moves to the voice a write just chose.
   $: current = String(tts.voice ?? voices.current ?? '');
   $: fallback = String(tts.fallback ?? 'system');
+
+  // The daemon names every voice it can describe, and says which are here. A
+  // voice that is not costs 510 KB, and the daemon applies it once the file
+  // lands, so choosing one is the whole of the interaction.
+  async function choose(voice: Voice, here: boolean) {
+    await write('tts.voice', voice.id);
+    if (!here) {
+      await downloadModels().catch(() => announce('That voice would not download.'));
+    }
+  }
 </script>
 
-<Field name="Voice" pending={$daemon.pending.has('tts.voice')}>
+<Field name="Voice" pending={$waitsOnARestart.has('tts.voice')}>
   <div class="voices">
     {#each voices.voices as voice (voice.id)}
       {@const on = voice.id === current}
+      {@const here = voice.downloaded !== false}
       <div class="voice" class:on>
         <input
           type="radio"
           name="voice"
           id={`voice-${voice.id}`}
           checked={on}
-          on:change={() => write('tts.voice', voice.id)}
+          on:change={() => choose(voice, here)}
         />
         <label for={`voice-${voice.id}`}>
-          <span class="name">{voice.name}</span>
+          <span class="name" class:absent={!here}>{voice.name}</span>
           <span class="desc">{voice.description}</span>
+          {#if !here}<span class="sr">— not downloaded, 510 KB</span>{/if}
         </label>
         <button
           class="btn btn-ghost"
           aria-label={`Preview ${voice.name}`}
+          disabled={!here}
           on:click={() =>
             previewVoice(voice.id).catch(() => announce('That voice will not play.'))}
         >
@@ -41,12 +54,12 @@
         </button>
       </div>
     {:else}
-      <p class="empty">No voices are downloaded yet.</p>
+      <p class="empty">The daemon named no voices.</p>
     {/each}
   </div>
 </Field>
 
-<Field name="Speaking rate" pending={$daemon.pending.has('tts.speed')}>
+<Field name="Speaking rate" pending={$waitsOnARestart.has('tts.speed')}>
   <input
     class="range"
     type="range"
@@ -73,6 +86,12 @@
 </Field>
 
 <style>
+  /* The dash this world uses for a thing that is not here yet. Choosing the
+     voice fetches it. */
+  .absent {
+    border-bottom: 1px dashed var(--accent);
+  }
+
   .voices {
     display: flex;
     flex-direction: column;

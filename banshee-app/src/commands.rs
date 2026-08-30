@@ -230,6 +230,16 @@ pub async fn list_voices(daemon: State<'_, Daemon>) -> Result<Voices, CommandErr
 }
 
 #[tauri::command]
+pub async fn list_languages(daemon: State<'_, Daemon>) -> Result<calls::Languages, CommandError> {
+    let mut client = daemon.client.lock().await;
+    retrying!(
+        daemon,
+        client,
+        calls::list_languages(client.as_mut().unwrap()).await
+    )
+}
+
+#[tauri::command]
 pub async fn preview_voice(daemon: State<'_, Daemon>, id: String) -> Result<(), CommandError> {
     let mut client = daemon.client.lock().await;
     retrying!(
@@ -360,14 +370,22 @@ pub fn run_cli(subcommand: &str) -> Result<(), CommandError> {
     Err(failed(format!("banshee {subcommand} did not finish")))
 }
 
-/// Starts one login job. kickstart leaves a job that already runs alone, so a
-/// daemon part-way through loading its models survives this. It fails when the
-/// job was never bootstrapped, and the subcommand that installs it runs only
-/// then, because installing tears a running job down.
-fn ensure_running(label: &str, install: &str) -> Result<(), CommandError> {
+/// Starts one login job. Without `replace`, kickstart leaves a job that already
+/// runs alone, so a daemon part-way through loading its models survives it;
+/// with it, the running job is torn down and started again, which is the only
+/// thing that clears a pipeline that died at startup.
+///
+/// It fails when the job was never bootstrapped, and the subcommand that
+/// installs it runs only then, because installing tears a running job down.
+fn kickstart(label: &str, install: &str, replace: bool) -> Result<(), CommandError> {
     let target = utils::launchd_target(label);
+    let mut args = vec!["kickstart"];
+    if replace {
+        args.push("-k");
+    }
+    args.push(&target);
     let started = std::process::Command::new("launchctl")
-        .args(["kickstart", &target])
+        .args(&args)
         .status()
         .map_err(|error| failed(error.to_string()))?;
     if started.success() {
@@ -379,14 +397,23 @@ fn ensure_running(label: &str, install: &str) -> Result<(), CommandError> {
 /// Puts the menu bar icon up. Not a second copy of the binary, which the
 /// icon's own lock refuses while launchd keeps retrying it.
 pub fn open_the_tray() -> Result<(), CommandError> {
-    ensure_running(utils::TRAY_AGENT, "tray")
+    kickstart(utils::TRAY_AGENT, "tray", false)
 }
 
 // `banshee start` waits on launchd, so running it on a worker thread would
 // hold that thread and stall every other command the window sends.
 #[tauri::command]
 pub async fn start_daemon() -> Result<(), CommandError> {
-    tauri::async_runtime::spawn_blocking(|| ensure_running(utils::DAEMON_AGENT, "start"))
+    tauri::async_runtime::spawn_blocking(|| kickstart(utils::DAEMON_AGENT, "start", false))
+        .await
+        .map_err(|error| failed(error.to_string()))?
+}
+
+/// Replaces the running daemon. A setting the daemon reads once, and a pipeline
+/// that died at startup, both need the process itself renewed.
+#[tauri::command]
+pub async fn restart_daemon() -> Result<(), CommandError> {
+    tauri::async_runtime::spawn_blocking(|| kickstart(utils::DAEMON_AGENT, "start", true))
         .await
         .map_err(|error| failed(error.to_string()))?
 }

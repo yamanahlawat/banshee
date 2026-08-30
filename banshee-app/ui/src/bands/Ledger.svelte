@@ -1,6 +1,6 @@
 <script lang="ts">
   import { formatCount } from '../lib/history';
-  import { write } from '../lib/settings';
+  import SaveSwitch from '../controls/SaveSwitch.svelte';
 
   export let total: number;
   export let saving: boolean;
@@ -8,14 +8,12 @@
 </script>
 
 <div class="ledger">
-  <button class="state mono" on:click={open}>
+  <button class="state mono btn-underline" on:click={open}>
     {saving ? (total > 0 ? `${formatCount(total)} saved` : 'Nothing saved yet') : 'Not saving'}
     <span class="sr">— open what Banshee keeps</span>
   </button>
 
-  <button class="switch mono" on:click={() => write('daemon.save_history', !saving)}>
-    {saving ? 'Stop saving' : 'Start saving'}
-  </button>
+  <SaveSwitch {saving} />
 
   {#if saving && total > 1}
     <span class="hint mono">&#8984;F to find</span>
@@ -33,7 +31,6 @@
   }
 
   .state,
-  .switch,
   .hint {
     font-family: var(--mono);
     font-size: 11px;
@@ -44,31 +41,6 @@
 
   .state {
     color: var(--accent);
-    background: transparent;
-    border: 0;
-    border-bottom: 1px solid transparent;
-    padding: 0;
-    cursor: pointer;
-    flex: none;
-  }
-
-  .state:hover {
-    border-bottom-color: var(--accent);
-  }
-
-  .switch {
-    color: var(--ink);
-    background: transparent;
-    border: 0;
-    border-bottom: 1px solid transparent;
-    border-radius: 0;
-    padding: 0 0 1px;
-    cursor: pointer;
-    flex: none;
-  }
-
-  .switch:hover {
-    border-bottom-color: var(--ink);
   }
 
   /* Lines up with the copy controls on the turns below. */

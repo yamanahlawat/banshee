@@ -25,7 +25,7 @@ export function formatCount(n: number): string {
 // One table for the pad, the earlier band and the History panel.
 export type Table = {
   rows: HistoryRow[];
-  // What `daemon.save_history` last said.
+  // Whether the daemon last said it was keeping anything.
   saving: boolean | null;
   // The one unlimited read's answer, moved by hand afterwards.
   total: number;
@@ -77,8 +77,9 @@ export function forget(): void {
   table.update((held) => ({ ...held, rows: [], total: 0, loaded: true }));
 }
 
-// Follows `daemon.save_history`. The open reads the table itself, so the first
-// answer only records the switch. Off is the exception: nothing is there to read.
+// Follows what the daemon says it is keeping. The open reads the table itself,
+// so the first answer only records the switch. Off is the exception: nothing is
+// there to read.
 export function followSaveHistory(on: boolean): void {
   const held = get(table);
   if (on === held.saving) return;
@@ -88,3 +89,8 @@ export function followSaveHistory(on: boolean): void {
   else if (!first) readAll().catch(() => {});
 }
 
+/// The read a caller wants: the whole table the first time, the newest rows
+/// after that. Which one is the table's own business, not each caller's.
+export function readLatest(): Promise<void> {
+  return (get(table).loaded ? readNewest() : readAll()).catch(() => {});
+}

@@ -53,6 +53,7 @@ fn main() {
             commands::set_setting,
             commands::list_devices,
             commands::list_voices,
+            commands::list_languages,
             commands::preview_voice,
             commands::download_models,
             commands::detect_agents,
@@ -63,6 +64,7 @@ fn main() {
             commands::open_permission_pane,
             commands::copy_text,
             commands::start_daemon,
+            commands::restart_daemon,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the banshee-app window");

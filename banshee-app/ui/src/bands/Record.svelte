@@ -2,6 +2,8 @@
   import { forget, table } from '../lib/history';
   import { clearHistory } from '../lib/tauri';
   import { announce } from '../lib/copy';
+  import { daemon } from '../lib/daemon';
+  import SaveSwitch from '../controls/SaveSwitch.svelte';
 
   // Deleting is not undoable and not reversible from anywhere else, so it
   // asks once before it acts.
@@ -33,8 +35,11 @@
       <span class="warn">This cannot be undone.</span>
       <button class="btn" on:click={clear}>Delete everything</button>
       <button class="btn btn-ghost" on:click={() => (confirming = false)}>Keep it</button>
-    {:else if total > 0}
-      <button class="btn btn-ghost" on:click={() => (confirming = true)}>Clear</button>
+    {:else}
+      <SaveSwitch {saving} />
+      {#if total > 0}
+        <button class="btn btn-ghost" on:click={() => (confirming = true)}>Clear</button>
+      {/if}
     {/if}
   </div>
 

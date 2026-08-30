@@ -17,6 +17,7 @@ const STATES: Record<string, unknown> = {
   speaking: { ...ready, speaking: true },
   armed: { ...ready, recording: true, armed: true },
   saving_off: { ...ready, config: { ...ready.config, daemon: { save_history: false } } },
+  pending: { ...ready, pending: ['audio.hotkey', 'daemon.save_history'] },
 };
 
 function chosen(): string {

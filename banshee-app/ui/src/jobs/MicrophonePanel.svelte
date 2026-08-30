@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { daemon, deviceLabel, shownFloat, SYSTEM_DEVICE } from '../lib/daemon';
+  import { daemon, deviceLabel, shownFloat, waitsOnARestart, SYSTEM_DEVICE } from '../lib/daemon';
   import { write } from '../lib/settings';
-  import { listDevices, type Devices } from '../lib/tauri';
+  import { PRESETS } from '../lib/presets';
+  import { listDevices, listLanguages, type Devices, type Languages } from '../lib/tauri';
   import Field from '../controls/Field.svelte';
   import Picker from '../controls/Picker.svelte';
   import Segmented from '../controls/Segmented.svelte';
@@ -15,13 +16,13 @@
     { upTo: Infinity, word: 'High' },
   ];
   const QUIET = [1000, 1500, 2500, 4000];
-  const PRESETS = [
-    { value: 'fast', label: 'Fast' },
-    { value: 'balanced', label: 'Balanced' },
-    { value: 'quality', label: 'Quality' },
+  // Whisper translates in one direction only: any language in, English out.
+  const ANSWER = [
+    { value: 'spoken', label: 'What I said' },
+    { value: 'english', label: 'English' },
   ];
-
   let devices: Devices = { devices: [], current: null };
+  let spoken: Languages = { languages: [] };
   let adding = false;
   let field: HTMLInputElement | undefined;
   // Typing a word owns the keyboard: without this Escape closed the whole panel
@@ -40,6 +41,12 @@
   }
 
   onDestroy(() => release?.());
+
+  // Whisper's own list, so the window cannot offer a code the engine refuses.
+  // It does not move while the panel is open.
+  listLanguages()
+    .then((got) => (spoken = got))
+    .catch(() => {});
 
   // Ordered by request: a slow earlier read must not overwrite a later one.
   let reading = 0;
@@ -72,6 +79,12 @@
   $: silence = Number(stt.endpoint_silence_ms ?? 2500);
   $: vocabulary = (stt.vocabulary ?? []) as string[];
   $: preset = String(stt.preset ?? 'balanced');
+  $: language = String(stt.language ?? 'en');
+  $: translate = stt.translate === true;
+  // The daemon's own word: it reads English whatever `stt.language` says when
+  // the loaded build holds no other language. Working it out from the preset
+  // name would be a second rule for one fact, in a second language.
+  $: englishOnly = $daemon.status?.english_only === true;
   // `endpoint_silence_ms` is a plain u64 in the daemon, so a hand-edited config
   // can hold a value none of these offer.
   $: offered = QUIET.includes(silence) ? QUIET : [silence, ...QUIET];
@@ -133,7 +146,7 @@
   </Picker>
 </Field>
 
-<Field name="Transcription" pending={$daemon.pending.has('stt.preset')}>
+<Field name="Transcription" pending={$waitsOnARestart.has('stt.preset')}>
   <Segmented
     label="Transcription"
     value={preset}
@@ -141,6 +154,42 @@
     change={(next) => write('stt.preset', next)}
   />
 </Field>
+
+<!-- Beside the preset it depends on: the English-only model rules every other
+     language out, and the two read as one decision only if they sit together. -->
+<Field
+  name="Language"
+  note={englishOnly
+    ? 'Fast hears English only. Choose Balanced or Quality above to speak another language.'
+    : 'The language you speak. Naming it beats detecting it.'}
+  pending={$waitsOnARestart.has('stt.language')}
+>
+  <Picker
+    label="Language"
+    value={language}
+    disabled={englishOnly}
+    change={(next) => write('stt.language', next)}
+  >
+    <!-- `auto` is a value the config takes and the engine reads as detect it,
+         so it belongs in the list a person picks from. Whisper's own table
+         holds only real languages. -->
+    <option value="auto">Detect it</option>
+    {#each spoken.languages as option (option.code)}
+      <option value={option.code}>{option.name}</option>
+    {/each}
+  </Picker>
+</Field>
+
+{#if !englishOnly && language !== 'en'}
+  <Field name="Answer in" pending={$waitsOnARestart.has('stt.translate')}>
+    <Segmented
+      label="Answer in"
+      value={translate ? 'english' : 'spoken'}
+      options={ANSWER}
+      change={(next) => write('stt.translate', next === 'english')}
+    />
+  </Field>
+{/if}
 
 <Field
   name="Vocabulary"

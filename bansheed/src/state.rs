@@ -52,6 +52,7 @@ pub enum ConsumerCommand {
     // so either can land while the microphone is open. The ring holds the audio,
     // so the dictation that follows is whole.
     Retune(Vec<String>),
+    Speak(crate::speech_to_text::whisper::Speech),
     Reload(&'static str),
     // A new stream opened, so the old ring is dead. The rate comes with it:
     // devices do not share one.
@@ -116,8 +117,16 @@ impl std::fmt::Display for RecordingError {
 impl RecordingError {
     /// Trimmed at the source, not in each renderer: the wrapped error ends in a
     /// period and the other blocker prose does not.
+    ///
+    /// A model fault drops the engine's own words. They name a file and an
+    /// absolute path, the remedy is a restart either way, and the file is
+    /// usually on disk by the time anyone reads this. `Display` keeps them for
+    /// the log.
     pub fn consequence(&self) -> String {
-        self.to_string().trim_end_matches('.').to_string()
+        match self {
+            RecordingError::Model(_) => "a model would not load".to_string(),
+            RecordingError::Microphone(_) => self.to_string().trim_end_matches('.').to_string(),
+        }
     }
 
     pub fn command(&self) -> Option<&'static str> {
@@ -730,6 +739,12 @@ impl DaemonState {
 
     pub fn set_vocabulary(&self, words: Vec<String>) -> bool {
         self.commands.send(ConsumerCommand::Retune(words)).is_ok()
+    }
+
+    /// What language the next utterance is read as, and whether it answers in
+    /// English. Whisper reads both per utterance, so no model moves.
+    pub fn set_speech(&self, speech: crate::speech_to_text::whisper::Speech) -> bool {
+        self.commands.send(ConsumerCommand::Speak(speech)).is_ok()
     }
 
     pub fn load_stt_model(&self, model: &'static str) -> bool {

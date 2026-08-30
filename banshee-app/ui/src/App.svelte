@@ -2,20 +2,24 @@
   import { onMount } from 'svelte';
   import {
     daemon,
+    downloadLine,
+    endsTheRun,
     lampForm,
     microphoneInUse,
     reduceLive,
     reduceStatus,
+    waitsOnARestart,
     stateWord,
     type Live,
     type Status,
   } from './lib/daemon';
-  import { announcement } from './lib/copy';
-  import { followSaveHistory, readAll, readNewest, table } from './lib/history';
+  import { announce, announcement } from './lib/copy';
+  import { followSaveHistory, readAll, readLatest, readNewest, table } from './lib/history';
   import { agents, refresh as readAgents } from './lib/agents';
   import {
     listen,
     listVoices,
+    restartDaemon,
     startDaemon,
     status,
     type Down,
@@ -101,7 +105,33 @@
   $: pending = waiting ? null : pendingOf($daemon.live);
   $: nothingYet = $table.loaded && rows.length === 0;
   $: blockers = $daemon.status?.blockers ?? [];
-  $: savingHistory = config.daemon?.save_history !== false;
+  // The daemon answers this, and the config only says what was asked for. A
+  // history file that will not open leaves the two disagreeing.
+  $: savingHistory = ($daemon.status?.history_enabled ?? config.daemon?.save_history) !== false;
+
+  // A setting the daemon could not apply live needs the process replaced, and
+  // the window can do that rather than name a command for a terminal.
+  let restarting = false;
+  const COMING_BACK = 12;
+  async function restart() {
+    restarting = true;
+    try {
+      await restartDaemon();
+      // `launchctl kickstart -k` answers when launchd accepts the request, not
+      // when the new process listens. Reading straight away finds a dead socket
+      // and tells the user Banshee has stopped, which is the opposite of what
+      // just happened. Nothing measured this count; it trades how slow a
+      // machine may be against how long the window waits before believing it.
+      for (let left = COMING_BACK; left > 0; left--) {
+        if (await readStatus()) break;
+        await new Promise((wake) => setTimeout(wake, 250));
+      }
+      await readLatest();
+    } catch {
+      // The pending keys are still pending, so the notice already says it.
+    }
+    restarting = false;
+  }
 
   let starting = false;
   async function start() {
@@ -116,31 +146,52 @@
   }
 
   // A stopped daemon is acting on none of these, so each reads empty.
-  $: footValues = ((): { label: Job; value: string }[] => {
+  //
+  // The hotkey is the config's, because the daemon reports no bound key, and it
+  // is never applied live. Marking it pending is the only way the foot can stop
+  // naming a key the daemon is not listening for. `audio.input_device` always
+  // applies, so the microphone has no such state.
+  $: footValues = ((): { label: Job; value: string; pending?: boolean }[] => {
     const voice = String(config.tts?.voice ?? '');
     const said = (value: string) => (live ? value : '');
+    const waits = (...keys: string[]) => live && keys.some((key) => $waitsOnARestart.has(key));
     return [
       { label: 'Microphone', value: said(microphoneInUse($daemon.live.audio_device)) },
-      { label: 'Hotkey', value: said(humanize(String(config.audio?.hotkey ?? ''))) },
-      { label: 'Voice', value: said(voices.voices.find((v) => v.id === voice)?.name ?? voice) },
+      {
+        label: 'Hotkey',
+        value: said(humanize(String(config.audio?.hotkey ?? ''))),
+        pending: waits('audio.hotkey', 'audio.hotkey_mode'),
+      },
+      {
+        label: 'Voice',
+        value: said(voices.voices.find((v) => v.id === voice)?.name ?? voice),
+        pending: waits('tts.voice', 'tts.speed'),
+      },
       { label: 'Agents', value: said(connected > 0 ? `${connected} connected` : 'None yet') },
     ];
   })();
 
   $: if ($daemon.status) followSaveHistory(savingHistory);
 
-  async function readDaemon() {
+  /// Split from the record, because the two change for different reasons and a
+  /// download moves only this one.
+  async function readStatus(): Promise<boolean> {
     try {
       const initial = await status();
       wasTranscribing = initial.transcribing === true;
       daemon.update((s) => reduceStatus(s, initial));
+      return true;
     } catch (error) {
       const reason = (error as { message?: string })?.message || 'not running';
       daemon.update((s) => ({ ...s, down: reason }));
       startDaemon().catch(() => {});
-      return;
+      return false;
     }
-    await ($table.loaded ? readNewest() : readAll()).catch(() => {});
+  }
+
+  async function readDaemon() {
+    if (!(await readStatus())) return;
+    await readLatest();
   }
 
   async function readVoices(): Promise<boolean> {
@@ -176,9 +227,28 @@
         if (e.payload.transcribing === false && wasTranscribing) readNewest().catch(() => {});
         if (e.payload.transcribing !== undefined) wasTranscribing = e.payload.transcribing;
       }),
-      listen<DownloadProgress>('daemon:downloads', (e) =>
-        daemon.update((s) => ({ ...s, downloading: e.payload.state === 'downloading' })),
-      ),
+      listen<DownloadProgress>('daemon:downloads', (e) => {
+        const progress = e.payload;
+        const last = endsTheRun(progress);
+        daemon.update((s) => ({ ...s, download: last ? null : progress }));
+
+        // `downloadModels` answers as soon as the daemon takes the task, so a
+        // fetch that fails afterwards reaches no caller. This push is the only
+        // report of it.
+        if (progress.state === 'failed') {
+          announce(`${downloadLine(progress)}. Try again when you are back online.`);
+        }
+        // A file that lands changes what the daemon is blocked on, and no other
+        // push says so. The status alone: a download writes no history, so
+        // re-reading the record could only return what it already holds.
+        if (progress.state !== 'downloading') readStatus().catch(() => {});
+        // The voices are files too, and the last one a run fetches is a voice,
+        // so their list settles once rather than after every file.
+        if (last) {
+          voicesRead = false;
+          readTheRest().catch(() => {});
+        }
+      }),
       listen<Down>('daemon:down', (e) =>
         daemon.update((s) => ({ ...s, down: e.payload.reason })),
       ),
@@ -192,7 +262,13 @@
 <svelte:window on:keydown={onKeydown} />
 
 <main>
-  <Header {word} {form} />
+  <Header
+    {word}
+    {form}
+    waiting={live && $waitsOnARestart.size > 0}
+    {restart}
+    {restarting}
+  />
 
   <div class="body">
     {#if job}
@@ -214,8 +290,15 @@
         <Find bind:query matches={shown.length} close={closeFind} />
       {/if}
 
-      {#if blockers.length > 0}
-        <Blockers {blockers} downloading={$daemon.downloading} />
+      {#if blockers.length > 0 || $daemon.download !== null}
+        <Blockers
+          {blockers}
+          {restart}
+          busy={restarting}
+          download={$daemon.download}
+          preset={String(config.stt?.preset ?? 'balanced')}
+          megabytes={Number($daemon.status?.download_megabytes ?? 0)}
+        />
       {/if}
 
       {#if !live}
@@ -228,7 +311,7 @@
         />
       {/if}
 
-      {#if live && !finding}
+      {#if live && !finding && ($table.total > 0 || !savingHistory)}
         <Ledger
           total={$table.total}
           saving={savingHistory}
@@ -274,6 +357,8 @@
         <Absence
           label="Nothing said yet"
           detail="Hold the hotkey and speak. What you say lands in whatever app has focus, and shows up here."
+          action="What Banshee keeps"
+          act={() => (job = 'Record')}
         />
       {/if}
     {/if}

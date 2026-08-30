@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { RESTART_SAYS } from '../lib/copy';
   // Four values, and the brief holds it to four. This band reports what
   // Banshee is set to. It is a status line that can be opened, not the
   // window's navigation, which is what went wrong with the strip it replaces.
-  export let values: { label: string; value: string }[];
+  export let values: { label: string; value: string; pending?: boolean }[];
   export let open: (label: string) => void;
   export let active: string | null = null;
 </script>
@@ -16,7 +17,8 @@
       on:click={() => open(row.label)}
     >
       <span class="caps">{row.label}</span>
-      <span class="mono value">{row.value || '—'}</span>
+      <span class="mono value" class:pending={row.pending}>{row.value || '—'}</span>
+      {#if row.pending}<span class="sr">{RESTART_SAYS}</span>{/if}
     </button>
   {/each}
 </footer>
@@ -62,5 +64,11 @@
 
   .cell:hover .value {
     color: var(--accent);
+  }
+
+  /* The dash is this world's form for a thing that is not there yet. The cell
+     opens the panel that says it in words. */
+  .value.pending {
+    border-bottom: 1px dashed var(--accent);
   }
 </style>

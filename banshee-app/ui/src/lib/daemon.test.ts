@@ -7,7 +7,23 @@ import transcribing from '../fixtures/transcribing.json';
 import speaking from '../fixtures/speaking.json';
 import notRunning from '../fixtures/not-running.json';
 import pendingCues from '../fixtures/pending-cues.json';
-import { deviceLabel, empty, microphoneInUse, fixGroups, fixProse, lampForm, liveFrom, markPending, reduceLive, reduceStatus, shownFloat, stateWord } from './daemon';
+import {
+  deviceLabel,
+  downloadLine,
+  empty,
+  endsTheRun,
+  fixGroups,
+  fixProse,
+  lampForm,
+  liveFrom,
+  markPending,
+  microphoneInUse,
+  percent,
+  reduceLive,
+  reduceStatus,
+  shownFloat,
+  stateWord,
+} from './daemon';
 
 describe('the state word', () => {
   it('is Ready on a clear machine', () => {
@@ -123,4 +139,50 @@ describe('shownFloat', () => {
     expect(shownFloat(0.5)).toBe(0.5);
     expect(shownFloat(2)).toBe(2);
   });
+});
+
+it('says which file is in flight and how far it has come', () => {
+  expect(downloadLine({ label: 'Speech model', model: 'ggml-x.bin', index: 1, count: 4, bytes: 40, total: 100, state: 'downloading' })).toBe('Speech model, 1 of 4 · 40%');
+});
+
+// A daemon older than the label and count fields sends neither, and a run has
+// at least one file, so a zero count has no place to report.
+it('falls back to the filename when the daemon reports no place', () => {
+  expect(downloadLine({ model: 'silero_vad.onnx', bytes: 50, total: 200, state: 'downloading' })).toBe('silero_vad.onnx · 25%');
+});
+
+// No Content-Length means no bar to draw, so it counts what has arrived.
+it('counts megabytes when the server sent no length', () => {
+  expect(downloadLine({ model: 'kokoro.onnx', bytes: 5 * 1_048_576, total: null, state: 'downloading' })).toBe('kokoro.onnx · 5 MB');
+});
+
+it('never reports past a hundred percent', () => {
+  expect(percent(120, 100)).toBe(100);
+  expect(percent(10, null)).toBeNull();
+  expect(percent(10, 0)).toBeNull();
+});
+
+// The daemon blocks on two files and fetches four, so the blocking two land
+// while the rest are still coming. Being unblocked is not being finished.
+it('ends the run on its last file, not when the daemon stops being blocked', () => {
+  const tick = { model: 'kokoro.onnx', bytes: 1, total: 2, index: 3, count: 4 };
+  expect(endsTheRun({ ...tick, state: 'downloading' })).toBe(false);
+  expect(endsTheRun({ ...tick, state: 'done' })).toBe(false);
+  expect(endsTheRun({ ...tick, index: 4, state: 'done' })).toBe(true);
+  expect(endsTheRun({ ...tick, index: 4, state: 'failed' })).toBe(true);
+});
+
+// A daemon older than the count field names no last file, so any terminal
+// report has to end the run or the window would say Downloading for ever.
+it('ends the run on any terminal report when the daemon sends no count', () => {
+  expect(endsTheRun({ model: 'x.bin', bytes: 1, total: 2, state: 'done' })).toBe(true);
+  expect(endsTheRun({ model: 'x.bin', bytes: 1, total: 2, state: 'downloading' })).toBe(false);
+});
+
+// download_all carries on past a bad file, so the line has to say which one
+// failed or the person retries blind.
+it('says when a file failed rather than showing its last percentage', () => {
+  expect(
+    downloadLine({ label: 'Voice detection', model: 'silero_vad.onnx', index: 2, count: 4, bytes: 0, total: null, state: 'failed' }),
+  ).toBe('Voice detection, 2 of 4 · failed');
 });
