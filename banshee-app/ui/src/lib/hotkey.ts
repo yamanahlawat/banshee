@@ -1,6 +1,5 @@
-// The daemon's own name for each modifier, and every name here is one it
-// binds on macOS. RightControl is absent because rdev never maps it there.
 // A second copy of the daemon's table, until `status` reports its own.
+// RightControl is absent because rdev never maps it on macOS.
 const MODIFIERS: Record<string, string> = {
   AltRight: 'RightOption',
   AltLeft: 'LeftOption',
@@ -23,8 +22,7 @@ export function humanize(hotkey: string): string {
     .join(' + ');
 }
 
-// A press becomes the daemon's grammar: a chord, an F-key, a lone modifier,
-// or one typed character. `null` for a press it can never bind.
+// `null` for a press the daemon can never bind.
 export function hotkeyFrom(event: {
   code: string;
   ctrlKey: boolean;

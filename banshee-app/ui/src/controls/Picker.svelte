@@ -1,30 +1,59 @@
 <script lang="ts">
-  import Chevron from './Chevron.svelte';
-
-  export let options: { value: string; label: string }[];
-  export let value: string;
+  // The platform draws its own bezel and stepper on a select unless the
+  // appearance is reset, and `color-scheme` decides which bezel.
   export let label: string;
-  export let wide = true;
+  export let value: string;
   export let change: (next: string) => void;
 
-  // A select whose value names no option renders blank, which is how an
-  // unplugged device reads as a missing control rather than a missing device.
-  $: shown = options.some((o) => o.value === value)
-    ? options
-    : [{ value, label: value }, ...options];
 </script>
-<!-- A native select: the platform draws the list, and the keyboard and
-     VoiceOver behaviour come with it. -->
-<label style="display: inline-flex; align-items: center; gap: 8px; min-height: 30px; padding: 0 10px; border: 1.5px solid var(--ink); border-radius: 6px; background: var(--field); color: var(--ink); {wide ? 'flex: 1; min-width: 0;' : ''}">
-  <span class="sr">{label}</span>
-  <select
-    value={value}
-    onchange={(event) => change(event.currentTarget.value)}
-    style="font: inherit; color: inherit; background: transparent; border: 0; padding: 0; margin: 0; width: 100%; min-width: 0; cursor: pointer; appearance: none; outline-offset: 4px;"
-  >
-    {#each shown as option (option.value)}
-      <option value={option.value}>{option.label}</option>
-    {/each}
+
+<span class="picker">
+  <!-- svelte-ignore a11y_no_onchange -->
+  <!-- svelte-ignore a11y_no_onchange -->
+  <select aria-label={label} {value} on:change={(e) => change(e.currentTarget.value)}>
+    <slot />
   </select>
-  <Chevron />
-</label>
+  <svg width="11" height="7" viewBox="0 0 11 7" aria-hidden="true" focusable="false">
+    <path
+      d="M1 1.5 L5.5 5.5 L10 1.5"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+  </svg>
+</span>
+
+<style>
+  .picker {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    color: var(--ink);
+    border-bottom: 1px solid var(--ink);
+  }
+
+  select {
+    appearance: none;
+    -webkit-appearance: none;
+    flex: 1;
+    min-width: 0;
+    font-variation-settings: 'wght' 500, 'wdth' 100;
+    font-size: 15px;
+    color: var(--ink);
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 6px 22px 6px 0;
+    margin: 0;
+  }
+
+  svg {
+    position: absolute;
+    right: 2px;
+    pointer-events: none;
+  }
+</style>

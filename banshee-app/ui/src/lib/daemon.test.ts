@@ -7,7 +7,7 @@ import transcribing from '../fixtures/transcribing.json';
 import speaking from '../fixtures/speaking.json';
 import notRunning from '../fixtures/not-running.json';
 import pendingCues from '../fixtures/pending-cues.json';
-import { STATIONS, checklist, deviceLabel, empty, microphoneInUse, fixGroups, fixProse, lampForm, liveFrom, markPending, needleAt, reduceLive, reduceStatus, shownFloat, stateWord } from './daemon';
+import { deviceLabel, empty, microphoneInUse, fixGroups, fixProse, lampForm, liveFrom, markPending, reduceLive, reduceStatus, shownFloat, stateWord } from './daemon';
 
 describe('the state word', () => {
   it('is Ready on a clear machine', () => {
@@ -51,27 +51,6 @@ describe('the state word', () => {
   });
 });
 
-describe('the checklist', () => {
-  it('marks every station clear on a clear machine and Try it todo', () => {
-    const rows = checklist(reduceStatus(empty(), ready));
-    expect(rows.map((r) => r.station)).toEqual(['Running', 'Microphone', 'Permissions', 'Models', 'Try it']);
-    expect(rows.map((r) => r.state)).toEqual(['clear', 'clear', 'clear', 'clear', 'todo']);
-  });
-  it('puts a missing grant under Permissions with the daemon\'s own words', () => {
-    const rows = checklist(reduceStatus(empty(), permissions));
-    const perms = rows.find((r) => r.station === 'Permissions')!;
-    expect(perms.state).toBe('blocked');
-    expect(perms.blockers[0].fix.length).toBeGreaterThan(0);
-  });
-  it('puts a blocker of a kind the daemon does not emit under Running, so it never vanishes', () => {
-    const status = { ...ready, blockers: [{ kind: 'mystery', id: 'x', name: 'X', consequence: 'y', fix: 'z' }] };
-    const rows = checklist(reduceStatus(empty(), status));
-    const running = rows.find((r) => r.station === 'Running')!;
-    expect(running.state).toBe('blocked');
-    expect(running.blockers).toHaveLength(1);
-  });
-});
-
 describe('pending', () => {
   it('is whatever the daemon says waits for a restart', () => {
     const state = reduceStatus(empty(), pendingCues);
@@ -97,21 +76,6 @@ describe('the status reply carries the live flags', () => {
   });
   it('takes only the live flags, not the rest of the reply', () => {
     expect(Object.keys(liveFrom(ready)).sort()).toEqual(Object.keys(empty().live).sort());
-  });
-});
-
-describe('the needle', () => {
-  it('rests on the first station that is not clear', () => {
-    expect(needleAt(checklist(reduceStatus(empty(), permissions)))).toBe(
-      STATIONS.indexOf('Permissions'),
-    );
-  });
-  it('reaches Try it on a machine with nothing to fix', () => {
-    expect(needleAt(checklist(reduceStatus(empty(), ready)))).toBe(STATIONS.indexOf('Try it'));
-  });
-  it('rests on Running when the daemon is down', () => {
-    const down = { ...reduceStatus(empty(), permissions), down: 'not running' };
-    expect(needleAt(checklist(down))).toBe(STATIONS.indexOf('Running'));
   });
 });
 

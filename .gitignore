@@ -19,3 +19,4 @@ banshee-app/ui/dist/
 # Superpowers plans and run state
 docs/superpowers/
 .superpowers/
+.env

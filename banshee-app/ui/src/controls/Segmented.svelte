@@ -1,18 +1,21 @@
 <script lang="ts">
-  export let options: { value: string; label: string }[];
-  export let active: string;
+  // A component and not a CSS class: without the group role and label a screen
+  // reader hears N separate toggles with no idea they are one choice.
   export let label: string;
+  export let value: string;
+  export let options: { value: string; label: string }[];
   export let change: (next: string) => void;
 </script>
-<div role="radiogroup" aria-label={label} style="display: inline-flex; border: 1.5px solid var(--ink); border-radius: 6px; overflow: hidden;">
+
+<div class="seg" role="radiogroup" aria-label={label}>
   {#each options as option (option.value)}
-    {@const on = option.value === active}
     <button
       type="button"
       role="radio"
-      aria-checked={on}
-      onclick={() => change(option.value)}
-      style="font: inherit; min-height: 30px; padding: 0 12px; border: 0; background: {on ? 'var(--ink)' : 'transparent'}; color: {on ? 'var(--face)' : 'var(--ink)'}; font-weight: {on ? 600 : 400}; cursor: pointer;"
-    >{option.label}</button>
+      aria-checked={option.value === value}
+      on:click={() => change(option.value)}
+    >
+      {option.label}
+    </button>
   {/each}
 </div>

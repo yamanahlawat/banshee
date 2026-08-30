@@ -5,8 +5,6 @@ export type Live = { recording: boolean; speaking: boolean; armed: boolean; tran
 export type Daemon = { status: Status | null; live: Live; pending: Set<string>; down: string | null; downloading: boolean };
 export type Word = 'Ready' | 'Recording' | 'Speaking' | 'Listening' | 'Working' | 'Not ready' | 'Downloading' | 'Not running';
 export type LampForm = 'idle' | 'recording' | 'speaking' | 'notrunning';
-export type Station = 'Running' | 'Microphone' | 'Permissions' | 'Models' | 'Try it';
-export const STATIONS: Station[] = ['Running', 'Microphone', 'Permissions', 'Models', 'Try it'];
 
 export function empty(): Daemon {
   return { status: null, live: { recording: false, speaking: false, armed: false, transcribing: false, audio_device: null, missing_device: null }, pending: new Set(), down: null, downloading: false };
@@ -24,7 +22,7 @@ export function liveFrom(status: Status): Partial<Live> {
 }
 
 export function reduceStatus(state: Daemon, status: Status): Daemon {
-  // Pending is the daemon's answer: it knows which keys it applied live.
+  // The daemon reports which keys it applied live; the window does not guess.
   return { ...state, status, live: { ...state.live, ...liveFrom(status) }, pending: new Set(status.pending ?? []), down: status.running === false ? (state.down ?? 'not running') : null };
 }
 export function reduceLive(state: Daemon, live: Partial<Live>): Daemon {
@@ -50,44 +48,15 @@ export function lampForm(word: Word): LampForm {
   if (word === 'Speaking') return 'speaking';
   return 'idle';
 }
-export function checklist(state: Daemon) {
-  const blockers = state.status?.blockers ?? [];
-  const byStation = (station: Station) => blockers.filter((b) => stationOf(b) === station);
-  return STATIONS.map((station) => {
-    if (station === 'Try it') return { station, state: 'todo' as const, blockers: [] };
-    if (station === 'Running' && state.down !== null) return { station, state: 'blocked' as const, blockers: [] };
-    if (station === 'Models' && state.downloading) return { station, state: 'working' as const, blockers: [] };
-    const own = byStation(station);
-    return { station, state: own.length ? ('blocked' as const) : ('clear' as const), blockers: own };
-  });
-}
-// Which stations hold the pad shut. A download in progress still holds it,
-// or the band would vanish under the button that started it. A microphone
-// does not: the history it recorded is still worth showing.
-export function setupBlocked(state: Daemon): boolean {
-  return checklist(state).some(
-    (row) =>
-      (row.state === 'blocked' || row.state === 'working') && row.station !== 'Microphone',
-  );
-}
 
-// The needle rests on the first station that is not clear. `Try it` is never
-// clear, so it catches the needle on a machine with nothing left to fix.
-export function needleAt(rows: { state: string }[]): number {
-  const at = rows.findIndex((row) => row.state !== 'clear');
-  return at === -1 ? rows.length - 1 : at;
-}
-
-// The daemon writes the same command twice, as prose and as a field. A
-// sentence that only restates the command line below it is worth dropping.
+// The daemon writes the same command twice, as prose and as a field.
 export function fixProse(blocker: Blocker): string | null {
   if (blocker.command === undefined || !blocker.fix.endsWith(blocker.command)) return blocker.fix;
   const lead = blocker.fix.slice(0, -blocker.command.length);
   return /^(?:run|restart|start)(?: it)?:\s*$/.test(lead) ? null : blocker.fix;
 }
 
-// Every missing model is downloaded by one call, so the blockers that share
-// that call belong under one row. A permission names its own pane.
+// One call downloads every missing model, so those blockers share a row.
 export function fixGroups(blockers: Blocker[]): Blocker[][] {
   const groups = new Map<string, Blocker[]>();
   for (const blocker of blockers) {
@@ -97,32 +66,21 @@ export function fixGroups(blockers: Blocker[]): Blocker[][] {
   return [...groups.values()];
 }
 
-function stationOf(blocker: Blocker): Station {
-  if (blocker.kind === 'permission') return 'Permissions';
-  if (blocker.kind === 'model') return 'Models';
-  if (blocker.kind === 'pipeline') return 'Microphone';
-  return 'Running';
-}
 export const daemon = writable<Daemon>(empty());
 
 export const SYSTEM_DEVICE = 'default';
 
-/// What Banshee is listening with, the rule `microphone_label` holds for the
-/// tray, `banshee status` and the start message. The configured name is what
-/// the user asked for, not what is open, so naming it here would claim a
-/// microphone the daemon never got.
+// The configured name is deliberately not consulted: it is what was asked for,
+// not what the daemon opened.
 export function microphoneInUse(open: string | null): string {
   return open ?? 'No microphone';
 }
 
-// The daemon names no device until it opens one, so this says which device
-// its own word stands for.
 export function deviceLabel(live: string | null): string {
   return live ? `Default (${live})` : 'Default';
 }
 
-// The daemon holds its float settings as f32, so 1.2 reaches a client as
-// 1.2000000476837158. Every step it offers has one decimal or two.
+// The daemon holds these as f32, so 1.2 arrives as 1.2000000476837158.
 export function shownFloat(value: number): number {
   return Math.round(value * 100) / 100;
 }

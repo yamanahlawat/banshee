@@ -1,406 +1,262 @@
-import { fireEvent, render, screen } from '@testing-library/svelte';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { beforeEach, expect, it, vi } from 'vitest';
 import ready from './fixtures/ready.json';
 import permissions from './fixtures/permissions.json';
 
-// Local noon, because `today()` reads the local calendar day. Midday UTC is
-// midnight at +12, so every offset below would straddle the day there.
+// Local noon, because the history helpers read the local calendar day.
 const NOW = new Date(2026, 7, 27, 12, 0, 0);
 
 function stamp(minutesAgo: number): string {
   return `${new Date(NOW.getTime() - minutesAgo * 60_000).toISOString().slice(0, 19)}Z`;
 }
 
-// The daemon answers oldest first, and a limit takes the newest rows.
-const table = Array.from({ length: 10 }, (_, i) => ({
-  id: i + 1,
-  text: i === 9 ? 'Yes, open the pull request.' : `dictation ${i + 1}`,
-  timestamp: stamp(9 - i),
-}));
+// The daemon answers oldest first, so the newest row is last.
+const rows = [
+  { id: 1, text: 'the older one', timestamp: stamp(9) },
+  { id: 2, text: 'Yes, open the pull request.', timestamp: stamp(1) },
+];
 
-vi.mock('./lib/tauri', () => ({
-  status: vi.fn(),
-  history: vi.fn(),
-  listen: vi.fn(),
-  copyText: vi.fn(),
-  downloadModels: vi.fn(),
-  openPermissionPane: vi.fn(),
-  listVoices: vi.fn(),
-  detectAgents: vi.fn(),
-  startDaemon: vi.fn(() => Promise.resolve()),
-  planConnect: vi.fn(),
-  applyConnect: vi.fn(),
-}));
-import { applyConnect, detectAgents, history, listen, listVoices, planConnect, startDaemon, status } from './lib/tauri';
+vi.mock('./lib/tauri', async () => (await import('./lib/tauri.mock')).mockTauri());
+
+import {
+  detectAgents,
+  history,
+  listen,
+  listVoices,
+  listDevices,
+  openPermissionPane,
+  startDaemon,
+  status,
+} from './lib/tauri';
 import { agents } from './lib/agents';
 import { table as historyTable } from './lib/history';
-import { daemon, empty } from './lib/daemon';
+import { daemon, empty, reduceStatus } from './lib/daemon';
 import { forgetCopy } from './lib/copy';
-import { open } from './lib/jobs';
+import { forgetKeys } from './lib/keys';
 import App from './App.svelte';
 
 beforeEach(async () => {
-  // A previous test's mount can still be in flight, and it writes to the same
-  // module-level store. Let it land before this test resets that store.
   await new Promise((resolve) => setTimeout(resolve, 0));
-  // Only `Date` is faked: real timers keep the async waits below working.
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(NOW);
   vi.clearAllMocks();
-  // Every store here is module-level, so one test's copy would otherwise
-  // still read as copied in the next.
   daemon.set(empty());
-  open.set(null);
   agents.set([]);
   historyTable.set({ rows: [], total: 0, loaded: false, saving: null });
   forgetCopy();
+  forgetKeys();
   vi.mocked(status).mockResolvedValue(ready);
-  vi.mocked(history).mockImplementation(async (limit?: number) => (limit == null ? table : table.slice(-limit)));
+  vi.mocked(history).mockResolvedValue(rows);
   vi.mocked(listen).mockResolvedValue(() => {});
-  vi.mocked(listVoices).mockResolvedValue({ voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }], current: 'af_sky' });
+  vi.mocked(listDevices).mockResolvedValue({ devices: [], current: null });
+  vi.mocked(listVoices).mockResolvedValue({
+    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }],
+    current: 'af_sky',
+  });
   vi.mocked(detectAgents).mockResolvedValue([]);
 });
 
-afterEach(() => vi.useRealTimers());
+it('names the speaker in words, because the type cut says nothing to a screen reader', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  expect(screen.getAllByText(/^You said at /).length).toBe(rows.length);
+});
 
-it('opens on Ready with the latest dictation and one live region', async () => {
+it('sets the newest turn apart from the ones below it', async () => {
   const { container } = render(App);
-  expect(await screen.findByText('Yes, open the pull request.')).toBeTruthy();
-  expect(container.querySelector('header')?.textContent).toContain('Ready');
-  expect(container.querySelectorAll('[aria-live]').length).toBe(1);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  const turns = container.querySelectorAll('article.turn');
+  expect(turns.length).toBe(rows.length);
+  expect(turns[0].classList.contains('lead')).toBe(true);
+  expect(turns[1].classList.contains('lead')).toBe(false);
 });
 
-it('keeps the live region off the bands, so a redraw is not announced', async () => {
-  const { container } = render(App);
-  await screen.findByText('Yes, open the pull request.');
-  expect(container.querySelector('main')?.hasAttribute('aria-live')).toBe(false);
-  // `.sr` is a shared utility class, so the region is named by its role here.
-  expect(container.querySelectorAll('[aria-live]').length).toBe(1);
-  expect(container.querySelector('[aria-live]')?.getAttribute('aria-live')).toBe('polite');
-});
-
-it('gives the band the whole day, however many rows that is', async () => {
-  render(App);
-  // Ten rows, all from today: the pad takes the newest and the band takes the
-  // nine below it, so nothing is left for the footer to count.
-  expect(await screen.findByText('dictation 1')).toBeTruthy();
-  expect(screen.queryByRole('button', { name: /more in History/ })).toBeNull();
-});
-
-it('counts only the days the band cannot hold', async () => {
-  const older = [{ id: 0, text: 'yesterday', timestamp: stamp(60 * 26) }, ...table];
-  vi.mocked(history).mockImplementation(async (limit?: number) => (limit == null ? older : older.slice(-limit)));
-  render(App);
-  expect(await screen.findByRole('button', { name: '1 more in History ›' })).toBeTruthy();
-  expect(screen.queryByText('yesterday')).toBeNull();
-});
-
-it('speaks a copy confirmation through the announcement region', async () => {
-  const { container } = render(App);
-  const copyButton = await screen.findByRole('button', { name: 'Copy' });
-  await fireEvent.click(copyButton);
-  // Pad renders its own visible "Copied", so this reads the region alone.
-  expect(container.querySelector('[aria-live]')?.textContent).toContain('Copied');
-});
-
-it('still listens when the daemon is not running at open', async () => {
-  vi.mocked(status).mockRejectedValue(new Error('no socket'));
-  vi.mocked(history).mockRejectedValue(new Error('no socket'));
-  const { container } = render(App);
-  await screen.findAllByText('Not running');
-  expect(container.querySelector('header')?.textContent).toContain('Not running');
-  const events = vi.mocked(listen).mock.calls.map((c) => c[0]);
-  expect(events).toEqual([
-    'daemon:status',
-    'daemon:state',
-    'daemon:downloads',
-    'daemon:down',
-    'app:reopened',
-  ]);
-});
-
-it('names no microphone while the daemon holds none, not the one asked for', async () => {
-  const waiting = {
-    ...ready,
-    audio_device: null,
-    missing_device: 'OnePlus Buds 3',
-    config: { ...ready.config, audio: { ...ready.config.audio, input_device: 'OnePlus Buds 3' } },
-  };
-  vi.mocked(status).mockResolvedValue(waiting as never);
-  render(App);
-  await screen.findByText('Yes, open the pull request.');
-
-  const row = screen.getByRole('button', { name: /Microphone/ });
-  expect(row.textContent).toContain('No microphone');
-  expect(row.textContent).not.toContain('OnePlus Buds 3');
-});
-
-it('keeps the Setup row speaking while a stopped daemon silences the rest', async () => {
-  vi.mocked(status).mockRejectedValue(new Error('no socket'));
-  vi.mocked(history).mockRejectedValue(new Error('no socket'));
-  render(App);
-  await screen.findAllByText('Not running');
-  expect(screen.getByRole('button', { name: /Setup/ }).textContent).toContain('To fix');
-  expect(screen.getByRole('button', { name: /Hotkey/ })).toHaveProperty('disabled', true);
-});
-
-// The window starts the daemon, so it routinely reads before the daemon can
-// answer. A read that failed then must not stay failed.
-it('reads the voices and the agents again once the daemon comes back', async () => {
-  vi.mocked(status).mockRejectedValueOnce(new Error('no socket'));
-  vi.mocked(listVoices).mockRejectedValueOnce(new Error('no socket'));
-  vi.mocked(detectAgents).mockRejectedValueOnce(new Error('no socket'));
-  render(App);
-  await screen.findAllByText('Not running');
-  expect(vi.mocked(listVoices)).toHaveBeenCalledTimes(1);
-  expect(vi.mocked(detectAgents)).toHaveBeenCalledTimes(1);
-
-  const push = vi.mocked(listen).mock.calls.find((c) => c[0] === 'daemon:status')?.[1];
-  push?.({ payload: ready } as never);
-  await screen.findByText('Yes, open the pull request.');
-
-  expect(vi.mocked(listVoices)).toHaveBeenCalledTimes(2);
-  expect(vi.mocked(detectAgents)).toHaveBeenCalledTimes(2);
-});
-
-// The pad, the band and the History panel read one table.
-it('follows the save_history switch without the panel being reopened', async () => {
-  render(App);
-  await screen.findByText('Yes, open the pull request.');
-
-  const off = { ...ready, config: { ...ready.config, daemon: { save_history: false } } };
-  push('daemon:status', off);
-  await vi.waitFor(() => expect(screen.queryByText('Yes, open the pull request.')).toBeNull());
-
-  push('daemon:status', ready);
-  expect(await screen.findByText('Yes, open the pull request.')).toBeTruthy();
-});
-
-it('starts the daemon again when a second open reaches this window', async () => {
-  vi.mocked(status).mockRejectedValueOnce(new Error('no socket'));
-  render(App);
-  await screen.findAllByText('Not running');
-  expect(vi.mocked(startDaemon)).toHaveBeenCalledTimes(1);
-
-  vi.mocked(status).mockRejectedValueOnce(new Error('no socket'));
-  const reopen = vi.mocked(listen).mock.calls.find((c) => c[0] === 'app:reopened')?.[1];
-  reopen?.({ payload: undefined } as never);
-  await vi.waitFor(() => expect(vi.mocked(startDaemon)).toHaveBeenCalledTimes(2));
-});
-
-it('reads the history once the daemon comes back', async () => {
-  // Only the status read fails: the history read never runs while it does.
-  vi.mocked(status).mockRejectedValueOnce(new Error('no socket'));
-  render(App);
-  await screen.findAllByText('Not running');
-  const push = vi.mocked(listen).mock.calls.find((c) => c[0] === 'daemon:status')?.[1];
-  push?.({ payload: ready } as never);
-  expect(await screen.findByText('Yes, open the pull request.')).toBeTruthy();
-});
-
-it('empties the band when only the pad row is from today', async () => {
-  const yesterday = [
-    { id: 1, text: 'last week', timestamp: '2026-08-20T09:00:00Z' },
-    { id: 2, text: 'Yes, open the pull request.', timestamp: stamp(1) },
-  ];
-  vi.mocked(history).mockImplementation(async () => yesterday);
-  render(App);
-  await screen.findByText('Yes, open the pull request.');
-  expect(screen.queryByText('last week')).toBeNull();
-  expect(await screen.findByRole('button', { name: '1 more in History \u203a' })).toBeTruthy();
-});
-
-function push(event: string, payload: unknown) {
-  const handler = vi.mocked(listen).mock.calls.find((c) => c[0] === event)?.[1];
-  handler?.({ payload } as never);
-}
-
-it('waits for transcribing to fall before it refetches, not for recording', async () => {
-  render(App);
-  await screen.findByText('Yes, open the pull request.');
-  const reads = vi.mocked(history).mock.calls.length;
-
-  // The daemon stops recording seconds before the row exists.
-  push('daemon:state', { recording: true, transcribing: false });
-  push('daemon:state', { recording: false, transcribing: false });
-  expect(vi.mocked(history).mock.calls.length).toBe(reads);
-
-  push('daemon:state', { recording: false, transcribing: true });
-  push('daemon:state', { recording: false, transcribing: false });
-  expect(vi.mocked(history).mock.calls.length).toBe(reads + 1);
-});
-
-it('knows a fall is coming when it opens mid-dictation', async () => {
-  vi.mocked(status).mockResolvedValue({ ...ready, transcribing: true });
-  render(App);
-  await screen.findByText('Yes, open the pull request.');
-  const reads = vi.mocked(history).mock.calls.length;
-
-  push('daemon:state', { recording: false, transcribing: false });
-
-  expect(vi.mocked(history).mock.calls.length).toBe(reads + 1);
-});
-
-it('reads the table once when the first read and a status push race', async () => {
-  let release: () => void = () => {};
-  const gate = new Promise<void>((resolve) => (release = resolve));
-  vi.mocked(history).mockImplementation(async (limit?: number) => {
-    if (limit == null) await gate;
-    return limit == null ? table : table.slice(-limit);
-  });
-
-  render(App);
-  // Let the listeners register and the first read start, then have the
-  // bridge push its own status while that read is still in flight.
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-  push('daemon:status', ready);
-  release();
-
-  await screen.findByText('Yes, open the pull request.');
-  const wholeTableReads = vi.mocked(history).mock.calls.filter((c) => c[0] == null).length;
-  expect(wholeTableReads).toBe(1);
-});
-
-it('puts the fixes where the pad goes until the machine can record', async () => {
-  vi.mocked(status).mockResolvedValue(permissions);
-  render(App);
-  expect(await screen.findByRole('button', { name: /Open Accessibility settings/ })).toBeTruthy();
-  expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
-});
-
-it('gives the pad back once nothing blocks the machine and a dictation exists', async () => {
-  const { container } = render(App);
-  expect(await screen.findByRole('button', { name: 'Copy' })).toBeTruthy();
-  // The strip carries a Setup row of its own, so the band is named here.
-  expect(container.querySelector('section[aria-label="Setup"]')).toBeNull();
-});
-
-it('shows the fixes on a clear machine that has never recorded', async () => {
+it('draws an empty history rather than leaving the body blank', async () => {
   vi.mocked(history).mockResolvedValue([]);
   render(App);
-  // Naming the summary, because a landmark called Setup also belongs to the
-  // scale, and `Nothing saved yet` shows before the history read lands.
-  expect(await screen.findByText(/Nothing left to fix/)).toBeTruthy();
-  expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
 });
 
-it('shows the fix, not an empty pad, when the daemon is down at open', async () => {
-  vi.mocked(status).mockRejectedValue(new Error('no socket'));
-  vi.mocked(history).mockRejectedValue(new Error('no socket'));
-  render(App);
-  expect(await screen.findByText('Banshee is not running.')).toBeTruthy();
-  expect(screen.getByText('banshee start')).toBeTruthy();
-});
-
-it('keeps the newest dictation reachable when the fixes hold the pad', async () => {
+it('says what a blocker stops and offers the pane that clears it', async () => {
   vi.mocked(status).mockResolvedValue(permissions);
   render(App);
-  await screen.findByRole('button', { name: /Open Accessibility settings/ });
-  // The pad is not on screen, so no row is spoken for by it.
+  const open = await screen.findAllByRole('button', { name: 'Open System Settings' });
+  await fireEvent.click(open[0]);
+  expect(vi.mocked(openPermissionPane)).toHaveBeenCalled();
+});
+
+it('shows that an agent is waiting, without claiming to know the question', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  daemon.update((s) => ({ ...s, live: { ...s.live, armed: true } }));
+  await waitFor(() =>
+    expect(screen.getByText('An agent asked a question and is waiting for your answer.')).toBeTruthy(),
+  );
+});
+
+it('opens a job into the body and closes it again', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: /Hotkey/ }));
+  expect(screen.getByRole('button', { name: 'Done' })).toBeTruthy();
+  expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+});
+
+it('asks before it deletes the record', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  // Reachable from the head of the list, because the foot of a long list is not.
+  await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect(screen.getByText('This cannot be undone.')).toBeTruthy();
+});
+
+it('renders a page of turns at a time rather than the whole record', async () => {
+  const many = Array.from({ length: 95 }, (_, i) => ({
+    id: i + 1,
+    text: `dictation ${i + 1}`,
+    timestamp: stamp(95 - i),
+  }));
+  vi.mocked(history).mockResolvedValue(many);
+
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('dictation 95')).toBeTruthy());
+
+  expect(container.querySelectorAll('article.turn').length).toBe(40);
+  await fireEvent.click(screen.getByRole('button', { name: '55 older' }));
+  expect(container.querySelectorAll('article.turn').length).toBe(80);
+});
+
+it('filters what was said instead of opening a second place for it', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  expect(screen.queryByRole('searchbox')).toBeNull();
+  await fireEvent.keyDown(window, { key: 'f', metaKey: true });
+
+  const find = screen.getByRole('searchbox', { name: 'Find in what was said' });
+  await fireEvent.input(find, { target: { value: 'older' } });
+
+  await waitFor(() => expect(screen.getByText('the older one')).toBeTruthy());
+  expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
+
+  await fireEvent.input(find, { target: { value: 'nothing matches this' } });
+  await waitFor(() => expect(screen.getByText('No match')).toBeTruthy());
+
+  await fireEvent.keyDown(window, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('searchbox')).toBeNull());
   expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
-  expect(await screen.findByText('dictation 1')).toBeTruthy();
 });
 
-it('keeps the band on screen while a download runs', async () => {
-  vi.mocked(status).mockResolvedValue(permissions);
+it('says what Banshee does with your words without being asked', async () => {
   render(App);
-  await screen.findByRole('button', { name: /Open Accessibility settings/ });
-  const push = vi.mocked(listen).mock.calls.find((c) => c[0] === 'daemon:status')?.[1];
-  push?.({ payload: { ...ready, blockers: [] } } as never);
-  const downloads = vi.mocked(listen).mock.calls.find((c) => c[0] === 'daemon:downloads')?.[1];
-  downloads?.({ payload: { state: 'downloading' } } as never);
-  expect(await screen.findByText(/Downloading what Banshee needs/)).toBeTruthy();
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  expect(screen.getByRole('button', { name: 'Stop saving' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: /saved/ })).toBeTruthy();
 });
 
-it('opens a job in the earlier list\'s place, and gives it back on close', async () => {
-  render(App);
-  await screen.findByText('Yes, open the pull request.');
-  expect(screen.getByText('Earlier today')).toBeTruthy();
+it('holds the place words will take while the microphone is open', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
-  expect(await screen.findByRole('button', { name: 'Change key' })).toBeTruthy();
-  expect(screen.queryByText('Earlier today')).toBeNull();
+  daemon.update((s) => ({ ...s, live: { ...s.live, recording: true } }));
+  await waitFor(() =>
+    expect(screen.getByText('Recording. What you say will appear here.')).toBeTruthy(),
+  );
+  // NOT COVERED HERE: that the caret does not animate. jsdom answers `none` for
+  // animationName whatever the stylesheet declares, so an assertion on it proves
+  // nothing. The absence of keyframes outside Mark.svelte holds that line.
+  const caret = container.querySelector('[data-mode="recording"] .caret');
+  expect(caret).toBeTruthy();
 
-  await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
-  expect(await screen.findByText('Earlier today')).toBeTruthy();
+  daemon.update((s) => ({ ...s, live: { ...s.live, recording: false, transcribing: true } }));
+  await waitFor(() => expect(screen.getByText('Working out what you said.')).toBeTruthy());
+
+  // Speaking produces no turn, so it must not hold a place for one.
+  daemon.update((s) => ({ ...s, live: { ...s.live, transcribing: false, speaking: true } }));
+  await waitFor(() => expect(container.querySelector('.caret')).toBeNull());
 });
 
-it('names the strip values from the daemon, not from a default', async () => {
+it('offers a way back when the daemon has stopped', async () => {
   render(App);
-  await screen.findByText('Yes, open the pull request.');
-  expect(screen.getByText('Right Command')).toBeTruthy();
-  expect(screen.getByText('All clear')).toBeTruthy();
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  daemon.update((s) => ({ ...s, down: 'not running' }));
+  await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
+  expect(screen.getByRole('button', { name: 'Start Banshee' })).toBeTruthy();
+  // What was said before is still readable.
+  expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
 });
 
-it('names the voice the way a person does, not by its id', async () => {
-  render(App);
-  expect(await screen.findByText('Sky')).toBeTruthy();
-  expect(screen.queryByText('af_sky')).toBeNull();
+it('does not reflow the paragraph when a copy is confirmed', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const named = screen.getAllByRole('button', { name: /^Copy what you said at \d\d:\d\d$/ });
+  expect(named.length).toBeGreaterThan(1);
+  const copy = named[0];
+  // NOT COVERED HERE: that the box keeps its width between the two labels.
+  // jsdom resolves no scoped stylesheet and has no layout engine, so
+  // `getComputedStyle` answers `auto` with the reservation deleted. The
+  // reservation is `width: 68px` in Turn.svelte, verified against a real render.
+  await fireEvent.click(copy);
+  await waitFor(() => expect(screen.getAllByText('Copied').length).toBeGreaterThan(0));
+  // What this can prove: confirming one turn's copy does not touch another's.
+  const others = container.querySelectorAll('article.turn button');
+  expect([...others].filter((b) => b.textContent?.includes('Copied')).length).toBe(1);
 });
 
-it('keeps the history when the voice list fails', async () => {
-  vi.mocked(listVoices).mockRejectedValue(new Error('no voices'));
-  render(App);
-  expect(await screen.findByText('Yes, open the pull request.')).toBeTruthy();
+it('keeps the newest turn monumental while the microphone is open', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  daemon.update((s) => ({ ...s, live: { ...s.live, recording: true } }));
+  await waitFor(() =>
+    expect(screen.getByText('Recording. What you say will appear here.')).toBeTruthy(),
+  );
+
+  const turns = container.querySelectorAll('article.turn');
+  const leads = container.querySelectorAll('article.turn.lead');
+  expect(leads.length).toBe(1);
+  expect(leads[0].textContent).toContain('Yes, open the pull request.');
+  expect(turns[0].classList.contains('lead')).toBe(false);
 });
 
-it('counts connected agents in the strip, not merely detected ones', async () => {
-  vi.mocked(detectAgents).mockResolvedValue([
-    { id: 'claude-code', name: 'Claude Code', presence: 'connected', note: 'Connected' },
-    { id: 'cursor', name: 'Cursor', presence: 'found', note: 'Installed, not connected' },
-  ]);
+it('subscribes to every push the daemon sends before reading it', async () => {
   render(App);
-  await screen.findByText('Yes, open the pull request.');
-  expect(await screen.findByText('1 connected')).toBeTruthy();
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  const events = vi.mocked(listen).mock.calls.map((c) => c[0]);
+  for (const name of ['daemon:status', 'daemon:state', 'daemon:downloads', 'daemon:down', 'app:reopened']) {
+    expect(events).toContain(name);
+  }
 });
 
-it('reads None yet when no agent is connected', async () => {
+it('starts the daemon itself when it finds it gone', async () => {
+  vi.mocked(status).mockRejectedValue({ message: 'not running' });
   render(App);
-  await screen.findByText('Yes, open the pull request.');
-  expect(await screen.findByText('None yet')).toBeTruthy();
+  await waitFor(() => expect(vi.mocked(startDaemon)).toHaveBeenCalled());
+  await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
 });
 
-it('opens the Agents panel from its strip row', async () => {
-  vi.mocked(detectAgents).mockResolvedValue([{ id: 'cursor', name: 'Cursor', presence: 'found', note: 'Installed, not connected' }]);
+it('reads the voices and the agents the strip needs', async () => {
   render(App);
-  await screen.findByText('Yes, open the pull request.');
-  await fireEvent.click(screen.getByRole('button', { name: /^Agents/ }));
-  expect(await screen.findByText(/Coding agents found on this Mac/)).toBeTruthy();
+  await waitFor(() => expect(vi.mocked(listVoices)).toHaveBeenCalled());
+  await waitFor(() => expect(vi.mocked(detectAgents)).toHaveBeenCalled());
+  // Neither read may take the status and the history down with it.
+  expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
 });
 
-it('counts a connect made in the panel above it, without reopening the window', async () => {
-  const cursor = { id: 'cursor', name: 'Cursor', presence: 'found', note: 'Installed, not connected' };
-  let detected = [cursor];
-  vi.mocked(detectAgents).mockImplementation(async () => detected);
-  vi.mocked(planConnect).mockResolvedValue([{ path: '~/.cursor/mcp.json', diff: '+ "banshee": {' }]);
-  vi.mocked(applyConnect).mockImplementation(async () => {
-    detected = [{ ...cursor, presence: 'connected', note: 'Connected' }];
-  });
+it('empties the record when the daemon says it is no longer saving', async () => {
   render(App);
-  await screen.findByText('Yes, open the pull request.');
-  expect(await screen.findByText('None yet')).toBeTruthy();
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: /^Agents/ }));
-  await fireEvent.click(await screen.findByRole('button', { name: 'Connect' }));
-  await fireEvent.click(await screen.findByRole('button', { name: 'Apply' }));
-
-  expect(await screen.findByText('1 connected')).toBeTruthy();
-  expect(screen.queryByText('None yet')).toBeNull();
-});
-
-it('opens History in place of both the pad and the earlier band, and restores both on close', async () => {
-  render(App);
-  await screen.findByText('Yes, open the pull request.');
-  expect(screen.getByRole('button', { name: 'Copy' })).toBeTruthy();
-  expect(screen.getByText('Earlier today')).toBeTruthy();
-
-  await fireEvent.click(screen.getByRole('button', { name: /More settings/ }));
-  expect(await screen.findByRole('searchbox', { name: 'Search history' })).toBeTruthy();
-  expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
-  expect(screen.queryByText('Earlier today')).toBeNull();
-
-  await fireEvent.click(screen.getByRole('button', { name: /More settings/ }));
-  expect(await screen.findByRole('button', { name: 'Copy' })).toBeTruthy();
-  expect(screen.getByText('Earlier today')).toBeTruthy();
-  expect(screen.queryByRole('searchbox', { name: 'Search history' })).toBeNull();
+  const off = { ...ready, config: { ...ready.config, daemon: { save_history: false } } };
+  daemon.update((s) => reduceStatus(s, off));
+  // The daemon refuses the read outright while this is off.
+  await waitFor(() => expect(screen.getByText('Nothing is kept')).toBeTruthy());
+  expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
 });

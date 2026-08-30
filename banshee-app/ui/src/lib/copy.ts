@@ -15,8 +15,6 @@ export function forgetCopy(): void {
   announcement.set('');
 }
 
-// The region speaks a change, so a message has to leave again before the
-// same one can be spoken twice.
 export function announce(message: string): void {
   clearTimeout(timer);
   announcement.set(message);
