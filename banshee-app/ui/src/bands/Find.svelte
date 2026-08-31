@@ -60,7 +60,6 @@
     appearance: none;
   }
 
-
   .dismiss {
     color: var(--ink);
     background: transparent;

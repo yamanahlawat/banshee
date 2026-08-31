@@ -26,6 +26,8 @@ export function formatWhen(stamp: string, now: Date): string {
 // The day the reader is in, not the day UTC is in.
 export function sameLocalDay(a: Date, b: Date): boolean {
   return (
-    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
   );
 }

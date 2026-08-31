@@ -22,3 +22,5 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macro
 
 [dev-dependencies]
 tempfile = "3"
+# `start_paused`, so a test can prove a 30 s deadline without waiting 30 s.
+tokio = { version = "1", features = ["test-util"] }

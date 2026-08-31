@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, setContext } from 'svelte';
+  import { PANEL } from './panel';
 
   // A job takes over the body rather than opening beside it, so the window
   // never has two things competing for the same attention, and so first run
@@ -16,6 +17,10 @@
   // The body this replaced held the control that opened it, so the keyboard
   // has to be brought across or it is left on a node that is gone.
   onMount(() => title.focus());
+
+  // A band that destroys the control the keyboard was on has somewhere to send
+  // it that outlives its own markup.
+  setContext(PANEL, { refocus: () => title.focus() });
 </script>
 
 <!-- The short name lives in the label, not above the statement: a small
@@ -72,7 +77,9 @@
   .title {
     margin: 0;
     max-width: 520px;
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
     font-size: 28px;
     line-height: 1.3;
     letter-spacing: -0.03em;

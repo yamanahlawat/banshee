@@ -28,7 +28,11 @@
   // Returning by Tab lands where you left: the arrows move the stop, and
   // opening a panel moves it to that cell.
   let stop = 0;
-  $: if (active) stop = Math.max(0, values.findIndex((row) => row.label === active));
+  $: if (active)
+    stop = Math.max(
+      0,
+      values.findIndex((row) => row.label === active),
+    );
 
   // A cell is a quarter of 480pt, so a device name is often cut. The whole of
   // it is in the DOM either way, and a screen reader reads it whole, so this
@@ -55,25 +59,25 @@
 
 <footer class="band">
   <div class="cells" role="toolbar" aria-label="Jobs" bind:this={band}>
-  {#each values as row, i (row.label)}
-    <button
-      id={row.id}
-      class="cell"
-      class:on={active === row.label}
-      aria-pressed={active === row.label}
-      tabindex={i === stop ? 0 : -1}
-      on:keydown={onKeydown}
-      on:click={() => {
-        stop = i;
-        open(row.label, row.id);
-      }}
-    >
-      <span class="caps">{row.label}</span>
-      <span class="mono value" class:pending={row.pending} use:clipped={row.value}>
-        {row.value || '—'}
-      </span>
-      {#if row.pending}<span class="sr">{RESTART_SAYS}</span>{/if}
-    </button>
+    {#each values as row, i (row.label)}
+      <button
+        id={row.id}
+        class="cell"
+        class:on={active === row.label}
+        aria-pressed={active === row.label}
+        tabindex={i === stop ? 0 : -1}
+        on:keydown={onKeydown}
+        on:click={() => {
+          stop = i;
+          open(row.label, row.id);
+        }}
+      >
+        <span class="caps">{row.label}</span>
+        <span class="mono value" class:pending={row.pending} use:clipped={row.value}>
+          {row.value || '—'}
+        </span>
+        {#if row.pending}<span class="sr">{RESTART_SAYS}</span>{/if}
+      </button>
     {/each}
   </div>
 </footer>

@@ -103,7 +103,9 @@
   .lede {
     max-width: 520px;
     margin: 0 0 20px;
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
     font-size: 15px;
     line-height: 1.45;
   }
@@ -122,7 +124,9 @@
   }
 
   .name {
-    font-variation-settings: 'wght' 700, 'wdth' 105;
+    font-variation-settings:
+      'wght' 700,
+      'wdth' 105;
     font-size: 15px;
     flex: 1;
     min-width: 0;
@@ -141,7 +145,9 @@
   .elsewhere {
     max-width: 520px;
     margin: 16px 0 0;
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
     font-size: 13px;
     color: var(--dim);
   }

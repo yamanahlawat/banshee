@@ -107,7 +107,15 @@ it('says what Banshee is on a first run, and not afterwards', () => {
 it('draws the download against its own length', () => {
   const { container } = render(Blockers, {
     blockers: [],
-    download: { label: 'Speech model', model: 'ggml.bin', index: 1, count: 4, bytes: 41, total: 100, state: 'downloading' as const },
+    download: {
+      label: 'Speech model',
+      model: 'ggml.bin',
+      index: 1,
+      count: 4,
+      bytes: 41,
+      total: 100,
+      state: 'downloading' as const,
+    },
     restart: () => {},
   });
   expect(container.querySelector('.bar')?.getAttribute('style')).toMatch(/41%/);
@@ -119,7 +127,15 @@ it('draws the download against its own length', () => {
 it('offers no retry while the run that failed a file is still going', () => {
   const { queryByRole, container } = render(Blockers, {
     blockers: [],
-    download: { label: 'Speech model', model: 'ggml.bin', index: 1, count: 4, bytes: 41, total: 100, state: 'failed' as const },
+    download: {
+      label: 'Speech model',
+      model: 'ggml.bin',
+      index: 1,
+      count: 4,
+      bytes: 41,
+      total: 100,
+      state: 'failed' as const,
+    },
     restart: () => {},
   });
   expect(queryByRole('button', { name: 'Try again' })).toBeNull();

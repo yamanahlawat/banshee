@@ -105,10 +105,7 @@
   />
 </Row>
 
-<Row
-  name="While Banshee is talking"
-  pending={$daemon.pending.has('audio.barge_in')}
->
+<Row name="While Banshee is talking" pending={$daemon.pending.has('audio.barge_in')}>
   <Segmented
     label="While Banshee is talking"
     value={bargeIn}
@@ -157,7 +154,9 @@
 
   .refusal {
     margin: -16px 0 26px;
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
     font-size: 13px;
     color: var(--accent);
   }

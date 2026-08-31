@@ -4,10 +4,18 @@ const { history } = vi.hoisted(() => ({ history: vi.fn() }));
 vi.mock('./tauri', () => ({ history }));
 
 import { get } from 'svelte/store';
-import { countNewer, forget, formatCount, newestFirst, readNewest, table } from './history';
+import {
+  countNewer,
+  forget,
+  formatCount,
+  newestFirst,
+  readAll,
+  readNewest,
+  table,
+} from './history';
 
 describe('newestFirst', () => {
-  it('puts the daemon\'s last row first', () => {
+  it("puts the daemon's last row first", () => {
     const rows = [
       { id: 1, text: 'first', timestamp: '2026-08-27T09:00:00Z' },
       { id: 2, text: 'second', timestamp: '2026-08-27T10:00:00Z' },
@@ -67,6 +75,23 @@ describe('readNewest', () => {
     const reading = readNewest();
     forget();
     release([{ id: 2, text: 'second', timestamp: '2026-08-27T10:00:00Z' }]);
+    await reading;
+
+    expect(get(table).rows).toEqual([]);
+    expect(get(table).total).toBe(0);
+  });
+});
+
+describe('readAll', () => {
+  // This path replaces the table wholesale, so a clear landing mid-read would
+  // otherwise put every deleted row back, and the total with it.
+  it('does not put back rows a clear removed while the whole table was reading', async () => {
+    let release: (rows: unknown[]) => void = () => {};
+    history.mockReturnValueOnce(new Promise((resolve) => (release = resolve)));
+
+    const reading = readAll();
+    forget();
+    release([{ id: 1, text: 'gone', timestamp: '2026-08-27T09:00:00Z' }]);
     await reading;
 
     expect(get(table).rows).toEqual([]);

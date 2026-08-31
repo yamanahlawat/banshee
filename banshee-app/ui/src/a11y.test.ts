@@ -97,3 +97,17 @@ it.each(JOBS)('the %s panel carries none', async (job) => {
   expect(await violations(container)).toEqual([]);
 });
 
+// This panel holds the only action in the window that cannot be undone, so the
+// confirm that replaces its controls is checked as well as the panel.
+it('the Record panel carries none, before and during the confirm', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes.')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Done' })).toBeTruthy());
+  expect(await violations(container)).toEqual([]);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Keep it' })).toBeTruthy());
+  expect(await violations(container)).toEqual([]);
+});

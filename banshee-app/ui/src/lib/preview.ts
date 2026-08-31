@@ -45,7 +45,13 @@ const SAID = [
 
 function rows(): HistoryRow[] {
   const state = chosen();
-  if (state === 'empty' || state === 'saving_off' || state === 'first-run' || state === 'downloading') return [];
+  if (
+    state === 'empty' ||
+    state === 'saving_off' ||
+    state === 'first-run' ||
+    state === 'downloading'
+  )
+    return [];
   const start = new Date();
   start.setHours(21, 58, 0, 0);
   // The daemon answers oldest first.
@@ -126,15 +132,18 @@ const ANSWERS: Record<string, () => unknown> = {
           { id: 'cursor', name: 'Cursor', presence: 'found', note: '' },
         ]
       : [
-    { id: 'claude', name: 'Claude Code', presence: 'connected', note: '' },
-    { id: 'codex', name: 'Codex', presence: 'connected', note: '' },
-    { id: 'cursor', name: 'Cursor', presence: 'found', note: '' },
-    { id: 'opencode', name: 'OpenCode', presence: 'connected', note: '' },
-    { id: 'antigravity', name: 'Antigravity', presence: 'absent', note: '' },
-    { id: 'pi', name: 'Pi', presence: 'absent', note: '' },
-  ],
+          { id: 'claude', name: 'Claude Code', presence: 'connected', note: '' },
+          { id: 'codex', name: 'Codex', presence: 'connected', note: '' },
+          { id: 'cursor', name: 'Cursor', presence: 'found', note: '' },
+          { id: 'opencode', name: 'OpenCode', presence: 'connected', note: '' },
+          { id: 'antigravity', name: 'Antigravity', presence: 'absent', note: '' },
+          { id: 'pi', name: 'Pi', presence: 'absent', note: '' },
+        ],
   plan_connect: () => [
-    { path: '~/.cursor/mcp.json', diff: '+  "banshee": {\n+    "command": "banshee-mcp-shim"\n+  }' },
+    {
+      path: '~/.cursor/mcp.json',
+      diff: '+  "banshee": {\n+    "command": "banshee-mcp-shim"\n+  }',
+    },
   ],
 };
 

@@ -5,16 +5,75 @@ import { derived, writable } from 'svelte/store';
 /// daemon older than them.
 export type Remedy = 'download' | 'restart' | 'grant';
 export type FileRole = 'speech' | 'detector' | 'engine' | 'voice';
-export type Blocker = { kind: string; id: string; name: string; role?: FileRole; remedy?: Remedy; consequence: string; fix: string; command?: string };
-export type Status = Record<string, unknown> & { english_only?: boolean; download_megabytes?: number; running: boolean; blockers?: Blocker[]; config?: Record<string, Record<string, unknown>>; pending?: string[]; history_enabled?: boolean };
-export type Live = { recording: boolean; speaking: boolean; armed: boolean; transcribing: boolean; audio_device: string | null; missing_device: string | null };
-export type Daemon = { status: Status | null; live: Live; pending: Set<string>; down: string | null; download: Progress | null };
-export type Progress = { label?: string; model: string; index?: number; count?: number; bytes: number; total: number | null; state: 'downloading' | 'done' | 'failed' };
-export type Word = 'Ready' | 'Recording' | 'Speaking' | 'Listening' | 'Working' | 'Not ready' | 'Downloading' | 'Not running';
+export type Blocker = {
+  kind: string;
+  id: string;
+  name: string;
+  role?: FileRole;
+  remedy?: Remedy;
+  consequence: string;
+  fix: string;
+  command?: string;
+};
+export type Status = Record<string, unknown> & {
+  english_only?: boolean;
+  download_megabytes?: number;
+  running: boolean;
+  blockers?: Blocker[];
+  config?: Record<string, Record<string, unknown>>;
+  pending?: string[];
+  history_enabled?: boolean;
+};
+export type Live = {
+  recording: boolean;
+  speaking: boolean;
+  armed: boolean;
+  transcribing: boolean;
+  audio_device: string | null;
+  missing_device: string | null;
+};
+export type Daemon = {
+  status: Status | null;
+  live: Live;
+  pending: Set<string>;
+  down: string | null;
+  download: Progress | null;
+};
+export type Progress = {
+  label?: string;
+  model: string;
+  index?: number;
+  count?: number;
+  bytes: number;
+  total: number | null;
+  state: 'downloading' | 'done' | 'failed';
+};
+export type Word =
+  | 'Ready'
+  | 'Recording'
+  | 'Speaking'
+  | 'Listening'
+  | 'Working'
+  | 'Not ready'
+  | 'Downloading'
+  | 'Not running';
 export type LampForm = 'idle' | 'recording' | 'speaking' | 'listening' | 'notrunning';
 
 export function empty(): Daemon {
-  return { status: null, live: { recording: false, speaking: false, armed: false, transcribing: false, audio_device: null, missing_device: null }, pending: new Set(), down: null, download: null };
+  return {
+    status: null,
+    live: {
+      recording: false,
+      speaking: false,
+      armed: false,
+      transcribing: false,
+      audio_device: null,
+      missing_device: null,
+    },
+    pending: new Set(),
+    down: null,
+    download: null,
+  };
 }
 const LIVE_KEYS = Object.keys(empty().live);
 
@@ -30,7 +89,13 @@ export function liveFrom(status: Status): Partial<Live> {
 
 export function reduceStatus(state: Daemon, status: Status): Daemon {
   // The daemon reports which keys it applied live; the window does not guess.
-  return { ...state, status, live: { ...state.live, ...liveFrom(status) }, pending: new Set(status.pending ?? []), down: status.running === false ? (state.down ?? 'not running') : null };
+  return {
+    ...state,
+    status,
+    live: { ...state.live, ...liveFrom(status) },
+    pending: new Set(status.pending ?? []),
+    down: status.running === false ? (state.down ?? 'not running') : null,
+  };
 }
 export function reduceLive(state: Daemon, live: Partial<Live>): Daemon {
   return { ...state, live: { ...state.live, ...live }, down: null };
@@ -114,7 +179,9 @@ export function percent(bytes: number, total: number | null): number | null {
 /// A daemon that sends no count has no place to report, so the file names
 /// itself instead.
 function names(progress: Progress): string {
-  return progress.label && progress.count ? `${progress.label}, ${progress.index} of ${progress.count}` : progress.model;
+  return progress.label && progress.count
+    ? `${progress.label}, ${progress.index} of ${progress.count}`
+    : progress.model;
 }
 
 /// One line for the file in flight.

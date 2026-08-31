@@ -87,7 +87,15 @@
 
   function onKeydown(event: KeyboardEvent) {
     if (keysClaimed()) return;
-    if ((event.metaKey || event.ctrlKey) && event.key === 'f') {
+    // `key`, so the shortcut follows the character the way macOS does: `code`
+    // names a physical position, which moves under Dvorak. Lowercased because
+    // Caps Lock reports 'F'; the two modifiers were never part of it.
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === 'f'
+    ) {
       event.preventDefault();
       openJob(null);
       finding = true;
@@ -165,7 +173,7 @@
   $: rows = $table.rows;
   $: needle = query.trim().toLowerCase();
   $: shown = needle ? rows.filter((r) => r.text.toLowerCase().includes(needle)) : rows;
-  $: needle, (limit = PAGE);
+  $: (needle, (limit = PAGE));
   $: visible = shown.slice(0, limit);
   $: older = shown.length - visible.length;
   // The daemon sets `armed` from `ask_user` alone, and sends no question with
@@ -229,7 +237,11 @@
     const said = (value: string) => (live ? value : '');
     const waits = (...keys: string[]) => live && keys.some((key) => $waitsOnARestart.has(key));
     return [
-      { id: 'job-microphone', label: 'Microphone', value: said(microphoneInUse($daemon.live.audio_device)) },
+      {
+        id: 'job-microphone',
+        label: 'Microphone',
+        value: said(microphoneInUse($daemon.live.audio_device)),
+      },
       {
         id: 'job-hotkey',
         label: 'Hotkey',
@@ -242,7 +254,11 @@
         value: said(voiceName),
         pending: waits('tts.voice', 'tts.speed'),
       },
-      { id: 'job-agents', label: 'Agents', value: said(connected > 0 ? `${connected} connected` : 'None yet') },
+      {
+        id: 'job-agents',
+        label: 'Agents',
+        value: said(connected > 0 ? `${connected} connected` : 'None yet'),
+      },
     ];
   })();
 
@@ -324,9 +340,7 @@
           readTheRest().catch(() => {});
         }
       }),
-      listen<Down>('daemon:down', (e) =>
-        daemon.update((s) => ({ ...s, down: e.payload.reason })),
-      ),
+      listen<Down>('daemon:down', (e) => daemon.update((s) => ({ ...s, down: e.payload.reason }))),
       listen('app:reopened', () => readDaemon()),
     ]);
     // The foot needs neither, so it does not queue behind the whole-table read.
@@ -344,13 +358,7 @@
     Skip to the jobs
   </button>
 
-  <Header
-    {word}
-    {form}
-    waiting={live && $waitsOnARestart.size > 0}
-    {restart}
-    {restarting}
-  />
+  <Header {word} {form} waiting={live && $waitsOnARestart.size > 0} {restart} {restarting} />
 
   <div class="body">
     <!-- Outside the panel branch on purpose: a voice that will not play is
@@ -459,7 +467,10 @@
           </div>
         {/if}
       {:else if needle}
-        <Absence label="No match" detail={`Nothing said so far contains \u201c${query.trim()}\u201d.`} />
+        <Absence
+          label="No match"
+          detail={`Nothing said so far contains \u201c${query.trim()}\u201d.`}
+        />
       {:else if !savingHistory}
         <Absence
           label="Nothing is kept"

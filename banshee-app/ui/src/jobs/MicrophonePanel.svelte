@@ -128,11 +128,7 @@
 </script>
 
 <Row name="Input" block pending={$daemon.pending.has('audio.input_device')}>
-  <Picker
-    label="Input device"
-    value={current}
-    change={(next) => write('audio.input_device', next)}
-  >
+  <Picker label="Input device" value={current} change={(next) => write('audio.input_device', next)}>
     <option value={SYSTEM_DEVICE}>{deviceLabel($daemon.live.audio_device)}</option>
     {#each options as name (name)}
       <option value={name}>{name}</option>
@@ -172,12 +168,7 @@
 
 <!-- Beside the preset it depends on: the English-only model rules every other
      language out, and the two read as one decision only if they sit together. -->
-<Row
-  name="Language"
-  block
-  note={languageNote}
-  pending={$waitsOnARestart.has('stt.language')}
->
+<Row name="Language" block note={languageNote} pending={$waitsOnARestart.has('stt.language')}>
   <Picker
     label="Language"
     value={language}

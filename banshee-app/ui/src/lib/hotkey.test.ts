@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { hotkeyFrom, humanize } from './hotkey';
 
-const press = (code: string, held: Partial<{ ctrlKey: boolean; altKey: boolean; metaKey: boolean }> = {}) => ({
+const press = (
+  code: string,
+  held: Partial<{ ctrlKey: boolean; altKey: boolean; metaKey: boolean; shiftKey: boolean }> = {},
+) => ({
   code,
   ctrlKey: false,
   altKey: false,
   metaKey: false,
+  // A browser reports this on the Shift press itself. Without it a Shift press
+  // reaches the name regexes rather than the guard that refuses it.
+  shiftKey: code.startsWith('Shift'),
   ...held,
 });
 
@@ -24,11 +30,15 @@ describe('hotkeyFrom', () => {
   it('refuses an F-key the daemon cannot receive', () => {
     expect(hotkeyFrom(press('F13'))).toBeNull();
   });
-  it('builds a chord in the daemon\'s order', () => {
+  it("builds a chord in the daemon's order", () => {
     expect(hotkeyFrom(press('KeyR', { ctrlKey: true, altKey: true }))).toBe('Ctrl+Alt+R');
   });
   it('refuses Shift, which the daemon reserves', () => {
     expect(hotkeyFrom(press('ShiftLeft'))).toBeNull();
+    // The rule is the chord, not the lone key, and a lone modifier alone would
+    // pass here on its name rather than on the guard.
+    expect(hotkeyFrom(press('KeyR', { shiftKey: true }))).toBeNull();
+    expect(hotkeyFrom(press('F6', { shiftKey: true }))).toBeNull();
   });
   it('refuses a key it cannot name', () => {
     expect(hotkeyFrom(press('CapsLock'))).toBeNull();
@@ -36,7 +46,7 @@ describe('hotkeyFrom', () => {
 });
 
 describe('humanize', () => {
-  it('spaces the daemon\'s run-together name', () => {
+  it("spaces the daemon's run-together name", () => {
     expect(humanize('RightOption')).toBe('Right Option');
   });
   it('spaces every part of a chord', () => {

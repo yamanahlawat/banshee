@@ -78,19 +78,26 @@ pub async fn ensure_connected(slot: &mut Option<Client>, path: &Path) -> Result<
     Ok(())
 }
 
-/// Ensures `$client` holds a connection, runs `$body`, and on a dead
-/// connection reconnects once and runs `$body` again. Any other error,
-/// success included, returns from its try untouched. A generic function
-/// here hits a known rustc limitation with `AsyncFn` closures that borrow
-/// their arguments, so this is a macro.
+/// Ensures `$client` holds a connection, runs `$body`, and drops the
+/// connection on any transport failure. Every one of them leaves the framing
+/// unknown: an EOF, a read that failed mid-line, and a reply deadline that
+/// cancelled a read part way through it. Only the ones that never reached the
+/// daemon are then sent again. A generic function here hits a known rustc
+/// limitation with `AsyncFn` closures that borrow their arguments, so this is
+/// a macro.
 macro_rules! retrying {
     ($daemon:expr, $client:expr, $body:expr) => {{
         let path = $daemon.path_or_error()?;
         ensure_connected(&mut $client, path).await?;
         match $body {
-            Err(error) if is_safe_to_retry(&error) => {
-                force_reconnect(&mut $client, path).await?;
-                $body
+            Err(error) if error.transport => {
+                *$client = None;
+                if is_safe_to_retry(&error) {
+                    ensure_connected(&mut $client, path).await?;
+                    $body
+                } else {
+                    Err(error)
+                }
             }
             other => other,
         }

@@ -5,17 +5,10 @@
   export let value: string;
   export let change: (next: string) => void;
   export let disabled = false;
-
 </script>
 
 <span class="picker">
-  <!-- svelte-ignore a11y_no_onchange -->
-  <select
-    aria-label={label}
-    {value}
-    {disabled}
-    on:change={(e) => change(e.currentTarget.value)}
-  >
+  <select aria-label={label} {value} {disabled} on:change={(e) => change(e.currentTarget.value)}>
     <slot />
   </select>
   <svg width="11" height="7" viewBox="0 0 11 7" aria-hidden="true" focusable="false">
@@ -51,7 +44,9 @@
     -webkit-appearance: none;
     flex: 1;
     min-width: 0;
-    font-variation-settings: 'wght' 500, 'wdth' 100;
+    font-variation-settings:
+      'wght' 500,
+      'wdth' 100;
     font-size: 15px;
     color: var(--ink);
     background: transparent;

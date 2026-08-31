@@ -10,7 +10,11 @@
   $: pending = $waitsOnARestart.has('daemon.save_history');
 </script>
 
-<button class="caps btn-underline" class:pending on:click={() => write('daemon.save_history', !saving)}>
+<button
+  class="caps btn-underline"
+  class:pending
+  on:click={() => write('daemon.save_history', !saving)}
+>
   {saving ? 'Stop saving' : 'Start saving'}
   {#if pending}<span class="sr">{RESTART_SAYS}</span>{/if}
 </button>

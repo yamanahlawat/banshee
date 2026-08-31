@@ -15,7 +15,9 @@
      genuinely on its way here, so this is a place kept rather than a presence
      invented. -->
 <article class="turn">
-  <span class="mono time" aria-hidden="true">{time}</span>
+  <!-- Read, not hidden. A turn hides its own clock because its `sr` line
+       already says the time; this row has no such line. -->
+  <span class="mono time">{time}</span>
   <p class="text">{SAYS[mode]}</p>
 </article>
 
@@ -25,7 +27,9 @@
   .text {
     margin: 0;
     max-width: 520px;
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
     font-size: 15px;
     line-height: 1.45;
     color: var(--dim);

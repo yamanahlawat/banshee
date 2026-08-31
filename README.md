@@ -435,8 +435,10 @@ For `voice`, any file in the
 works, e.g. `af_bella`, `am_michael`, or `bf_emma` (the prefix is
 accent/gender: `a`merican/`b`ritish, `f`emale/`m`ale). After changing the
 `preset` or `voice`, run `banshee setup` to fetch the new file; the daemon
-starts using it as the download finishes, with no restart. The window's Voice
-panel lists every voice Banshee can name and fetches the one you pick.
+starts using it as the download finishes, with no restart. The exception is a
+daemon that started with no models at all: it has no pipeline to change, so the
+first setup on a new machine still ends with a restart. The window's Voice panel
+lists every voice Banshee can name and fetches the one you pick.
 
 ## Troubleshooting
 

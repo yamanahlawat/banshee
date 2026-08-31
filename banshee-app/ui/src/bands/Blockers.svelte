@@ -35,7 +35,6 @@
   /// real.
   let asked: Record<string, boolean> = {};
 
-
   $: groups = fixGroups(blockers);
   // What a reader can actually see, with its remedy resolved once. A group a
   // running download settles is not drawn, and the download box is, so neither
@@ -106,7 +105,15 @@
           chooses: false,
         };
       default:
-        return { title: first.name, label: null, pane: '', confirmsWithRestart: false, run: null, settledByADownload: false, chooses: false };
+        return {
+          title: first.name,
+          label: null,
+          pane: '',
+          confirmsWithRestart: false,
+          run: null,
+          settledByADownload: false,
+          chooses: false,
+        };
     }
   }
 
@@ -130,8 +137,9 @@
        screen to dismiss: the window states what is true, and this stops being
        true once the first thing is said. -->
   <p class="opening">
-    Banshee types what you say into whatever app you are using, and nothing you say leaves
-    this machine. It needs {spell(steps)} {steps === 1 ? 'thing' : 'things'} first.
+    Banshee types what you say into whatever app you are using, and nothing you say leaves this
+    machine. It needs {spell(steps)}
+    {steps === 1 ? 'thing' : 'things'} first.
   </p>
 {/if}
 
@@ -178,8 +186,8 @@
           change={(next) => write('stt.preset', next)}
         />
         <p class="size">
-          About {downloadSize(megabytes)} to fetch. Faster models hear less well. You can
-          change this later.
+          About {downloadSize(megabytes)} to fetch. Faster models hear less well. You can change this
+          later.
         </p>
       </div>
     {/if}
@@ -210,7 +218,7 @@
       </div>
     {/if}
     {#if fix.confirmsWithRestart && asked[group[0].id]}
-    <p class="fix">A grant only reaches Banshee if it starts afterwards.</p>
+      <p class="fix">A grant only reaches Banshee if it starts afterwards.</p>
     {/if}
   </section>
 {/each}
@@ -238,7 +246,9 @@
   .size {
     max-width: 520px;
     margin: 8px 0 0;
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
     font-size: 15px;
     line-height: 1.45;
   }
@@ -277,7 +287,9 @@
   .opening {
     max-width: 520px;
     margin: 0 var(--gutter) 22px;
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
     font-size: 15px;
     line-height: 1.45;
   }

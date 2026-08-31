@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+# The jobs build and test. Nothing here writes to the repository.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -25,6 +29,26 @@ jobs:
           mkdir -p ~/.banshee/models
           curl -fsSL -o ~/.banshee/models/silero_vad.onnx https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
       - run: cargo test
+
+  # The window's suite is the only check on the Svelte half, including the
+  # accessibility gate. Ubuntu, because none of it touches the app bundle.
+  window:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: banshee-app/ui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: banshee-app/ui/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run check
+      - run: npm test
 
   linux:
     runs-on: ubuntu-latest

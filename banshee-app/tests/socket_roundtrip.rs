@@ -1,6 +1,6 @@
 mod common;
 
-use banshee_app::socket::{Client, backoff};
+use banshee_app::socket::{Client, NO_REPLY, backoff};
 use banshee_common::BANSHEE_STATUS;
 use common::recording_daemon;
 
@@ -32,4 +32,38 @@ fn backoff_doubles_from_a_quarter_second_and_caps_at_five() {
     assert_eq!(backoff(10).as_millis(), 5000);
     assert_eq!(backoff(63).as_millis(), 5000);
     assert_eq!(backoff(u32::MAX).as_millis(), 5000);
+}
+
+/// Every window command takes the same client lock before it calls, so one call
+/// that never gets its reply stops the status, the history and every setting.
+// Paused time, so the 30 s deadline is proved without spending 30 s here.
+#[tokio::test(start_paused = true)]
+async fn a_reply_that_never_arrives_ends_the_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("banshee.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let (stream, _) = listener.accept().unwrap();
+        // Reads the request, writes nothing, and ends when the client drops.
+        for _ in std::io::BufReader::new(stream).lines() {}
+    });
+
+    let mut client = Client::connect(&path).await.unwrap();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client.call(BANSHEE_STATUS, serde_json::json!({})),
+    )
+    .await
+    .expect("the call has to end on its own, not on this test's deadline")
+    .expect_err("no reply arrived, so this cannot be a result");
+
+    // The message, because `SOCKET_CLOSED` carries the same two flags: without
+    // it a server thread that died on accept would read as a deadline.
+    assert_eq!(error.message, NO_REPLY);
+    assert!(error.transport, "a dead wait is a transport failure");
+    assert!(
+        error.sent,
+        "the request went out, so it may already have run"
+    );
 }

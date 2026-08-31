@@ -111,18 +111,24 @@
   }
 
   .name {
-    font-variation-settings: 'wght' 600, 'wdth' 100;
+    font-variation-settings:
+      'wght' 600,
+      'wdth' 100;
     font-size: 15px;
     width: 58px;
     flex: none;
   }
 
   .on .name {
-    font-variation-settings: 'wght' 800, 'wdth' 105;
+    font-variation-settings:
+      'wght' 800,
+      'wdth' 105;
   }
 
   .desc {
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
     font-size: 13px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -131,7 +137,9 @@
 
   .empty {
     margin: 0;
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
     font-size: 13px;
   }
 </style>

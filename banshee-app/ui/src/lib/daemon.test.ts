@@ -13,7 +13,6 @@ import {
   empty,
   endsTheRun,
   fixGroups,
-  fixProse,
   lampForm,
   liveFrom,
   markPending,
@@ -97,8 +96,20 @@ describe('the status reply carries the live flags', () => {
 });
 
 describe('the fix groups', () => {
-  const model = (id: string) => ({ kind: 'model', id, name: id, consequence: 'c', fix: 'run: banshee setup' });
-  const grant = (id: string) => ({ kind: 'permission', id, name: id, consequence: 'c', fix: 'grant it' });
+  const model = (id: string) => ({
+    kind: 'model',
+    id,
+    name: id,
+    consequence: 'c',
+    fix: 'run: banshee setup',
+  });
+  const grant = (id: string) => ({
+    kind: 'permission',
+    id,
+    name: id,
+    consequence: 'c',
+    fix: 'grant it',
+  });
   it('puts every missing model under the one row that downloads them all', () => {
     const groups = fixGroups([model('a.bin'), model('b.onnx')]);
     expect(groups.length).toBe(1);
@@ -108,8 +119,6 @@ describe('the fix groups', () => {
     expect(fixGroups([grant('accessibility'), grant('input_monitoring')]).length).toBe(2);
   });
 });
-
-
 
 // The cases `microphone_label` covers, so the two cannot drift apart.
 describe('microphoneInUse', () => {
@@ -143,18 +152,32 @@ describe('shownFloat', () => {
 });
 
 it('says which file is in flight and how far it has come', () => {
-  expect(downloadLine({ label: 'Speech model', model: 'ggml-x.bin', index: 1, count: 4, bytes: 40, total: 100, state: 'downloading' })).toBe('Speech model, 1 of 4 · 40%');
+  expect(
+    downloadLine({
+      label: 'Speech model',
+      model: 'ggml-x.bin',
+      index: 1,
+      count: 4,
+      bytes: 40,
+      total: 100,
+      state: 'downloading',
+    }),
+  ).toBe('Speech model, 1 of 4 · 40%');
 });
 
 // A daemon older than the label and count fields sends neither, and a run has
 // at least one file, so a zero count has no place to report.
 it('falls back to the filename when the daemon reports no place', () => {
-  expect(downloadLine({ model: 'silero_vad.onnx', bytes: 50, total: 200, state: 'downloading' })).toBe('silero_vad.onnx · 25%');
+  expect(
+    downloadLine({ model: 'silero_vad.onnx', bytes: 50, total: 200, state: 'downloading' }),
+  ).toBe('silero_vad.onnx · 25%');
 });
 
 // No Content-Length means no bar to draw, so it counts what has arrived.
 it('counts megabytes when the server sent no length', () => {
-  expect(downloadLine({ model: 'kokoro.onnx', bytes: 5 * 1_048_576, total: null, state: 'downloading' })).toBe('kokoro.onnx · 5 MB');
+  expect(
+    downloadLine({ model: 'kokoro.onnx', bytes: 5 * 1_048_576, total: null, state: 'downloading' }),
+  ).toBe('kokoro.onnx · 5 MB');
 });
 
 it('never reports past a hundred percent', () => {
@@ -184,7 +207,15 @@ it('ends the run on any terminal report when the daemon sends no count', () => {
 // failed or the person retries blind.
 it('says when a file failed rather than showing its last percentage', () => {
   expect(
-    downloadLine({ label: 'Voice detection', model: 'silero_vad.onnx', index: 2, count: 4, bytes: 0, total: null, state: 'failed' }),
+    downloadLine({
+      label: 'Voice detection',
+      model: 'silero_vad.onnx',
+      index: 2,
+      count: 4,
+      bytes: 0,
+      total: null,
+      state: 'failed',
+    }),
   ).toBe('Voice detection, 2 of 4 · failed');
 });
 
@@ -192,7 +223,14 @@ it('says when a file failed rather than showing its last percentage', () => {
 // given, so an 862 MB run would speak about eight hundred times. What is said
 // aloud steps in quarters and holds the same words between two steps.
 it('says a download aloud in quarters, and the same words in between', () => {
-  const tick = { label: 'Speech model', model: 'ggml-x.bin', index: 1, count: 4, total: 100, state: 'downloading' as const };
+  const tick = {
+    label: 'Speech model',
+    model: 'ggml-x.bin',
+    index: 1,
+    count: 4,
+    total: 100,
+    state: 'downloading' as const,
+  };
   expect(spokenProgress({ ...tick, bytes: 26 })).toBe(spokenProgress({ ...tick, bytes: 49 }));
   expect(spokenProgress({ ...tick, bytes: 26 })).not.toBe(spokenProgress({ ...tick, bytes: 51 }));
   expect(spokenProgress({ ...tick, bytes: 51 })).toBe('Speech model, 1 of 4 · 50%');
@@ -201,7 +239,9 @@ it('says a download aloud in quarters, and the same words in between', () => {
 // A failure is the one report a person has to hear when it happens, not at the
 // next quarter.
 it('says a failed file aloud whatever the percentage', () => {
-  expect(spokenProgress({ model: 'silero_vad.onnx', bytes: 3, total: 100, state: 'failed' })).toBe('silero_vad.onnx · failed');
+  expect(spokenProgress({ model: 'silero_vad.onnx', bytes: 3, total: 100, state: 'failed' })).toBe(
+    'silero_vad.onnx · failed',
+  );
 });
 
 // With no length to measure against there is no progress to say, so the file

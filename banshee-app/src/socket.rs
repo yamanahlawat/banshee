@@ -8,6 +8,18 @@ use tokio::net::UnixStream;
 /// itself writes, so a caller can tell a dead socket from a real refusal.
 pub const SOCKET_CLOSED: &str = "the daemon closed the socket";
 
+/// What a deadline reached with no answer reads as. Distinct from
+/// `SOCKET_CLOSED`: both are transport failures, and only the message
+/// separates a peer that went away from one that is still there and silent.
+pub const NO_REPLY: &str = "the daemon did not answer";
+
+/// The window's slowest call is `preview_voice`, and the daemon answers that
+/// with an utterance id rather than waiting on playback. So this covers daemon
+/// work only, and is short enough that a wedged daemon does not hold every
+/// command for a minute. `ask_user`, which the daemon bounds at 120 s, is not
+/// a call the window makes.
+const REPLY_DEADLINE: Duration = Duration::from_secs(30);
+
 #[derive(Debug)]
 pub struct RpcError {
     pub code: i32,
@@ -58,6 +70,20 @@ impl Client {
             .write_all(line.as_bytes())
             .await
             .map_err(unsent)?;
+        // Around the whole read, not around each line: a peer that keeps
+        // sending lines that answer some other call would reset a per-line
+        // deadline for ever.
+        tokio::time::timeout(REPLY_DEADLINE, self.read_reply(&request.id))
+            .await
+            .unwrap_or_else(|_| Err(io_error(NO_REPLY)))
+    }
+
+    /// Reads until the reply to `id` arrives. Cancelling this leaves the bytes
+    /// it consumed nowhere, so its caller must not use the connection again.
+    async fn read_reply(
+        &mut self,
+        id: &Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, RpcError> {
         loop {
             let mut reply = String::new();
             let read = self.reader.read_line(&mut reply).await.map_err(io_error)?;
@@ -74,7 +100,7 @@ impl Client {
             if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&reply) {
                 // A reply left behind by an abandoned call is not this call's
                 // answer, whatever it holds. Read past it.
-                if !answers(&response, &request.id) {
+                if !answers(&response, id) {
                     continue;
                 }
                 match response {

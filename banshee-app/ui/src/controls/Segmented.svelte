@@ -15,14 +15,27 @@
   // that will not answer.
   // A daemon value these options do not hold leaves no match, and every cell at
   // -1 puts the group out of the keyboard's reach.
-  $: at = options.findIndex((option) => option.value === value);
-  $: stop = at === -1 ? 0 : at;
+  // A daemon round trip is not instant, so the handlers write this directly and
+  // the next arrow steps from where the last one left. The statement re-runs
+  // only when `value` or `options` moves, so the daemon's answer takes it back
+  // whatever it says. `Math.max`, because a value these options do not hold
+  // leaves -1, and that puts the group out of the keyboard's reach.
+  let stop = 0;
+  $: stop = Math.max(
+    0,
+    options.findIndex((option) => option.value === value),
+  );
+
+  function pick(to: number) {
+    stop = to;
+    change(options[to].value);
+  }
 
   function onKeydown(event: KeyboardEvent) {
-    const to = arrowStep(event.key, at, options.length);
+    const to = arrowStep(event.key, stop, options.length);
     if (to === null) return;
     event.preventDefault();
-    change(options[to].value);
+    pick(to);
     // The write is the daemon's round trip, and the focus is not: it moves now
     // or the next Tab leaves from a cell nobody is on.
     (group.children[to] as HTMLElement).focus();
@@ -37,7 +50,7 @@
       role="radio"
       aria-checked={option.value === value}
       tabindex={i === stop ? 0 : -1}
-      on:click={() => change(option.value)}
+      on:click={() => pick(i)}
       on:keydown={onKeydown}
     >
       {option.label}

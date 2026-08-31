@@ -559,9 +559,11 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_CLEAR_HISTORY => {
             match daemon_state.with_history(crate::history::TranscriptionHistory::clear) {
                 Some(Ok(())) => JsonRpcResponse::success(request.id, serde_json::json!({})),
+                // Not -32003: that code names history being off, and the
+                // listing path already answers -32603 for the same failure.
                 Some(Err(e)) => JsonRpcResponse::error(
                     request.id,
-                    -32003,
+                    -32603,
                     format!("Failed to clear history: {e}"),
                 ),
                 None => JsonRpcResponse::error(request.id, -32003, "History is not enabled."),
@@ -743,6 +745,28 @@ mod tests {
             };
             assert_eq!(error.code, -32602);
             assert!(error.message.contains("disconnect"), "{}", error.message);
+        }
+    }
+
+    /// `-32003` names one cause: history is off. NOT COVERED: the database
+    /// failure beside it, which needs a database that refuses a clear, and the
+    /// harness cannot build one.
+    #[tokio::test]
+    async fn only_history_being_off_answers_its_own_code() {
+        let state = test_state(std::sync::mpsc::channel().0);
+
+        for method in [BANSHEE_HISTORY, BANSHEE_CLEAR_HISTORY] {
+            let request = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: method.to_string(),
+                params: Some(serde_json::json!({})),
+                id: Some(serde_json::json!(1)),
+            };
+            let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
+                panic!("{method} must refuse when nothing is kept");
+            };
+            assert_eq!(error.code, -32003, "{method}");
+            assert!(error.message.contains("not enabled"), "{}", error.message);
         }
     }
 

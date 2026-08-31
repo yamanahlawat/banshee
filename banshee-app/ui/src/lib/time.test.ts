@@ -25,7 +25,9 @@ describe('sameLocalDay', () => {
     expect(sameLocalDay(new Date(noon.getTime() - 3_600_000), noon)).toBe(true);
   });
   it('separates two different days', () => {
-    expect(sameLocalDay(toDate('2026-08-26T09:00:00Z'), toDate('2026-08-27T09:00:00Z'))).toBe(false);
+    expect(sameLocalDay(toDate('2026-08-26T09:00:00Z'), toDate('2026-08-27T09:00:00Z'))).toBe(
+      false,
+    );
   });
 });
 
@@ -34,7 +36,7 @@ describe('formatWhen', () => {
   const at = (y: number, m: number, d: number, h: number, min: number) =>
     new Date(y, m, d, h, min).toISOString();
 
-  it('gives the clock alone for a row from the reader\'s own day', () => {
+  it("gives the clock alone for a row from the reader's own day", () => {
     expect(formatWhen(at(2026, 7, 29, 0, 1), now)).toBe('00:01');
   });
   it('names yesterday, so 23:58 is not read as a minute ago', () => {

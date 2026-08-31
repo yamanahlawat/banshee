@@ -41,8 +41,9 @@ it('moves the choice and the focus with the arrow keys, and wraps at the end', a
   // or the next Tab leaves from a cell nobody is on.
   expect(document.activeElement).toBe(screen.getByRole('radio', { name: 'Fast' }));
 
-  await fireEvent.keyDown(screen.getByRole('radio', { name: 'Quality' }), { key: 'ArrowLeft' });
-  expect(chosen).toBe('balanced');
+  // Left from the first cell wraps to the last, and steps from the focus.
+  await fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowLeft' });
+  expect(chosen).toBe('quality');
 });
 
 // Three tab stops make the group a corridor. One makes it a control.
@@ -54,4 +55,35 @@ it('puts the only tab stop on the chosen option', () => {
     change: () => {},
   });
   expect(screen.getAllByRole('radio').map((r) => (r as HTMLElement).tabIndex)).toEqual([-1, 0, -1]);
+});
+
+it('steps again from where the last arrow left it, before the value catches up', async () => {
+  const chosen: string[] = [];
+  render(Segmented, {
+    label: 'Transcription',
+    value: 'fast',
+    options: OPTIONS,
+    change: (next: string) => chosen.push(next),
+  });
+  await fireEvent.keyDown(screen.getByRole('radio', { name: 'Fast' }), { key: 'ArrowRight' });
+  // The second press lands on whatever the first one focused, as a real one does.
+  await fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowRight' });
+  expect(chosen).toEqual(['balanced', 'quality']);
+});
+
+// A click moves the focus natively, so a step that ignored it would leave the
+// tab stop on the cell the arrows last named and refuse to wrap from the end.
+it('steps from the cell a click chose, not the one the arrows left', async () => {
+  const chosen: string[] = [];
+  render(Segmented, {
+    label: 'Transcription',
+    value: 'fast',
+    options: OPTIONS,
+    change: (next: string) => chosen.push(next),
+  });
+  await fireEvent.keyDown(screen.getByRole('radio', { name: 'Fast' }), { key: 'ArrowRight' });
+  await fireEvent.click(screen.getByRole('radio', { name: 'Quality' }));
+
+  await fireEvent.keyDown(screen.getByRole('radio', { name: 'Quality' }), { key: 'ArrowRight' });
+  expect(chosen).toEqual(['balanced', 'quality', 'fast']);
 });

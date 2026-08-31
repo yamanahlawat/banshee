@@ -21,7 +21,9 @@
     {#if id}
       <button class="copy caps" on:click={() => copy(text, id)}>
         {$copied === id ? 'Copied' : 'Copy'}
-        <span class="sr">{speaker === 'agent' ? 'what Banshee said' : 'what you said'} at {time}</span>
+        <span class="sr"
+          >{speaker === 'agent' ? 'what Banshee said' : 'what you said'} at {time}</span
+        >
       </button>
     {/if}
     <p class="text">
@@ -46,14 +48,18 @@
   }
 
   [data-speaker='user'] .text {
-    font-variation-settings: 'wght' var(--cut-user-weight), 'wdth' var(--cut-user-width);
+    font-variation-settings:
+      'wght' var(--cut-user-weight),
+      'wdth' var(--cut-user-width);
     font-size: 15px;
     line-height: 1.4;
     letter-spacing: -0.01em;
   }
 
   [data-speaker='agent'] .text {
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
     font-size: 15px;
     line-height: 1.45;
     letter-spacing: 0;

@@ -39,15 +39,27 @@ export const table: Writable<Table> = writable({ rows: [], total: 0, loaded: fal
 // finishes, so they share one read of the table.
 let reading: Promise<void> | null = null;
 
+// Moved by every clear, so a read that began before one can tell its answer
+// describes a table that no longer exists.
+let cleared = 0;
+
 export function readAll(): Promise<void> {
-  reading ??= readWholeTable().finally(() => {
-    reading = null;
-  });
+  if (reading === null) {
+    // Only if it is still the current read: `forget` may have dropped it and a
+    // later caller claimed the slot, and clearing that would send a third
+    // caller down its own round trip.
+    const mine: Promise<void> = readWholeTable().finally(() => {
+      if (reading === mine) reading = null;
+    });
+    reading = mine;
+  }
   return reading;
 }
 
 async function readWholeTable(): Promise<void> {
+  const was = cleared;
   const all = await history();
+  if (cleared !== was) return;
   table.update((held) => ({ ...held, rows: newestFirst(all), total: all.length, loaded: true }));
 }
 
@@ -74,6 +86,10 @@ export async function readNewest(): Promise<void> {
 // Empties the table without asking the daemon: `Clear all` has already emptied
 // its side, and history switched off keeps nothing to read.
 export function forget(): void {
+  cleared += 1;
+  // The read in flight will apply nothing, so a caller that asks after this
+  // must get its own rather than be handed the one already emptied.
+  reading = null;
   table.update((held) => ({ ...held, rows: [], total: 0, loaded: true }));
 }
 
