@@ -25,20 +25,23 @@
 </script>
 
 <div class="record">
-  <div class="actions">
-    {#if confirming}
-      <!-- Keeping is the primary and reads first. The destructive control held
-           both, and neither of them named how much was about to go. -->
-      <span class="warn">Delete all {formatCount(total)}? This cannot be undone.</span>
+  {#if confirming}
+    <!-- On one line with the buttons this wraps at 480 and drops the
+         destructive control alone at the gutter, which is the strongest
+         reading position in the panel. -->
+    <p class="warn">Delete all {formatCount(total)}? This cannot be undone.</p>
+    <div class="actions">
       <button class="btn" on:click={() => (confirming = false)}>Keep it</button>
       <button class="btn btn-ghost" on:click={clear}>Delete everything</button>
-    {:else}
+    </div>
+  {:else}
+    <div class="actions">
       <SaveSwitch {saving} />
       {#if total > 0}
         <button class="btn btn-ghost" on:click={() => (confirming = true)}>Clear</button>
       {/if}
-    {/if}
-  </div>
+    </div>
+  {/if}
 
   <p class="note">It lives in a file only you can read. Nothing is sent anywhere.</p>
 
@@ -60,6 +63,8 @@
   }
 
   .warn {
+    max-width: 520px;
+    margin: 0 0 12px;
     font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
     font-size: 13px;
     color: var(--accent);
