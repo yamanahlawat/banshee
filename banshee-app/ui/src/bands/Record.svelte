@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { forget, table } from '../lib/history';
+  import { forget, formatCount, table } from '../lib/history';
   import { clearHistory } from '../lib/tauri';
   import { announce } from '../lib/copy';
   import { daemon } from '../lib/daemon';
@@ -25,16 +25,13 @@
 </script>
 
 <div class="record">
-  <p class="lede">
-    Banshee keeps what you dictate on this machine, in a file only you can read. Nothing is
-    sent anywhere.
-  </p>
-
   <div class="actions">
     {#if confirming}
-      <span class="warn">This cannot be undone.</span>
-      <button class="btn" on:click={clear}>Delete everything</button>
-      <button class="btn btn-ghost" on:click={() => (confirming = false)}>Keep it</button>
+      <!-- Keeping is the primary and reads first. The destructive control held
+           both, and neither of them named how much was about to go. -->
+      <span class="warn">Delete all {formatCount(total)}? This cannot be undone.</span>
+      <button class="btn" on:click={() => (confirming = false)}>Keep it</button>
+      <button class="btn btn-ghost" on:click={clear}>Delete everything</button>
     {:else}
       <SaveSwitch {saving} />
       {#if total > 0}
@@ -42,6 +39,8 @@
       {/if}
     {/if}
   </div>
+
+  <p class="note">It lives in a file only you can read. Nothing is sent anywhere.</p>
 
   {#if !saving}
     <p class="note">
@@ -52,14 +51,6 @@
 </div>
 
 <style>
-  .lede {
-    max-width: 520px;
-    margin: 0;
-    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
-    font-size: 15px;
-    line-height: 1.45;
-  }
-
   .actions {
     display: flex;
     flex-wrap: wrap;

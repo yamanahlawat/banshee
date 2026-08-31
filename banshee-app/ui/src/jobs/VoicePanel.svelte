@@ -3,8 +3,7 @@
   import { write } from '../lib/settings';
   import { downloadModels, previewVoice, type Voice, type Voices } from '../lib/tauri';
   import { announce } from '../lib/copy';
-  import Field from '../controls/Field.svelte';
-  import Segmented from '../controls/Segmented.svelte';
+  import Row from '../controls/Row.svelte';
 
   export let voices: Voices = { voices: [], current: null };
 
@@ -12,7 +11,6 @@
   $: speed = shownFloat(Number(tts.speed ?? 1));
   // The config leads, so the mark moves to the voice a write just chose.
   $: current = String(tts.voice ?? voices.current ?? '');
-  $: fallback = String(tts.fallback ?? 'system');
 
   // The daemon names every voice it can describe, and says which are here. A
   // voice that is not costs 510 KB, and the daemon applies it once the file
@@ -25,7 +23,7 @@
   }
 </script>
 
-<Field name="Voice" pending={$waitsOnARestart.has('tts.voice')}>
+<Row name="Voice" block pending={$waitsOnARestart.has('tts.voice')}>
   <div class="voices">
     {#each voices.voices as voice (voice.id)}
       {@const on = voice.id === current}
@@ -54,12 +52,12 @@
         </button>
       </div>
     {:else}
-      <p class="empty">The daemon named no voices.</p>
+      <p class="empty">No voices yet. They arrive with Banshee's models.</p>
     {/each}
   </div>
-</Field>
+</Row>
 
-<Field name="Speaking rate" pending={$waitsOnARestart.has('tts.speed')}>
+<Row name="Speaking rate" pending={$waitsOnARestart.has('tts.speed')}>
   <input
     class="range"
     type="range"
@@ -71,19 +69,10 @@
     on:change={(e) => write('tts.speed', Number(e.currentTarget.value))}
   />
   <span class="readout">{speed}&times;</span>
-</Field>
+</Row>
 
-<Field name="If a voice is missing" pending={$daemon.pending.has('tts.fallback')}>
-  <Segmented
-    label="If a voice is missing"
-    value={fallback}
-    options={[
-      { value: 'system', label: 'System voice' },
-      { value: 'none', label: 'Silence' },
-    ]}
-    change={(next) => write('tts.fallback', next)}
-  />
-</Field>
+<!-- `tts.fallback` is deliberately absent: it serves no job this audience has.
+     It stays in config.toml and the CLI. -->
 
 <style>
   /* The dash this world uses for a thing that is not here yet. Choosing the

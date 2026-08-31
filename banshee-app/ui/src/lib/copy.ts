@@ -5,6 +5,15 @@ export const RESTART_SAYS = '— set, and in effect when Banshee restarts';
 import { writable } from 'svelte/store';
 import { copyText } from './tauri';
 
+/// A sentence should not open on a digit, and a count mid-sentence reads better
+/// as a word. Past what this names, the digit is clearer than the word anyway.
+const WORDS = ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+
+export function spell(n: number, capital = false): string {
+  const word = WORDS[n] ?? String(n);
+  return capital ? word.charAt(0).toUpperCase() + word.slice(1) : word;
+}
+
 export const copied = writable<string | null>(null);
 export const announcement = writable('');
 

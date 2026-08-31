@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, expect, it, vi } from 'vitest';
 import ready from './fixtures/ready.json';
 import permissions from './fixtures/permissions.json';
@@ -38,6 +38,12 @@ import { daemon, empty, reduceStatus } from './lib/daemon';
 import { forgetCopy } from './lib/copy';
 import { forgetKeys } from './lib/keys';
 import App from './App.svelte';
+
+// A panel's heading is its lead statement now, and that sentence moves with
+// the daemon. The section keeps the short name, so tests ask for that and read
+// the heading inside it.
+const panel = (name: string) => screen.getByRole('region', { name });
+const panelHeading = (name: string) => within(panel(name)).getByRole('heading');
 
 // The daemon's pushes, captured so a test can deliver one.
 const pushes = new Map<string, (event: { payload: unknown }) => void>();
@@ -129,7 +135,7 @@ it('asks before it deletes the record', async () => {
   // Reachable from the head of the list, because the foot of a long list is not.
   await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
   await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
-  expect(screen.getByText('This cannot be undone.')).toBeTruthy();
+  expect(screen.getByText(/This cannot be undone/)).toBeTruthy();
 });
 
 it('renders a page of turns at a time rather than the whole record', async () => {
@@ -227,7 +233,7 @@ it('asks for a restart in the header, which a panel does not cover', async () =>
 
   // The ledger scrolls away and a job takes the body; the header does neither.
   await fireEvent.click(screen.getByRole('button', { name: /Hotkey/ }));
-  await waitFor(() => expect(screen.getByRole('heading', { name: 'Hotkey' })).toBeTruthy());
+  await waitFor(() => expect(panelHeading('Hotkey')).toBeTruthy());
   expect(screen.getByText('Restart to apply')).toBeTruthy();
 });
 
@@ -414,7 +420,7 @@ it('says which file is downloading and how far it has come', async () => {
   // The two blocking files land before the other two, so the daemon starts
   // asking for a restart while the run is still going. One thing is happening,
   // and the box says which.
-  expect(screen.getByText("Getting Banshee's models")).toBeTruthy();
+  expect(screen.getByText(/Getting Banshee's models/)).toBeTruthy();
   expect(screen.queryByRole('radiogroup', { name: 'Speech model' })).toBeNull();
 
   vi.mocked(status).mockResolvedValue({
@@ -528,7 +534,7 @@ it('offers every voice, and fetches the one that is chosen', async () => {
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: /Voice/ }));
 
-  await waitFor(() => expect(screen.getByRole('heading', { name: 'Voice' })).toBeTruthy());
+  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
   expect(screen.getByText('George')).toBeTruthy();
 
   // Nothing to play until the file is here.
@@ -551,7 +557,7 @@ it('does not fetch a voice that is already here', async () => {
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: /Voice/ }));
-  await waitFor(() => expect(screen.getByRole('heading', { name: 'Voice' })).toBeTruthy());
+  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
 
   await fireEvent.change(screen.getByRole('radio', { name: /Sky/ }));
   await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'af_sky'));
@@ -611,7 +617,7 @@ it('keeps a permission reachable while a download runs', async () => {
   pushes.get('daemon:downloads')?.({
     payload: { model: 'ggml.bin', label: 'Speech model', index: 1, count: 4, bytes: 1, total: 2, state: 'downloading' },
   });
-  await waitFor(() => expect(screen.getByText("Getting Banshee's models")).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(/Getting Banshee's models/)).toBeTruthy());
   expect(screen.getByRole('button', { name: /^Open System Settings for / })).toBeTruthy();
 });
 
@@ -695,7 +701,7 @@ it('reaches what Banshee keeps before anything has been said', async () => {
   await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('button', { name: 'What Banshee keeps' }));
-  await waitFor(() => expect(screen.getByRole('heading', { name: 'Record' })).toBeTruthy());
+  await waitFor(() => expect(panelHeading('What Banshee keeps')).toBeTruthy());
   expect(screen.getByRole('button', { name: /Stop saving/ })).toBeTruthy();
 });
 
@@ -712,7 +718,7 @@ it('does not call an unplugged microphone a restart', async () => {
 
   expect(screen.queryByText('Banshee needs a restart')).toBeNull();
   expect(screen.getByRole('button', { name: 'Restart anyway' })).toBeTruthy();
-  expect(screen.getByText(/connect the microphone/)).toBeTruthy();
+  expect(screen.getByText(/onnect the microphone/)).toBeTruthy();
 });
 
 // `auto` is a value the config takes and the engine reads as detect it, so a
@@ -741,7 +747,8 @@ it('puts the keyboard in a panel when it opens, and back where it came from', as
   opener.focus();
   await fireEvent.click(opener);
 
-  const title = await screen.findByRole('heading', { name: 'Microphone' });
+  await waitFor(() => expect(panel('Microphone')).toBeTruthy());
+  const title = panelHeading('Microphone');
   expect(document.activeElement).toBe(title);
 
   await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
@@ -757,7 +764,7 @@ it('gives the keyboard back to the ledger after the record closes', async () => 
   const opener = screen.getByRole('button', { name: /saved/ });
   opener.focus();
   await fireEvent.click(opener);
-  await screen.findByRole('heading', { name: 'Record' });
+  await waitFor(() => expect(panel('What Banshee keeps')).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: /saved/ })));
@@ -772,7 +779,8 @@ it('gives the keyboard back when Escape closes a panel', async () => {
   const opener = screen.getByRole('button', { name: /^Voice/ });
   opener.focus();
   await fireEvent.click(opener);
-  expect(document.activeElement).toBe(await screen.findByRole('heading', { name: 'Voice' }));
+  await waitFor(() => expect(panel('Voice')).toBeTruthy());
+  expect(document.activeElement).toBe(panelHeading('Voice'));
 
   await fireEvent.keyDown(window, { key: 'Escape' });
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Voice/ })));
@@ -822,4 +830,164 @@ it('lets the hotkey be changed by the key it names', async () => {
   const key = await screen.findByRole('button', { name: /Right Command — change the hotkey/ });
   await fireEvent.click(key);
   await waitFor(() => expect(screen.getByText('Press a key')).toBeTruthy());
+});
+
+// The differentiating moment cannot be the window's quietest pixel.
+it('gives the waiting agent the lead, and names the key that answers it', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  // Armed arrives as a live push mid-session, after the config is known. Set
+  // before mount, the turn draws before the window has been told which key.
+  daemon.update((s) => ({ ...s, live: { ...s.live, armed: true } }));
+  // hotkey_mode is toggle in the ready fixture, so the verb is Tap, not Hold.
+  await waitFor(() => expect(screen.getByText(/Tap Right Command to answer/)).toBeTruthy());
+
+  // Normalized, because the sentence wraps in the source and textContent keeps
+  // the newline that HTML itself collapses.
+  const lead = container.querySelector('.lead')?.textContent?.replace(/\s+/g, ' ');
+  expect(lead).toMatch(/is waiting for your answer/);
+  // The newest thing you said stands down while an agent is blocked on you.
+  expect(lead).not.toMatch(/Yes, open the pull request/);
+});
+
+// Giving an agent a voice is the job nothing else here does. Zero connected
+// agents is the state that has to say so.
+it('offers the agent job on the home screen when none is connected', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(/can speak to you/)).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: /Connect an agent/ }));
+  await waitFor(() => expect(panelHeading('Agents')).toBeTruthy());
+});
+
+// The foot is the only route to every setting, so it cannot sit behind every
+// copy control on the page.
+it('makes the foot one tab stop the arrows move inside', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const cells = [...container.querySelectorAll('footer button')] as HTMLElement[];
+  expect(cells.map((c) => c.tabIndex)).toEqual([0, -1, -1, -1]);
+
+  cells[0].focus();
+  await fireEvent.keyDown(cells[0], { key: 'ArrowRight' });
+  expect(document.activeElement).toBe(cells[1]);
+  // Moving inside a toolbar moves the focus and opens nothing.
+  expect(screen.queryByRole('button', { name: 'Done' })).toBeNull();
+});
+
+// Nobody needs 21 steps of a value the window only ever reads back as one of
+// three words. The control shows the band the current float falls in.
+it('sets sensitivity by band, and writes a float for it', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+
+  const group = await screen.findByRole('radiogroup', { name: 'Sensitivity' });
+  expect(group).toBeTruthy();
+  // ready.json holds 0.5, which is the middle band.
+  expect(screen.getByRole('radio', { name: 'Medium' }).getAttribute('aria-checked')).toBe('true');
+
+  await fireEvent.click(screen.getByRole('radio', { name: 'High' }));
+  await waitFor(() => expect(setSetting).toHaveBeenCalledWith('stt.vad_threshold', 0.85));
+});
+
+// tts.fallback serves no job this audience has, and belongs to the CLI.
+it('does not spend the Voice panel on a key that belongs to the CLI', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /^Voice/ }));
+
+  await waitFor(() => expect(screen.getByRole('radio', { name: /Sky/ })).toBeTruthy());
+  expect(screen.queryByText(/If a voice is missing/i)).toBeNull();
+  expect(screen.queryByRole('radiogroup', { name: /voice is missing/i })).toBeNull();
+});
+
+// Software that is not on this machine has no action, so it earns no row.
+it('collapses agents that are not installed into one line', async () => {
+  vi.mocked(detectAgents).mockResolvedValue([
+    { id: 'claude', name: 'Claude Code', presence: 'connected', note: '' },
+    { id: 'cursor', name: 'Cursor', presence: 'found', note: '' },
+    { id: 'pi', name: 'Pi', presence: 'absent', note: '' },
+    { id: 'antigravity', name: 'Antigravity', presence: 'absent', note: '' },
+  ]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /^Agents/ }));
+
+  await waitFor(() => expect(screen.getByText('Claude Code')).toBeTruthy());
+  expect(screen.getByText(/also works with/)).toBeTruthy();
+  expect(screen.queryByText(/^Not installed$/)).toBeNull();
+});
+
+// Keeping is the primary, and the prompt names how much would go.
+it('makes keeping the record the primary, and names what would be lost', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
+
+  expect(screen.getByText(/Delete all 2\?/)).toBeTruthy();
+  const buttons = screen.getAllByRole('button').map((b) => b.textContent?.trim());
+  expect(buttons.indexOf('Keep it')).toBeLessThan(buttons.indexOf('Delete everything'));
+});
+
+// Abandoning a half-typed word must not also throw the reader out of the panel.
+// The field claims the keyboard for exactly this, and releasing the claim
+// inside the same keydown lets the event reach the window handler unclaimed.
+it('keeps the panel open when Escape abandons a vocabulary word', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'Add a word' }));
+
+  const field = screen.getByRole('textbox', { name: 'New word' });
+  await fireEvent.keyDown(field, { key: 'Escape' });
+
+  expect(screen.queryByRole('region', { name: 'Microphone' })).toBeTruthy();
+});
+
+// The way out of a panel cannot sit behind every control in it.
+it('reaches Done by tabbing forward from the panel heading', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /^Voice/ }));
+  await waitFor(() => expect(panel('Voice')).toBeTruthy());
+
+  const order = [...container.querySelectorAll('.panel button, .panel input, .panel select')];
+  const heading = panelHeading('Voice');
+  const done = screen.getByRole('button', { name: 'Done' });
+  // Focus lands on the heading, so Done has to come after it in the order the
+  // keyboard walks, not before.
+  expect(heading.compareDocumentPosition(done) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(order[0]).toBe(done);
+});
+
+// Tab out and back should return where the arrows left, which is what a roving
+// tab stop is for.
+it('moves the foot tab stop with the arrows', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const cells = [...container.querySelectorAll('footer button')] as HTMLElement[];
+  cells[0].focus();
+  await fireEvent.keyDown(cells[0], { key: 'ArrowRight' });
+  expect(cells.map((c) => c.tabIndex)).toEqual([-1, 0, -1, -1]);
+});
+
+// A hand-edited config, or one written by a newer daemon, holds values these
+// options do not. Every cell at -1 puts the group out of the keyboard's reach.
+it('keeps a tab stop when no option matches the daemon', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: { ...ready.config, audio: { ...ready.config.audio, barge_in: 'something-else' } },
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
+
+  const group = await screen.findByRole('radiogroup', { name: 'While Banshee is talking' });
+  const stops = [...group.querySelectorAll('button')].map((b) => (b as HTMLElement).tabIndex);
+  expect(stops).toContain(0);
 });

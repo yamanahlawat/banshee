@@ -4,17 +4,21 @@
   import { write } from '../lib/settings';
   import { PRESETS } from '../lib/presets';
   import { listDevices, listLanguages, type Devices, type Languages } from '../lib/tauri';
-  import Field from '../controls/Field.svelte';
+  import Row from '../controls/Row.svelte';
   import Picker from '../controls/Picker.svelte';
   import Segmented from '../controls/Segmented.svelte';
   import { claimKeys } from '../lib/keys';
 
-  // The word beside the slider, so the number is never the only reading.
+  // The window only ever reads this float back as one of three words, so three
+  // words are what it offers. Each band writes its own midpoint: derived from
+  // the boundaries, never measured against a room. A measurement replaces these
+  // three numbers.
   const BANDS = [
-    { upTo: 1 / 3, word: 'Low' },
-    { upTo: 2 / 3, word: 'Medium' },
-    { upTo: Infinity, word: 'High' },
+    { upTo: 1 / 3, word: 'Low', writes: 0.15 },
+    { upTo: 2 / 3, word: 'Medium', writes: 0.5 },
+    { upTo: Infinity, word: 'High', writes: 0.85 },
   ];
+  const HEARD = BANDS.map((b) => ({ value: b.word, label: b.word }));
   const QUIET = [1000, 1500, 2500, 4000];
   // Whisper translates in one direction only: any language in, English out.
   const ANSWER = [
@@ -123,7 +127,7 @@
   }
 </script>
 
-<Field name="Input" pending={$daemon.pending.has('audio.input_device')}>
+<Row name="Input" block pending={$daemon.pending.has('audio.input_device')}>
   <Picker
     label="Input device"
     value={current}
@@ -134,23 +138,18 @@
       <option value={name}>{name}</option>
     {/each}
   </Picker>
-</Field>
+</Row>
 
-<Field name="Sensitivity" pending={$daemon.pending.has('stt.vad_threshold')}>
-  <input
-    class="range"
-    type="range"
-    aria-label="Sensitivity"
-    min="0"
-    max="1"
-    step="0.05"
-    value={threshold}
-    on:change={(e) => write('stt.vad_threshold', Number(e.currentTarget.value))}
+<Row name="Sensitivity" pending={$daemon.pending.has('stt.vad_threshold')}>
+  <Segmented
+    label="Sensitivity"
+    value={band}
+    options={HEARD}
+    change={(next) => write('stt.vad_threshold', BANDS.find((b) => b.word === next)?.writes ?? 0.5)}
   />
-  <span class="readout">{band}</span>
-</Field>
+</Row>
 
-<Field name="End of speech" pending={$daemon.pending.has('stt.endpoint_silence_ms')}>
+<Row name="End of speech" block pending={$daemon.pending.has('stt.endpoint_silence_ms')}>
   <Picker
     label="End of speech"
     value={String(silence)}
@@ -160,21 +159,22 @@
       <option value={String(ms)}>After {ms / 1000} seconds of quiet</option>
     {/each}
   </Picker>
-</Field>
+</Row>
 
-<Field name="Transcription" pending={$waitsOnARestart.has('stt.preset')}>
+<Row name="Transcription" pending={$waitsOnARestart.has('stt.preset')}>
   <Segmented
     label="Transcription"
     value={preset}
     options={PRESETS}
     change={(next) => write('stt.preset', next)}
   />
-</Field>
+</Row>
 
 <!-- Beside the preset it depends on: the English-only model rules every other
      language out, and the two read as one decision only if they sit together. -->
-<Field
+<Row
   name="Language"
+  block
   note={languageNote}
   pending={$waitsOnARestart.has('stt.language')}
 >
@@ -192,21 +192,22 @@
       <option value={option.code}>{option.name}</option>
     {/each}
   </Picker>
-</Field>
+</Row>
 
 {#if !englishOnly && language !== 'en'}
-  <Field name="Answer in" pending={$waitsOnARestart.has('stt.translate')}>
+  <Row name="Answer in" pending={$waitsOnARestart.has('stt.translate')}>
     <Segmented
       label="Answer in"
       value={translate ? 'english' : 'spoken'}
       options={ANSWER}
       change={(next) => write('stt.translate', next === 'english')}
     />
-  </Field>
+  </Row>
 {/if}
 
-<Field
+<Row
   name="Vocabulary"
+  block
   note="Words Banshee should expect to hear."
   pending={$daemon.pending.has('stt.vocabulary')}
 >
@@ -232,14 +233,19 @@
         on:blur={(e) => addWord(e.currentTarget.value)}
         on:keydown={(e) => {
           if (e.key === 'Enter') addWord(e.currentTarget.value);
-          if (e.key === 'Escape') stopAdding();
+          if (e.key === 'Escape') {
+            // The window's own Escape closes the panel, and this event still
+            // reaches it: the claim is gone by the time it bubbles.
+            e.stopPropagation();
+            stopAdding();
+          }
         }}
       />
     {:else}
       <button class="btn btn-ghost" on:click={beginAdding}>Add a word</button>
     {/if}
   </div>
-</Field>
+</Row>
 
 <style>
   /* Centred, not stretched. A wrapped flex line sizes its items to the tallest,

@@ -211,3 +211,10 @@ it('names the file once when the server sent no length', () => {
   expect(spokenProgress({ ...tick, bytes: 5 * 1_048_576 })).toBe('kokoro.onnx');
   expect(spokenProgress({ ...tick, bytes: 90 * 1_048_576 })).toBe('kokoro.onnx');
 });
+
+// Listening means an agent has stopped and is waiting for an answer. It shared
+// a silhouette with Ready, which is the state where doing nothing is correct.
+it('gives Listening a form of its own', () => {
+  expect(lampForm('Listening')).toBe('listening');
+  expect(lampForm('Ready')).toBe('idle');
+});

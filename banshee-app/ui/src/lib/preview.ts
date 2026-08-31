@@ -13,6 +13,10 @@ const STATES: Record<string, unknown> = {
   ready,
   permissions,
   'not-running': notRunning,
+  'no-agents': ready,
+  // A real first run: blocked, and nothing ever said.
+  'first-run': permissions,
+  downloading: permissions,
   recording: { ...ready, recording: true },
   speaking: { ...ready, speaking: true },
   armed: { ...ready, recording: true, armed: true },
@@ -40,7 +44,7 @@ const SAID = [
 
 function rows(): HistoryRow[] {
   const state = chosen();
-  if (state === 'empty' || state === 'saving_off') return [];
+  if (state === 'empty' || state === 'saving_off' || state === 'first-run' || state === 'downloading') return [];
   const start = new Date();
   start.setHours(21, 58, 0, 0);
   // The daemon answers oldest first.
@@ -106,7 +110,15 @@ const ANSWERS: Record<string, () => unknown> = {
     ],
     current: 'af_sky',
   }),
-  detect_agents: () => [
+  // The home screen's agent absence needs a state with none connected, or it
+  // cannot be looked at.
+  detect_agents: () =>
+    chosen() === 'no-agents'
+      ? [
+          { id: 'claude', name: 'Claude Code', presence: 'found', note: '' },
+          { id: 'cursor', name: 'Cursor', presence: 'found', note: '' },
+        ]
+      : [
     { id: 'claude', name: 'Claude Code', presence: 'connected', note: '' },
     { id: 'codex', name: 'Codex', presence: 'connected', note: '' },
     { id: 'cursor', name: 'Cursor', presence: 'found', note: '' },
@@ -118,6 +130,30 @@ const ANSWERS: Record<string, () => unknown> = {
     { path: '~/.cursor/mcp.json', diff: '+  "banshee": {\n+    "command": "banshee-mcp-shim"\n+  }' },
   ],
 };
+
+/// The daemon pushes nothing into a browser, so the preview scripts the one
+/// stream that has no other way to be seen. Without this the download bar,
+/// which stands in for the longest wait in the product, is unreviewable.
+export function push(event: string, deliver: (payload: unknown) => void): () => void {
+  if (event !== 'daemon:downloads' || chosen() !== 'downloading') return () => {};
+  const files = [
+    { label: 'Speech model', model: 'ggml-large-v3-turbo.bin', index: 1, count: 4 },
+    { label: 'Voice detection', model: 'silero_vad.onnx', index: 2, count: 4 },
+  ];
+  let at = 0;
+  let done = 0;
+  const tick = setInterval(() => {
+    done += 7;
+    if (done > 100) {
+      done = 0;
+      at += 1;
+      if (at >= files.length) return clearInterval(tick);
+    }
+    deliver({ ...files[at], bytes: done, total: 100, state: 'downloading' });
+  }, 400);
+  deliver({ ...files[0], bytes: 41, total: 100, state: 'downloading' });
+  return () => clearInterval(tick);
+}
 
 export function answer<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (command === 'set_setting' && typeof args?.key === 'string') {

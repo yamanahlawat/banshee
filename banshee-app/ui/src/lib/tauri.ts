@@ -17,7 +17,11 @@ function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
 // The daemon pushes nothing into a browser, so a preview listens to silence
 // rather than throwing on a bridge that is not there.
 export function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
-  if (PREVIEW) return Promise.resolve(() => {});
+  if (PREVIEW) {
+    return import('./preview').then((m) =>
+      m.push(event, (payload) => handler({ payload } as Parameters<EventCallback<T>>[0])),
+    );
+  }
   return tauriListen<T>(event, handler);
 }
 

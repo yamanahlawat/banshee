@@ -11,8 +11,17 @@
   const SAYS: Record<string, string> = {
     connected: 'Connected',
     found: 'Installed',
-    absent: 'Not installed',
   };
+
+  // An agent that is not on this machine has no action and no state worth a row.
+  $: here = $agents.filter((agent) => agent.presence !== 'absent');
+  $: elsewhere = $agents.filter((agent) => agent.presence === 'absent').map((a) => a.name);
+  $: alsoWorksWith =
+    elsewhere.length === 0
+      ? ''
+      : elsewhere.length === 1
+        ? elsewhere[0]
+        : `${elsewhere.slice(0, -1).join(', ')} and ${elsewhere[elsewhere.length - 1]}`;
 
   // The daemon can only add banshee to an agent's config today, never remove
   // it, so a review always plans a connect.
@@ -64,12 +73,8 @@
     </div>
   </div>
 {:else}
-  <p class="lede">
-    A connected agent can speak to you and ask you questions out loud, so you can leave the
-    screen while it works.
-  </p>
   <div class="rows">
-    {#each $agents as agent (agent.id)}
+    {#each here as agent (agent.id)}
       <div class="row">
         <span class="name">{agent.name}</span>
         <span class="presence caps" class:on={agent.presence === 'connected'}>
@@ -84,6 +89,10 @@
       <p class="lede">Looking for agents on this machine.</p>
     {/each}
   </div>
+
+  {#if alsoWorksWith}
+    <p class="elsewhere">Banshee also works with {alsoWorksWith}.</p>
+  {/if}
 {/if}
 
 <style>
@@ -127,6 +136,14 @@
 
   .presence.on {
     color: var(--accent);
+  }
+
+  .elsewhere {
+    max-width: 520px;
+    margin: 16px 0 0;
+    font-variation-settings: 'wght' var(--cut-agent-weight), 'wdth' var(--cut-agent-width);
+    font-size: 13px;
+    color: var(--dim);
   }
 
   .error {

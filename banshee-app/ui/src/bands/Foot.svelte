@@ -1,11 +1,34 @@
 <script lang="ts">
   import { RESTART_SAYS } from '../lib/copy';
+  import { arrowStep } from '../lib/keys';
   // Four values, and the brief holds it to four. This band reports what
   // Banshee is set to. It is a status line that can be opened, not the
   // window's navigation, which is what went wrong with the strip it replaces.
   export let values: { id: string; label: string; value: string; pending?: boolean }[];
   export let open: (label: string, id: string) => void;
   export let active: string | null = null;
+
+  let band: HTMLElement;
+
+  // A toolbar is one tab stop and the arrows move within it. The foot is the
+  // only route to every setting in the window, so it cannot sit behind every
+  // copy control on the page.
+  function onKeydown(event: KeyboardEvent) {
+    const cells = [...band.querySelectorAll('button')];
+    const at = cells.indexOf(event.currentTarget as HTMLButtonElement);
+    const to = arrowStep(event.key, at, cells.length);
+    if (to === null) return;
+    event.preventDefault();
+    stop = to;
+    // Focus moves; nothing opens. A panel is a choice, not a side effect of
+    // arriving somewhere.
+    cells[to].focus();
+  }
+
+  // Returning by Tab lands where you left: the arrows move the stop, and
+  // opening a panel moves it to that cell.
+  let stop = 0;
+  $: if (active) stop = Math.max(0, values.findIndex((row) => row.label === active));
 
   // A cell is a quarter of 480pt, so a device name is often cut. The whole of
   // it is in the DOM either way, and a screen reader reads it whole, so this
@@ -31,13 +54,19 @@
 </script>
 
 <footer class="band">
-  {#each values as row (row.label)}
+  <div class="cells" role="toolbar" aria-label="Jobs" bind:this={band}>
+  {#each values as row, i (row.label)}
     <button
       id={row.id}
       class="cell"
       class:on={active === row.label}
       aria-pressed={active === row.label}
-      on:click={() => open(row.label, row.id)}
+      tabindex={i === stop ? 0 : -1}
+      on:keydown={onKeydown}
+      on:click={() => {
+        stop = i;
+        open(row.label, row.id);
+      }}
     >
       <span class="caps">{row.label}</span>
       <span class="mono value" class:pending={row.pending} use:clipped={row.value}>
@@ -45,18 +74,24 @@
       </span>
       {#if row.pending}<span class="sr">{RESTART_SAYS}</span>{/if}
     </button>
-  {/each}
+    {/each}
+  </div>
 </footer>
 
 <style>
   .band {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 10px;
     padding: 12px var(--gutter) 14px;
     background: var(--foot);
     border-top: 1px solid var(--rule);
     flex: none;
+  }
+
+  /* The role sits here and not on the footer: a toolbar is not an allowed role
+     on that element, and axe is right to say so. */
+  .cells {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
   }
 
   .caps {

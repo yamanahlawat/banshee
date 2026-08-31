@@ -29,7 +29,7 @@
   .ledger {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 16px;
     margin: 0 var(--gutter) 22px;
     padding-bottom: 12px;
     border-bottom: 1px solid var(--rule);

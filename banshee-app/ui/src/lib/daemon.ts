@@ -11,7 +11,7 @@ export type Live = { recording: boolean; speaking: boolean; armed: boolean; tran
 export type Daemon = { status: Status | null; live: Live; pending: Set<string>; down: string | null; download: Progress | null };
 export type Progress = { label?: string; model: string; index?: number; count?: number; bytes: number; total: number | null; state: 'downloading' | 'done' | 'failed' };
 export type Word = 'Ready' | 'Recording' | 'Speaking' | 'Listening' | 'Working' | 'Not ready' | 'Downloading' | 'Not running';
-export type LampForm = 'idle' | 'recording' | 'speaking' | 'notrunning';
+export type LampForm = 'idle' | 'recording' | 'speaking' | 'listening' | 'notrunning';
 
 export function empty(): Daemon {
   return { status: null, live: { recording: false, speaking: false, armed: false, transcribing: false, audio_device: null, missing_device: null }, pending: new Set(), down: null, download: null };
@@ -53,14 +53,27 @@ export function lampForm(word: Word): LampForm {
   if (word === 'Not running') return 'notrunning';
   if (word === 'Recording') return 'recording';
   if (word === 'Speaking') return 'speaking';
+  // The one state where doing nothing is the wrong answer, so it cannot share
+  // a silhouette with Ready. Working, Downloading and Not ready still do: each
+  // resolves on its own, and the window shouts them in the body anyway.
+  if (word === 'Listening') return 'listening';
   return 'idle';
+}
+
+/// The daemon writes these lower case, to sit after a colon in a terminal. The
+/// window sets them as their own sentence, so it capitalises rather than asking
+/// the daemon to write for two readers at once.
+function sentence(prose: string): string {
+  return prose.charAt(0).toUpperCase() + prose.slice(1);
 }
 
 // The daemon writes the same command twice, as prose and as a field.
 export function fixProse(blocker: Blocker): string | null {
-  if (blocker.command === undefined || !blocker.fix.endsWith(blocker.command)) return blocker.fix;
+  if (blocker.command === undefined || !blocker.fix.endsWith(blocker.command)) {
+    return sentence(blocker.fix);
+  }
   const lead = blocker.fix.slice(0, -blocker.command.length);
-  return /^(?:run|restart|start)(?: it)?:\s*$/.test(lead) ? null : blocker.fix;
+  return /^(?:run|restart|start)(?: it)?:\s*$/.test(lead) ? null : sentence(blocker.fix);
 }
 
 // One call downloads every missing model, so those blockers share a row.

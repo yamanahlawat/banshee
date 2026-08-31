@@ -13,7 +13,7 @@
     type Live,
     type Status,
   } from './lib/daemon';
-  import { announce, announcement } from './lib/copy';
+  import { announce, announcement, spell } from './lib/copy';
   import { followSaveHistory, readAll, readLatest, readNewest, table } from './lib/history';
   import { agents, refresh as readAgents } from './lib/agents';
   import {
@@ -29,6 +29,7 @@
   import { humanize } from './lib/hotkey';
   import { keysClaimed } from './lib/keys';
   import { formatWhen } from './lib/time';
+  import { formatCount } from './lib/history';
   import Header from './bands/Header.svelte';
   import Foot from './bands/Foot.svelte';
   import Panel from './bands/Panel.svelte';
@@ -54,7 +55,7 @@
   // A panel takes over the body, so an opener standing in that body is
   // destroyed by the click it is answering. The way back is the opener's id
   // and never the node, which no longer exists by the time it is wanted.
-  const RETURNS_TO = { ledger: 'ledger', absence: 'nothing-yet' };
+  const RETURNS_TO = { ledger: 'ledger', absence: 'nothing-yet', agents: 'no-agents' };
   let cameFrom = '';
 
   async function openJob(next: Job | null, from = '') {
@@ -107,6 +108,59 @@
   $: config = ($daemon.status?.config ?? {}) as Record<string, Record<string, unknown>>;
   $: live = word !== 'Not running';
   $: connected = $agents.filter((a) => a.presence === 'connected').length;
+  // The window names no key it has not been told. `audio.hotkey_mode` decides
+  // the verb, because "Hold" is a lie when a tap is what starts it.
+  $: boundKey = humanize(String(config.audio?.hotkey ?? ''));
+  $: holdToTalk = String(config.audio?.hotkey_mode ?? 'hold') !== 'toggle';
+  // Said on the home screen only while it is true, so it needs no dismissal to
+  // remember: connecting one is what clears it.
+  $: noAgentYet = live && agentsRead && connected === 0;
+
+  // Spelled, because a sentence should not open on a digit. Six agents are
+  // detectable today, so the list needs no more than this.
+  // A panel's short name and the statement it opens with are one concept, so
+  // they are declared together. The name may not collide with a state word:
+  // "Record" under a header reading RECORDING reads as capture rather than as
+  // what is kept, and the ledger already names it without the collision.
+  //
+  // Every statement reads the daemon, because the config says what was asked
+  // for and only the daemon says what is running, and every one carries the
+  // sentence for when it is not true.
+  $: panels = {
+    Microphone: {
+      name: 'Microphone',
+      lead: $daemon.live.audio_device
+        ? `Banshee is listening through the ${$daemon.live.audio_device}.`
+        : 'Banshee has no microphone.',
+    },
+    Hotkey: {
+      name: 'Hotkey',
+      lead: !boundKey
+        ? 'No key is bound, so nothing starts dictation.'
+        : holdToTalk
+          ? `Hold ${boundKey} to talk.`
+          : `Tap ${boundKey} to start, and again to stop.`,
+    },
+    Voice: {
+      name: 'Voice',
+      lead: voiceName ? `Banshee speaks as ${voiceName}.` : 'Banshee has no voice yet.',
+    },
+    Agents: {
+      name: 'Agents',
+      lead:
+        connected === 0
+          ? 'No agent can speak to you yet.'
+          : `${spell(connected, true)} agent${connected === 1 ? '' : 's'} can speak to you and ask you questions out loud.`,
+    },
+    Record: {
+      name: 'What Banshee keeps',
+      lead: !savingHistory
+        ? 'Banshee is keeping nothing you say.'
+        : $table.total === 0
+          ? 'Banshee is keeping what you say, and you have not said anything yet.'
+          : `Banshee is keeping ${formatCount($table.total)} things you have said, on this machine.`,
+    },
+  } as Record<Job, { name: string; lead: string }>;
 
   $: rows = $table.rows;
   $: needle = query.trim().toLowerCase();
@@ -166,8 +220,12 @@
   // is never applied live. Marking it pending is the only way the foot can stop
   // naming a key the daemon is not listening for. `audio.input_device` always
   // applies, so the microphone has no such state.
+  $: voiceName = ((): string => {
+    const id = String(config.tts?.voice ?? '');
+    return voices.voices.find((v) => v.id === id)?.name ?? id;
+  })();
+
   $: footValues = ((): { id: string; label: Job; value: string; pending?: boolean }[] => {
-    const voice = String(config.tts?.voice ?? '');
     const said = (value: string) => (live ? value : '');
     const waits = (...keys: string[]) => live && keys.some((key) => $waitsOnARestart.has(key));
     return [
@@ -181,7 +239,7 @@
       {
         id: 'job-voice',
         label: 'Voice',
-        value: said(voices.voices.find((v) => v.id === voice)?.name ?? voice),
+        value: said(voiceName),
         pending: waits('tts.voice', 'tts.speed'),
       },
       { id: 'job-agents', label: 'Agents', value: said(connected > 0 ? `${connected} connected` : 'None yet') },
@@ -279,6 +337,13 @@
 <svelte:window on:keydown={onKeydown} />
 
 <main>
+  <!-- Invisible until it takes focus. The roving foot collapses four stops into
+       one, but the copy controls are the bulk of them and they have to stay
+       reachable, so the keyboard needs a way over the record entirely. -->
+  <button class="skip" on:click={() => document.getElementById('job-microphone')?.focus()}>
+    Skip to the jobs
+  </button>
+
   <Header
     {word}
     {form}
@@ -289,7 +354,7 @@
 
   <div class="body">
     {#if job}
-      <Panel name={job} close={() => openJob(null)}>
+      <Panel name={panels[job].name} lead={panels[job].lead} close={() => openJob(null)}>
         {#if job === 'Record'}
           <TheRecord saving={savingHistory} />
         {:else if job === 'Microphone'}
@@ -315,6 +380,7 @@
           download={$daemon.download}
           preset={String(config.stt?.preset ?? 'balanced')}
           megabytes={Number($daemon.status?.download_megabytes ?? 0)}
+          first={savingHistory && nothingYet}
         />
       {/if}
 
@@ -337,12 +403,30 @@
         />
       {/if}
 
+      {#if noAgentYet && !nothingYet && blockers.length === 0}
+        <Absence
+          label="No agent can speak to you yet"
+          detail="A connected agent can ask you questions out loud and hear your answer, so you can leave the screen while it works."
+          action="Connect an agent"
+          id={RETURNS_TO.agents}
+          act={() => openJob('Agents', RETURNS_TO.agents)}
+        />
+      {/if}
+
       {#if waiting}
+        <!-- The lead while it stands: a person who glances at the window during
+             this moment is the one person the window exists for. No copy
+             control, because the daemon sends no question to copy. -->
         <Turn
+          lead
           speaker="agent"
           time={rightNow}
           text="An agent asked a question and is waiting for your answer."
-        />
+        >
+          {#if boundKey}
+            <p class="how">{holdToTalk ? 'Hold' : 'Tap'} {boundKey} to answer.</p>
+          {/if}
+        </Turn>
       {:else if pending}
         <Pending mode={pending} time={rightNow} />
       {/if}
@@ -350,7 +434,7 @@
       {#if shown.length > 0}
         {#each visible as row, i (row.id)}
           <Turn
-            lead={i === 0}
+            lead={i === 0 && !waiting}
             speaker="user"
             id={String(row.id)}
             time={formatWhen(row.timestamp, now)}
@@ -374,8 +458,10 @@
       {:else if nothingYet && blockers.length === 0}
         <Absence
           label="Nothing said yet"
-          detail="Hold the hotkey and speak. What you say lands in whatever app has focus, and shows up here."
-          action="What Banshee keeps"
+          detail={boundKey
+            ? `${holdToTalk ? 'Hold' : 'Tap'} ${boundKey} and speak. What you say lands in whatever app you are using, and shows up here.`
+            : 'No key is bound yet, so nothing starts dictation. The Hotkey panel below binds one.'}
+          action={panels.Record.name}
           id={RETURNS_TO.absence}
           act={() => openJob('Record', RETURNS_TO.absence)}
         />
@@ -410,7 +496,38 @@
     padding-top: 22px;
   }
 
+  /* The readout voice: an instruction the config answers, not a thing anyone
+     said. */
+  .how {
+    margin: 12px 0 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+  }
+
   .older {
     margin: 4px var(--gutter) 24px;
+  }
+
+  .skip {
+    position: absolute;
+    left: -9999px;
+    z-index: 1;
+    background: var(--ink);
+    color: var(--ground);
+    border: 0;
+    border-radius: 0;
+    padding: 8px 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .skip:focus {
+    left: var(--gutter);
+    top: 8px;
   }
 </style>

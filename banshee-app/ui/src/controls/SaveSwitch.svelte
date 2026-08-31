@@ -16,8 +16,11 @@
 </button>
 
 <style>
+  /* A resting rule, so it reads as a control rather than the second half of
+     the count beside it. Without one, "8 saved  Stop saving" is one phrase. */
   button {
     color: var(--ink);
+    border-bottom-color: currentcolor;
   }
 
   /* The dash this world uses for a value the daemon has not taken. */

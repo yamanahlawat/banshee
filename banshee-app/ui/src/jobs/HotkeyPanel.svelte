@@ -4,7 +4,7 @@
   import { write } from '../lib/settings';
   import { hotkeyFrom, humanize, isModifier } from '../lib/hotkey';
   import { claimKeys } from '../lib/keys';
-  import Field from '../controls/Field.svelte';
+  import Row from '../controls/Row.svelte';
   import Segmented from '../controls/Segmented.svelte';
 
   let recording = false;
@@ -75,7 +75,7 @@
 
 <svelte:window on:keydown={onKeyDown} on:keyup={onKeyUp} />
 
-<Field name="Hold to talk" pending={$daemon.pending.has('audio.hotkey')}>
+<Row name="The key" pending={$daemon.pending.has('audio.hotkey')}>
   <button class="key" on:click={() => (recording ? stop() : begin())}>
     {recording ? 'Press a key' : humanize(key) || 'Not set'}
     <span class="sr">— change the hotkey</span>
@@ -83,15 +83,15 @@
   <button class="btn" on:click={() => (recording ? stop() : begin())}>
     {recording ? 'Cancel' : 'Change'}
   </button>
-</Field>
+</Row>
 
 {#if refusal}
   <p class="refusal">{refusal}</p>
 {/if}
 
-<Field
+<Row
   name="Press behaviour"
-  note="Hold: speak while the key is down. Toggle: tap to start, tap to stop."
+  note="Hold: speak while the key is down. Tap: press once to start, once to stop."
   pending={$daemon.pending.has('audio.hotkey_mode')}
 >
   <Segmented
@@ -99,13 +99,13 @@
     value={mode}
     options={[
       { value: 'hold', label: 'Hold' },
-      { value: 'toggle', label: 'Toggle' },
+      { value: 'toggle', label: 'Tap' },
     ]}
     change={(next) => write('audio.hotkey_mode', next)}
   />
-</Field>
+</Row>
 
-<Field
+<Row
   name="While Banshee is talking"
   pending={$daemon.pending.has('audio.barge_in')}
 >
@@ -119,9 +119,9 @@
     ]}
     change={(next) => write('audio.barge_in', next)}
   />
-</Field>
+</Row>
 
-<Field name="Sounds" pending={$daemon.pending.has('audio.cues.enabled')}>
+<Row name="Sounds" pending={$daemon.pending.has('audio.cues.enabled')}>
   <Segmented
     label="Sounds"
     value={cues ? 'on' : 'off'}
@@ -131,7 +131,7 @@
     ]}
     change={(next) => write('audio.cues.enabled', next === 'on')}
   />
-</Field>
+</Row>
 
 <style>
   /* A button, because this underline is the one the pickers wear and it has to

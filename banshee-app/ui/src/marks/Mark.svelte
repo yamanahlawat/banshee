@@ -42,6 +42,12 @@
         stroke-linejoin="round"
         stroke-dasharray={form === 'notrunning' ? '22 14' : undefined}
       />
+      {#if form === 'listening'}
+        <!-- One bar, low in the hood. It has to hold at 18px against four
+             other forms, and must not resemble recording, which is the only
+             other form carrying solid ink. -->
+        <rect x="33" y="52" width="34" height="10" fill="currentColor" />
+      {/if}
       {#if form === 'speaking'}
         <path
           d="M8 40 C4 48 4 56 8 64"

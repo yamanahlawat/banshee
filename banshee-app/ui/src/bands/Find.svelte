@@ -38,7 +38,10 @@
   .field {
     flex: 1;
     min-width: 0;
-    /* A pointer's height, for the same reason the sliders carry one. */
+    /* A pointer's height, stated rather than derived: padding plus the font's
+       own line box came to 23.55px, which reads as 24 in any rounded output and
+       is not. */
+    min-height: 24px;
     padding: 3px 0;
     font-size: 13px;
     color: var(--ink);

@@ -27,6 +27,7 @@
     <p class="text">
       <span class="sr">{SAID[speaker]} at {time}.</span>{text}
     </p>
+    <slot />
   </div>
 </article>
 
