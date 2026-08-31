@@ -1,5 +1,4 @@
-/* Values sampled from the approved comp's pixels, not authored by hand.
-   .impeccable/surfaces/banshee-app-ui-src-app-svelte.md carries the sample points. */
+/* Values sampled from the approved comp's pixels, not authored by hand. */
 
 @font-face {
   font-family: 'Archivo';
@@ -171,9 +170,9 @@ body {
   font-feature-settings: 'tnum' 1;
 }
 
-/* The type role, exactly as DESIGN.md declares it, which names no colour. Half
-   the controls that take this type are ink and half are accent, so the colour
-   is the caller's line and this is the other five. */
+/* The type role, which names no colour. Half the controls that take it are ink
+   and half are accent, so the colour is the caller's line and this is the other
+   five. */
 .caps,
 .btn {
   font-family: var(--mono);

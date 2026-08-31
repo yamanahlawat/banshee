@@ -47,13 +47,14 @@ mod mac {
     // machine wakes to a failing connect.
     const RETRY: Duration = Duration::from_secs(2);
 
-    /// What the menu bar shows. `Activity` ranks the two booleans the daemon
-    /// pushes; the fourth state is the daemon failing to answer at all.
+    /// What the menu bar shows. `Activity` ranks the booleans the daemon
+    /// pushes; the last state is the daemon failing to answer at all.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Indicator {
         Idle,
         Recording,
         Speaking,
+        Listening,
         NotRunning,
     }
 
@@ -64,6 +65,7 @@ mod mac {
                 Some(Activity::Idle) => Indicator::Idle,
                 Some(Activity::Recording) => Indicator::Recording,
                 Some(Activity::Speaking) => Indicator::Speaking,
+                Some(Activity::Listening) => Indicator::Listening,
             }
         }
 
@@ -72,20 +74,23 @@ mod mac {
                 Indicator::Idle => "Idle",
                 Indicator::Recording => "Recording",
                 Indicator::Speaking => "Speaking",
+                // What it means to a person, not the name on the wire.
+                Indicator::Listening => "Waiting for you",
                 Indicator::NotRunning => "Not running",
             }
         }
     }
 
-    // The mark ships as four rendered states, generated from
-    // assets/banshee-mark.svg. macOS paints a template image from its alpha
-    // alone, so each asset is black with the drawing in the alpha channel.
-    // tray-icon renders any icon 18pt tall, which makes 36px its 2x asset.
+    // The mark ships as five rendered states, drawn from the same geometry the
+    // window uses. macOS paints a template image from its alpha alone, so each
+    // asset is black with the drawing in the alpha channel. tray-icon renders
+    // any icon 18pt tall, which makes 36px its 2x asset.
     fn glyph(indicator: Indicator) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error>> {
         let asset: &[u8] = match indicator {
             Indicator::Idle => include_bytes!("../../assets/tray/mark-idle.png"),
             Indicator::Recording => include_bytes!("../../assets/tray/mark-recording.png"),
             Indicator::Speaking => include_bytes!("../../assets/tray/mark-speaking.png"),
+            Indicator::Listening => include_bytes!("../../assets/tray/mark-listening.png"),
             Indicator::NotRunning => include_bytes!("../../assets/tray/mark-notrunning.png"),
         };
         let mut reader = png::Decoder::new(std::io::Cursor::new(asset)).read_info()?;
@@ -505,10 +510,11 @@ mod mac {
             serde_json::json!({"recording": recording, "speaking": speaking})
         }
 
-        const STATES: [Indicator; 4] = [
+        const STATES: [Indicator; 5] = [
             Indicator::Idle,
             Indicator::Recording,
             Indicator::Speaking,
+            Indicator::Listening,
             Indicator::NotRunning,
         ];
 

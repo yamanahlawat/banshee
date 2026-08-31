@@ -49,18 +49,22 @@
         <rect x="33" y="52" width="34" height="10" fill="currentColor" />
       {/if}
       {#if form === 'speaking'}
+        <!-- The gap is the point: closed up, the arcs read as earmuffs rather
+             than as sound leaving the figure. The menu bar draws them 5 units
+             tighter because 36px cannot hold this pair, and that is the one
+             place the two surfaces differ. -->
         <path
           d="M8 40 C4 48 4 56 8 64"
           fill="none"
           stroke="currentColor"
-          stroke-width="8"
+          stroke-width="6"
           stroke-linecap="round"
         />
         <path
           d="M92 40 C96 48 96 56 92 64"
           fill="none"
           stroke="currentColor"
-          stroke-width="8"
+          stroke-width="6"
           stroke-linecap="round"
         />
       {/if}

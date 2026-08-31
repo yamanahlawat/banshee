@@ -143,14 +143,20 @@ pub enum Activity {
     Idle,
     Recording,
     Speaking,
+    Listening,
 }
 
 impl Activity {
     // The microphone outranks the speaker: it is what the user is waiting on,
-    // and both are true at once when barge-in is off
+    // and both are true at once when barge-in is off. Waiting on an answer
+    // outranks both: the daemon opens the microphone to hear one, so `armed`
+    // arrives with `recording` already true, and it is the only one of the
+    // three where doing nothing is the wrong response.
     pub fn of(state: &Value) -> Self {
         let flag = |name| state.get(name).and_then(Value::as_bool) == Some(true);
-        if flag("recording") {
+        if flag("armed") {
+            Activity::Listening
+        } else if flag("recording") {
             Activity::Recording
         } else if flag("speaking") {
             Activity::Speaking
@@ -478,6 +484,18 @@ mod wire_tests {
     #[test]
     fn a_payload_missing_its_fields_reads_as_idle() {
         assert_eq!(Activity::of(&serde_json::json!({})), Activity::Idle);
+    }
+
+    // The daemon sets `recording` whenever it sets `armed`, so an armed state
+    // that is ranked on `recording` first reads as ordinary dictation. It is
+    // the one state where doing nothing is the wrong answer, so it outranks.
+    #[test]
+    fn waiting_on_an_answer_outranks_the_microphone_it_opened() {
+        let armed = serde_json::json!({"recording": true, "armed": true, "speaking": false});
+        assert_eq!(Activity::of(&armed), Activity::Listening);
+
+        let dictating = serde_json::json!({"recording": true, "armed": false});
+        assert_eq!(Activity::of(&dictating), Activity::Recording);
     }
 
     #[test]
