@@ -28,6 +28,8 @@ import {
   downloadModels,
   openPermissionPane,
   restartDaemon,
+  copyText,
+  clearHistory,
   setSetting,
   startDaemon,
   status,
@@ -990,4 +992,32 @@ it('keeps a tab stop when no option matches the daemon', async () => {
   const group = await screen.findByRole('radiogroup', { name: 'While Banshee is talking' });
   const stops = [...group.querySelectorAll('button')].map((b) => (b as HTMLElement).tabIndex);
   expect(stops).toContain(0);
+});
+
+// A live region alone leaves a sighted reader nothing, hence the .sr assertion.
+it('draws a failure where a reader can see it, and keeps it there', async () => {
+  vi.mocked(copyText).mockRejectedValue(new Error('no clipboard'));
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  await fireEvent.click(screen.getAllByRole('button', { name: /^Copy/ })[0]);
+  const shown = await screen.findByText(/Nothing was copied/);
+  expect(shown.closest('.sr')).toBeNull();
+
+  // Well past the 1500ms after which the sibling confirmation clears itself.
+  vi.advanceTimersByTime(5000);
+  await waitFor(() => expect(screen.getByText(/Nothing was copied/)).toBeTruthy());
+});
+
+it('lets a failure be dismissed', async () => {
+  vi.mocked(clearHistory).mockRejectedValue(new Error('locked'));
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Delete everything' }));
+
+  await waitFor(() => expect(screen.getByText(/could not be cleared/)).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+  await waitFor(() => expect(screen.queryByText(/could not be cleared/)).toBeNull());
 });

@@ -2,7 +2,7 @@
   import { daemon, shownFloat, waitsOnARestart } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { downloadModels, previewVoice, type Voice, type Voices } from '../lib/tauri';
-  import { announce } from '../lib/copy';
+  import { report } from '../lib/copy';
   import Row from '../controls/Row.svelte';
 
   export let voices: Voices = { voices: [], current: null };
@@ -18,7 +18,7 @@
   async function choose(voice: Voice, here: boolean) {
     await write('tts.voice', voice.id);
     if (!here) {
-      await downloadModels().catch(() => announce('That voice would not download.'));
+      await downloadModels().catch(() => report(`${voice.name} would not download.`));
     }
   }
 </script>
@@ -46,7 +46,7 @@
           aria-label={`Preview ${voice.name}`}
           disabled={!here}
           on:click={() =>
-            previewVoice(voice.id).catch(() => announce('That voice will not play.'))}
+            previewVoice(voice.id).catch(() => report(`${voice.name} will not play.`))}
         >
           Play
         </button>

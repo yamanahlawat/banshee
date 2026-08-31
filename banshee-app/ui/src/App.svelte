@@ -13,7 +13,7 @@
     type Live,
     type Status,
   } from './lib/daemon';
-  import { announce, announcement, spell } from './lib/copy';
+  import { announcement, problem, report, spell } from './lib/copy';
   import { followSaveHistory, readAll, readLatest, readNewest, table } from './lib/history';
   import { agents, refresh as readAgents } from './lib/agents';
   import {
@@ -311,7 +311,7 @@
         // fetch that fails afterwards reaches no caller. This push is the only
         // report of it.
         if (progress.state === 'failed') {
-          announce(`${downloadLine(progress)}. Try again when you are back online.`);
+          report(`${downloadLine(progress)}. Try again when you are back online.`);
         }
         // A file that lands changes what the daemon is blocked on, and no other
         // push says so. The status alone: a download writes no history, so
@@ -353,6 +353,16 @@
   />
 
   <div class="body">
+    <!-- Outside the panel branch on purpose: a voice that will not play is
+         reported from inside a panel, and the reader has to see it there. The
+         region is always in the DOM, because one that arrives with its own
+         content is not reliably announced. -->
+    <div aria-live="polite">
+      {#if $problem}
+        <Absence label={$problem} action="Dismiss" act={() => problem.set('')} />
+      {/if}
+    </div>
+
     {#if job}
       <Panel name={panels[job].name} lead={panels[job].lead} close={() => openJob(null)}>
         {#if job === 'Record'}

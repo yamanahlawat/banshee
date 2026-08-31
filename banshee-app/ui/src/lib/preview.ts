@@ -14,6 +14,7 @@ const STATES: Record<string, unknown> = {
   permissions,
   'not-running': notRunning,
   'no-agents': ready,
+  'copy-fails': ready,
   // A real first run: blocked, and nothing ever said.
   'first-run': permissions,
   downloading: permissions,
@@ -80,6 +81,12 @@ const ANSWERS: Record<string, () => unknown> = {
   status: statusNow,
   history: () => (written['daemon.save_history'] === false ? [] : rows()),
   set_setting: () => [],
+  // A failure has no other way to be looked at: every other state is a status
+  // reply, and this one only happens when a call rejects.
+  copy_text: () => {
+    if (chosen() === 'copy-fails') throw new Error('the clipboard refused it');
+    return undefined;
+  },
   list_devices: () => ({
     devices: [
       { name: 'MacBook Pro Microphone', default: true },
@@ -160,5 +167,9 @@ export function answer<T>(command: string, args?: Record<string, unknown>): Prom
     written[args.key] = args.value;
   }
   const reply = ANSWERS[command];
-  return Promise.resolve((reply ? reply() : undefined) as T);
+  try {
+    return Promise.resolve((reply ? reply() : undefined) as T);
+  } catch (refused) {
+    return Promise.reject(refused);
+  }
 }

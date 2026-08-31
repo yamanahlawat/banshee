@@ -12,7 +12,7 @@
   import { PRESETS, downloadSize } from '../lib/presets';
   import { write } from '../lib/settings';
   import { downloadModels, openPermissionPane } from '../lib/tauri';
-  import { announce, spell } from '../lib/copy';
+  import { report, spell } from '../lib/copy';
   import Segmented from '../controls/Segmented.svelte';
 
   export let blockers: Blocker[] = [];
@@ -115,7 +115,7 @@
   function run(fix: { label: string | null; run: (() => unknown) | null }): () => void {
     return () => {
       if (!fix.run) return;
-      Promise.resolve(fix.run()).catch(() => announce(`${fix.label} did not work.`));
+      Promise.resolve(fix.run()).catch(() => report(`${fix.label} did not work.`));
     };
   }
 </script>

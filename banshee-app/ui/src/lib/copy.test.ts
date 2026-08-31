@@ -1,7 +1,7 @@
 import { get } from 'svelte/store';
 import { beforeEach, expect, it, vi } from 'vitest';
 vi.mock('./tauri', () => ({ copyText: vi.fn().mockResolvedValue(null) }));
-import { announcement, copy, copied } from './copy';
+import { announcement, copy, copied, problem } from './copy';
 beforeEach(() => vi.useFakeTimers());
 it('marks the control Copied for a moment, then clears', async () => {
   await copy('hello', 'row-14:02');
@@ -24,5 +24,5 @@ it('says so when the clipboard refuses, rather than looking like it worked', asy
   await copy('hello', 'row-14:02');
 
   expect(get(copied)).toBeNull();
-  expect(get(announcement)).toBe('Copy failed');
+  expect(get(problem)).toMatch(/Nothing was copied/);
 });

@@ -17,6 +17,17 @@ export function spell(n: number, capital = false): string {
 export const copied = writable<string | null>(null);
 export const announcement = writable('');
 
+/// A confirmation may expire, because the reader either saw it or did not need
+/// it. A failure may not: the reader is often not looking at the screen at all.
+/// So it holds until dismissed.
+export const problem = writable('');
+
+/// Announced from the element that draws it rather than from a second hidden
+/// copy, so a screen reader hears it once and finds it where it was spoken.
+export function report(message: string): void {
+  problem.set(message);
+}
+
 let timer: ReturnType<typeof setTimeout> | undefined;
 const HELD_MS = 1500;
 
@@ -26,6 +37,7 @@ export function forgetCopy(): void {
   clearTimeout(timer);
   copied.set(null);
   announcement.set('');
+  problem.set('');
 }
 
 export function announce(message: string): void {
@@ -44,11 +56,13 @@ export async function copy(text: string, id: string): Promise<void> {
   try {
     await copyText(text);
   } catch {
-    // Saying nothing would read as a copy that worked.
-    announcement.set('Copy failed');
+    // Saying nothing would read as a copy that worked: the button still says
+    // Copy either way.
+    report('Nothing was copied. The clipboard refused it.');
     return;
   }
   copied.set(id);
+  problem.set('');
   announcement.set('Copied');
   clearTimeout(timer);
   timer = setTimeout(() => {

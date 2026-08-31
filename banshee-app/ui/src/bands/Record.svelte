@@ -1,7 +1,7 @@
 <script lang="ts">
   import { forget, formatCount, table } from '../lib/history';
   import { clearHistory } from '../lib/tauri';
-  import { announce } from '../lib/copy';
+  import { announce, report } from '../lib/copy';
   import { daemon } from '../lib/daemon';
   import SaveSwitch from '../controls/SaveSwitch.svelte';
 
@@ -19,7 +19,7 @@
       forget();
       announce('History cleared.');
     } catch {
-      announce('That did not clear.');
+      report('The record could not be cleared. Nothing was deleted.');
     }
   }
 </script>
