@@ -2,7 +2,7 @@
 
 What Banshee does next, in the order it is likely to land. Dates are not promises.
 Issues labelled `help wanted` are sized for a first contribution; each one says how to
-verify it on a real machine.
+verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, in no order.
 
 ## Landed
 
