@@ -105,6 +105,17 @@ body {
   overflow: hidden;
 }
 
+/* Nothing here scrolls sideways, so one unbreakable token leaves the window for
+   good: a dictated URL, a package name, a path. Every class that holds text
+   Banshee did not author needs this, in one rule, because four copies are four
+   chances to drop one. */
+.turn .text,
+.absence .label,
+.absence .detail,
+.row .note {
+  overflow-wrap: anywhere;
+}
+
 body {
   background: var(--ground);
   color: var(--ink);
