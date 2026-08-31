@@ -22,6 +22,13 @@ const MAX_QUEUED_UTTERANCES: usize = 8;
 // A backend starts one utterance at a time; SpeechPlayer serializes them
 pub trait TtsBackend: Send + Sync {
     fn start(&self, text: &str, voice: Option<&str>) -> std::io::Result<Box<dyn ActiveUtterance>>;
+
+    /// A live `[tts]` change. Answers the voice utterances now speak in, or
+    /// `None` when the backend cannot honour the change: the system fallback
+    /// speaks in whatever voice the OS is set to and takes no rate.
+    fn reconfigure(&self, _tts: &TTSConfig) -> Option<String> {
+        None
+    }
 }
 
 pub trait ActiveUtterance: Send {
@@ -70,6 +77,12 @@ pub struct SpeechPlayer {
 }
 
 impl SpeechPlayer {
+    /// What a live `[tts]` write reaches. An utterance already speaking keeps
+    /// the voice and rate it started with.
+    pub fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
+        self.backend.reconfigure(tts)
+    }
+
     pub fn new(backend: Box<dyn TtsBackend>) -> Self {
         Self {
             backend,

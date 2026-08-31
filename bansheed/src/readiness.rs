@@ -26,11 +26,19 @@ fn assemble(
         && !models_explain_it
     {
         grants.push(Blocker {
-            kind: BlockerKind::Pipeline,
+            // A model that will not load is a model fault, whatever it stops.
+            // Only a real capture fault belongs to the microphone.
+            kind: match error {
+                RecordingError::Model(_) => BlockerKind::Model,
+                RecordingError::Microphone(_) => BlockerKind::Pipeline,
+            },
+            role: None,
+            remedy: Some(banshee_common::Remedy::Restart),
             id: "recording_pipeline".to_string(),
             name: "Recording pipeline".to_string(),
             consequence: error.consequence(),
             fix: error.fix().to_string(),
+            command: error.command().map(str::to_string),
         });
     }
     grants
@@ -46,10 +54,13 @@ mod tests {
     fn blocker(kind: BlockerKind, id: &str) -> Blocker {
         Blocker {
             kind,
+            role: None,
+            remedy: None,
             id: id.to_string(),
             name: id.to_string(),
             consequence: "recording does not work".to_string(),
             fix: "run: banshee setup".to_string(),
+            command: Some("banshee setup".to_string()),
         }
     }
 
@@ -58,14 +69,39 @@ mod tests {
         assert!(assemble(vec![], vec![], None).is_empty());
     }
 
+    /// A client that routes by kind sends a model fault to its models step.
+    /// Calling it a pipeline fault hides it behind whatever handles the
+    /// microphone.
+    /// A client routes on `command`, so this literal is a wire contract.
     #[test]
-    fn a_dead_pipeline_with_every_model_present_asks_for_a_restart() {
+    fn a_dead_pipeline_names_the_command_a_client_routes_on() {
+        let error = RecordingError::Model("missing file.".to_string());
+        let blockers = assemble(vec![], vec![], Some(&error));
+        assert_eq!(blockers[0].command.as_deref(), Some("banshee start"));
+    }
+
+    #[test]
+    fn a_model_that_will_not_load_reports_as_a_model_fault() {
+        let error = RecordingError::Model("missing file.".to_string());
+        let blockers = assemble(vec![], vec![], Some(&error));
+        assert_eq!(blockers[0].kind, BlockerKind::Model);
+    }
+
+    #[test]
+    fn a_dead_microphone_reports_as_a_pipeline_fault() {
+        let error = RecordingError::Microphone("no device".to_string());
+        let blockers = assemble(vec![], vec![], Some(&error));
+        assert_eq!(blockers[0].kind, BlockerKind::Pipeline);
+    }
+
+    #[test]
+    fn a_model_that_will_not_load_asks_for_a_restart() {
         let error = RecordingError::Model("missing file.".to_string());
         let blockers = assemble(vec![], vec![], Some(&error));
         let [blocker] = &blockers[..] else {
             panic!("expected exactly one blocker, got {blockers:?}");
         };
-        assert_eq!(blocker.kind, BlockerKind::Pipeline);
+        assert_eq!(blocker.kind, BlockerKind::Model);
         assert!(
             blocker.fix.contains("banshee start"),
             "the fix must name the restart: {}",

@@ -24,7 +24,11 @@ trap 'rm -rf "$staging"' EXIT
 rm -rf "$staging"
 mkdir -p "$macos" "$resources"
 
-for binary in banshee banshee-tray banshee-mcp-shim; do
+# banshee-app is the bundle's executable. The other three run from inside it:
+# launchd starts the daemon and the tray, and ~/.cargo/bin links the CLI.
+binaries="banshee-app banshee banshee-tray banshee-mcp-shim"
+
+for binary in $binaries; do
     cp "$bindir/$binary" "$macos/$binary"
 done
 
@@ -33,7 +37,7 @@ sed "s/__VERSION__/$version/g" "$root/packaging/Info.plist" > "$staging/Contents
 
 # Nested binaries first, then the bundle. --deep is unreliable and Apple
 # deprecated it.
-for binary in banshee banshee-tray banshee-mcp-shim; do
+for binary in $binaries; do
     codesign --force --identifier "com.banshee.app" --sign "$identity" "$macos/$binary"
 done
 codesign --force --sign "$identity" "$staging"

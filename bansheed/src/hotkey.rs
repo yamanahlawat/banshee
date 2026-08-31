@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use rdev::listen;
 
-use crate::audio::cues::Cue;
+use crate::audio::cues::{Cue, Cues};
 use crate::audio::utils::{StreamingResampler, resample_audio};
 use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
 use crate::config::HotkeyMode;
@@ -50,7 +50,7 @@ pub struct Pipeline {
     pub speech_to_text: WhisperEngine,
     pub vad: VADEngine,
     pub state: Arc<DaemonState>,
-    pub cues: mpsc::Sender<Cue>,
+    pub cues: Cues,
     pub endpoint_silence_ms: u64,
 }
 
@@ -89,6 +89,21 @@ pub fn hotkey_listener(
                         consumer,
                         sample_rate,
                     };
+                }
+                ConsumerCommand::Retune(words) => pipeline.speech_to_text.set_vocabulary(&words),
+                ConsumerCommand::Speak(speech) => pipeline.speech_to_text.set_speech(speech),
+                // The load takes seconds and holds this thread. Nothing is lost:
+                // a press queues behind it and the ring still holds the audio.
+                ConsumerCommand::Reload(model) => {
+                    match pipeline
+                        .speech_to_text
+                        .reload(banshee_common::WhisperConfig::new(model))
+                    {
+                        Ok(()) => pipeline.state.set_stt_model(model),
+                        Err(error) => {
+                            eprintln!("banshee: the transcription model did not load: {error}")
+                        }
+                    }
                 }
                 ConsumerCommand::Shutdown => break,
             }
@@ -176,7 +191,7 @@ impl Pipeline {
                 Ok(data) => data,
                 Err(e) => {
                     eprintln!("Error: {e}");
-                    let _ = self.cues.send(Cue::Error);
+                    self.cues.send(Cue::Error);
                     return;
                 }
             };
@@ -229,13 +244,13 @@ impl Pipeline {
                 "Only detected speech in {:.2}% of the audio. Skipping transcription.",
                 speech_ratio * 100.0
             );
-            let _ = self.cues.send(Cue::Error);
+            self.cues.send(Cue::Error);
             return;
         }
 
         if speech_chunks < 2 {
             println!("No speech detected in the audio. Skipping transcription.");
-            let _ = self.cues.send(Cue::Error);
+            self.cues.send(Cue::Error);
             return;
         }
 
@@ -243,6 +258,9 @@ impl Pipeline {
         let transcribe_started = Instant::now();
         self.state.set_transcribing(true);
         let transcribed = self.speech_to_text.transcribe(&final_data);
+        // A client refetches its history when `transcribing` falls, so the
+        // row has to be stored before the flag drops.
+        store(&self.state, transcribed.as_deref().ok());
         self.state.set_transcribing(false);
         match transcribed {
             Ok(transcription) => {
@@ -263,17 +281,15 @@ impl Pipeline {
                 // Whisper can return nothing for noise; skip before it reaches the ring or clipboard
                 if transcription.is_empty() {
                     println!("Empty transcription. Skipping.");
-                    let _ = self.cues.send(Cue::Error);
+                    self.cues.send(Cue::Error);
                     return;
                 }
-
-                save_history(&self.state, &transcription);
 
                 // Ready only after the utterance is actually delivered
                 match action {
                     TranscribeTarget::Mailbox => {
                         self.state.push_transcription(transcription);
-                        let _ = self.cues.send(Cue::Ready);
+                        self.cues.send(Cue::Ready);
                     }
                     TranscribeTarget::Dictate => {
                         println!("Dictating: {}", transcription);
@@ -282,11 +298,11 @@ impl Pipeline {
                         self.state.set_typing(false);
                         match typed {
                             Ok(_) => {
-                                let _ = self.cues.send(Cue::Ready);
+                                self.cues.send(Cue::Ready);
                             }
                             Err(e) => {
                                 eprintln!("Failed to type text: {:?}", e);
-                                let _ = self.cues.send(Cue::Error);
+                                self.cues.send(Cue::Error);
                             }
                         }
                     }
@@ -294,7 +310,7 @@ impl Pipeline {
             }
             Err(error) => {
                 eprintln!("Transcription failed: {error}");
-                let _ = self.cues.send(Cue::Error);
+                self.cues.send(Cue::Error);
             }
         }
     }
@@ -303,7 +319,7 @@ impl Pipeline {
     fn ask(&mut self, ask: AskCommand) {
         // The ring holds echo captured while the question played
         self.source.discard();
-        let _ = self.cues.send(Cue::Arm);
+        self.cues.send(Cue::Arm);
         // Let the arm cue leave the speaker before the VAD listens
         thread::sleep(CUE_SETTLE);
         self.source.discard();
@@ -312,30 +328,28 @@ impl Pipeline {
 
         // Close the mic before the slow transcription; every exit disarms
         self.state.set_recording_mode(RecordingMode::Idle);
-        let _ = self.cues.send(Cue::Disarm);
+        self.cues.send(Cue::Disarm);
 
         let text = match answer_audio {
             Some(audio) => {
                 self.state.set_transcribing(true);
                 let transcribed = self.speech_to_text.transcribe(&audio);
+                store(&self.state, transcribed.as_deref().ok());
                 self.state.set_transcribing(false);
                 match transcribed {
                     Ok(text) => {
                         println!("Answer: {text}");
-                        if !text.is_empty() {
-                            save_history(&self.state, &text);
-                        }
                         text
                     }
                     Err(e) => {
                         eprintln!("Transcription failed: {e}");
-                        let _ = self.cues.send(Cue::Error);
+                        self.cues.send(Cue::Error);
                         String::new()
                     }
                 }
             }
             None => {
-                let _ = self.cues.send(Cue::Error);
+                self.cues.send(Cue::Error);
                 String::new()
             }
         };
@@ -466,11 +480,20 @@ impl Pipeline {
     }
 }
 
-fn save_history(state: &DaemonState, transcription: &str) {
-    if let Some(db) = state.db_connection()
-        && let Ok(connection) = db.lock()
-        && let Err(e) = crate::history::TranscriptionHistory::insert(&connection, transcription)
+/// Stores an utterance worth keeping. Whisper answers an empty string for
+/// noise, and that is not a dictation.
+fn store(state: &DaemonState, transcription: Option<&str>) {
+    if let Some(text) = transcription
+        && !text.is_empty()
     {
+        save_history(state, text);
+    }
+}
+
+fn save_history(state: &DaemonState, transcription: &str) {
+    let stored =
+        state.with_history(|c| crate::history::TranscriptionHistory::insert(c, transcription));
+    if let Some(Err(e)) = stored {
         eprintln!("Failed to insert transcription into database: {e}");
     }
 }

@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Banshee has a window.** Choose `Open Banshee` from the menu bar to set up
+  dictation, copy what you said, and change any setting. It sets Banshee up on
+  its own, models and all, so nothing in it sends you to a terminal. Everything
+  it does, the CLI still does. It needs no new permission and holds nothing the
+  daemon needs: quit it and dictation carries on.
+- **The window sets Banshee up from nothing.** A first run offers the three
+  speech models with what each costs to download, fetches them, says which file
+  is arriving and how far it has come, and restarts the daemon when the files
+  need it. Every fix it names is a button.
+- **The window lists every voice Banshee can name.** The Voice panel shows all
+  of them, marks the ones this machine does not hold, and fetches the one you
+  choose. `banshee voices` still prints only the voices that work today.
+- **A setting waiting on a model applies when the model arrives.** Choosing a
+  speech model or a voice before its file is downloaded no longer waits for a
+  restart: a running daemon asks the setting again as the download finishes.
+  The first setup on a new machine still ends with a restart, because a daemon
+  that started with no models has no pipeline to change, and the window offers
+  the restart when it is needed.
 - **The daemon reports when it listens for an answer and when it transcribes.**
   A client subscribed to `state` sees `armed` and `transcribing` beside `recording`
   and `speaking`. `recording` still means the microphone is open, so it stays true
@@ -35,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A download that cannot reach its host no longer hangs for ever.** The
+  fetch had no timeout of any kind, so one unreachable server held the whole
+  run and stranded every file behind it. A connect now gives up after ten
+  seconds and a stall between chunks after thirty, and the run carries on to
+  the remaining files and says which one failed.
 - **The daemon and `banshee connect` now report the same agents.** The daemon
   reads your login shell's `PATH`, so it sees the agents you have installed
   rather than only the four system directories launchd gives it. What remains: a

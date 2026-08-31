@@ -163,11 +163,15 @@ pub fn blockers() -> Vec<Blocker> {
         Grant::missing()
             .into_iter()
             .map(|grant| Blocker {
+                role: None,
+                remedy: Some(banshee_common::Remedy::Grant),
                 kind: BlockerKind::Permission,
                 id: grant.id().to_string(),
                 name: grant.name().to_string(),
                 consequence: grant.consequence().to_string(),
                 fix: grant.fix().to_string(),
+                // A grant is a switch in System Settings, not a command.
+                command: None,
             })
             .collect()
     }

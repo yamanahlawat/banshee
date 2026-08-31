@@ -1,8 +1,9 @@
 // Start-at-login behind a neutral surface: launchd on macOS, systemd on Linux.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use banshee_common::error::BansheeError;
+use banshee_common::utils::sibling;
 
 /// What can be set to start at login. The platform arms decide what they can
 /// honour, so a new entry is one variant rather than a new pair of functions.
@@ -23,25 +24,8 @@ impl Agent {
     }
 }
 
-// current_exe returns the symlink, so canonicalize first or a symlinked CLI
-// searches the wrong directory.
 pub(crate) fn home_dir() -> Result<PathBuf, BansheeError> {
     dirs::home_dir().ok_or_else(|| BansheeError::Other("home dir not found".into()))
-}
-
-pub(crate) fn sibling(exe: &Path, name: &str) -> Result<PathBuf, BansheeError> {
-    let real = std::fs::canonicalize(exe)?;
-    let found = real
-        .parent()
-        .ok_or_else(|| BansheeError::Other("banshee is not inside a directory".into()))?
-        .join(name);
-    if !found.exists() {
-        return Err(BansheeError::Other(format!(
-            "{} not found; reinstall so {name} ships beside the CLI",
-            found.display()
-        )));
-    }
-    Ok(found)
 }
 
 #[cfg(target_os = "macos")]
@@ -51,12 +35,14 @@ mod launchd {
 
     use banshee_common::error::BansheeError;
 
+    use banshee_common::utils::{DAEMON_AGENT, TRAY_AGENT, launchd_target, uid};
+
     use super::{Agent, home_dir, sibling};
 
     fn label(agent: Agent) -> &'static str {
         match agent {
-            Agent::Daemon => "com.banshee.daemon",
-            Agent::Tray => "com.banshee.tray",
+            Agent::Daemon => DAEMON_AGENT,
+            Agent::Tray => TRAY_AGENT,
         }
     }
 
@@ -111,8 +97,9 @@ mod launchd {
             log = log.display(),
         );
 
-        // Reinstall must be idempotent: unload any previous copy before loading
-        let _ = launchctl(&["bootout", &format!("gui/{}/{label}", uid())]);
+        // Install means make this binary the one that runs, so a live job is
+        // torn down even when the plist is identical.
+        let _ = launchctl(&["bootout", &launchd_target(label)]);
         std::fs::write(&plist, content)?;
         // bootout is asynchronous and bootstrap fails while the old job is
         // still tearing down, so retry the bootstrap itself
@@ -133,7 +120,7 @@ mod launchd {
 
     fn remove_agent(label: &str) -> Result<bool, BansheeError> {
         let plist = agent_path(&home_dir()?, label);
-        let _ = launchctl(&["bootout", &format!("gui/{}/{label}", uid())]);
+        let _ = launchctl(&["bootout", &launchd_target(label)]);
         if plist.exists() {
             std::fs::remove_file(&plist)?;
             return Ok(true);
@@ -182,13 +169,6 @@ mod launchd {
                 String::from_utf8_lossy(&output.stderr).trim()
             )))
         }
-    }
-
-    fn uid() -> u32 {
-        unsafe extern "C" {
-            fn getuid() -> u32;
-        }
-        unsafe { getuid() }
     }
 }
 

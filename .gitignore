@@ -1,8 +1,22 @@
 /target
 
 Banshee_Specification.md
+DESIGN.md
+PRODUCT.md
 .impeccable
 design
 
 # macOS directory metadata
 .DS_Store
+
+# Tauri build output
+banshee-app/gen/
+
+# Frontend build output and dependencies
+banshee-app/ui/node_modules/
+banshee-app/ui/dist/
+
+# Superpowers plans and run state
+docs/superpowers/
+.superpowers/
+.env

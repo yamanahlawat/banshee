@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use std::thread;
 
 use banshee_common::{
@@ -280,6 +280,12 @@ impl KokoroEngine {
         &self.loaded_voice
     }
 
+    /// Read into the synthesis tensor for each sentence, so the next one is
+    /// spoken at the new rate without the model loading again.
+    pub fn set_speed(&mut self, speed: f32) {
+        self.speed = speed;
+    }
+
     #[cfg(test)]
     fn style_fingerprint(&self) -> (usize, Option<f32>) {
         (self.voice.len(), self.voice.first().copied())
@@ -393,10 +399,31 @@ impl KokoroEngine {
     }
 }
 
+fn lock_read<T>(value: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    value.read().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// The voice a live `[tts]` write puts in effect, or `None` when this machine
+/// does not hold it. A voice accepted here but missing fails later inside the
+/// chunk iterator, where nothing can refuse it and every reply goes silent.
+fn voice_to_take(wanted: &str, held: &[String]) -> Option<String> {
+    held.iter()
+        .any(|id| id == wanted)
+        .then(|| wanted.to_string())
+}
+
+/// The voice an utterance speaks in: the one the caller names, or the one
+/// `tts.voice` last set.
+fn voice_for(requested: Option<&str>, configured: &str) -> String {
+    requested.unwrap_or(configured).to_string()
+}
+
 pub struct KokoroBackend {
     engine: Arc<Mutex<KokoroEngine>>,
     mixer: Mixer,
-    configured_voice: String,
+    // What an utterance that names no voice speaks in. A live `tts.voice`
+    // moves it, so it cannot be fixed at construction.
+    configured_voice: RwLock<String>,
 }
 
 impl KokoroBackend {
@@ -412,7 +439,7 @@ impl KokoroBackend {
         Ok(Self {
             engine: Arc::new(Mutex::new(engine)),
             mixer,
-            configured_voice,
+            configured_voice: RwLock::new(configured_voice),
         })
     }
 }
@@ -453,11 +480,21 @@ fn play(mixer: &Mixer, chunks: impl Iterator<Item = Vec<f32>> + Send + 'static) 
 }
 
 impl TtsBackend for KokoroBackend {
+    fn reconfigure(&self, tts: &crate::config::TTSConfig) -> Option<String> {
+        let taken = voice_to_take(&tts.voice, &crate::models::installed_voices())?;
+        *self
+            .configured_voice
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = taken.clone();
+        lock(&self.engine).set_speed(tts.speed);
+        Some(taken)
+    }
+
     fn start(&self, text: &str, voice: Option<&str>) -> std::io::Result<Box<dyn ActiveUtterance>> {
         if let Some(requested) = voice {
             installed(requested).map_err(to_io_error)?;
         }
-        let desired = voice.unwrap_or(&self.configured_voice).to_string();
+        let desired = voice_for(voice, &lock_read(&self.configured_voice));
         let engine = Arc::clone(&self.engine);
         let mut sentences = sentences(text)
             .map(str::to_string)
@@ -600,6 +637,27 @@ mod tests {
         assert!(
             !error.contains(models.to_str().expect("a printable path")),
             "the message must not name the path the daemon built: {error}"
+        );
+    }
+
+    #[test]
+    fn a_voice_this_machine_does_not_hold_is_refused() {
+        let held = vec!["af_sky".to_string(), "am_adam".to_string()];
+        assert_eq!(voice_to_take("am_adam", &held), Some("am_adam".to_string()));
+        assert_eq!(
+            voice_to_take("am_nobody", &held),
+            None,
+            "a voice that is not installed would silence every later reply"
+        );
+    }
+
+    #[test]
+    fn an_utterance_that_names_no_voice_takes_the_configured_one() {
+        assert_eq!(voice_for(None, "am_adam"), "am_adam");
+        assert_eq!(
+            voice_for(Some("af_heart"), "am_adam"),
+            "af_heart",
+            "a named voice must win over the configured one"
         );
     }
 

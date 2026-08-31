@@ -47,13 +47,14 @@ mod mac {
     // machine wakes to a failing connect.
     const RETRY: Duration = Duration::from_secs(2);
 
-    /// What the menu bar shows. `Activity` ranks the two booleans the daemon
-    /// pushes; the fourth state is the daemon failing to answer at all.
+    /// What the menu bar shows. `Activity` ranks the booleans the daemon
+    /// pushes; the last state is the daemon failing to answer at all.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Indicator {
         Idle,
         Recording,
         Speaking,
+        Listening,
         NotRunning,
     }
 
@@ -64,6 +65,7 @@ mod mac {
                 Some(Activity::Idle) => Indicator::Idle,
                 Some(Activity::Recording) => Indicator::Recording,
                 Some(Activity::Speaking) => Indicator::Speaking,
+                Some(Activity::Listening) => Indicator::Listening,
             }
         }
 
@@ -72,20 +74,23 @@ mod mac {
                 Indicator::Idle => "Idle",
                 Indicator::Recording => "Recording",
                 Indicator::Speaking => "Speaking",
+                // What it means to a person, not the name on the wire.
+                Indicator::Listening => "Waiting for you",
                 Indicator::NotRunning => "Not running",
             }
         }
     }
 
-    // The mark ships as four rendered states, generated from
-    // assets/banshee-mark.svg. macOS paints a template image from its alpha
-    // alone, so each asset is black with the drawing in the alpha channel.
-    // tray-icon renders any icon 18pt tall, which makes 36px its 2x asset.
+    // The mark ships as five rendered states, drawn from the same geometry the
+    // window uses. macOS paints a template image from its alpha alone, so each
+    // asset is black with the drawing in the alpha channel. tray-icon renders
+    // any icon 18pt tall, which makes 36px its 2x asset.
     fn glyph(indicator: Indicator) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error>> {
         let asset: &[u8] = match indicator {
             Indicator::Idle => include_bytes!("../../assets/tray/mark-idle.png"),
             Indicator::Recording => include_bytes!("../../assets/tray/mark-recording.png"),
             Indicator::Speaking => include_bytes!("../../assets/tray/mark-speaking.png"),
+            Indicator::Listening => include_bytes!("../../assets/tray/mark-listening.png"),
             Indicator::NotRunning => include_bytes!("../../assets/tray/mark-notrunning.png"),
         };
         let mut reader = png::Decoder::new(std::io::Cursor::new(asset)).read_info()?;
@@ -107,6 +112,7 @@ mod mac {
         Device(Device),
         History(bool),
         Quit,
+        Open,
         CopyLast,
         Copied(String),
     }
@@ -163,7 +169,7 @@ mod mac {
                 "Copy last dictation".to_string(),
                 copy_last_enabled(indicator, history_enabled),
             ),
-            Row::Action(OPEN_ID, "Open Banshee (coming soon)".to_string(), false),
+            Row::Action(OPEN_ID, "Open Banshee".to_string(), true),
             Row::Separator,
             Row::Action(QUIT_ID, "Quit Banshee".to_string(), true),
         ]
@@ -235,7 +241,14 @@ mod mac {
             // the reconnect loop repeats itself once a cycle while the daemon is
             // down, so an unchanged value must not reach show()
             let changed = match message {
-                Message::Quit => return event_loop.exit(),
+                // The row says Quit Banshee, so it stops Banshee. This menu is
+                // the only way to let go of the microphone and the hotkey
+                // without a terminal.
+                Message::Quit => {
+                    close_the_window().unwrap_or_else(|e| eprintln!("banshee-tray: {e}"));
+                    stop_the_daemon().unwrap_or_else(|e| eprintln!("banshee-tray: {e}"));
+                    return event_loop.exit();
+                }
                 Message::State(indicator) => {
                     let moved = self.indicator != indicator;
                     self.indicator = indicator;
@@ -250,6 +263,10 @@ mod mac {
                     let moved = self.history_enabled != enabled;
                     self.history_enabled = enabled;
                     moved
+                }
+                Message::Open => {
+                    return open_the_window()
+                        .unwrap_or_else(|error| eprintln!("banshee-tray: {error}"));
                 }
                 Message::CopyLast => return spawn_copy_last(self.proxy.clone()),
                 Message::Copied(text) => {
@@ -387,6 +404,36 @@ mod mac {
         Ok(())
     }
 
+    // A stop over the socket leaves the login agent installed, so the daemon
+    // is down now and back at the next login.
+    fn stop_the_daemon() -> Result<(), Box<dyn std::error::Error>> {
+        utils::sibling_command("banshee")?.arg("stop").status()?;
+        Ok(())
+    }
+
+    // The window runs as its own process and can come from Spotlight rather
+    // than from Open Banshee, so the tray holds no handle for it.
+    fn close_the_window() -> Result<(), Box<dyn std::error::Error>> {
+        std::process::Command::new("/usr/bin/pkill")
+            .args(["-x", "banshee-app"])
+            .status()?;
+        Ok(())
+    }
+
+    // Not `open`, which resolves the bundle id and starts nothing when a
+    // second Banshee.app is registered under it. The window is this binary's
+    // sibling, so run it directly.
+    fn open_the_window() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::CommandExt;
+
+        // Its own process group, or it dies with this one. launchd signals
+        // the whole group when it boots the job out, and a reinstall does.
+        utils::sibling_command("banshee-app")?
+            .process_group(0)
+            .spawn()?;
+        Ok(())
+    }
+
     // launchd runs one job, but nothing stops the binary being started by hand,
     // and a second process means a second icon. The lock lives as long as the
     // process does and the kernel drops it however the process dies.
@@ -424,6 +471,7 @@ mod mac {
             let message = match event.id.0.as_str() {
                 QUIT_ID => Some(Message::Quit),
                 COPY_LAST_ID => Some(Message::CopyLast),
+                OPEN_ID => Some(Message::Open),
                 _ => None,
             };
             if let Some(message) = message {
@@ -462,10 +510,11 @@ mod mac {
             serde_json::json!({"recording": recording, "speaking": speaking})
         }
 
-        const STATES: [Indicator; 4] = [
+        const STATES: [Indicator; 5] = [
             Indicator::Idle,
             Indicator::Recording,
             Indicator::Speaking,
+            Indicator::Listening,
             Indicator::NotRunning,
         ];
 
@@ -494,7 +543,7 @@ mod mac {
                     "MacBook Pro Microphone",
                     "---",
                     "Copy last dictation",
-                    "Open Banshee (coming soon)",
+                    "Open Banshee",
                     "---",
                     "Quit Banshee",
                 ]
@@ -515,6 +564,22 @@ mod mac {
 
             assert!(!copy_enabled(Indicator::Idle, false));
             assert!(copy_enabled(Indicator::Idle, true));
+        }
+
+        // A stopped daemon is the state the window has most to say about: it
+        // names the fix and prints the command that applies it.
+        #[test]
+        fn the_open_row_stays_live_even_when_the_daemon_is_not() {
+            for indicator in [Indicator::Idle, Indicator::NotRunning] {
+                let open = menu_rows(indicator, &Device::default(), false)
+                    .into_iter()
+                    .find_map(|row| match row {
+                        Row::Action(id, _, enabled) if id == OPEN_ID => Some(enabled),
+                        _ => None,
+                    })
+                    .expect("menu_rows must include the open action");
+                assert!(open, "{indicator:?} must still offer the window");
+            }
         }
 
         #[test]

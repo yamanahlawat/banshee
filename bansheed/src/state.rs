@@ -10,7 +10,7 @@ use std::{
 use banshee_common::DownloadProgress;
 use tokio::sync::{broadcast, watch};
 
-use crate::audio::cues::Cue;
+use crate::audio::cues::{Cue, Cues};
 use crate::config::{BargeInMode, Config};
 use crate::text_to_speech::SpeechPlayer;
 
@@ -47,6 +47,13 @@ pub enum ConsumerCommand {
     // the next transcription
     Discard,
     Ask(AskCommand),
+    // The listener owns the engine, so both of these reach it the way a rebind
+    // does. A push-to-talk leaves that thread idle until the key is released,
+    // so either can land while the microphone is open. The ring holds the audio,
+    // so the dictation that follows is whole.
+    Retune(Vec<String>),
+    Speak(crate::speech_to_text::whisper::Speech),
+    Reload(&'static str),
     // A new stream opened, so the old ring is dead. The rate comes with it:
     // devices do not share one.
     Rebind {
@@ -110,8 +117,22 @@ impl std::fmt::Display for RecordingError {
 impl RecordingError {
     /// Trimmed at the source, not in each renderer: the wrapped error ends in a
     /// period and the other blocker prose does not.
+    ///
+    /// A model fault drops the engine's own words. They name a file and an
+    /// absolute path, the remedy is a restart either way, and the file is
+    /// usually on disk by the time anyone reads this. `Display` keeps them for
+    /// the log.
     pub fn consequence(&self) -> String {
-        self.to_string().trim_end_matches('.').to_string()
+        match self {
+            RecordingError::Model(_) => "a model would not load".to_string(),
+            RecordingError::Microphone(_) => self.to_string().trim_end_matches('.').to_string(),
+        }
+    }
+
+    pub fn command(&self) -> Option<&'static str> {
+        match self {
+            RecordingError::Microphone(_) | RecordingError::Model(_) => Some("banshee start"),
+        }
     }
 
     pub fn fix(&self) -> &'static str {
@@ -155,7 +176,10 @@ fn replace_if_new(field: &RwLock<Option<String>>, name: Option<String>) -> bool 
 
 pub struct DaemonState {
     version: &'static str,
-    stt_model: &'static str,
+    // The model the listener has loaded, not the one the file names. The
+    // window reads the blockers built from this, so a preset that was asked
+    // for and never loaded must not clear them.
+    stt_model: RwLock<&'static str>,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: RwLock<Option<String>>,
@@ -165,11 +189,17 @@ pub struct DaemonState {
     // What `audio.input_device` asks for. The watchdog reads it and rebuilds
     // capture when it differs from the device it opened.
     wanted_device: Mutex<String>,
-    tts_voice: OnceLock<String>,
-    wanted_downloads: OnceLock<Vec<crate::models::download::Download>>,
+    // Follows a live `tts.voice`, so the voice reported is the one now loaded
+    tts_voice: RwLock<Option<String>>,
+    // What the config asks the daemon to hold.
+    wanted_downloads: RwLock<Vec<crate::models::download::Download>>,
     // The file as last parsed. `vad_threshold`, `wanted_device` and `barge_in`
     // beside it are live values the file may no longer agree with.
     config: RwLock<Arc<Config>>,
+    // A key with no live apply is read once, when the daemon starts, so this is
+    // what those keys run for the daemon's whole life. Without it a write cannot
+    // tell a change from a change back.
+    running_config: OnceLock<Arc<Config>>,
     // Keys the daemon accepted and wrote but has not applied. A restart empties
     // it by nature; a live path clears its own key.
     pending: Mutex<std::collections::BTreeSet<String>>,
@@ -178,7 +208,7 @@ pub struct DaemonState {
     recording_error: RwLock<Option<RecordingError>>,
     recording: AtomicU8,
     started_at: Instant,
-    db_connection: Option<Mutex<rusqlite::Connection>>,
+    db_connection: Mutex<Option<rusqlite::Connection>>,
     transcriptions: Mutex<TranscriptionRing>,
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
@@ -191,8 +221,8 @@ pub struct DaemonState {
     downloading: AtomicBool,
     speech: Arc<SpeechPlayer>,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
-    cues: std::sync::mpsc::Sender<Cue>,
-    barge_in: BargeInMode,
+    cues: Cues,
+    barge_in: Mutex<BargeInMode>,
     // Start and stop can be separate RPC calls, so this cannot live on a stack
     pending_dictate: AtomicBool,
     // enigo posts to the same HID stream rdev listens at, so while this is
@@ -216,28 +246,29 @@ impl DaemonState {
         vad_model: &'static str,
         initial_vad_threshold: f32,
         wanted_device: String,
-        db_connection: Option<Mutex<rusqlite::Connection>>,
+        db_connection: Option<rusqlite::Connection>,
         speech: SpeechPlayer,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
-        cues: std::sync::mpsc::Sender<Cue>,
+        cues: Cues,
         barge_in: BargeInMode,
     ) -> Self {
         Self {
             version,
-            stt_model,
+            stt_model: RwLock::new(stt_model),
             vad_model,
             vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
             audio_device: RwLock::new(None),
             missing_device: RwLock::new(None),
             wanted_device: Mutex::new(wanted_device),
-            tts_voice: OnceLock::new(),
-            wanted_downloads: OnceLock::new(),
+            tts_voice: RwLock::new(None),
+            wanted_downloads: RwLock::new(Vec::new()),
             config: RwLock::new(Arc::new(Config::default())),
+            running_config: OnceLock::new(),
             pending: Mutex::new(std::collections::BTreeSet::new()),
             recording_error: RwLock::new(None),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
-            db_connection,
+            db_connection: Mutex::new(db_connection),
             transcriptions: Mutex::new(TranscriptionRing {
                 next_id: 0,
                 entries: VecDeque::with_capacity(TRANSCRIPTION_RING_CAPACITY),
@@ -251,7 +282,7 @@ impl DaemonState {
             speech: Arc::new(speech),
             commands,
             cues,
-            barge_in,
+            barge_in: Mutex::new(barge_in),
             pending_dictate: AtomicBool::new(false),
             typing: AtomicBool::new(false),
             push_to_talk_deadline: AtomicU64::new(0),
@@ -266,19 +297,19 @@ impl DaemonState {
         // The hotkey arrives here too, so a deaf daemon answers a press with the
         // error cue. Arming a session nothing can transcribe would be silent.
         if self.recording_error.read().unwrap().is_some() {
-            let _ = self.cues.send(Cue::Error);
+            self.cues.send(Cue::Error);
             return false;
         }
         if self.try_transition(RecordingMode::Armed, RecordingMode::ArmedHold) {
             // Manual override of an armed session: hold to answer
-            if matches!(self.barge_in, BargeInMode::Stop) {
+            if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
-            let _ = self.cues.send(Cue::RecordStart);
+            self.cues.send(Cue::RecordStart);
             true
         } else if self.try_transition(RecordingMode::Idle, RecordingMode::PushToTalk) {
             // Silence the daemon's own voice before the mic opens
-            if matches!(self.barge_in, BargeInMode::Stop) {
+            if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
             self.push_to_talk_deadline.store(
@@ -289,7 +320,7 @@ impl DaemonState {
                 matches!(action, TranscribeTarget::Dictate),
                 std::sync::atomic::Ordering::Relaxed,
             );
-            let _ = self.cues.send(Cue::RecordStart);
+            self.cues.send(Cue::RecordStart);
             println!("Recording started...");
             true
         } else {
@@ -302,7 +333,7 @@ impl DaemonState {
     pub fn record_stop(&self) {
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             println!("Recording stopped");
-            let _ = self.cues.send(Cue::RecordStop);
+            self.cues.send(Cue::RecordStop);
             let action = if self
                 .pending_dictate
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -313,7 +344,7 @@ impl DaemonState {
             };
             let _ = self.commands.send(ConsumerCommand::Transcribe(action));
         } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
-            let _ = self.cues.send(Cue::RecordStop);
+            self.cues.send(Cue::RecordStop);
         }
     }
 
@@ -343,7 +374,7 @@ impl DaemonState {
         } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
             // The armed session keeps its audio; only the manual hold ends.
             // This cue answers the start cue the hold played.
-            let _ = self.cues.send(Cue::RecordStop);
+            self.cues.send(Cue::RecordStop);
         }
     }
 
@@ -514,8 +545,19 @@ impl DaemonState {
         self.version
     }
 
-    pub fn stt_model(&self) -> &str {
-        self.stt_model
+    pub fn stt_model(&self) -> &'static str {
+        *self
+            .stt_model
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// The listener records what it loaded, as the speech backend does.
+    pub fn set_stt_model(&self, model: &'static str) {
+        *self
+            .stt_model
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = model;
     }
 
     pub fn vad_model(&self) -> &str {
@@ -597,30 +639,70 @@ impl DaemonState {
 
     /// The voice the speech backend actually loaded, which `config.toml` may no
     /// longer agree with.
-    pub fn tts_voice(&self) -> Option<&str> {
-        self.tts_voice.get().map(String::as_str)
+    pub fn tts_voice(&self) -> Option<String> {
+        self.tts_voice
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    /// True when the backend took the change. The voice the window marks as
+    /// current comes from the backend, not from the file, so a backend that
+    /// speaks in something else is never reported as speaking in this.
+    pub fn set_tts(&self, tts: &crate::config::TTSConfig) -> bool {
+        let Some(voice) = self.speech.reconfigure(tts) else {
+            return false;
+        };
+        self.set_tts_voice(voice);
+        true
     }
 
     pub fn set_tts_voice(&self, voice: String) {
-        let _ = self.tts_voice.set(voice);
+        *self
+            .tts_voice
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(voice);
     }
 
     /// Every file this daemon's own config needs. Set before the socket
     /// accepts, so a caller never sees it unset.
-    pub fn wanted_downloads(&self) -> &[crate::models::download::Download] {
-        self.wanted_downloads.get().map_or(&[], Vec::as_slice)
+    pub fn wanted_downloads(&self) -> Vec<crate::models::download::Download> {
+        self.wanted_downloads
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
+    /// Tests need a list of their own, because what is missing otherwise
+    /// depends on which models the machine happens to hold.
+    #[cfg(test)]
     pub fn set_wanted_downloads(&self, wanted: Vec<crate::models::download::Download>) {
-        let _ = self.wanted_downloads.set(wanted);
+        *self
+            .wanted_downloads
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = wanted;
     }
 
     pub fn config(&self) -> Arc<Config> {
         Arc::clone(&self.config.read().unwrap())
     }
 
+    /// The models the daemon wants are determined by the config that names
+    /// them, so they are rewritten here and nowhere else.
     pub fn set_config(&self, config: Arc<Config>) {
+        *self
+            .wanted_downloads
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) =
+            crate::models::download::wanted(&config);
+        let _ = self.running_config.set(Arc::clone(&config));
         *self.config.write().unwrap() = config;
+    }
+
+    /// The config the restart-only keys are running, or `None` before the
+    /// daemon has been handed one, when nothing can be compared against it.
+    pub fn running_config(&self) -> Option<Arc<Config>> {
+        self.running_config.get().cloned()
     }
 
     pub fn pending(&self) -> Vec<String> {
@@ -638,6 +720,49 @@ impl DaemonState {
         }
     }
 
+    // A record start reads this, so a write between two dictations changes
+    // what the next one does.
+    // The player reads this as each cue reaches it, so a write between two
+    // dictations decides whether the next one is heard.
+    pub fn set_cues_enabled(&self, on: bool) {
+        self.cues.set_enabled(on);
+    }
+
+    #[cfg(test)]
+    pub fn cues_enabled(&self) -> bool {
+        self.cues.enabled()
+    }
+
+    pub fn barge_in(&self) -> BargeInMode {
+        *self.locked_barge_in()
+    }
+
+    pub fn set_barge_in(&self, mode: BargeInMode) {
+        *self.locked_barge_in() = mode;
+    }
+
+    // A mode has no invariant a panic can break, and a panic here would stop
+    // every later dictation reading it, so the value stands
+    fn locked_barge_in(&self) -> std::sync::MutexGuard<'_, BargeInMode> {
+        self.barge_in
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    pub fn set_vocabulary(&self, words: Vec<String>) -> bool {
+        self.commands.send(ConsumerCommand::Retune(words)).is_ok()
+    }
+
+    /// What language the next utterance is read as, and whether it answers in
+    /// English. Whisper reads both per utterance, so no model moves.
+    pub fn set_speech(&self, speech: crate::speech_to_text::whisper::Speech) -> bool {
+        self.commands.send(ConsumerCommand::Speak(speech)).is_ok()
+    }
+
+    pub fn load_stt_model(&self, model: &'static str) -> bool {
+        self.commands.send(ConsumerCommand::Reload(model)).is_ok()
+    }
+
     pub fn set_vad_threshold(&self, threshold: f32) {
         self.vad_threshold
             .store(threshold.to_bits(), std::sync::atomic::Ordering::Relaxed);
@@ -650,8 +775,28 @@ impl DaemonState {
         f32::from_bits(bits)
     }
 
-    pub fn db_connection(&self) -> Option<&Mutex<rusqlite::Connection>> {
-        self.db_connection.as_ref()
+    /// Runs `job` against the history file, or answers `None` when history is
+    /// off. The one place that holds the lock, so no caller repeats the two
+    /// steps that stand between it and the table.
+    pub fn with_history<T>(&self, job: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
+        let held = self
+            .db_connection
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        held.as_ref().map(job)
+    }
+
+    pub fn history_enabled(&self) -> bool {
+        self.with_history(|_| ()).is_some()
+    }
+
+    /// Opening and closing the file is the whole of `daemon.save_history`, so a
+    /// write between two dictations decides whether the next one is kept.
+    pub fn set_history(&self, connection: Option<rusqlite::Connection>) {
+        *self
+            .db_connection
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = connection;
     }
 
     /// Called from the real time audio thread, so it must not lock or allocate.
@@ -674,7 +819,102 @@ impl DaemonState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_models_wanted_follow_the_preset_the_config_names() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        let mut config = Config::default();
+        config.stt.preset = crate::config::STTPreset::Fast;
+        state.set_config(std::sync::Arc::new(config));
+        let named = |state: &DaemonState| {
+            state
+                .wanted_downloads()
+                .iter()
+                .map(|d| d.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(named(&state).contains(&"ggml-base.en.bin".to_string()));
+
+        let mut config = Config::default();
+        config.stt.preset = crate::config::STTPreset::Quality;
+        state.set_config(std::sync::Arc::new(config));
+
+        let after = named(&state);
+        assert!(after.contains(&"ggml-large-v3-q5_0.bin".to_string()));
+        assert!(
+            !after.contains(&"ggml-base.en.bin".to_string()),
+            "the window must stop asking for the model the daemon left behind"
+        );
+    }
+
+    #[test]
+    fn a_preset_change_hands_the_listener_the_model_to_load() {
+        let (commands, taken) = std::sync::mpsc::channel();
+        let state = crate::test_support::daemon_state(commands);
+
+        assert!(state.load_stt_model("ggml-large-v3-q5_0.bin"));
+
+        match taken.try_recv() {
+            Ok(ConsumerCommand::Reload(model)) => assert_eq!(model, "ggml-large-v3-q5_0.bin"),
+            _ => panic!("the listener was handed no model"),
+        }
+    }
+
+    // A listener that has gone cannot load anything, and saying otherwise would
+    // report a preset in effect that nothing runs.
+    #[test]
+    fn a_preset_change_with_no_listener_is_not_reported_as_taken() {
+        let (commands, gone) = std::sync::mpsc::channel();
+        let state = crate::test_support::daemon_state(commands);
+        drop(gone);
+
+        assert!(!state.load_stt_model("ggml-large-v3-q5_0.bin"));
+    }
+
+    #[test]
+    fn the_model_reported_is_the_one_the_listener_loaded() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        assert_eq!(state.stt_model(), "stt");
+
+        state.set_stt_model("ggml-large-v3-q5_0.bin");
+
+        assert_eq!(state.stt_model(), "ggml-large-v3-q5_0.bin");
+    }
+
+    // The off direction alone would pass a `set_history` that always stores
+    // nothing, so this asks whether a reopened file is reached.
+    #[test]
+    fn history_turned_back_on_is_written_to_again() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        assert!(!state.history_enabled(), "this state starts with none");
+
+        state.set_history(Some(crate::test_support::seeded_history(&["kept"])));
+
+        assert!(state.history_enabled());
+        let rows = state
+            .with_history(|c| crate::history::TranscriptionHistory::list(c, None))
+            .expect("history is on, so the job must run")
+            .expect("the table must be readable");
+        assert_eq!(rows.len(), 1, "the reopened file must be the one read");
+    }
+
     use super::*;
+
+    /// A client offers the command behind a Copy button, so `command` has to
+    /// be the command the sentence names, not a near miss.
+    #[test]
+    fn a_recording_error_names_the_same_command_its_sentence_does() {
+        for error in [
+            RecordingError::Microphone(String::new()),
+            RecordingError::Model(String::new()),
+        ] {
+            let command = error.command().expect("both faults name a command");
+            assert!(
+                error.fix().ends_with(command),
+                "`{}` does not end with `{command}`",
+                error.fix()
+            );
+        }
+    }
 
     // A watchdog rescans after a fault, but `start_recording` returning Err
     // spawns none, so that one microphone fault needs a restart.
@@ -703,7 +943,7 @@ mod tests {
             None,
             crate::text_to_speech::SpeechPlayer::default(),
             commands,
-            std::sync::mpsc::channel().0,
+            crate::audio::cues::Cues::silent(),
             BargeInMode::Stop,
         );
         (state, requests)
@@ -756,7 +996,7 @@ mod tests {
         state.set_audio_device(Some("OnePlus Buds 3".to_string()));
         assert_eq!(state.audio_device().as_deref(), Some("OnePlus Buds 3"));
 
-        // The OnceLock discarded this. A rebind depends on it landing.
+        // A rebind depends on a second write landing.
         state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
         assert_eq!(
             state.audio_device().as_deref(),
@@ -981,12 +1221,14 @@ mod tests {
         let state = test_state();
         assert_eq!(state.tts_voice(), None);
         state.set_tts_voice("af_sky".to_string());
-        assert_eq!(state.tts_voice(), Some("af_sky"));
+        assert_eq!(state.tts_voice().as_deref(), Some("af_sky"));
+
         state.set_tts_voice("am_adam".to_string());
+
         assert_eq!(
-            state.tts_voice(),
-            Some("af_sky"),
-            "a second write must not replace what is already loaded"
+            state.tts_voice().as_deref(),
+            Some("am_adam"),
+            "a live voice change must move the voice the window marks as current"
         );
     }
 

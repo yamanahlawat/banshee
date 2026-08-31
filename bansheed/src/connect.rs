@@ -689,7 +689,7 @@ impl Env {
         let claude_config_dir = config_dir_override.unwrap_or_else(|| home.join(".claude"));
         let exe = std::env::current_exe()?;
         let banshee = std::fs::canonicalize(&exe)?;
-        let shim = crate::service::sibling(&exe, SHIM_NAME).ok();
+        let shim = banshee_common::utils::sibling(&exe, SHIM_NAME).ok();
         // Starting Claude Code makes it rewrite its own config, so detection never spawns an agent
         let on_path = Agent::ALL
             .iter()

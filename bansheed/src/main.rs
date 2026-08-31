@@ -21,19 +21,14 @@ mod test_support;
 mod text_to_speech;
 
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use args::{Cli, CommandType};
-use banshee_common::{
-    SileroVADConfig, Voice, WhisperConfig,
-    error::BansheeError,
-    utils::{self, get_db_path},
-};
+use banshee_common::{SileroVADConfig, Voice, WhisperConfig, error::BansheeError, utils};
 use clap::Parser;
 
 use crate::{
     config::Config,
-    history::TranscriptionHistory,
     speech_to_text::{vad::VADEngine, whisper::WhisperEngine},
     state::RecordingError,
 };
@@ -64,7 +59,7 @@ fn start_recording(
     daemon_state: &Arc<state::DaemonState>,
     config: &Config,
     command_receiver: std::sync::mpsc::Receiver<state::ConsumerCommand>,
-    cues: std::sync::mpsc::Sender<audio::cues::Cue>,
+    cues: audio::cues::Cues,
 ) -> Result<Recording, RecordingError> {
     // Startup selects through the same function the watchdog tick uses, so a
     // device that is absent at boot falls back rather than leaving capture dead
@@ -85,6 +80,7 @@ fn start_recording(
     let speech_to_text = WhisperEngine::new(
         WhisperConfig::new(config.stt.preset.model_name()),
         &config.stt.vocabulary,
+        (&config.stt).into(),
     )
     .map_err(|e| model_failure(daemon_state, e.to_string()))?;
     let vad = VADEngine::new(SileroVADConfig::new(VAD_MODEL))
@@ -234,6 +230,7 @@ fn state_word(state: &serde_json::Value) -> &'static str {
         banshee_common::Activity::Idle => "idle",
         banshee_common::Activity::Recording => "recording",
         banshee_common::Activity::Speaking => "speaking",
+        banshee_common::Activity::Listening => "listening",
     }
 }
 
@@ -290,21 +287,14 @@ async fn main() -> Result<(), BansheeError> {
             let (socket_path, listener) = daemon::claim()?;
             permissions::restart_when_granted();
             let db_connection = if config.daemon.save_history {
-                let db_path = get_db_path().ok_or_else(|| {
-                    BansheeError::Other("Failed to get database path".to_string())
-                })?;
-                let connection = rusqlite::Connection::open(db_path)
-                    .map_err(|e| BansheeError::Other(e.to_string()))?;
-                TranscriptionHistory::create_table(&connection)
-                    .map_err(|e| BansheeError::Other(e.to_string()))?;
-                Some(Mutex::new(connection))
+                Some(history::open()?)
             } else {
                 None
             };
 
             let (speech_backend, live_voice) = text_to_speech::select_backend(&config.tts)?;
             let (commands, command_receiver) = std::sync::mpsc::channel();
-            let cue_sender = audio::cues::start_cue_player(config.audio.cues.enabled);
+            let cues = audio::cues::start_cue_player(config.audio.cues.enabled);
             let daemon_state = Arc::new(state::DaemonState::new(
                 env!("CARGO_PKG_VERSION"),
                 config.stt.preset.model_name(),
@@ -314,42 +304,40 @@ async fn main() -> Result<(), BansheeError> {
                 db_connection,
                 text_to_speech::SpeechPlayer::new(speech_backend),
                 commands,
-                cue_sender.clone(),
+                cues.clone(),
                 config.audio.barge_in,
             ));
 
             if let Some(voice) = live_voice {
                 daemon_state.set_tts_voice(voice);
             }
-            daemon_state.set_wanted_downloads(models::download::wanted(&config));
             daemon_state.set_config(Arc::clone(&config));
 
             // The watchdog owns the stream past daemon::run: stopping it stops
             // capture, and the thread is the only thing left to join
-            let recording =
-                match start_recording(&daemon_state, &config, command_receiver, cue_sender) {
-                    Ok(started) => {
-                        let watchdog = audio::watchdog::spawn(
-                            Arc::clone(&daemon_state),
-                            started.stream,
-                            started.open,
-                            started.missing,
-                        );
-                        Some((watchdog, started.thread))
-                    }
-                    // A missing mic or model leaves the daemon useful rather than
-                    // exiting, which the supervisor reads as a crash and retries
-                    Err(error) => {
-                        eprintln!("Recording is unavailable: {error}");
-                        eprintln!(
-                            "The daemon is up: speak, status, and history still work. \
+            let recording = match start_recording(&daemon_state, &config, command_receiver, cues) {
+                Ok(started) => {
+                    let watchdog = audio::watchdog::spawn(
+                        Arc::clone(&daemon_state),
+                        started.stream,
+                        started.open,
+                        started.missing,
+                    );
+                    Some((watchdog, started.thread))
+                }
+                // A missing mic or model leaves the daemon useful rather than
+                // exiting, which the supervisor reads as a crash and retries
+                Err(error) => {
+                    eprintln!("Recording is unavailable: {error}");
+                    eprintln!(
+                        "The daemon is up: speak, status, and history still work. \
                              Recording, dictation, and ask_user do not."
-                        );
-                        eprintln!("Run `banshee status` for the fix.");
-                        daemon_state.set_recording_error(error);
-                        None
-                    }
-                };
+                    );
+                    eprintln!("Run `banshee status` for the fix.");
+                    daemon_state.set_recording_error(error);
+                    None
+                }
+            };
             // After the pipeline, so a press always reaches record_start: with
             // no pipeline it answers with the error cue rather than nothing
             hotkey::start_global_hotkey(
@@ -434,22 +422,27 @@ async fn main() -> Result<(), BansheeError> {
                         .and_then(|voice| voice.as_str())
                         .map(str::to_string),
                 ),
-                // A voice gets chosen before there is a daemon to ask
+                // A voice gets chosen before there is a daemon to ask. These
+                // came off the disk, so every one of them is here.
                 Err(error) if daemon_is_down(&error) => (
                     models::installed_voices()
                         .iter()
-                        .map(|id| text_to_speech::voices::describe(id))
+                        .map(|id| text_to_speech::voices::describe(id, true))
                         .collect(),
                     None,
                 ),
                 Err(error) => fail(&error),
             };
 
-            if voices.is_empty() {
+            // The daemon names every voice it can describe, so what this has to
+            // print is the ones that are here: `banshee voices` promises that
+            // every name it lists works today.
+            let held: Vec<&Voice> = voices.iter().filter(|voice| voice.downloaded).collect();
+            if held.is_empty() {
                 println!("No voices found. Download one with: banshee setup");
                 return Ok(());
             }
-            for voice in &voices {
+            for voice in held {
                 let marker = if current.as_deref() == Some(voice.id.as_str()) {
                     "*"
                 } else {

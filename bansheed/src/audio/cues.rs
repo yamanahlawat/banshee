@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -30,14 +32,69 @@ impl Cue {
     }
 }
 
-// When disabled, the receiver is dropped so sends become silent no-ops
-pub fn start_cue_player(enabled: bool) -> mpsc::Sender<Cue> {
-    let (sender, receiver) = mpsc::channel::<Cue>();
-    if !enabled {
-        return sender;
+/// The cue channel and the switch that decides whether a cue sounds. One value,
+/// because a cue sent while cues are off must still reach a live player for the
+/// moment they come back on.
+#[derive(Clone)]
+pub struct Cues {
+    sender: mpsc::Sender<Cue>,
+    enabled: Arc<AtomicBool>,
+}
+
+impl Cues {
+    /// A cue nobody can hear is not an error, so this swallows a dead player.
+    pub fn send(&self, cue: Cue) {
+        let _ = self.sender.send(cue);
     }
 
+    /// The player thread reads the flag itself, so this serves the tests that
+    /// ask whether a write reached it.
+    #[cfg(test)]
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Relaxed);
+    }
+
+    /// A handle with no player behind it, for tests that build a daemon state
+    /// but never sound anything.
+    #[cfg(test)]
+    pub fn silent() -> Self {
+        Cues {
+            sender: mpsc::channel().0,
+            enabled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+/// The next cue that must be heard, skipping every one that arrives while cues
+/// are off. `None` once the last sender is gone.
+fn next_playable(receiver: &mpsc::Receiver<Cue>, enabled: &AtomicBool) -> Option<Cue> {
+    loop {
+        let cue = receiver.recv().ok()?;
+        if enabled.load(Ordering::Relaxed) {
+            return Some(cue);
+        }
+    }
+}
+
+/// The player holds the receiver whether or not cues sound, so turning them on
+/// reaches a thread that is already listening. It opens no output device until
+/// the first cue it must play, so cues left off hold no audio hardware.
+pub fn start_cue_player(enabled: bool) -> Cues {
+    let (sender, receiver) = mpsc::channel::<Cue>();
+    let cues = Cues {
+        sender,
+        enabled: Arc::new(AtomicBool::new(enabled)),
+    };
+    let enabled = cues.enabled.clone();
+
     thread::spawn(move || {
+        let Some(mut cue) = next_playable(&receiver, &enabled) else {
+            return;
+        };
         // The device sink is !Send, so it must live on this thread
         let sink = match DeviceSinkBuilder::open_default_sink() {
             Ok(sink) => sink,
@@ -49,14 +106,18 @@ pub fn start_cue_player(enabled: bool) -> mpsc::Sender<Cue> {
         // Player queues tones back to back; the mixer alone would overlap them
         let player = Player::connect_new(sink.mixer());
 
-        while let Ok(cue) = receiver.recv() {
+        loop {
             for &(frequency, ms) in cue.tones() {
                 player.append(tone(frequency, ms));
             }
+            cue = match next_playable(&receiver, &enabled) {
+                Some(next) => next,
+                None => return,
+            };
         }
     });
 
-    sender
+    cues
 }
 
 fn tone(frequency: f32, ms: u64) -> impl Source + Send {
@@ -87,9 +148,40 @@ mod tests {
         }
     }
 
+    // Cues off must not end the player, or turning them on would need a
+    // restart to get a thread back.
     #[test]
-    fn disabled_player_swallows_sends() {
-        let sender = start_cue_player(false);
-        assert!(sender.send(Cue::Ready).is_err());
+    fn a_player_that_starts_off_still_takes_cues() {
+        let cues = start_cue_player(false);
+        assert!(
+            cues.sender.send(Cue::Ready).is_ok(),
+            "the player must still hold the receiver, or turning cues on would \
+             need a restart to get a thread back"
+        );
+    }
+
+    #[test]
+    fn nothing_is_played_while_cues_are_off() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Cue::Ready).unwrap();
+        sender.send(Cue::Error).unwrap();
+        drop(sender);
+
+        assert!(
+            next_playable(&receiver, &AtomicBool::new(false)).is_none(),
+            "a cue that arrives while cues are off must not reach the speaker"
+        );
+    }
+
+    #[test]
+    fn the_first_cue_after_cues_come_on_is_played() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Cue::Ready).unwrap();
+        sender.send(Cue::Error).unwrap();
+
+        assert!(matches!(
+            next_playable(&receiver, &AtomicBool::new(true)),
+            Some(Cue::Ready)
+        ));
     }
 }

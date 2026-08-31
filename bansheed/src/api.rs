@@ -5,9 +5,9 @@ use banshee_common::error::BansheeError;
 use banshee_common::{
     BANSHEE_AGENTS, BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE,
     BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS,
-    BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES,
-    BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_SPEAK,
-    BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
+    BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_LANGUAGES,
+    BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP,
+    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -167,7 +167,20 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "speaking": daemon_state.speech().is_speaking(),
         "uptime_seconds": daemon_state.uptime().as_secs(),
         "vad_threshold": daemon_state.vad_threshold(),
-        "history_enabled": daemon_state.db_connection().is_some(),
+        "history_enabled": daemon_state.history_enabled(),
+        // The English-only build reads English whatever `stt.language` says.
+        // Stated here rather than worked out from the preset name by every
+        // client that has to know.
+        // The window shows this rather than summing a file list it does not
+        // hold: only the daemon knows which files are already here.
+        "download_megabytes": crate::models::download::models_dir()
+            .map(|dir| {
+                crate::models::download::pending_megabytes(&daemon_state.wanted_downloads(), &dir)
+            })
+            .unwrap_or(0),
+        "english_only": crate::speech_to_text::whisper::english_only(
+            daemon_state.config().stt.preset.model_name(),
+        ),
         // Stated, so no client invents a narrower definition of ready
         "ready": blockers.is_empty(),
         "blockers": blockers,
@@ -432,7 +445,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 }
             };
             let missing =
-                crate::models::download::still_missing(daemon_state.wanted_downloads(), &dir);
+                crate::models::download::still_missing(&daemon_state.wanted_downloads(), &dir);
             if missing.is_empty() {
                 return JsonRpcResponse::success(
                     request.id,
@@ -457,25 +470,49 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             let dir = dir.clone();
             let slot = slot;
             tokio::spawn(async move {
-                let mut report = |progress| state.report_download(progress);
-                if let Err(error) =
-                    crate::models::download::download_all(&dir, &missing, &mut report).await
                 {
-                    eprintln!("Download failed: {error}");
+                    let mut report = |progress| state.report_download(progress);
+                    if let Err(error) =
+                        crate::models::download::download_all(&dir, &missing, &mut report).await
+                    {
+                        eprintln!("Download failed: {error}");
+                    }
                 }
+                // The files these settings were waiting for are here now, so a
+                // preset or a voice chosen before its model arrived takes
+                // effect rather than waiting for a restart with nothing to do.
+                crate::settings::reapply_pending(&state);
                 drop(slot);
             });
             response
         }
-        BANSHEE_LIST_VOICES => JsonRpcResponse::success(
+        // Every voice this build can name, and whether each is here. A client
+        // that can fetch one needs the whole list to offer a choice; one that
+        // cannot filters to the installed ones itself.
+        BANSHEE_LIST_VOICES => {
+            let installed = crate::models::installed_voices();
+            let mut ids: Vec<String> = crate::text_to_speech::voices::catalogue()
+                .map(str::to_string)
+                .collect();
+            for id in &installed {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+            let voices: Vec<_> = ids
+                .iter()
+                .map(|id| crate::text_to_speech::voices::describe(id, installed.contains(id)))
+                .collect();
+            JsonRpcResponse::success(
+                request.id,
+                serde_json::json!({ "voices": voices, "current": daemon_state.tts_voice() }),
+            )
+        }
+        // The engine's own list, so a client offering a choice cannot drift
+        // from what the engine will accept.
+        BANSHEE_LIST_LANGUAGES => JsonRpcResponse::success(
             request.id,
-            serde_json::json!({
-                "voices": crate::models::installed_voices()
-                    .iter()
-                    .map(|id| crate::text_to_speech::voices::describe(id))
-                    .collect::<Vec<_>>(),
-                "current": daemon_state.tts_voice(),
-            }),
+            serde_json::json!({ "languages": crate::speech_to_text::languages::all() }),
         ),
         BANSHEE_LIST_INPUT_DEVICES => JsonRpcResponse::success(
             request.id,
@@ -505,52 +542,31 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 },
                 Err(response) => return *response,
             };
-            if let Some(db) = daemon_state.db_connection() {
-                match db.lock() {
-                    Ok(connection) => {
-                        match crate::history::TranscriptionHistory::list(&connection, limit) {
-                            Ok(history) => JsonRpcResponse::success(
-                                request.id,
-                                serde_json::json!({ "history": history }),
-                            ),
-                            Err(e) => JsonRpcResponse::error(
-                                request.id,
-                                -32603,
-                                format!("Failed to retrieve history: {e}"),
-                            ),
-                        }
-                    }
-                    Err(e) => JsonRpcResponse::error(
-                        request.id,
-                        -32603,
-                        format!("Failed to lock database connection: {e}"),
-                    ),
+            match daemon_state
+                .with_history(|c| crate::history::TranscriptionHistory::list(c, limit))
+            {
+                Some(Ok(history)) => {
+                    JsonRpcResponse::success(request.id, serde_json::json!({ "history": history }))
                 }
-            } else {
-                JsonRpcResponse::error(request.id, -32003, "History is not enabled.")
+                Some(Err(e)) => JsonRpcResponse::error(
+                    request.id,
+                    -32603,
+                    format!("Failed to retrieve history: {e}"),
+                ),
+                None => JsonRpcResponse::error(request.id, -32003, "History is not enabled."),
             }
         }
         BANSHEE_CLEAR_HISTORY => {
-            if let Some(db) = daemon_state.db_connection() {
-                match db.lock() {
-                    Ok(connection) => {
-                        match crate::history::TranscriptionHistory::clear(&connection) {
-                            Ok(_) => JsonRpcResponse::success(request.id, serde_json::json!({})),
-                            Err(e) => JsonRpcResponse::error(
-                                request.id,
-                                -32003,
-                                format!("Failed to clear history: {e}"),
-                            ),
-                        }
-                    }
-                    Err(e) => JsonRpcResponse::error(
-                        request.id,
-                        -32603,
-                        format!("Failed to lock database connection: {e}"),
-                    ),
-                }
-            } else {
-                JsonRpcResponse::error(request.id, -32003, "History is not enabled.")
+            match daemon_state.with_history(crate::history::TranscriptionHistory::clear) {
+                Some(Ok(())) => JsonRpcResponse::success(request.id, serde_json::json!({})),
+                // Not -32003: that code names history being off, and the
+                // listing path already answers -32603 for the same failure.
+                Some(Err(e)) => JsonRpcResponse::error(
+                    request.id,
+                    -32603,
+                    format!("Failed to clear history: {e}"),
+                ),
+                None => JsonRpcResponse::error(request.id, -32003, "History is not enabled."),
             }
         }
         BANSHEE_AGENTS => {
@@ -701,25 +717,9 @@ mod tests {
         }
     }
 
-    fn state_with_history(rows: &[&str]) -> Arc<DaemonState> {
-        let connection = crate::test_support::seeded_history(rows);
-        Arc::new(DaemonState::new(
-            "0.0.0",
-            "stt",
-            "vad",
-            0.5,
-            "default".to_string(),
-            Some(std::sync::Mutex::new(connection)),
-            crate::text_to_speech::SpeechPlayer::default(),
-            std::sync::mpsc::channel().0,
-            std::sync::mpsc::channel().0,
-            crate::config::BargeInMode::Stop,
-        ))
-    }
-
     #[tokio::test]
     async fn history_honours_a_limit() {
-        let state = state_with_history(&["first", "second", "third"]);
+        let state = crate::test_support::daemon_state_with_history(&["first", "second", "third"]);
 
         let request = history_request(serde_json::json!({ "limit": 1 }));
         let response = dispatch(request, &state).await;
@@ -748,9 +748,31 @@ mod tests {
         }
     }
 
+    /// `-32003` names one cause: history is off. NOT COVERED: the database
+    /// failure beside it, which needs a database that refuses a clear, and the
+    /// harness cannot build one.
+    #[tokio::test]
+    async fn only_history_being_off_answers_its_own_code() {
+        let state = test_state(std::sync::mpsc::channel().0);
+
+        for method in [BANSHEE_HISTORY, BANSHEE_CLEAR_HISTORY] {
+            let request = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: method.to_string(),
+                params: Some(serde_json::json!({})),
+                id: Some(serde_json::json!(1)),
+            };
+            let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
+                panic!("{method} must refuse when nothing is kept");
+            };
+            assert_eq!(error.code, -32003, "{method}");
+            assert!(error.message.contains("not enabled"), "{}", error.message);
+        }
+    }
+
     #[tokio::test]
     async fn a_history_limit_that_does_not_fit_is_refused() {
-        let state = state_with_history(&["first"]);
+        let state = crate::test_support::daemon_state_with_history(&["first"]);
 
         let request = history_request(serde_json::json!({ "limit": 4_294_967_296u64 }));
         let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
@@ -761,7 +783,7 @@ mod tests {
 
     #[tokio::test]
     async fn history_takes_an_explicit_zero_literally() {
-        let state = state_with_history(&["first", "second", "third"]);
+        let state = crate::test_support::daemon_state_with_history(&["first", "second", "third"]);
 
         let request = history_request(serde_json::json!({ "limit": 0 }));
         let response = dispatch(request, &state).await;
@@ -1095,6 +1117,7 @@ mod tests {
         // Something to fetch, or the call answers "nothing to do" and never
         // reaches the slot at all
         state.set_wanted_downloads(vec![crate::models::download::Download {
+            megabytes: 1,
             name: "no-such-model-9f3a.bin".to_string(),
             url: "https://example.invalid/no-such-model-9f3a.bin".to_string(),
         }]);
@@ -1252,7 +1275,7 @@ mod tests {
             None,
             speech,
             std::sync::mpsc::channel().0,
-            std::sync::mpsc::channel().0,
+            crate::audio::cues::Cues::silent(),
             crate::config::BargeInMode::Stop,
         ));
 

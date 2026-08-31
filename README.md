@@ -11,7 +11,8 @@ local Whisper for listening, a local neural voice for speaking, no cloud, no
 API keys, no audio ever leaving your laptop.
 
 It's also a straight-up local dictation tool: hold a hotkey, speak, and the
-text lands in whatever app you're focused on. Pure Rust, offline, always on.
+text lands in whatever app you're focused on. A Rust daemon and CLI, a Tauri
+window, offline, always on.
 
 ## Demo
 
@@ -117,6 +118,12 @@ it reports.
 The daemon runs at every login, restarts if it crashes, and logs to
 `~/.banshee/daemon.log`. `banshee stop` pauses it until the next login;
 `banshee serve` runs it in the foreground for debugging.
+
+Choose **Open Banshee** from the menu bar for a window that does the same jobs:
+what you have dictated, newest first, each with a button to copy it, and the
+microphone, hotkey, voice and agent settings. It sets Banshee up on its own,
+models and all, so nothing there sends you to a terminal. Quit it and dictation
+carries on; it holds nothing the daemon needs.
 
 With the daemon running, the global hotkeys are:
 
@@ -251,6 +258,8 @@ save_history = true    # keep transcriptions in ~/.banshee/banshee.db
 preset = "balanced"      # fast | balanced | quality (see below)
 vad_threshold = 0.5      # 0.0 to 1.0; higher means stricter speech detection
 vocabulary = ["banshee"] # words Whisper keeps mangling, e.g. ["clippy", "tokio"]
+language = "en"          # a Whisper code, or "auto" to detect it
+translate = false        # true answers in English whatever you spoke
 endpoint_silence_ms = 2500  # trailing silence that ends a spoken answer
 
 [tts]
@@ -394,9 +403,20 @@ The key is the section and the field, as they appear in the file. A number, a
 `true`, or a `[list]` is read as that type; anything else is read as text.
 Quote twice to force text, as in `banshee config set audio.input_device '"12"'`.
 A value the field does not accept is refused, and the message lists the legal
-ones. `vad_threshold` and `audio.input_device` take effect immediately;
-everything else is read once at startup, so the command tells you to restart.
-This works whether or not the daemon is running.
+ones. This works whether or not the daemon is running.
+
+Most settings take effect at once: `stt.vad_threshold`, `stt.vocabulary`,
+`stt.preset`, `stt.language`, `stt.translate`, `audio.input_device`,
+`audio.barge_in`, `audio.cues.enabled`, `tts.voice`, `tts.speed` and
+`daemon.save_history`. Four are read when the daemon starts, so the command
+tells you to restart: `audio.hotkey`, `audio.hotkey_mode`,
+`stt.endpoint_silence_ms` and `tts.fallback`.
+
+A live setting whose model is not downloaded yet waits for the file. Once
+`banshee setup` fetches it, a running daemon applies the setting as the
+download finishes. A daemon that started without its models is a different
+case: it has no pipeline to change, so the first setup on a new machine ends
+with a restart.
 
 `endpoint_silence_ms` is how long you can go quiet mid-answer before Banshee
 decides you're done. Lower it if replies feel sluggish, raise it if you keep
@@ -414,8 +434,11 @@ For `voice`, any file in the
 [Kokoro voices directory](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/voices)
 works, e.g. `af_bella`, `am_michael`, or `bf_emma` (the prefix is
 accent/gender: `a`merican/`b`ritish, `f`emale/`m`ale). After changing the
-`preset` or `voice`, run `banshee setup` to download the new files, then restart
-the daemon.
+`preset` or `voice`, run `banshee setup` to fetch the new file; the daemon
+starts using it as the download finishes, with no restart. The exception is a
+daemon that started with no models at all: it has no pipeline to change, so the
+first setup on a new machine still ends with a restart. The window's Voice panel
+lists every voice Banshee can name and fetches the one you pick.
 
 ## Troubleshooting
 
