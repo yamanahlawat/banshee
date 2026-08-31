@@ -216,6 +216,30 @@ pub fn reapply_pending(state: &DaemonState) {
     state.record_outcome(&outcome.applied, &[]);
 }
 
+/// The value a dotted key names, read off a serialized `Config` so both sides
+/// of a comparison are spelled by the same serializer. `None` for a key no
+/// config field answers to.
+fn value_at(config: &Config, key: &str) -> Option<serde_json::Value> {
+    let mut node = serde_json::to_value(config).ok()?;
+    for segment in key.split('.') {
+        node = node.get(segment)?.clone();
+    }
+    Some(node)
+}
+
+/// Whether a key with no live apply is already in effect, which it is when the
+/// daemon is running the value being written. A key set to what it already
+/// holds, or changed and changed back, has nothing left to wait for.
+fn in_effect(key: &str, state: &DaemonState, config: &Config) -> bool {
+    // A daemon handed no config yet has nothing to compare against, so its keys
+    // wait. Two absent values must not read as a match.
+    let Some(running) = state.running_config() else {
+        return false;
+    };
+    let was = value_at(&running, key);
+    was.is_some() && was == value_at(config, key)
+}
+
 /// A variant applies once however many of its keys one call carries: without
 /// the memo, `tts.voice` and `tts.speed` together would reconfigure the backend
 /// twice with the same pair.
@@ -238,6 +262,7 @@ fn apply_each<'a>(
                     outcome.restart_required.push(key.clone());
                 }
             }
+            None if in_effect(key, state, config) => outcome.applied.push(key.clone()),
             None => outcome.restart_required.push(key.clone()),
         }
     }
@@ -302,6 +327,7 @@ pub fn configure(
 #[cfg(test)]
 mod tests {
     use super::{Assignments, edit, startup_only};
+    use crate::config::Config;
 
     fn assignments(pairs: &[(&str, serde_json::Value)]) -> Assignments {
         pairs
@@ -776,6 +802,47 @@ mod tests {
 
         state.record_outcome(&["audio.cues.enabled".to_string()], &[]);
         assert!(state.pending().is_empty());
+    }
+
+    /// The window turns `restart_required` into "it takes effect when Banshee
+    /// restarts". A binding written with the value the daemon already runs makes
+    /// that notice untrue.
+    #[test]
+    fn a_restart_only_key_set_to_the_value_already_running_needs_no_restart() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        let running: Config =
+            toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
+        state.set_config(std::sync::Arc::new(running));
+        let next: Config =
+            toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
+
+        let keys = vec!["audio.hotkey".to_string()];
+        let outcome = super::apply_each(&state, &next, keys.iter());
+
+        assert!(
+            outcome.restart_required.is_empty(),
+            "nothing changed, so nothing waits: {:?}",
+            outcome.restart_required
+        );
+        assert_eq!(outcome.applied, keys);
+    }
+
+    /// The other half of the same rule: a binding that really is different has
+    /// to wait, or the window would promise a key that does nothing yet.
+    #[test]
+    fn a_restart_only_key_set_to_a_different_value_still_waits() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        let running: Config =
+            toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
+        state.set_config(std::sync::Arc::new(running));
+        let next: Config =
+            toml::from_str("[audio]\nhotkey = \"LeftCommand\"\n").expect("a legal binding");
+
+        let keys = vec!["audio.hotkey".to_string()];
+        let outcome = super::apply_each(&state, &next, keys.iter());
+
+        assert_eq!(outcome.restart_required, keys);
+        assert!(outcome.applied.is_empty());
     }
 
     #[test]

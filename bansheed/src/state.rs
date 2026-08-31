@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64},
     },
     time::{Duration, Instant},
@@ -196,6 +196,10 @@ pub struct DaemonState {
     // The file as last parsed. `vad_threshold`, `wanted_device` and `barge_in`
     // beside it are live values the file may no longer agree with.
     config: RwLock<Arc<Config>>,
+    // A key with no live apply is read once, when the daemon starts, so this is
+    // what those keys run for the daemon's whole life. Without it a write cannot
+    // tell a change from a change back.
+    running_config: OnceLock<Arc<Config>>,
     // Keys the daemon accepted and wrote but has not applied. A restart empties
     // it by nature; a live path clears its own key.
     pending: Mutex<std::collections::BTreeSet<String>>,
@@ -259,6 +263,7 @@ impl DaemonState {
             tts_voice: RwLock::new(None),
             wanted_downloads: RwLock::new(Vec::new()),
             config: RwLock::new(Arc::new(Config::default())),
+            running_config: OnceLock::new(),
             pending: Mutex::new(std::collections::BTreeSet::new()),
             recording_error: RwLock::new(None),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
@@ -690,7 +695,14 @@ impl DaemonState {
             .write()
             .unwrap_or_else(|poison| poison.into_inner()) =
             crate::models::download::wanted(&config);
+        let _ = self.running_config.set(Arc::clone(&config));
         *self.config.write().unwrap() = config;
+    }
+
+    /// The config the restart-only keys are running, or `None` before the
+    /// daemon has been handed one, when nothing can be compared against it.
+    pub fn running_config(&self) -> Option<Arc<Config>> {
+        self.running_config.get().cloned()
     }
 
     pub fn pending(&self) -> Vec<String> {
