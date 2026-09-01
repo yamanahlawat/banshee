@@ -32,6 +32,50 @@ fn from_error(id: Option<serde_json::Value>, error: BansheeError) -> JsonRpcResp
     JsonRpcResponse::error(id, error.rpc_code(), error.rpc_message())
 }
 
+/// `Env::from_machine` polls a login shell for up to five seconds, and an
+/// apply waits on an agent's own CLI with no timeout. On a worker thread that
+/// wait holds every other socket behind it.
+async fn off_the_worker(
+    id: Option<serde_json::Value>,
+    work: impl FnOnce() -> Result<serde_json::Value, BansheeError> + Send + 'static,
+) -> JsonRpcResponse {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(Ok(result)) => JsonRpcResponse::success(id, result),
+        Ok(Err(error)) => from_error(id, error),
+        Err(_) => {
+            JsonRpcResponse::error(id, -32603, "The connect task stopped before it answered.")
+        }
+    }
+}
+
+fn the_plan(agent: connect::Agent) -> Result<(connect::Env, Vec<connect::Change>), BansheeError> {
+    let env = connect::Env::from_machine()?;
+    let changes = connect::plan(agent, &env)?;
+    Ok((env, changes))
+}
+
+fn read_the_agents() -> Result<serde_json::Value, BansheeError> {
+    let env = connect::Env::from_machine()?;
+    let agents: Vec<_> = connect::Agent::ALL
+        .iter()
+        .map(|agent| connect::row(*agent, &env))
+        .collect();
+    Ok(serde_json::json!({"agents": agents}))
+}
+
+fn read_the_plan(agent: connect::Agent) -> Result<serde_json::Value, BansheeError> {
+    let (_, changes) = the_plan(agent)?;
+    Ok(serde_json::json!({
+        "changes": changes.iter().map(connect::planned_change).collect::<Vec<_>>(),
+    }))
+}
+
+fn write_the_plan(agent: connect::Agent) -> Result<serde_json::Value, BansheeError> {
+    let (env, changes) = the_plan(agent)?;
+    connect::apply_all(&changes, &env.path, |_| {})?;
+    Ok(serde_json::json!({"applied": changes.len()}))
+}
+
 // absent means None; a present value of the wrong type means -32602 naming the field
 fn typed_param<'a, T>(
     params: Option<&'a serde_json::Value>,
@@ -582,17 +626,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 None => JsonRpcResponse::error(request.id, -32003, "History is not enabled."),
             }
         }
-        BANSHEE_AGENTS => {
-            let env = match connect::Env::from_machine() {
-                Ok(env) => env,
-                Err(error) => return from_error(request.id, error),
-            };
-            let agents: Vec<_> = connect::Agent::ALL
-                .iter()
-                .map(|agent| connect::row(*agent, &env))
-                .collect();
-            JsonRpcResponse::success(request.id, serde_json::json!({"agents": agents}))
-        }
+        BANSHEE_AGENTS => off_the_worker(request.id, read_the_agents).await,
         BANSHEE_CONNECT_PLAN => {
             let disconnect = match disconnect_param(request.params.as_ref(), &request.id) {
                 Ok(value) => value,
@@ -609,21 +643,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 Ok(agent) => agent,
                 Err(response) => return *response,
             };
-            let env = match connect::Env::from_machine() {
-                Ok(env) => env,
-                Err(error) => return from_error(request.id, error),
-            };
-            match connect::plan(agent, &env) {
-                Ok(changes) => JsonRpcResponse::success(
-                    request.id,
-                    serde_json::json!({
-                        "changes": changes.iter().map(connect::planned_change).collect::<Vec<_>>(),
-                    }),
-                ),
-                Err(error) => {
-                    JsonRpcResponse::error(request.id, error.rpc_code(), error.rpc_message())
-                }
-            }
+            off_the_worker(request.id, move || read_the_plan(agent)).await
         }
         BANSHEE_CONNECT_APPLY => {
             let disconnect = match disconnect_param(request.params.as_ref(), &request.id) {
@@ -641,24 +661,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 Ok(agent) => agent,
                 Err(response) => return *response,
             };
-            let env = match connect::Env::from_machine() {
-                Ok(env) => env,
-                Err(error) => return from_error(request.id, error),
-            };
-            let changes = match connect::plan(agent, &env) {
-                Ok(changes) => changes,
-                Err(error) => {
-                    return JsonRpcResponse::error(
-                        request.id,
-                        error.rpc_code(),
-                        error.rpc_message(),
-                    );
-                }
-            };
-            if let Err(error) = connect::apply_all(&changes, &env.path, |_| {}) {
-                return from_error(request.id, error);
-            }
-            JsonRpcResponse::success(request.id, serde_json::json!({"applied": changes.len()}))
+            off_the_worker(request.id, move || write_the_plan(agent)).await
         }
         BANSHEE_OPEN_PERMISSION => {
             let id = match str_param(request.params.as_ref(), "id", &request.id) {
