@@ -5,6 +5,8 @@ use std::time::Duration;
 use banshee_common::{Blocker, BlockerKind, KokoroTTSConfig, error::BansheeError, utils};
 
 use crate::config::{BargeInMode, Config, HotkeyMode, STTPreset, TTSFallback};
+#[cfg(target_os = "macos")]
+use crate::permissions::Access;
 
 // Read-only diagnosis: it reports and names the fix, and never mutates.
 // Returns true when every required check passed.
@@ -214,10 +216,48 @@ fn unreported(what: &str) -> bool {
     true
 }
 
-// TCC answers for the process that asked, so only the daemon speaks for the
-// daemon. An undecided grant blocks one already up: macOS would have asked.
 #[cfg(target_os = "macos")]
 fn check_permissions(daemon: &Daemon) -> bool {
+    let healthy = check_grants(daemon);
+    report_key_presses(daemon);
+    healthy
+}
+
+/// The daemon measures this, for the same reason it speaks for its own grants.
+#[cfg(target_os = "macos")]
+fn report_key_presses(daemon: &Daemon) {
+    let reported = match daemon {
+        Daemon::Running { status, .. } => banshee_common::key_press_access(status),
+        Daemon::Legacy(_) => None,
+        // A read from here answers for the terminal, so with no daemon the
+        // checklist says nothing rather than saying it under Banshee's name.
+        _ => return,
+    };
+    let Some(word) = reported else {
+        unreported("key press access");
+        return;
+    };
+    match Access::from_wire(word) {
+        Some(access) => note(key_press_line(access)),
+        None => note(&format!(
+            "the daemon reports key press access as '{word}', which this command cannot read"
+        )),
+    }
+}
+
+/// A note and never a fix: no pane in System Settings offers this one. A macOS
+/// that starts to want the grant of its own flips the line.
+#[cfg(target_os = "macos")]
+fn key_press_line(access: Access) -> &'static str {
+    match access {
+        Access::Granted => "the daemon can receive key presses",
+        Access::Denied => "the daemon cannot receive key presses",
+        Access::Undetermined => "macOS has not decided whether the daemon can receive key presses",
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn check_grants(daemon: &Daemon) -> bool {
     let denied: Vec<(&str, &str, &str)> = match daemon {
         Daemon::Running { blockers, .. } => {
             let denied: Vec<_> = blockers
@@ -237,46 +277,21 @@ fn check_permissions(daemon: &Daemon) -> bool {
             denied
         }
         Daemon::Legacy(_) => return unreported("permissions"),
+        // A read from here answers for the terminal that ran the command.
         _ => {
-            use crate::permissions::Access;
-            let mut healthy = true;
-            let mut denied = Vec::new();
-            for grant in crate::permissions::Grant::REQUIRED {
-                match grant.access() {
-                    Access::Granted => {
-                        healthy &= pass(&format!("{} granted to this process", grant.name()));
-                    }
-                    // Only this branch has a third answer: nothing has asked yet
-                    Access::Undetermined => note(&format!(
-                        "{} not decided yet; macOS asks the first time the daemon runs",
-                        grant.name()
-                    )),
-                    Access::Denied => {
-                        denied.push((grant.name(), grant.consequence(), grant.fix()));
-                    }
-                }
-            }
-            if denied.is_empty() {
-                return healthy;
-            }
-            denied
+            note("a grant cannot be read from here: only the daemon speaks for the daemon");
+            return true;
         }
     };
 
-    let subject = permission_subject(daemon);
     let mut healthy = true;
     for (name, consequence, fix) in denied {
-        healthy &= fail(&format!("{name} missing for {subject}: {consequence}"), fix);
+        healthy &= fail(
+            &format!("{name} missing for the daemon: {consequence}"),
+            fix,
+        );
     }
     healthy
-}
-
-#[cfg(target_os = "macos")]
-fn permission_subject(daemon: &Daemon) -> &'static str {
-    match daemon {
-        Daemon::Running { .. } => "the daemon",
-        _ => "this process",
-    }
 }
 
 // status fields are optional by protocol, so every read needs a fallback
@@ -510,16 +525,29 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_permission_failure_names_whose_grant_it_checked() {
-        use super::{Daemon, permission_subject};
-        let running = Daemon::Running {
-            status: serde_json::json!({}),
-            blockers: Vec::new(),
-        };
-        assert_eq!(permission_subject(&running), "the daemon");
-        assert_eq!(permission_subject(&Daemon::Missing), "this process");
-        assert_eq!(permission_subject(&Daemon::Stale), "this process");
+    fn the_key_press_note_states_what_the_daemon_measured() {
+        use super::{Access, key_press_line};
+
+        assert_eq!(
+            key_press_line(Access::Granted),
+            "the daemon can receive key presses"
+        );
+        assert_eq!(
+            key_press_line(Access::Denied),
+            "the daemon cannot receive key presses"
+        );
+        assert_eq!(
+            key_press_line(Access::Undetermined),
+            "macOS has not decided whether the daemon can receive key presses"
+        );
+        for access in [Access::Granted, Access::Denied, Access::Undetermined] {
+            assert!(
+                !key_press_line(access).contains("System Settings"),
+                "the note names no pane: a person cannot grant this one"
+            );
+        }
     }
+
 
     #[test]
     fn a_daemon_that_is_not_running_fails_the_checklist() {

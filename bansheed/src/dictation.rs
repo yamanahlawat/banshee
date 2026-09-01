@@ -48,12 +48,12 @@ pub fn type_text(text: &str) -> Result<(), Box<dyn Error>> {
 
 #[cfg(target_os = "macos")]
 fn ensure_accessibility() -> Result<(), Box<dyn Error>> {
-    use crate::permissions::{Access, Grant};
+    use crate::permissions::{ACCESSIBILITY, accessibility_granted};
 
-    if Grant::Accessibility.access() == Access::Denied {
+    if !accessibility_granted() {
         return Err(format!(
             "Accessibility permission missing! To type, {}",
-            Grant::Accessibility.fix()
+            ACCESSIBILITY.fix
         )
         .into());
     }

@@ -247,7 +247,7 @@ async fn open_permission_pane_sends_the_id_key() {
     let (path, mut seen, _guard) = recording_daemon(serde_json::json!({"ok": true})).await;
     let mut client = Client::connect(&path).await.unwrap();
 
-    calls::open_permission_pane(&mut client, "input_monitoring")
+    calls::open_permission_pane(&mut client, "accessibility")
         .await
         .unwrap();
 
@@ -255,7 +255,7 @@ async fn open_permission_pane_sends_the_id_key() {
     assert_eq!(request.method, BANSHEE_OPEN_PERMISSION);
     assert_eq!(
         request.params.unwrap(),
-        serde_json::json!({"id": "input_monitoring"})
+        serde_json::json!({"id": "accessibility"})
     );
 }
 

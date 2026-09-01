@@ -285,6 +285,7 @@ async fn main() -> Result<(), BansheeError> {
         CommandType::Serve => {
             let config = Arc::new(config_result?);
             let (socket_path, listener) = daemon::claim()?;
+            permissions::ask_for_accessibility();
             permissions::restart_when_granted();
             let db_connection = if config.daemon.save_history {
                 Some(history::open()?)
@@ -677,8 +678,7 @@ async fn main() -> Result<(), BansheeError> {
                 }
             };
 
-            // Opens System Settings, so it goes last: read here, then switch
-            blocked |= permissions::guide_missing();
+            permissions::grant_note();
 
             match binding {
                 Some((hotkey, mode)) if !blocked => {

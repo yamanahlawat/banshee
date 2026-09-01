@@ -154,7 +154,7 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
 /// Everything `banshee.status` reports.
 pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     let blockers = readiness::blockers(daemon_state);
-    serde_json::json!({
+    let payload = serde_json::json!({
         "running": true,
         "version": daemon_state.version(),
         "stt_model": daemon_state.stt_model(),
@@ -186,7 +186,20 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "blockers": blockers,
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
-    })
+    });
+    with_key_press_access(payload)
+}
+
+/// Only the daemon can answer this, so only its reply carries it.
+#[cfg(target_os = "macos")]
+fn with_key_press_access(mut payload: serde_json::Value) -> serde_json::Value {
+    payload["key_press_access"] = crate::permissions::key_presses_reach_us().as_str().into();
+    payload
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_key_press_access(payload: serde_json::Value) -> serde_json::Value {
+    payload
 }
 
 /// The `banshee.state_changed` params: what moves without a client touching it.
