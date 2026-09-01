@@ -3,7 +3,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 vi.mock('./tauri', () => ({ setSetting: vi.fn(), status: vi.fn() }));
 import { setSetting, status } from './tauri';
 import { daemon, empty } from './daemon';
-import { set } from './settings';
+import { set, write } from './settings';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -50,4 +50,16 @@ it('keeps the write when the re-read fails', async () => {
   vi.mocked(status).mockRejectedValue(new Error('gone'));
   await set('audio.hotkey', 'F6');
   expect(get(daemon).pending.has('audio.hotkey')).toBe(true);
+});
+
+it('reports that a write the daemon took has landed', async () => {
+  vi.mocked(setSetting).mockResolvedValue([]);
+  expect(await write('tts.voice', 'af_sky', () => {})).toBe(true);
+});
+
+it('reports that a refused write has not landed', async () => {
+  vi.mocked(setSetting).mockRejectedValue(new Error('no such voice'));
+  const said: string[] = [];
+  expect(await write('tts.voice', 'af_sky', (m) => said.push(m))).toBe(false);
+  expect(said).toEqual(['no such voice']);
 });

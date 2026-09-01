@@ -8,11 +8,13 @@ export async function write(
   key: string,
   value: unknown,
   say: (message: string) => void = announce,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await set(key, value);
+    return true;
   } catch (error) {
     say((error as { message?: string })?.message || 'The daemon refused that.');
+    return false;
   }
 }
 
