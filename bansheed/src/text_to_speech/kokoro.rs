@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use std::thread;
 
 use banshee_common::{
@@ -149,6 +149,45 @@ fn token_id(c: char) -> Option<i64> {
     VOCAB.iter().find(|(v, _)| *v == c).map(|(_, id)| *id)
 }
 
+fn read_voice_file(voice_path: &std::path::Path) -> Result<Vec<f32>, BansheeError> {
+    let voice_bytes = fs::read(voice_path).map_err(|e| {
+        BansheeError::Other(format!("Failed to read voice file {voice_path:?}: {e}"))
+    })?;
+    let voice: Vec<f32> = voice_bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
+        .collect();
+    if voice.is_empty() || !voice.len().is_multiple_of(STYLE_DIM) {
+        return Err(BansheeError::Other(format!(
+            "Voice file {voice_path:?} is not a multiple of {STYLE_DIM} floats"
+        )));
+    }
+    Ok(voice)
+}
+
+fn to_io_error(e: BansheeError) -> std::io::Error {
+    std::io::Error::other(e.to_string())
+}
+
+fn strip_bin_suffix(voice_name: &str) -> &str {
+    voice_name.strip_suffix(".bin").unwrap_or(voice_name)
+}
+
+fn installed(voice: &str) -> Result<(), BansheeError> {
+    if crate::models::installed_voices()
+        .iter()
+        .any(|id| id == voice)
+    {
+        Ok(())
+    } else {
+        Err(BansheeError::Other(format!(
+            "Voice {voice} is not installed on this machine."
+        )))
+    }
+}
+
 // Streaming boundary only; the token cap is enforced per window in synthesize
 fn sentences(text: &str) -> impl Iterator<Item = &str> {
     text.split_inclusive(['.', '!', '?'])
@@ -160,6 +199,7 @@ pub struct KokoroEngine {
     session: Session,
     g2p: G2P,
     voice: Vec<f32>,
+    loaded_voice: String,
     speed: f32,
     oov: Option<OovFallback>,
     logged_oov: HashSet<String>,
@@ -191,20 +231,7 @@ impl KokoroEngine {
             .commit_from_file(&model_path)
             .map_err(|e| BansheeError::Other(e.to_string()))?;
 
-        let voice_bytes = fs::read(&voice_path).map_err(|e| {
-            BansheeError::Other(format!("Failed to read voice file {voice_path:?}: {e}"))
-        })?;
-        let voice: Vec<f32> = voice_bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|bytes| f32::from_le_bytes(*bytes))
-            .collect();
-        if voice.is_empty() || !voice.len().is_multiple_of(STYLE_DIM) {
-            return Err(BansheeError::Other(format!(
-                "Voice file {voice_path:?} is not a multiple of {STYLE_DIM} floats"
-            )));
-        }
+        let voice = read_voice_file(&voice_path)?;
 
         let mut g2p = G2P::new(Language::EnglishUS);
         super::pronunciation::install_dictionary(&mut g2p);
@@ -221,10 +248,52 @@ impl KokoroEngine {
             session,
             g2p,
             voice,
+            loaded_voice: strip_bin_suffix(&kokoro_config.voice_name).to_string(),
             speed,
             oov,
             logged_oov: HashSet::new(),
         })
+    }
+
+    pub fn set_voice(&mut self, voice_name: &str) -> Result<(), BansheeError> {
+        installed(voice_name)?;
+        let models_path = get_models_path().ok_or_else(|| {
+            BansheeError::Other(
+                "Could not find home directory. Cannot initialize Kokoro engine.".to_string(),
+            )
+        })?;
+        let voice_config = KokoroTTSConfig::new(voice_name);
+        let voice_path = models_path.join(&voice_config.voice_name);
+        self.voice = read_voice_file(&voice_path)?;
+        self.loaded_voice = voice_name.to_string();
+        Ok(())
+    }
+
+    pub fn ensure_voice(&mut self, voice: &str) -> Result<(), BansheeError> {
+        if voice == self.loaded_voice {
+            return Ok(());
+        }
+        self.set_voice(voice)
+    }
+
+    pub fn loaded_voice(&self) -> &str {
+        &self.loaded_voice
+    }
+
+    /// Read into the synthesis tensor for each sentence, so the next one is
+    /// spoken at the new rate without the model loading again.
+    pub fn set_speed(&mut self, speed: f32) {
+        self.speed = speed;
+    }
+
+    #[cfg(test)]
+    fn style_fingerprint(&self) -> (usize, Option<f32>) {
+        (self.voice.len(), self.voice.first().copied())
+    }
+
+    #[cfg(test)]
+    fn voice_ptr(&self) -> *const f32 {
+        self.voice.as_ptr()
     }
 
     // Text in, 24kHz mono samples out; empty when nothing is speakable
@@ -330,13 +399,36 @@ impl KokoroEngine {
     }
 }
 
+fn lock_read<T>(value: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    value.read().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// The voice a live `[tts]` write puts in effect, or `None` when this machine
+/// does not hold it. A voice accepted here but missing fails later inside the
+/// chunk iterator, where nothing can refuse it and every reply goes silent.
+fn voice_to_take(wanted: &str, held: &[String]) -> Option<String> {
+    held.iter()
+        .any(|id| id == wanted)
+        .then(|| wanted.to_string())
+}
+
+/// The voice an utterance speaks in: the one the caller names, or the one
+/// `tts.voice` last set.
+fn voice_for(requested: Option<&str>, configured: &str) -> String {
+    requested.unwrap_or(configured).to_string()
+}
+
 pub struct KokoroBackend {
     engine: Arc<Mutex<KokoroEngine>>,
     mixer: Mixer,
+    // What an utterance that names no voice speaks in. A live `tts.voice`
+    // moves it, so it cannot be fixed at construction.
+    configured_voice: RwLock<String>,
 }
 
 impl KokoroBackend {
     pub fn new(engine: KokoroEngine) -> Result<Self, BansheeError> {
+        let configured_voice = engine.loaded_voice().to_string();
         let sink = DeviceSinkBuilder::open_default_sink()
             .map_err(|e| BansheeError::Other(format!("No audio output device: {e}")))?;
         let mixer = sink.mixer().clone();
@@ -347,6 +439,7 @@ impl KokoroBackend {
         Ok(Self {
             engine: Arc::new(Mutex::new(engine)),
             mixer,
+            configured_voice: RwLock::new(configured_voice),
         })
     }
 }
@@ -387,7 +480,21 @@ fn play(mixer: &Mixer, chunks: impl Iterator<Item = Vec<f32>> + Send + 'static) 
 }
 
 impl TtsBackend for KokoroBackend {
-    fn start(&self, text: &str) -> std::io::Result<Box<dyn ActiveUtterance>> {
+    fn reconfigure(&self, tts: &crate::config::TTSConfig) -> Option<String> {
+        let taken = voice_to_take(&tts.voice, &crate::models::installed_voices())?;
+        *self
+            .configured_voice
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = taken.clone();
+        lock(&self.engine).set_speed(tts.speed);
+        Some(taken)
+    }
+
+    fn start(&self, text: &str, voice: Option<&str>) -> std::io::Result<Box<dyn ActiveUtterance>> {
+        if let Some(requested) = voice {
+            installed(requested).map_err(to_io_error)?;
+        }
+        let desired = voice_for(voice, &lock_read(&self.configured_voice));
         let engine = Arc::clone(&self.engine);
         let mut sentences = sentences(text)
             .map(str::to_string)
@@ -397,7 +504,12 @@ impl TtsBackend for KokoroBackend {
         // rest are still synthesizing
         let chunks = std::iter::from_fn(move || {
             let sentence = sentences.next()?;
-            match lock(&engine).synthesize(&sentence) {
+            let mut engine = lock(&engine);
+            if let Err(e) = engine.ensure_voice(&desired) {
+                eprintln!("Kokoro synthesis failed: {e}");
+                return None;
+            }
+            match engine.synthesize(&sentence) {
                 Ok(samples) => Some(samples),
                 Err(e) => {
                     eprintln!("Kokoro synthesis failed: {e}");
@@ -456,6 +568,111 @@ mod tests {
 
     fn one_second_of_silence() -> impl Iterator<Item = Vec<f32>> + Send + 'static {
         std::iter::once(vec![0.0; SAMPLE_RATE.get() as usize])
+    }
+
+    fn engine_for(voice: &str) -> Option<KokoroEngine> {
+        let config = KokoroTTSConfig::new(voice);
+        match KokoroEngine::new(&config, 1.0) {
+            Ok(engine) => Some(engine),
+            Err(_) => {
+                eprintln!("{voice} model not installed; skipping");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn a_voice_swap_changes_the_style_and_swaps_back() {
+        let Some(mut engine) = engine_for("af_sky") else {
+            return;
+        };
+        let first = engine.style_fingerprint();
+        engine.set_voice("am_adam").expect("an installed voice");
+        let second = engine.style_fingerprint();
+        assert_ne!(first, second, "the fixture must discriminate");
+        engine.set_voice("af_sky").expect("an installed voice");
+        assert_eq!(engine.style_fingerprint(), first);
+    }
+
+    #[test]
+    fn an_uninstalled_voice_is_refused_and_leaves_the_engine_speaking() {
+        let Some(mut engine) = engine_for("af_sky") else {
+            return;
+        };
+        let before = engine.style_fingerprint();
+        assert!(engine.set_voice("zz_nobody").is_err());
+        assert_eq!(
+            engine.style_fingerprint(),
+            before,
+            "a refused swap must not clear the voice"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_utterance_returns_the_engine_to_the_configured_voice() {
+        let Some(mut engine) = engine_for("af_sky") else {
+            return;
+        };
+        let configured = engine.style_fingerprint();
+        engine.ensure_voice("am_adam").expect("an installed voice");
+        assert_ne!(
+            engine.style_fingerprint(),
+            configured,
+            "the fixture must discriminate"
+        );
+        engine.ensure_voice("af_sky").expect("an installed voice");
+        assert_eq!(engine.style_fingerprint(), configured);
+    }
+
+    #[test]
+    fn a_voice_outside_the_installed_set_is_refused_without_naming_a_path() {
+        let Some(mut engine) = engine_for("af_sky") else {
+            return;
+        };
+        let models = get_models_path().expect("a home directory");
+        let error = engine
+            .set_voice("../../../../etc/hosts")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !error.contains(models.to_str().expect("a printable path")),
+            "the message must not name the path the daemon built: {error}"
+        );
+    }
+
+    #[test]
+    fn a_voice_this_machine_does_not_hold_is_refused() {
+        let held = vec!["af_sky".to_string(), "am_adam".to_string()];
+        assert_eq!(voice_to_take("am_adam", &held), Some("am_adam".to_string()));
+        assert_eq!(
+            voice_to_take("am_nobody", &held),
+            None,
+            "a voice that is not installed would silence every later reply"
+        );
+    }
+
+    #[test]
+    fn an_utterance_that_names_no_voice_takes_the_configured_one() {
+        assert_eq!(voice_for(None, "am_adam"), "am_adam");
+        assert_eq!(
+            voice_for(Some("af_heart"), "am_adam"),
+            "af_heart",
+            "a named voice must win over the configured one"
+        );
+    }
+
+    #[test]
+    fn ensure_voice_on_the_loaded_voice_reads_nothing() {
+        let Some(mut engine) = engine_for("af_sky") else {
+            return;
+        };
+        let before = engine.voice_ptr();
+        engine.ensure_voice("af_sky").expect("already loaded");
+        assert_eq!(
+            engine.voice_ptr(),
+            before,
+            "the loaded voice must not be re-read"
+        );
     }
 
     fn wait_until(what: &str, mut done: impl FnMut() -> bool) {

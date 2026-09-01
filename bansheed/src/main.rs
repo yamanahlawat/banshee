@@ -20,20 +20,15 @@ mod status;
 mod test_support;
 mod text_to_speech;
 
-use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::io::{IsTerminal, Write};
+use std::sync::Arc;
 
 use args::{Cli, CommandType};
-use banshee_common::{
-    SileroVADConfig, WhisperConfig,
-    error::BansheeError,
-    utils::{self, get_db_path},
-};
+use banshee_common::{SileroVADConfig, Voice, WhisperConfig, error::BansheeError, utils};
 use clap::Parser;
 
 use crate::{
     config::Config,
-    history::TranscriptionHistory,
     speech_to_text::{vad::VADEngine, whisper::WhisperEngine},
     state::RecordingError,
 };
@@ -64,7 +59,7 @@ fn start_recording(
     daemon_state: &Arc<state::DaemonState>,
     config: &Config,
     command_receiver: std::sync::mpsc::Receiver<state::ConsumerCommand>,
-    cues: std::sync::mpsc::Sender<audio::cues::Cue>,
+    cues: audio::cues::Cues,
 ) -> Result<Recording, RecordingError> {
     // Startup selects through the same function the watchdog tick uses, so a
     // device that is absent at boot falls back rather than leaving capture dead
@@ -85,6 +80,7 @@ fn start_recording(
     let speech_to_text = WhisperEngine::new(
         WhisperConfig::new(config.stt.preset.model_name()),
         &config.stt.vocabulary,
+        (&config.stt).into(),
     )
     .map_err(|e| model_failure(daemon_state, e.to_string()))?;
     let vad = VADEngine::new(SileroVADConfig::new(VAD_MODEL))
@@ -121,7 +117,15 @@ fn show_progress(progress: banshee_common::DownloadProgress) {
     } else {
         '\n'
     };
-    print!("{}{ending}", progress_line(&progress));
+    // Erase to end of line, so a shorter line does not leave the tail of the
+    // longer one behind it. A redirected stdout takes neither the erase nor the
+    // carriage return: both reach a log file as themselves.
+    let (erase, ending) = if std::io::stdout().is_terminal() {
+        ("\x1b[K", ending)
+    } else {
+        ("", '\n')
+    };
+    print!("{}{erase}{ending}", progress_line(&progress));
     let _ = std::io::stdout().flush();
 }
 
@@ -170,6 +174,13 @@ fn progress_line(progress: &banshee_common::DownloadProgress) -> String {
         DownloadState::Failed => format!("{} failed", progress.model),
         DownloadState::Downloading => {
             match models::download::percent(progress.bytes, progress.total) {
+                // A daemon older than this field set sends no count at all,
+                // and a real run always has count >= 1, so 0 marks a message
+                // with no place to report
+                Some(done) if progress.count > 0 => format!(
+                    "{}, {} of {}  {done}%",
+                    progress.label, progress.index, progress.count
+                ),
                 Some(done) => format!("{} {done}%", progress.model),
                 // No Content-Length, so there is no bar to draw: count what arrived
                 None => format!("{} {} MB", progress.model, progress.bytes / 1_048_576),
@@ -225,6 +236,7 @@ fn state_word(state: &serde_json::Value) -> &'static str {
         banshee_common::Activity::Idle => "idle",
         banshee_common::Activity::Recording => "recording",
         banshee_common::Activity::Speaking => "speaking",
+        banshee_common::Activity::Listening => "listening",
     }
 }
 
@@ -277,25 +289,19 @@ async fn main() -> Result<(), BansheeError> {
 
     match cli.command {
         CommandType::Serve => {
-            let config = config_result?;
+            let config = Arc::new(config_result?);
             let (socket_path, listener) = daemon::claim()?;
+            permissions::ask_for_accessibility();
             permissions::restart_when_granted();
             let db_connection = if config.daemon.save_history {
-                let db_path = get_db_path().ok_or_else(|| {
-                    BansheeError::Other("Failed to get database path".to_string())
-                })?;
-                let connection = rusqlite::Connection::open(db_path)
-                    .map_err(|e| BansheeError::Other(e.to_string()))?;
-                TranscriptionHistory::create_table(&connection)
-                    .map_err(|e| BansheeError::Other(e.to_string()))?;
-                Some(Mutex::new(connection))
+                Some(history::open()?)
             } else {
                 None
             };
 
             let (speech_backend, live_voice) = text_to_speech::select_backend(&config.tts)?;
             let (commands, command_receiver) = std::sync::mpsc::channel();
-            let cue_sender = audio::cues::start_cue_player(config.audio.cues.enabled);
+            let cues = audio::cues::start_cue_player(config.audio.cues.enabled);
             let daemon_state = Arc::new(state::DaemonState::new(
                 env!("CARGO_PKG_VERSION"),
                 config.stt.preset.model_name(),
@@ -305,41 +311,40 @@ async fn main() -> Result<(), BansheeError> {
                 db_connection,
                 text_to_speech::SpeechPlayer::new(speech_backend),
                 commands,
-                cue_sender.clone(),
+                cues.clone(),
                 config.audio.barge_in,
             ));
 
             if let Some(voice) = live_voice {
                 daemon_state.set_tts_voice(voice);
             }
-            daemon_state.set_wanted_downloads(models::download::wanted(&config));
+            daemon_state.set_config(Arc::clone(&config));
 
             // The watchdog owns the stream past daemon::run: stopping it stops
             // capture, and the thread is the only thing left to join
-            let recording =
-                match start_recording(&daemon_state, &config, command_receiver, cue_sender) {
-                    Ok(started) => {
-                        let watchdog = audio::watchdog::spawn(
-                            Arc::clone(&daemon_state),
-                            started.stream,
-                            started.open,
-                            started.missing,
-                        );
-                        Some((watchdog, started.thread))
-                    }
-                    // A missing mic or model leaves the daemon useful rather than
-                    // exiting, which the supervisor reads as a crash and retries
-                    Err(error) => {
-                        eprintln!("Recording is unavailable: {error}");
-                        eprintln!(
-                            "The daemon is up: speak, status, and history still work. \
+            let recording = match start_recording(&daemon_state, &config, command_receiver, cues) {
+                Ok(started) => {
+                    let watchdog = audio::watchdog::spawn(
+                        Arc::clone(&daemon_state),
+                        started.stream,
+                        started.open,
+                        started.missing,
+                    );
+                    Some((watchdog, started.thread))
+                }
+                // A missing mic or model leaves the daemon useful rather than
+                // exiting, which the supervisor reads as a crash and retries
+                Err(error) => {
+                    eprintln!("Recording is unavailable: {error}");
+                    eprintln!(
+                        "The daemon is up: speak, status, and history still work. \
                              Recording, dictation, and ask_user do not."
-                        );
-                        eprintln!("Run `banshee status` for the fix.");
-                        daemon_state.set_recording_error(error);
-                        None
-                    }
-                };
+                    );
+                    eprintln!("Run `banshee status` for the fix.");
+                    daemon_state.set_recording_error(error);
+                    None
+                }
+            };
             // After the pipeline, so a press always reaches record_start: with
             // no pipeline it answers with the error cue rather than nothing
             hotkey::start_global_hotkey(
@@ -418,31 +423,45 @@ async fn main() -> Result<(), BansheeError> {
             .await
             {
                 Ok(reply) => (
-                    decoded::<Vec<String>>(&reply, "voices"),
+                    decoded::<Vec<Voice>>(&reply, "voices"),
                     reply
                         .get("current")
                         .and_then(|voice| voice.as_str())
                         .map(str::to_string),
                 ),
-                // A voice gets chosen before there is a daemon to ask
-                Err(error) if daemon_is_down(&error) => (models::installed_voices(), None),
+                // A voice gets chosen before there is a daemon to ask. These
+                // came off the disk, so every one of them is here.
+                Err(error) if daemon_is_down(&error) => (
+                    models::installed_voices()
+                        .iter()
+                        .map(|id| text_to_speech::voices::describe(id, true))
+                        .collect(),
+                    None,
+                ),
                 Err(error) => fail(&error),
             };
 
-            if voices.is_empty() {
+            // The daemon names every voice it can describe, so what this has to
+            // print is the ones that are here: `banshee voices` promises that
+            // every name it lists works today.
+            let held: Vec<&Voice> = voices.iter().filter(|voice| voice.downloaded).collect();
+            if held.is_empty() {
                 println!("No voices found. Download one with: banshee setup");
                 return Ok(());
             }
-            let width = voices.iter().map(|v| v.chars().count()).max().unwrap_or(0);
-            for voice in &voices {
-                if current.as_deref() == Some(voice.as_str()) {
-                    println!("  {voice:width$}  in use");
+            for voice in held {
+                let marker = if current.as_deref() == Some(voice.id.as_str()) {
+                    "*"
                 } else {
-                    println!("  {voice}");
-                }
+                    " "
+                };
+                println!(
+                    "{marker} {}  {}  ({})",
+                    voice.name, voice.description, voice.id
+                );
             }
             println!();
-            println!("Speak with one by: banshee config set tts.voice \"<name>\"");
+            println!("Speak with one by: banshee config set tts.voice \"<id>\"");
         }
         CommandType::Watch { waybar } => {
             let (mut state, mut changes) =
@@ -665,8 +684,7 @@ async fn main() -> Result<(), BansheeError> {
                 }
             };
 
-            // Opens System Settings, so it goes last: read here, then switch
-            blocked |= permissions::guide_missing();
+            permissions::grant_note();
 
             match binding {
                 Some((hotkey, mode)) if !blocked => {
@@ -716,8 +734,38 @@ async fn main() -> Result<(), BansheeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{state_word, watch_line, waybar_line};
+    use super::{progress_line, state_word, watch_line, waybar_line};
     use banshee_common::InputDevice;
+
+    #[test]
+    fn a_message_from_a_daemon_that_predates_these_fields_still_shows_progress() {
+        let old_format = serde_json::json!({
+            "model": "silero_vad.onnx",
+            "bytes": 356,
+            "total": 574,
+            "state": "downloading",
+        });
+        let reported: banshee_common::DownloadProgress =
+            serde_json::from_value(old_format).expect("old-format messages must still deserialize");
+
+        let line = progress_line(&reported);
+        assert!(!line.contains("of 0"), "{line}");
+        assert!(!line.contains("  "), "{line}");
+        assert_eq!(line, "silero_vad.onnx 62%");
+
+        let new_format = banshee_common::DownloadProgress {
+            model: "silero_vad.onnx".to_string(),
+            label: "Voice detection model".to_string(),
+            index: 1,
+            count: 3,
+            bytes: 356,
+            total: Some(574),
+            state: banshee_common::DownloadState::Downloading,
+        };
+        let line = progress_line(&new_format);
+        assert!(line.contains("Voice detection model"), "{line}");
+        assert!(line.contains("1 of 3"), "{line}");
+    }
 
     #[test]
     fn a_waybar_line_is_one_parseable_object() {

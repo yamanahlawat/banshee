@@ -2,8 +2,12 @@
 # grants survive rebuilds.
 # One-time setup: Keychain Access > Certificate Assistant > Create a Certificate,
 # name "banshee-dev", type "Code Signing", self-signed.
+# Needs: a Rust toolchain, `cargo install tauri-cli`, and Node 22. The Tauri
+# build runs `npm run build` in banshee-app/ui, so run `npm ci` there first.
+# /Applications needs an admin account; set APP_DIR=$HOME/Applications
+# without one.
 IDENTITY ?= banshee-dev
-APP_DIR ?= $(HOME)/Applications
+APP_DIR ?= /Applications
 APP := $(APP_DIR)/Banshee.app
 BIN_DIR ?= $(HOME)/.cargo/bin
 BANSHEE := $(APP)/Contents/MacOS/banshee
@@ -11,7 +15,10 @@ VERSION := $(shell grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 
 .PHONY: install
 install:
-	cargo build --release
+	cargo build --release --workspace --exclude banshee-app
+	# Last, and never followed by a plain `cargo build`: that rebuilds the app
+	# without the frontend and leaves it pointing at the dev server.
+	cd banshee-app && cargo tauri build --no-bundle
 	mkdir -p "$(APP_DIR)" "$(BIN_DIR)"
 	./scripts/bundle.sh target/release "$(APP)" "$(IDENTITY)" "$(VERSION)"
 	ln -sf "$(BANSHEE)" "$(BIN_DIR)/banshee"

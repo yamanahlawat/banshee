@@ -140,6 +140,7 @@ async fn push_changes(
     writer: Arc<Mutex<OwnedWriteHalf>>,
     mut recording: watch::Receiver<bool>,
     mut speaking: watch::Receiver<bool>,
+    mut transcribing: watch::Receiver<bool>,
     mut devices: watch::Receiver<u64>,
     mut told: serde_json::Value,
 ) {
@@ -148,6 +149,7 @@ async fn push_changes(
         let woken = tokio::select! {
             woken = recording.changed() => woken,
             woken = speaking.changed() => woken,
+            woken = transcribing.changed() => woken,
             woken = devices.changed() => woken,
         };
         if woken.is_err() {
@@ -199,6 +201,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             (
                 state.subscribe_recording(),
                 state.speech().subscribe_speaking(),
+                state.subscribe_transcribing(),
                 state.device_changes(),
                 live_state(&state),
             )
@@ -214,12 +217,13 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             break;
         }
 
-        if let Some((recording, speaking, devices, told)) = opening_state {
+        if let Some((recording, speaking, transcribing, devices, told)) = opening_state {
             pushing_state = Some(tokio::spawn(push_changes(
                 Arc::clone(&state),
                 Arc::clone(&writer),
                 recording,
                 speaking,
+                transcribing,
                 devices,
                 told,
             )));
@@ -405,6 +409,9 @@ mod tests {
 
         state.report_download(DownloadProgress {
             model: "silero_vad.onnx".to_string(),
+            label: "Voice detection model".to_string(),
+            index: 1,
+            count: 1,
             bytes: 1,
             total: Some(2),
             state: banshee_common::DownloadState::Downloading,
@@ -420,7 +427,7 @@ mod tests {
         let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
         let (mut lines, _writer, _) = subscribed(&state).await;
 
-        state.speech().speak("anything", false).unwrap();
+        state.speech().speak("anything", false, None).unwrap();
 
         let pushed = next_message(&mut lines).await;
         assert_eq!(pushed["method"], BANSHEE_STATE_CHANGED);

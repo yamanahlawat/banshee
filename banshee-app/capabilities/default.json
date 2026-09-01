@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window: listens for the daemon pushes bridge.rs forwards. Invokes no other plugin command over the IPC layer; the window's own commands and the clipboard plugin are called from Rust, not from this ACL.",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

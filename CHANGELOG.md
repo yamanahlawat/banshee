@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Banshee has a window.** Choose `Open Banshee` from the menu bar to set up
+  dictation, copy what you said, and change any setting. It sets Banshee up on
+  its own, models and all, so nothing in it sends you to a terminal. Everything
+  it does, the CLI still does. It needs no new permission and holds nothing the
+  daemon needs: quit it and dictation carries on.
+- **The window sets Banshee up from nothing.** A first run offers the three
+  speech models with what each costs to download, fetches them, says which file
+  is arriving and how far it has come, and restarts the daemon when the files
+  need it. Every fix it names is a button.
+- **The window lists every voice Banshee can name.** The Voice panel shows all
+  of them, marks the ones this machine does not hold, and fetches the one you
+  choose. `banshee voices` still prints only the voices that work today.
+- **A setting waiting on a model applies when the model arrives.** Choosing a
+  speech model or a voice before its file is downloaded no longer waits for a
+  restart: a running daemon asks the setting again as the download finishes.
+  The first setup on a new machine still ends with a restart, because a daemon
+  that started with no models has no pipeline to change, and the window offers
+  the restart when it is needed.
+- **The daemon reports when it listens for an answer and when it transcribes.**
+  A client subscribed to `state` sees `armed` and `transcribing` beside `recording`
+  and `speaking`. `recording` still means the microphone is open, so it stays true
+  while armed. A client ranks the four in order: `transcribing`, `armed`, `recording`,
+  `speaking`.
+- **Voices have names.** `banshee voices` marks the one in use and prints
+  `* Sky  American, clear  (af_sky)` for each installed voice, instead of the bare id.
+- **Model downloads report which file, of how many, and how big.** A progress
+  event carries `label`, `index`, and `count` beside the filename and the byte counts.
+- **`banshee status` reports your settings and what waits for a restart.** The
+  reply carries the parsed `config.toml` and a sorted list of keys the daemon
+  wrote but has not applied.
+- **Agents and permission panes answer over the socket.** `banshee.agents`,
+  `banshee.connect_plan`, `banshee.connect_apply`, and `banshee.open_permission` do
+  what `banshee connect` and `banshee permissions` already do. Any client can offer
+  them with no daemon code linked in.
+- **You can hear a voice before you choose it.** `banshee.speak` takes an
+  optional `voice` for one sentence and leaves your configured voice untouched.
+- **`banshee.history` takes a `limit`.** An absent `limit` still returns every
+  row. An explicit `0` returns none.
+- **The tray menu copies your last dictation.** `Copy last dictation` puts it on
+  the clipboard. `Open Banshee (coming soon)` sits next to it, disabled, until
+  the app it opens exists.
+
+### Fixed
+
+- **The desktop window ships in a release.** A release now carries
+  `Banshee.app.tar.gz` with all four binaries in it, so the window no longer
+  needs a source build. Install it with `curl … | tar -xzf - -C /Applications`.
+  It is signed but not notarised, so fetch it with `curl` rather than a browser,
+  or clear the quarantine flag once with `xattr -dr com.apple.quarantine
+  /Applications/Banshee.app`.
+- **Banshee installs to `/Applications`.** That is the folder Finder's
+  `Applications` favourite opens, and the one System Settings offers when a
+  permission pane asks which app to add. If you installed an earlier build,
+  delete the bundle left at `~/Applications/Banshee.app` by hand, then run
+  `banshee connect <agent>` once per agent: a registration holds the old
+  absolute path until something rewrites it.
+- **The window connects Claude Code again.** `Connect` failed with `No such
+  file or directory` and applied none of its changes, because the daemon runs
+  with a supervisor's four-directory `PATH` and looked for `claude` there.
+  Banshee now records where it found each agent's CLI and runs that path. The
+  other agents were never affected: their setup writes files and spawns nothing.
+- **Banshee asks for the permission it needs, and asks for one fewer.** The
+  daemon asks macOS for Accessibility as it starts, so Banshee appears in the
+  Privacy & Security list with a switch to turn on. It no longer asks for Input
+  Monitoring: the hotkey works without it, measured, and that pane never listed
+  Banshee to switch on. `banshee status` keeps one line about key presses as a
+  note, instead of reporting a grant that was never made.
+- **A download that cannot reach its host no longer hangs for ever.** The
+  fetch had no timeout of any kind, so one unreachable server held the whole
+  run and stranded every file behind it. A connect now gives up after ten
+  seconds and a stall between chunks after thirty, and the run carries on to
+  the remaining files and says which one failed.
+- **The daemon and `banshee connect` now report the same agents.** The daemon
+  reads your login shell's `PATH`, so it sees the agents you have installed
+  rather than only the four system directories launchd gives it. What remains: a
+  slow shell profile delays every client, not only the first. The `PATH` resolves
+  once, behind a `OnceLock`, the first time anything needs it, and every
+  concurrent caller waits on that same call. No timeout guards the wait, because
+  nothing has measured how long a shell profile should take.
+- **A bare command name no longer counts as connected.** Banshee used to ask
+  whether `banshee-mcp-shim` resolves on `PATH`. Your agent resolves that name,
+  not Banshee, so neither the daemon nor the CLI could answer, and they answered
+  differently. An agent registered with the bare name now reads as installed and
+  not connected, and `banshee connect <agent>` rewrites the entry to the shim's
+  absolute path, which depends on no `PATH` at all. Run it once per agent. What
+  remains: if you set `CLAUDE_CONFIG_DIR` in your shell, the daemon cannot see
+  that variable and reads the default config instead, so the two can still
+  disagree for Claude Code.
+
 ## [0.11.1] - 2026-08-26
 
 ### Fixed

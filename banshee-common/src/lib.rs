@@ -95,8 +95,13 @@ pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
 pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
 pub const BANSHEE_LIST_VOICES: &str = "banshee.list_voices";
+pub const BANSHEE_LIST_LANGUAGES: &str = "banshee.list_languages";
 pub const BANSHEE_DOWNLOAD_MODELS: &str = "banshee.download_models";
 pub const BANSHEE_SUBSCRIBE: &str = "banshee.subscribe";
+pub const BANSHEE_AGENTS: &str = "banshee.agents";
+pub const BANSHEE_CONNECT_PLAN: &str = "banshee.connect_plan";
+pub const BANSHEE_CONNECT_APPLY: &str = "banshee.connect_apply";
+pub const BANSHEE_OPEN_PERMISSION: &str = "banshee.open_permission";
 // Sent by the daemon, not called by a client
 pub const BANSHEE_STATE_CHANGED: &str = "banshee.state_changed";
 pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
@@ -119,6 +124,12 @@ pub fn missing_device(status: &Value) -> Option<&str> {
     status.get("missing_device").and_then(Value::as_str)
 }
 
+/// What `IOHIDCheckAccess` answered in the daemon: `granted`, `denied` or
+/// `undetermined`. `None` from a daemon older than the field.
+pub fn key_press_access(status: &Value) -> Option<&str> {
+    status.get("key_press_access").and_then(Value::as_str)
+}
+
 /// The sentence every surface shows for these two fields. Each client adds its
 /// own lead-in and nothing else, so all of them spell the absent case alike.
 pub fn microphone_label(open: Option<&str>, missing: Option<&str>) -> String {
@@ -138,14 +149,20 @@ pub enum Activity {
     Idle,
     Recording,
     Speaking,
+    Listening,
 }
 
 impl Activity {
     // The microphone outranks the speaker: it is what the user is waiting on,
-    // and both are true at once when barge-in is off
+    // and both are true at once when barge-in is off. Waiting on an answer
+    // outranks both: the daemon opens the microphone to hear one, so `armed`
+    // arrives with `recording` already true, and it is the only one of the
+    // three where doing nothing is the wrong response.
     pub fn of(state: &Value) -> Self {
         let flag = |name| state.get(name).and_then(Value::as_bool) == Some(true);
-        if flag("recording") {
+        if flag("armed") {
+            Activity::Listening
+        } else if flag("recording") {
             Activity::Recording
         } else if flag("speaking") {
             Activity::Speaking
@@ -166,6 +183,14 @@ pub enum DownloadState {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DownloadProgress {
     pub model: String,
+    /// What the file is, in the user's words. `model` stays the filename.
+    #[serde(default)]
+    pub label: String,
+    /// One-based place in this run, and how many files the run has.
+    #[serde(default)]
+    pub index: usize,
+    #[serde(default)]
+    pub count: usize,
     pub bytes: u64,
     /// None when the server sends no `Content-Length`, so a client shows a
     /// spinner rather than a bar.
@@ -192,8 +217,84 @@ pub struct Blocker {
     pub kind: BlockerKind,
     pub id: String,
     pub name: String,
+    /// Which file this is, for a client that has to tell one from another.
+    /// Absent on a blocker that names no file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<FileRole>,
+    /// What clears it. A daemon older than this field names only a `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<Remedy>,
     pub consequence: String,
     pub fix: String,
+    /// The command that clears this blocker, where one exists. `fix` says the
+    /// same thing in a sentence; this is the part a client can run or copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// What a model file is. The prose beside it is for reading; this is what a
+/// client routes on, so rewording one cannot move the other.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileRole {
+    Speech,
+    Detector,
+    Engine,
+    Voice,
+}
+
+/// What clears a blocker. `kind` says which part is at fault and `command` is
+/// the line a person could run; neither answers this.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Remedy {
+    Download,
+    Restart,
+    Grant,
+}
+
+/// A language Whisper can read, as the engine itself spells it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Language {
+    /// What `stt.language` carries, as in `en` or `hi`.
+    pub code: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Voice {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// Whether the file is on this machine. A client that can fetch one offers
+    /// every voice; one that cannot shows only the voices that work today.
+    /// Absent from a daemon older than this field, which listed only what it
+    /// held, so the voices it names are all installed.
+    #[serde(default = "yes")]
+    pub downloaded: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRow {
+    /// The slug `banshee connect <id>` takes.
+    pub id: String,
+    pub name: String,
+    /// "connected", "found" or "absent".
+    pub presence: String,
+    /// One line for the row, in the user's words.
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedChange {
+    /// The file the change writes. None when the change runs a command.
+    pub path: Option<String>,
+    /// What `banshee connect` prints for this change, unchanged.
+    pub diff: String,
 }
 
 // Whisper model configuration
@@ -241,11 +342,14 @@ pub struct KokoroTTSConfig {
     pub voice_url: String,
 }
 
+/// The engine every voice speaks through, which is not itself a voice.
+pub const KOKORO_MODEL: &str = "kokoro-v1.0.onnx";
+
 impl KokoroTTSConfig {
     pub fn new(voice: &str) -> Self {
         const KOKORO_REPO: &str = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231";
         Self {
-            model_name: "kokoro-v1.0.onnx".to_string(),
+            model_name: KOKORO_MODEL.to_string(),
             model_url: format!("{KOKORO_REPO}/onnx/model.onnx"),
             voice_name: format!("{voice}.bin"),
             voice_url: format!("{KOKORO_REPO}/voices/{voice}.bin"),
@@ -261,22 +365,43 @@ mod wire_tests {
     };
 
     #[test]
+    fn a_blocker_that_names_a_command_puts_it_on_the_wire() {
+        let blocker = Blocker {
+            kind: BlockerKind::Model,
+            role: None,
+            remedy: None,
+            id: "silero_vad.onnx".to_string(),
+            name: "silero_vad.onnx".to_string(),
+            consequence: "recording does not work".to_string(),
+            fix: "run: banshee setup".to_string(),
+            command: Some("banshee setup".to_string()),
+        };
+        let wire = serde_json::to_value(&blocker).unwrap();
+        assert_eq!(wire["command"], "banshee setup");
+    }
+
+    /// A grant has no command, and the key stays off the wire rather than
+    /// reaching a client as a null it has to test for.
+    #[test]
     fn a_blocker_serializes_with_the_keys_clients_read() {
         let blocker = Blocker {
             kind: BlockerKind::Permission,
-            id: "input_monitoring".to_string(),
-            name: "Input Monitoring".to_string(),
-            consequence: "the hotkey receives no key presses".to_string(),
+            role: None,
+            remedy: None,
+            id: "accessibility".to_string(),
+            name: "Accessibility".to_string(),
+            consequence: "dictation cannot type".to_string(),
             fix: "grant it in System Settings".to_string(),
+            command: None,
         };
         let wire = serde_json::to_value(&blocker).unwrap();
         assert_eq!(
             wire,
             serde_json::json!({
                 "kind": "permission",
-                "id": "input_monitoring",
-                "name": "Input Monitoring",
-                "consequence": "the hotkey receives no key presses",
+                "id": "accessibility",
+                "name": "Accessibility",
+                "consequence": "dictation cannot type",
                 "fix": "grant it in System Settings",
             })
         );
@@ -309,6 +434,9 @@ mod wire_tests {
     fn progress_serializes_with_the_keys_clients_read() {
         let wire = serde_json::to_value(DownloadProgress {
             model: "ggml-base.en.bin".to_string(),
+            label: "Speech model".to_string(),
+            index: 1,
+            count: 3,
             bytes: 512,
             total: Some(1024),
             state: DownloadState::Downloading,
@@ -318,6 +446,9 @@ mod wire_tests {
             wire,
             serde_json::json!({
                 "model": "ggml-base.en.bin",
+                "label": "Speech model",
+                "index": 1,
+                "count": 3,
                 "bytes": 512,
                 "total": 1024,
                 "state": "downloading",
@@ -329,6 +460,9 @@ mod wire_tests {
     fn an_unknown_total_stays_on_the_wire_as_null() {
         let wire = serde_json::to_value(DownloadProgress {
             model: "af_sky.bin".to_string(),
+            label: "Voice".to_string(),
+            index: 1,
+            count: 1,
             bytes: 7,
             total: None,
             state: DownloadState::Failed,
@@ -356,6 +490,18 @@ mod wire_tests {
     #[test]
     fn a_payload_missing_its_fields_reads_as_idle() {
         assert_eq!(Activity::of(&serde_json::json!({})), Activity::Idle);
+    }
+
+    // The daemon sets `recording` whenever it sets `armed`, so an armed state
+    // that is ranked on `recording` first reads as ordinary dictation. It is
+    // the one state where doing nothing is the wrong answer, so it outranks.
+    #[test]
+    fn waiting_on_an_answer_outranks_the_microphone_it_opened() {
+        let armed = serde_json::json!({"recording": true, "armed": true, "speaking": false});
+        assert_eq!(Activity::of(&armed), Activity::Listening);
+
+        let dictating = serde_json::json!({"recording": true, "armed": false});
+        assert_eq!(Activity::of(&dictating), Activity::Recording);
     }
 
     #[test]

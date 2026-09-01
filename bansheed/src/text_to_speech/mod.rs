@@ -3,6 +3,7 @@ pub mod oov;
 pub mod pronunciation;
 pub mod sanitizer;
 pub mod say;
+pub mod voices;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -20,7 +21,14 @@ const MAX_QUEUED_UTTERANCES: usize = 8;
 
 // A backend starts one utterance at a time; SpeechPlayer serializes them
 pub trait TtsBackend: Send + Sync {
-    fn start(&self, text: &str) -> std::io::Result<Box<dyn ActiveUtterance>>;
+    fn start(&self, text: &str, voice: Option<&str>) -> std::io::Result<Box<dyn ActiveUtterance>>;
+
+    /// A live `[tts]` change. Answers the voice utterances now speak in, or
+    /// `None` when the backend cannot honour the change: the system fallback
+    /// speaks in whatever voice the OS is set to and takes no rate.
+    fn reconfigure(&self, _tts: &TTSConfig) -> Option<String> {
+        None
+    }
 }
 
 pub trait ActiveUtterance: Send {
@@ -58,7 +66,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 struct Playback {
     utterance_id: u64,
     active: Option<Box<dyn ActiveUtterance>>,
-    queue: VecDeque<String>,
+    queue: VecDeque<(String, Option<String>)>,
     watcher_running: bool,
 }
 
@@ -69,6 +77,12 @@ pub struct SpeechPlayer {
 }
 
 impl SpeechPlayer {
+    /// What a live `[tts]` write reaches. An utterance already speaking keeps
+    /// the voice and rate it started with.
+    pub fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
+        self.backend.reconfigure(tts)
+    }
+
     pub fn new(backend: Box<dyn TtsBackend>) -> Self {
         Self {
             backend,
@@ -83,7 +97,12 @@ impl SpeechPlayer {
     }
 
     // Utterances play one at a time, in order; interrupt jumps the queue
-    pub fn speak(self: &Arc<Self>, text: &str, interrupt: bool) -> Result<u64, std::io::Error> {
+    pub fn speak(
+        self: &Arc<Self>,
+        text: &str,
+        interrupt: bool,
+        voice: Option<&str>,
+    ) -> Result<u64, std::io::Error> {
         let normalized = pronunciation::normalize(text);
         let text = normalized.as_str();
         let mut playback = self.lock();
@@ -106,7 +125,9 @@ impl SpeechPlayer {
         }
 
         if playback.active.is_some() {
-            playback.queue.push_back(text.to_string());
+            playback
+                .queue
+                .push_back((text.to_string(), voice.map(str::to_string)));
             // drop the oldest backlog rather than droning through stale updates
             if playback.queue.len() > MAX_QUEUED_UTTERANCES {
                 playback.queue.pop_front();
@@ -114,7 +135,7 @@ impl SpeechPlayer {
             return Ok(utterance_id);
         }
 
-        playback.active = Some(self.backend.start(text)?);
+        playback.active = Some(self.backend.start(text, voice)?);
         let needs_watcher = !playback.watcher_running;
         playback.watcher_running = true;
         drop(playback);
@@ -158,7 +179,7 @@ impl SpeechPlayer {
             }
             playback.active = None;
             match playback.queue.pop_front() {
-                Some(next) => match self.backend.start(&next) {
+                Some((next, voice)) => match self.backend.start(&next, voice.as_deref()) {
                     Ok(utterance) => playback.active = Some(utterance),
                     Err(e) => {
                         eprintln!("Failed to speak queued utterance: {e}");
@@ -205,8 +226,8 @@ mod tests {
         let player = Arc::new(SpeechPlayer::default());
         assert!(!player.is_speaking());
 
-        let first = player.speak("", false).unwrap();
-        let second = player.speak("", false).unwrap();
+        let first = player.speak("", false, None).unwrap();
+        let second = player.speak("", false, None).unwrap();
         assert_eq!((first, second), (1, 2));
 
         player.stop();
@@ -217,8 +238,8 @@ mod tests {
     async fn queued_utterances_drain_and_signal_completion() {
         let player = Arc::new(SpeechPlayer::default());
         let mut speaking = player.subscribe_speaking();
-        player.speak("", false).unwrap();
-        player.speak("", false).unwrap();
+        player.speak("", false, None).unwrap();
+        player.speak("", false, None).unwrap();
 
         tokio::time::timeout(Duration::from_secs(3), speaking.wait_for(|s| !s))
             .await

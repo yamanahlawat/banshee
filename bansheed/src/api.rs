@@ -1,14 +1,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use banshee_common::error::BansheeError;
 use banshee_common::{
-    BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_DOWNLOAD_MODELS,
-    BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES,
-    BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP,
-    BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
+    BANSHEE_AGENTS, BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE,
+    BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS,
+    BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_LANGUAGES,
+    BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP,
+    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
+use crate::connect;
+use crate::permissions;
 use crate::state::{
     AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, TranscribeTarget,
 };
@@ -23,6 +27,74 @@ const MAX_ASK_WAIT_MS: u64 = 120_000;
 const PLAYBACK_BASE_MS: u64 = 15_000;
 const PLAYBACK_PER_WORD_MS: u64 = 700;
 const MAX_PLAYBACK_WAIT_MS: u64 = 120_000;
+
+fn from_error(id: Option<serde_json::Value>, error: BansheeError) -> JsonRpcResponse {
+    JsonRpcResponse::error(id, error.rpc_code(), error.rpc_message())
+}
+
+/// `Env::from_machine` polls a login shell for up to five seconds, and an
+/// apply waits on an agent's own CLI with no timeout. On a worker thread that
+/// wait holds every other socket behind it.
+async fn off_the_worker(
+    id: Option<serde_json::Value>,
+    work: impl FnOnce() -> Result<serde_json::Value, BansheeError> + Send + 'static,
+) -> JsonRpcResponse {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(Ok(result)) => JsonRpcResponse::success(id, result),
+        Ok(Err(error)) => from_error(id, error),
+        Err(_) => {
+            JsonRpcResponse::error(id, -32603, "The connect task stopped before it answered.")
+        }
+    }
+}
+
+fn the_plan(agent: connect::Agent) -> Result<(connect::Env, Vec<connect::Change>), BansheeError> {
+    let env = connect::Env::from_machine()?;
+    let changes = connect::plan(agent, &env)?;
+    Ok((env, changes))
+}
+
+fn read_the_agents() -> Result<serde_json::Value, BansheeError> {
+    let env = connect::Env::from_machine()?;
+    let agents: Vec<_> = connect::Agent::ALL
+        .iter()
+        .map(|agent| connect::row(*agent, &env))
+        .collect();
+    Ok(serde_json::json!({"agents": agents}))
+}
+
+fn read_the_plan(agent: connect::Agent) -> Result<serde_json::Value, BansheeError> {
+    let (_, changes) = the_plan(agent)?;
+    Ok(serde_json::json!({
+        "changes": changes.iter().map(connect::planned_change).collect::<Vec<_>>(),
+    }))
+}
+
+fn write_the_plan(agent: connect::Agent) -> Result<serde_json::Value, BansheeError> {
+    let (env, changes) = the_plan(agent)?;
+    connect::apply_all(&changes, &env.path, |_| {})?;
+    Ok(serde_json::json!({"applied": changes.len()}))
+}
+
+// absent means None; a present value of the wrong type means -32602 naming the field
+fn typed_param<'a, T>(
+    params: Option<&'a serde_json::Value>,
+    key: &str,
+    id: &Option<serde_json::Value>,
+    read: impl FnOnce(&'a serde_json::Value) -> Option<T>,
+    expected: &str,
+) -> Result<Option<T>, Box<JsonRpcResponse>> {
+    let Some(value) = params.and_then(|p| p.get(key)) else {
+        return Ok(None);
+    };
+    read(value).map(Some).ok_or_else(|| {
+        Box::new(JsonRpcResponse::error(
+            id.clone(),
+            -32602,
+            format!("'{key}' must be {expected}."),
+        ))
+    })
+}
 
 fn str_param<'a>(
     params: Option<&'a serde_json::Value>,
@@ -60,6 +132,59 @@ fn u64_param(
     }
 }
 
+fn optional_str_param<'a>(
+    params: Option<&'a serde_json::Value>,
+    key: &str,
+    id: &Option<serde_json::Value>,
+) -> Result<Option<&'a str>, Box<JsonRpcResponse>> {
+    typed_param(params, key, id, serde_json::Value::as_str, "a string")
+}
+
+fn optional_u64_param(
+    params: Option<&serde_json::Value>,
+    key: &str,
+    id: &Option<serde_json::Value>,
+) -> Result<Option<u64>, Box<JsonRpcResponse>> {
+    typed_param(
+        params,
+        key,
+        id,
+        serde_json::Value::as_u64,
+        "a non-negative integer",
+    )
+}
+
+fn disconnect_param(
+    params: Option<&serde_json::Value>,
+    id: &Option<serde_json::Value>,
+) -> Result<bool, Box<JsonRpcResponse>> {
+    typed_param(
+        params,
+        "disconnect",
+        id,
+        serde_json::Value::as_bool,
+        "a boolean",
+    )
+    .map(|value| value.unwrap_or(false))
+}
+
+fn agent_param(
+    params: Option<&serde_json::Value>,
+    id: &Option<serde_json::Value>,
+) -> Result<connect::Agent, Box<JsonRpcResponse>> {
+    let slug = str_param(params, "agent", id)?;
+    connect::Agent::ALL
+        .into_iter()
+        .find(|agent| agent.name() == slug)
+        .ok_or_else(|| {
+            Box::new(JsonRpcResponse::error(
+                id.clone(),
+                -32602,
+                format!("'{slug}' is not a known agent."),
+            ))
+        })
+}
+
 // The daemon started without a pipeline. The code says which fix applies, so a
 // client can prompt for a microphone or re-run setup instead of retrying.
 fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpcResponse {
@@ -73,7 +198,7 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
 /// Everything `banshee.status` reports.
 pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     let blockers = readiness::blockers(daemon_state);
-    serde_json::json!({
+    let payload = serde_json::json!({
         "running": true,
         "version": daemon_state.version(),
         "stt_model": daemon_state.stt_model(),
@@ -81,14 +206,44 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "audio_device": daemon_state.audio_device(),
         "missing_device": daemon_state.missing_device(),
         "recording": daemon_state.is_recording(),
+        "armed": daemon_state.is_armed(),
+        "transcribing": daemon_state.is_transcribing(),
         "speaking": daemon_state.speech().is_speaking(),
         "uptime_seconds": daemon_state.uptime().as_secs(),
         "vad_threshold": daemon_state.vad_threshold(),
-        "history_enabled": daemon_state.db_connection().is_some(),
+        "history_enabled": daemon_state.history_enabled(),
+        // The English-only build reads English whatever `stt.language` says.
+        // Stated here rather than worked out from the preset name by every
+        // client that has to know.
+        // The window shows this rather than summing a file list it does not
+        // hold: only the daemon knows which files are already here.
+        "download_megabytes": crate::models::download::models_dir()
+            .map(|dir| {
+                crate::models::download::pending_megabytes(&daemon_state.wanted_downloads(), &dir)
+            })
+            .unwrap_or(0),
+        "english_only": crate::speech_to_text::whisper::english_only(
+            daemon_state.config().stt.preset.model_name(),
+        ),
         // Stated, so no client invents a narrower definition of ready
         "ready": blockers.is_empty(),
         "blockers": blockers,
-    })
+        "config": &*daemon_state.config(),
+        "pending": daemon_state.pending(),
+    });
+    with_key_press_access(payload)
+}
+
+/// Only the daemon can answer this, so only its reply carries it.
+#[cfg(target_os = "macos")]
+fn with_key_press_access(mut payload: serde_json::Value) -> serde_json::Value {
+    payload["key_press_access"] = crate::permissions::key_presses_reach_us().as_str().into();
+    payload
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_key_press_access(payload: serde_json::Value) -> serde_json::Value {
+    payload
 }
 
 /// The `banshee.state_changed` params: what moves without a client touching it.
@@ -98,6 +253,8 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
 pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
     serde_json::json!({
         "recording": daemon_state.is_recording(),
+        "armed": daemon_state.is_armed(),
+        "transcribing": daemon_state.is_transcribing(),
         "speaking": daemon_state.speech().is_speaking(),
         "audio_device": daemon_state.audio_device(),
         "missing_device": daemon_state.missing_device(),
@@ -117,10 +274,14 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 .and_then(|p| p.get("interrupt"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let voice = match optional_str_param(request.params.as_ref(), "voice", &request.id) {
+                Ok(value) => value,
+                Err(response) => return *response,
+            };
 
             let clean_text = sanitize(raw_text);
 
-            match daemon_state.speech().speak(&clean_text, interrupt) {
+            match daemon_state.speech().speak(&clean_text, interrupt, voice) {
                 Ok(utterance_id) => JsonRpcResponse::success(
                     request.id,
                     serde_json::json!({"ok": true, "utterance_id": utterance_id}),
@@ -200,7 +361,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
 
             // Interrupt: the question must not queue behind stale status speech
             let clean_question = sanitize(question);
-            if let Err(e) = daemon_state.speech().speak(&clean_question, true) {
+            if let Err(e) = daemon_state.speech().speak(&clean_question, true, None) {
                 daemon_state.set_recording_mode(RecordingMode::Idle);
                 return JsonRpcResponse::error(
                     request.id,
@@ -341,7 +502,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                 }
             };
             let missing =
-                crate::models::download::still_missing(daemon_state.wanted_downloads(), &dir);
+                crate::models::download::still_missing(&daemon_state.wanted_downloads(), &dir);
             if missing.is_empty() {
                 return JsonRpcResponse::success(
                     request.id,
@@ -366,22 +527,49 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             let dir = dir.clone();
             let slot = slot;
             tokio::spawn(async move {
-                let mut report = |progress| state.report_download(progress);
-                if let Err(error) =
-                    crate::models::download::download_all(&dir, &missing, &mut report).await
                 {
-                    eprintln!("Download failed: {error}");
+                    let mut report = |progress| state.report_download(progress);
+                    if let Err(error) =
+                        crate::models::download::download_all(&dir, &missing, &mut report).await
+                    {
+                        eprintln!("Download failed: {error}");
+                    }
                 }
+                // The files these settings were waiting for are here now, so a
+                // preset or a voice chosen before its model arrived takes
+                // effect rather than waiting for a restart with nothing to do.
+                crate::settings::reapply_pending(&state);
                 drop(slot);
             });
             response
         }
-        BANSHEE_LIST_VOICES => JsonRpcResponse::success(
+        // Every voice this build can name, and whether each is here. A client
+        // that can fetch one needs the whole list to offer a choice; one that
+        // cannot filters to the installed ones itself.
+        BANSHEE_LIST_VOICES => {
+            let installed = crate::models::installed_voices();
+            let mut ids: Vec<String> = crate::text_to_speech::voices::catalogue()
+                .map(str::to_string)
+                .collect();
+            for id in &installed {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+            let voices: Vec<_> = ids
+                .iter()
+                .map(|id| crate::text_to_speech::voices::describe(id, installed.contains(id)))
+                .collect();
+            JsonRpcResponse::success(
+                request.id,
+                serde_json::json!({ "voices": voices, "current": daemon_state.tts_voice() }),
+            )
+        }
+        // The engine's own list, so a client offering a choice cannot drift
+        // from what the engine will accept.
+        BANSHEE_LIST_LANGUAGES => JsonRpcResponse::success(
             request.id,
-            serde_json::json!({
-                "voices": crate::models::installed_voices(),
-                "current": daemon_state.tts_voice(),
-            }),
+            serde_json::json!({ "languages": crate::speech_to_text::languages::all() }),
         ),
         BANSHEE_LIST_INPUT_DEVICES => JsonRpcResponse::success(
             request.id,
@@ -397,52 +585,94 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
             JsonRpcResponse::success(request.id, status_payload(daemon_state))
         }
         BANSHEE_HISTORY => {
-            if let Some(db) = daemon_state.db_connection() {
-                match db.lock() {
-                    Ok(connection) => {
-                        match crate::history::TranscriptionHistory::list(&connection) {
-                            Ok(history) => JsonRpcResponse::success(
-                                request.id,
-                                serde_json::json!({ "history": history }),
-                            ),
-                            Err(e) => JsonRpcResponse::error(
-                                request.id,
-                                -32603,
-                                format!("Failed to retrieve history: {e}"),
-                            ),
-                        }
+            let limit = match optional_u64_param(request.params.as_ref(), "limit", &request.id) {
+                Ok(None) => None,
+                Ok(Some(limit)) => match u32::try_from(limit) {
+                    Ok(limit) => Some(limit),
+                    Err(_) => {
+                        return JsonRpcResponse::error(
+                            request.id,
+                            -32602,
+                            "'limit' must fit in 32 bits.",
+                        );
                     }
-                    Err(e) => JsonRpcResponse::error(
-                        request.id,
-                        -32603,
-                        format!("Failed to lock database connection: {e}"),
-                    ),
+                },
+                Err(response) => return *response,
+            };
+            match daemon_state
+                .with_history(|c| crate::history::TranscriptionHistory::list(c, limit))
+            {
+                Some(Ok(history)) => {
+                    JsonRpcResponse::success(request.id, serde_json::json!({ "history": history }))
                 }
-            } else {
-                JsonRpcResponse::error(request.id, -32003, "History is not enabled.")
+                Some(Err(e)) => JsonRpcResponse::error(
+                    request.id,
+                    -32603,
+                    format!("Failed to retrieve history: {e}"),
+                ),
+                None => JsonRpcResponse::error(request.id, -32003, "History is not enabled."),
             }
         }
         BANSHEE_CLEAR_HISTORY => {
-            if let Some(db) = daemon_state.db_connection() {
-                match db.lock() {
-                    Ok(connection) => {
-                        match crate::history::TranscriptionHistory::clear(&connection) {
-                            Ok(_) => JsonRpcResponse::success(request.id, serde_json::json!({})),
-                            Err(e) => JsonRpcResponse::error(
-                                request.id,
-                                -32003,
-                                format!("Failed to clear history: {e}"),
-                            ),
-                        }
-                    }
-                    Err(e) => JsonRpcResponse::error(
-                        request.id,
-                        -32603,
-                        format!("Failed to lock database connection: {e}"),
-                    ),
+            match daemon_state.with_history(crate::history::TranscriptionHistory::clear) {
+                Some(Ok(())) => JsonRpcResponse::success(request.id, serde_json::json!({})),
+                // Not -32003: that code names history being off, and the
+                // listing path already answers -32603 for the same failure.
+                Some(Err(e)) => JsonRpcResponse::error(
+                    request.id,
+                    -32603,
+                    format!("Failed to clear history: {e}"),
+                ),
+                None => JsonRpcResponse::error(request.id, -32003, "History is not enabled."),
+            }
+        }
+        BANSHEE_AGENTS => off_the_worker(request.id, read_the_agents).await,
+        BANSHEE_CONNECT_PLAN => {
+            let disconnect = match disconnect_param(request.params.as_ref(), &request.id) {
+                Ok(value) => value,
+                Err(response) => return *response,
+            };
+            if disconnect {
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32602,
+                    "Disconnect is not available yet. Remove Banshee from the agent's config by hand.",
+                );
+            }
+            let agent = match agent_param(request.params.as_ref(), &request.id) {
+                Ok(agent) => agent,
+                Err(response) => return *response,
+            };
+            off_the_worker(request.id, move || read_the_plan(agent)).await
+        }
+        BANSHEE_CONNECT_APPLY => {
+            let disconnect = match disconnect_param(request.params.as_ref(), &request.id) {
+                Ok(value) => value,
+                Err(response) => return *response,
+            };
+            if disconnect {
+                return JsonRpcResponse::error(
+                    request.id,
+                    -32602,
+                    "Disconnect is not available yet. Remove Banshee from the agent's config by hand.",
+                );
+            }
+            let agent = match agent_param(request.params.as_ref(), &request.id) {
+                Ok(agent) => agent,
+                Err(response) => return *response,
+            };
+            off_the_worker(request.id, move || write_the_plan(agent)).await
+        }
+        BANSHEE_OPEN_PERMISSION => {
+            let id = match str_param(request.params.as_ref(), "id", &request.id) {
+                Ok(value) => value,
+                Err(response) => return *response,
+            };
+            match permissions::open_pane(id) {
+                Ok(()) => JsonRpcResponse::success(request.id, serde_json::json!({"ok": true})),
+                Err(error) => {
+                    JsonRpcResponse::error(request.id, error.rpc_code(), error.rpc_message())
                 }
-            } else {
-                JsonRpcResponse::error(request.id, -32003, "History is not enabled.")
             }
         }
         _ => JsonRpcResponse::error(
@@ -474,6 +704,114 @@ mod tests {
             params: Some(params),
             id: Some(serde_json::json!(1)),
         }
+    }
+
+    fn connect_plan_request(params: serde_json::Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: BANSHEE_CONNECT_PLAN.to_string(),
+            params: Some(params),
+            id: Some(serde_json::json!(1)),
+        }
+    }
+
+    fn connect_apply_request(params: serde_json::Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: BANSHEE_CONNECT_APPLY.to_string(),
+            params: Some(params),
+            id: Some(serde_json::json!(1)),
+        }
+    }
+
+    fn history_request(params: serde_json::Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: BANSHEE_HISTORY.to_string(),
+            params: Some(params),
+            id: Some(serde_json::json!(1)),
+        }
+    }
+
+    #[tokio::test]
+    async fn history_honours_a_limit() {
+        let state = crate::test_support::daemon_state_with_history(&["first", "second", "third"]);
+
+        let request = history_request(serde_json::json!({ "limit": 1 }));
+        let response = dispatch(request, &state).await;
+
+        let JsonRpcResponse::Success { result, .. } = response else {
+            panic!("expected success response");
+        };
+        let history = result["history"].as_array().expect("a history array");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["text"], "third");
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_that_is_not_a_boolean_is_refused() {
+        let state = test_state(std::sync::mpsc::channel().0);
+
+        for request in [
+            connect_plan_request(serde_json::json!({"agent": "cursor", "disconnect": "true"})),
+            connect_apply_request(serde_json::json!({"agent": "cursor", "disconnect": "true"})),
+        ] {
+            let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
+                panic!("a string disconnect must not reach the plan");
+            };
+            assert_eq!(error.code, -32602);
+            assert!(error.message.contains("disconnect"), "{}", error.message);
+        }
+    }
+
+    /// `-32003` names one cause: history is off. NOT COVERED: the database
+    /// failure beside it, which needs a database that refuses a clear, and the
+    /// harness cannot build one.
+    #[tokio::test]
+    async fn only_history_being_off_answers_its_own_code() {
+        let state = test_state(std::sync::mpsc::channel().0);
+
+        for method in [BANSHEE_HISTORY, BANSHEE_CLEAR_HISTORY] {
+            let request = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: method.to_string(),
+                params: Some(serde_json::json!({})),
+                id: Some(serde_json::json!(1)),
+            };
+            let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
+                panic!("{method} must refuse when nothing is kept");
+            };
+            assert_eq!(error.code, -32003, "{method}");
+            assert!(error.message.contains("not enabled"), "{}", error.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_history_limit_that_does_not_fit_is_refused() {
+        let state = crate::test_support::daemon_state_with_history(&["first"]);
+
+        let request = history_request(serde_json::json!({ "limit": 4_294_967_296u64 }));
+        let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
+            panic!("a limit past 32 bits must not truncate");
+        };
+        assert_eq!(error.code, -32602);
+    }
+
+    #[tokio::test]
+    async fn history_takes_an_explicit_zero_literally() {
+        let state = crate::test_support::daemon_state_with_history(&["first", "second", "third"]);
+
+        let request = history_request(serde_json::json!({ "limit": 0 }));
+        let response = dispatch(request, &state).await;
+
+        let JsonRpcResponse::Success { result, .. } = response else {
+            panic!("expected success response");
+        };
+        let history = result["history"].as_array().expect("a history array");
+        assert!(
+            history.is_empty(),
+            "an explicit zero must not mean every row"
+        );
     }
 
     #[tokio::test]
@@ -681,6 +1019,31 @@ mod tests {
     }
 
     #[test]
+    fn status_carries_the_config_the_daemon_parsed() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        let mut config = crate::config::Config::default();
+        config.stt.language = "de".to_string();
+        config.stt.vocabulary = vec!["Tauri".to_string(), "Svelte".to_string()];
+        config.tts.voice = "af_sky".to_string();
+        state.set_config(std::sync::Arc::new(config));
+
+        let status = status_payload(&state);
+        assert_eq!(status["config"]["stt"]["language"], "de");
+        assert_eq!(
+            status["config"]["stt"]["vocabulary"],
+            serde_json::json!(["Tauri", "Svelte"])
+        );
+        assert_eq!(status["config"]["tts"]["voice"], "af_sky");
+        assert!(status["config"]["audio"]["hotkey"].is_string());
+    }
+
+    #[test]
+    fn status_reports_nothing_pending_on_a_fresh_daemon() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        assert_eq!(status_payload(&state)["pending"], serde_json::json!([]));
+    }
+
+    #[test]
     fn the_pushed_state_carries_the_device_and_what_it_waits_for() {
         let state = test_state(std::sync::mpsc::channel().0);
         state.set_audio_device(Some("OnePlus Buds 3".to_string()));
@@ -698,6 +1061,49 @@ mod tests {
             bound, substituted,
             "push_changes suppresses an unchanged state"
         );
+    }
+
+    #[test]
+    fn live_state_reports_armed_while_a_question_waits() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        assert_eq!(live_state(&state)["armed"], serde_json::json!(false));
+
+        assert!(state.arm_for_ask(), "the fixture must discriminate");
+        let live = live_state(&state);
+        assert_eq!(live["armed"], serde_json::json!(true));
+        // The microphone is open while armed
+        assert_eq!(live["recording"], serde_json::json!(true));
+
+        state.set_recording_mode(RecordingMode::Idle);
+        assert_eq!(live_state(&state)["armed"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn push_to_talk_records_without_arming() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        state.set_recording_mode(RecordingMode::PushToTalk);
+        let live = live_state(&state);
+        assert_eq!(live["recording"], serde_json::json!(true));
+        assert_eq!(live["armed"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn live_state_reports_transcribing() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        assert_eq!(live_state(&state)["transcribing"], serde_json::json!(false));
+        state.set_transcribing(true);
+        assert_eq!(live_state(&state)["transcribing"], serde_json::json!(true));
+        state.set_transcribing(false);
+        assert_eq!(live_state(&state)["transcribing"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn setting_transcribing_wakes_a_subscriber() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        let mut changes = state.subscribe_transcribing();
+        state.set_transcribing(true);
+        assert!(changes.has_changed().expect("the sender outlives this"));
+        assert!(*changes.borrow_and_update());
     }
 
     #[tokio::test]
@@ -727,6 +1133,7 @@ mod tests {
         // Something to fetch, or the call answers "nothing to do" and never
         // reaches the slot at all
         state.set_wanted_downloads(vec![crate::models::download::Download {
+            megabytes: 1,
             name: "no-such-model-9f3a.bin".to_string(),
             url: "https://example.invalid/no-such-model-9f3a.bin".to_string(),
         }]);
@@ -789,5 +1196,115 @@ mod tests {
             panic!("expected success response");
         };
         assert!(result["transcriptions"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_agent_slug_is_refused_by_plan_and_apply() {
+        let state = test_state(std::sync::mpsc::channel().0);
+
+        let JsonRpcResponse::Error {
+            error: plan_error, ..
+        } = dispatch(
+            connect_plan_request(serde_json::json!({"agent": "notatool", "disconnect": false})),
+            &state,
+        )
+        .await
+        else {
+            panic!("expected an error response");
+        };
+        assert!(
+            plan_error.message.contains("notatool"),
+            "{}",
+            plan_error.message
+        );
+
+        let JsonRpcResponse::Error {
+            error: apply_error, ..
+        } = dispatch(
+            connect_apply_request(serde_json::json!({"agent": "notatool", "disconnect": false})),
+            &state,
+        )
+        .await
+        else {
+            panic!("expected an error response");
+        };
+        assert!(
+            apply_error.message.contains("notatool"),
+            "{}",
+            apply_error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_true_is_refused_before_the_agent_is_resolved() {
+        let state = test_state(std::sync::mpsc::channel().0);
+        let refusal =
+            "Disconnect is not available yet. Remove Banshee from the agent's config by hand.";
+
+        for request in [
+            connect_plan_request(serde_json::json!({"agent": "cursor", "disconnect": true})),
+            connect_apply_request(serde_json::json!({"agent": "cursor", "disconnect": true})),
+            connect_plan_request(serde_json::json!({"agent": "notatool", "disconnect": true})),
+            connect_apply_request(serde_json::json!({"agent": "notatool", "disconnect": true})),
+        ] {
+            let response = dispatch(request, &state).await;
+            let JsonRpcResponse::Error { error, .. } = response else {
+                panic!("expected an error response");
+            };
+            assert_eq!(error.message, refusal);
+        }
+    }
+
+    struct VoiceCapture(Arc<std::sync::Mutex<Vec<Option<String>>>>);
+
+    struct RecordedUtterance;
+
+    impl crate::text_to_speech::ActiveUtterance for RecordedUtterance {
+        fn is_finished(&mut self) -> bool {
+            true
+        }
+        fn stop(&mut self) {}
+    }
+
+    impl crate::text_to_speech::TtsBackend for VoiceCapture {
+        fn start(
+            &self,
+            _text: &str,
+            voice: Option<&str>,
+        ) -> std::io::Result<Box<dyn crate::text_to_speech::ActiveUtterance>> {
+            self.0.lock().unwrap().push(voice.map(str::to_string));
+            Ok(Box::new(RecordedUtterance))
+        }
+    }
+
+    #[tokio::test]
+    async fn speak_passes_the_voice_parameter_to_the_backend() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let speech =
+            crate::text_to_speech::SpeechPlayer::new(Box::new(VoiceCapture(Arc::clone(&captured))));
+        let state = Arc::new(DaemonState::new(
+            "0.0.0",
+            "stt",
+            "vad",
+            0.5,
+            "default".to_string(),
+            None,
+            speech,
+            std::sync::mpsc::channel().0,
+            crate::audio::cues::Cues::silent(),
+            crate::config::BargeInMode::Stop,
+        ));
+
+        let response = dispatch(
+            request(
+                BANSHEE_SPEAK,
+                Some(serde_json::json!({"text": "hello", "voice": "am_adam"})),
+            ),
+            &state,
+        )
+        .await;
+
+        assert!(matches!(response, JsonRpcResponse::Success { .. }));
+        assert_eq!(*captured.lock().unwrap(), vec![Some("am_adam".to_string())]);
     }
 }
