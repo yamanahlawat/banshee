@@ -655,7 +655,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
                     );
                 }
             };
-            if let Err(error) = connect::apply_all(&changes, |_| {}) {
+            if let Err(error) = connect::apply_all(&changes, &env.path, |_| {}) {
                 return from_error(request.id, error);
             }
             JsonRpcResponse::success(request.id, serde_json::json!({"applied": changes.len()}))

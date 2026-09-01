@@ -156,6 +156,10 @@
     margin: 0 0 10px;
     font-size: 13px;
     color: var(--accent);
+    /* The daemon's message carries the commands it did not run, one per line.
+       Collapsed, they read as one run-on sentence. */
+    white-space: pre-wrap;
+    overflow-x: auto;
   }
 
   .path {

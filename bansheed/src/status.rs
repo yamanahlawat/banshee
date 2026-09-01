@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use banshee_common::{Blocker, BlockerKind, KokoroTTSConfig, error::BansheeError, utils};
@@ -93,7 +93,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         let typer = crate::dictation::WAYLAND_TYPERS
             .into_iter()
             .map(|(binary, _)| binary)
-            .find(|binary| on_path(binary, &path));
+            .find(|binary| resolve(binary, &path).is_some());
         match typer {
             Some(tool) => {
                 pass(&format!("wayland session: dictation types via {tool}"));
@@ -171,8 +171,25 @@ fn runs(bin: &str) -> bool {
 }
 
 // Walks the given PATH directly: `which` is its own package on minimal systems.
-pub(crate) fn on_path(bin: &str, path: &OsStr) -> bool {
-    crate::connect::path_dirs(path).any(|dir| dir.join(bin).is_file())
+// Answers with the file, because a caller that has to run it cannot resolve the
+// name again: a supervised process is handed a different PATH.
+pub(crate) fn resolve(bin: &str, path: &OsStr) -> Option<PathBuf> {
+    crate::connect::path_dirs(path)
+        .map(|dir| dir.join(bin))
+        .find(|candidate| runnable(candidate))
+}
+
+// A bare name let the kernel walk past a file it could not execute. An absolute
+// path cannot, so the walk skips one here.
+fn runnable(candidate: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(candidate)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    candidate.is_file()
 }
 
 fn check_model(models_dir: &Path, name: &str) -> bool {
@@ -548,6 +565,25 @@ mod tests {
         }
     }
 
+    // The walk hands back a path to run, so a file it cannot run is not an
+    // answer: a bare name let the kernel skip one.
+    #[test]
+    fn resolve_skips_a_file_it_cannot_run() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("banshee-resolve-{}", std::process::id()));
+        let (early, late) = (root.join("early"), root.join("late"));
+        std::fs::create_dir_all(&early).unwrap();
+        std::fs::create_dir_all(&late).unwrap();
+        std::fs::write(early.join("claude"), "not a program").unwrap();
+        std::fs::write(late.join("claude"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(late.join("claude"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        let path = std::ffi::OsString::from(format!("{}:{}", early.display(), late.display()));
+        assert_eq!(super::resolve("claude", &path), Some(late.join("claude")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_daemon_that_is_not_running_fails_the_checklist() {
