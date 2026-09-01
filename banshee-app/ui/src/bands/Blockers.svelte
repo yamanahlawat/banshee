@@ -67,8 +67,7 @@
         return {
           title: first.name,
           label: 'Open System Settings',
-          // Every permission blocker draws this button. Heard one after the
-          // other, the names are the same button twice.
+          // Heard on its own, "Open System Settings" is any pane in the list.
           pane: first.name,
           // Opening the pane cannot finish this one: the grant reaches only a
           // process started afterwards.
@@ -101,7 +100,9 @@
           pane: '',
           confirmsWithRestart: false,
           run: restart,
-          settledByADownload: true,
+          // A model arriving repairs a model, so a model restart stands down
+          // for the run. It brings no microphone, so a capture fault does not.
+          settledByADownload: !microphone,
           chooses: false,
         };
       default:

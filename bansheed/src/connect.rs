@@ -86,8 +86,13 @@ pub struct Env {
     pub banshee: PathBuf,
     /// None when the shim does not ship beside `banshee`. Only Pi works then.
     pub shim: Option<PathBuf>,
-    /// The agent binaries found on PATH.
-    pub on_path: Vec<&'static str>,
+    /// The PATH detection searched, which is also the PATH a command runs with.
+    /// A resolved program still needs it: an agent CLI is often a script whose
+    /// interpreter the daemon's own PATH does not hold.
+    pub path: OsString,
+    /// Where each agent binary was found. A plan that runs one carries this
+    /// path: the daemon cannot resolve a name against its own PATH.
+    pub on_path: Vec<(&'static str, PathBuf)>,
     /// The command Claude Code has registered for the banshee MCP server.
     pub claude_shim: Option<String>,
 }
@@ -114,7 +119,7 @@ pub enum Change {
 
 pub fn detect(agent: Agent, env: &Env) -> Presence {
     let (present, looked_for) = match agent.signal() {
-        Signal::OnPath(binary) => (env.on_path.contains(&binary), format!("{binary} on PATH")),
+        Signal::OnPath(binary) => (env.program(agent).is_some(), format!("{binary} on PATH")),
         Signal::HomeDir(dir) => (env.home.join(dir).is_dir(), format!("~/{dir}/")),
     };
     if present {
@@ -197,21 +202,38 @@ fn plan_claude(env: &Env) -> Result<Vec<Change>, BansheeError> {
     let shim = shim_path.display().to_string();
     let mut changes = Vec::new();
     if !reaches_shim(env.claude_shim.as_deref(), shim_path) {
+        let claude = env
+            .program(Agent::ClaudeCode)
+            .ok_or_else(|| {
+                BansheeError::Rejected("claude is not on PATH; nothing to connect".into())
+            })?
+            .display()
+            .to_string();
         // `claude mcp add` refuses a name it already holds, so a stale command
         // has to go first
         if env.claude_shim.is_some() {
             changes.push(Change::Run {
-                argv: ["claude", "mcp", "remove", "--scope", "user", "banshee"]
-                    .map(String::from)
-                    .to_vec(),
+                argv: vec![
+                    claude.clone(),
+                    "mcp".into(),
+                    "remove".into(),
+                    "--scope".into(),
+                    "user".into(),
+                    "banshee".into(),
+                ],
             });
         }
         changes.push(Change::Run {
-            argv: ["claude", "mcp", "add", "--scope", "user", "banshee", "--"]
-                .into_iter()
-                .map(String::from)
-                .chain(std::iter::once(shim))
-                .collect(),
+            argv: vec![
+                claude,
+                "mcp".into(),
+                "add".into(),
+                "--scope".into(),
+                "user".into(),
+                "banshee".into(),
+                "--".into(),
+                shim,
+            ],
         });
     }
 
@@ -540,7 +562,7 @@ fn shell_word(word: &str) -> String {
     }
 }
 
-pub fn apply(change: &Change) -> Result<(), BansheeError> {
+pub fn apply(change: &Change, path: &OsStr) -> Result<(), BansheeError> {
     match change {
         Change::Run { argv } => {
             let Some(program) = argv.first() else {
@@ -548,6 +570,7 @@ pub fn apply(change: &Change) -> Result<(), BansheeError> {
             };
             let status = std::process::Command::new(program)
                 .args(&argv[1..])
+                .env("PATH", path)
                 .status()?;
             if status.success() {
                 Ok(())
@@ -678,6 +701,18 @@ impl Env {
         Env::with_path(with_fallback(shell_path))
     }
 
+    /// Where detection found this agent's binary. `None` for an agent found by
+    /// a directory, and for one that is not installed.
+    pub fn program(&self, agent: Agent) -> Option<&Path> {
+        let Signal::OnPath(binary) = agent.signal() else {
+            return None;
+        };
+        self.on_path
+            .iter()
+            .find(|(name, _)| *name == binary)
+            .map(|(_, program)| program.as_path())
+    }
+
     fn with_path(path: OsString) -> Result<Env, BansheeError> {
         let home = crate::service::home_dir()?;
         let config_dir_override = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
@@ -697,13 +732,16 @@ impl Env {
                 Signal::OnPath(binary) => Some(binary),
                 Signal::HomeDir(_) => None,
             })
-            .filter(|binary| crate::status::on_path(binary, &path))
+            .filter_map(|binary| {
+                crate::status::resolve(binary, &path).map(|program| (binary, program))
+            })
             .collect();
         Ok(Env {
             home,
             claude_config_dir,
             banshee,
             shim,
+            path,
             on_path,
             claude_shim: registered_claude_shim(&claude_global),
         })
@@ -711,9 +749,13 @@ impl Env {
 }
 
 /// Applies in order and names what is left when one fails.
-pub fn apply_all(changes: &[Change], mut written: impl FnMut(&Change)) -> Result<(), BansheeError> {
+pub fn apply_all(
+    changes: &[Change],
+    path: &OsStr,
+    mut written: impl FnMut(&Change),
+) -> Result<(), BansheeError> {
     for (done, change) in changes.iter().enumerate() {
-        if let Err(error) = apply(change) {
+        if let Err(error) = apply(change, path) {
             let left: String = changes[done..].iter().map(render).collect();
             return Err(BansheeError::Rejected(format!(
                 "{error}\n{done} of {} changes applied. Still to apply:\n{left}",
@@ -748,7 +790,7 @@ pub fn run(agent: Option<Agent>, yes: bool) -> Result<(), BansheeError> {
     if !yes && !confirm("Apply? [y/N] ")? {
         return Err(BansheeError::Rejected("Nothing written.".into()));
     }
-    apply_all(&changes, |change| {
+    apply_all(&changes, &env.path, |change| {
         if let Change::WriteFile { path, .. } = change {
             println!("wrote {}", path.display());
         }
@@ -794,15 +836,31 @@ mod tests {
             claude_config_dir: home.join(".claude"),
             banshee: PathBuf::from("/opt/banshee/bin/banshee"),
             shim: Some(PathBuf::from("/opt/banshee/bin/banshee-mcp-shim")),
+            path: OsString::from("/usr/local/bin"),
             on_path: Vec::new(),
             claude_shim: None,
         }
     }
 
+    /// Where a machine would have a binary, and where `found` records it.
+    fn found_at(binary: &str) -> String {
+        format!("/usr/local/bin/{binary}")
+    }
+
+    /// Records a binary as found, so a plan can carry the path detection kept.
+    fn found(env: &mut Env, binary: &'static str) {
+        env.on_path.push((binary, PathBuf::from(found_at(binary))));
+    }
+
+    /// A file write runs no program, so the PATH is not part of what it does.
+    fn apply_write(change: &Change) -> Result<(), BansheeError> {
+        apply(change, OsStr::new(""))
+    }
+
     fn installed_env(home: &std::path::Path, agent: Agent) -> Env {
         let mut env = env_at(home);
         match agent.signal() {
-            Signal::OnPath(binary) => env.on_path.push(binary),
+            Signal::OnPath(binary) => found(&mut env, binary),
             Signal::HomeDir(dir) => std::fs::create_dir_all(home.join(dir)).unwrap(),
         }
         env
@@ -812,11 +870,17 @@ mod tests {
 
     #[test]
     fn detection_searches_the_resolved_path_not_the_process_path() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = scratch("resolved-path");
-        std::fs::write(dir.join("codex"), "").unwrap();
+        // Executable, because an installed CLI is: a file it cannot run is not one
+        std::fs::write(dir.join("codex"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(dir.join("codex"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
 
         let env = Env::with_shell_path(Some(OsString::from(&dir))).unwrap();
-        assert_eq!(env.on_path, vec!["codex"]);
+        let expected = dir.join("codex");
+        assert_eq!(env.program(Agent::Codex), Some(expected.as_path()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -844,7 +908,7 @@ mod tests {
             std::path::Path::new("Cargo.toml").is_file(),
             "test assumes the crate root as the working directory"
         );
-        assert!(!crate::status::on_path("Cargo.toml", &OsString::new()));
+        assert!(crate::status::resolve("Cargo.toml", &OsString::new()).is_none());
     }
 
     #[test]
@@ -881,7 +945,7 @@ mod tests {
         assert_eq!(row(Agent::Cursor, &env).presence, "found");
 
         for change in plan(Agent::Cursor, &env).unwrap() {
-            apply(&change).unwrap();
+            apply(&change, &env.path).unwrap();
         }
         assert_eq!(row(Agent::Cursor, &env).presence, "connected");
     }
@@ -932,8 +996,8 @@ mod tests {
             }
         );
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
-        env.on_path.push("codex");
-        env.on_path.push("agy");
+        found(&mut env, "codex");
+        found(&mut env, "agy");
         assert_eq!(detect(Agent::Cursor, &env), Presence::Installed);
         assert_eq!(detect(Agent::Codex, &env), Presence::Installed);
         assert_eq!(detect(Agent::Antigravity, &env), Presence::Installed);
@@ -1079,8 +1143,8 @@ mod tests {
         let home = scratch("plan-new");
         let mut env = env_at(&home);
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
-        env.on_path.push("codex");
-        env.on_path.push("agy");
+        found(&mut env, "codex");
+        found(&mut env, "agy");
         for (agent, file) in [
             (Agent::Cursor, ".cursor/mcp.json"),
             (Agent::Codex, ".codex/config.toml"),
@@ -1111,7 +1175,7 @@ mod tests {
     fn a_bare_shim_name_never_reaches_the_shim_even_when_registered() {
         let home = scratch("claude-bare-registered");
         let mut env = env_at(&home);
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         env.claude_shim = Some("banshee-mcp-shim".into());
         let script = home.join(".claude/hooks/banshee-speak-check.sh");
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
@@ -1129,13 +1193,20 @@ mod tests {
             changes,
             vec![
                 Change::Run {
-                    argv: ["claude", "mcp", "remove", "--scope", "user", "banshee"]
-                        .map(String::from)
-                        .to_vec()
+                    argv: [
+                        &found_at("claude"),
+                        "mcp",
+                        "remove",
+                        "--scope",
+                        "user",
+                        "banshee"
+                    ]
+                    .map(String::from)
+                    .to_vec()
                 },
                 Change::Run {
                     argv: [
-                        "claude",
+                        &found_at("claude"),
                         "mcp",
                         "add",
                         "--scope",
@@ -1157,7 +1228,7 @@ mod tests {
     fn a_bare_shim_name_with_no_hook_set_up_is_still_reissued() {
         let home = scratch("claude-bare-no-hook");
         let mut env = env_at(&home);
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         env.claude_shim = Some("banshee-mcp-shim".into());
         let changes = plan(Agent::ClaudeCode, &env).unwrap();
         assert!(
@@ -1188,7 +1259,7 @@ mod tests {
                 looked_for: "claude on PATH".into()
             }
         );
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         assert_eq!(detect(Agent::ClaudeCode, &env), Presence::Installed);
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -1356,14 +1427,14 @@ mod tests {
     fn claude_plan_adds_the_server_the_script_and_the_hook() {
         let home = scratch("claude-fresh");
         let mut env = env_at(&home);
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         let changes = plan(Agent::ClaudeCode, &env).unwrap();
         assert_eq!(changes.len(), 3, "{changes:?}");
         assert_eq!(
             changes[0],
             Change::Run {
                 argv: [
-                    "claude",
+                    &found_at("claude"),
                     "mcp",
                     "add",
                     "--scope",
@@ -1413,7 +1484,7 @@ mod tests {
     fn claude_plan_skips_the_server_when_claude_already_has_it() {
         let home = scratch("claude-has-mcp");
         let mut env = env_at(&home);
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         env.claude_shim = Some("/opt/banshee/bin/banshee-mcp-shim".into());
         let changes = plan(Agent::ClaudeCode, &env).unwrap();
         assert!(
@@ -1428,7 +1499,7 @@ mod tests {
     fn claude_plan_leaves_a_working_hook_alone_wherever_its_script_lives() {
         let home = scratch("claude-hook-elsewhere");
         let mut env = env_at(&home);
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         env.claude_shim = Some("/opt/banshee/bin/banshee-mcp-shim".into());
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::create_dir_all(home.join("elsewhere")).unwrap();
@@ -1449,7 +1520,7 @@ mod tests {
     fn claude_plan_repairs_a_registered_script_that_is_missing() {
         let home = scratch("claude-hook-missing");
         let mut env = env_at(&home);
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         env.claude_shim = Some("/opt/banshee/bin/banshee-mcp-shim".into());
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         let registered = home.join("gone/banshee-speak-check.sh");
@@ -1481,7 +1552,7 @@ mod tests {
     fn a_hook_in_settings_local_counts_as_registered() {
         let home = scratch("claude-hook-local");
         let mut env = env_at(&home);
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         env.claude_shim = Some("/opt/banshee/bin/banshee-mcp-shim".into());
         let script = home.join(".claude/hooks/banshee-speak-check.sh");
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
@@ -1573,7 +1644,7 @@ mod tests {
     fn claude_plan_honours_the_config_dir() {
         let home = scratch("claude-config-dir");
         let mut env = env_at(&home);
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         env.claude_shim = Some("/opt/banshee/bin/banshee-mcp-shim".into());
         env.claude_config_dir = home.join(".claude-work");
         let changes = plan(Agent::ClaudeCode, &env).unwrap();
@@ -1730,7 +1801,7 @@ mod tests {
     fn applying_a_file_write_creates_parents_and_sets_the_mode() {
         let home = scratch("apply-write");
         let path = home.join("deep/er/hook.sh");
-        apply(&Change::WriteFile {
+        apply_write(&Change::WriteFile {
             path: path.clone(),
             before: None,
             after: "#!/bin/sh\n".into(),
@@ -1753,11 +1824,77 @@ mod tests {
 
     #[test]
     fn a_failing_command_is_an_error() {
-        let error = apply(&Change::Run {
-            argv: vec!["false".into()],
-        })
-        .expect_err("false exits 1");
-        assert!(error.to_string().contains("false"), "{error}");
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("failing-command");
+        let script = dir.join("fails");
+        std::fs::write(&script, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = apply(
+            &Change::Run {
+                argv: vec![script.display().to_string()],
+            },
+            OsStr::new("/usr/bin:/bin"),
+        )
+        .expect_err("the script exits 1");
+        assert!(error.to_string().contains("fails"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The daemon runs under a supervisor, which hands it four system
+    // directories on PATH. A plan that names a program the daemon has to
+    // resolve itself cannot run there, so a plan resolves it first.
+    #[test]
+    fn every_program_a_plan_runs_is_absolute() {
+        let home = scratch("planned-programs");
+        for agent in Agent::ALL {
+            let mut env = installed_env(&home, agent);
+            // A stale registration, so the plan carries every command it can
+            env.claude_shim = Some("/elsewhere/banshee-mcp-shim".to_string());
+            for change in plan(agent, &env).expect("a plan") {
+                let Change::Run { argv } = change else {
+                    continue;
+                };
+                let program = std::path::Path::new(&argv[0]);
+                assert!(
+                    program.is_absolute(),
+                    "{agent:?} plans to run {program:?}, which the daemon resolves on its own PATH"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // A resolved program is not enough: an agent CLI is often a script, and its
+    // interpreter is found on the PATH the child is handed.
+    #[test]
+    fn a_command_runs_with_the_path_it_was_given() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("run-path");
+        let script = dir.join("writes-path");
+        let seen = dir.join("seen");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s' \"$PATH\" > '{}'\n", seen.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        apply(
+            &Change::Run {
+                argv: vec![script.display().to_string()],
+            },
+            OsStr::new("/handed/to/the/child"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "/handed/to/the/child"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1798,22 +1935,29 @@ mod tests {
     fn claude_plan_reissues_the_server_when_the_registered_command_differs() {
         let home = scratch("claude-stale-shim");
         let mut env = env_at(&home);
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         env.claude_shim = Some("/old/bin/banshee-mcp-shim".into());
         let changes = plan(Agent::ClaudeCode, &env).unwrap();
         assert_eq!(
             changes[0],
             Change::Run {
-                argv: ["claude", "mcp", "remove", "--scope", "user", "banshee"]
-                    .map(String::from)
-                    .to_vec()
+                argv: [
+                    &found_at("claude"),
+                    "mcp",
+                    "remove",
+                    "--scope",
+                    "user",
+                    "banshee"
+                ]
+                .map(String::from)
+                .to_vec()
             }
         );
         assert_eq!(
             changes[1],
             Change::Run {
                 argv: [
-                    "claude",
+                    &found_at("claude"),
                     "mcp",
                     "add",
                     "--scope",
@@ -1833,7 +1977,7 @@ mod tests {
     fn claude_plan_repairs_a_missing_script_at_the_canonical_path() {
         let home = scratch("claude-script-gone");
         let mut env = env_at(&home);
-        env.on_path.push("claude");
+        found(&mut env, "claude");
         env.claude_shim = Some("/opt/banshee/bin/banshee-mcp-shim".into());
         let script_path = home.join(".claude/hooks/banshee-speak-check.sh");
         std::fs::create_dir_all(home.join(".claude")).unwrap();

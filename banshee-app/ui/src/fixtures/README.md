@@ -1,13 +1,14 @@
 # Fixtures
 
-Real daemon replies, captured 2026-08-27 from Banshee 0.11.1 on macOS 25.6.0.
-Nothing here is hand-typed except `not-running.json`, which the daemon cannot
-produce because a stopped daemon answers nothing.
+Real daemon replies, captured from Banshee 0.11.1 on macOS 25.6.0: 2026-08-27,
+and `permissions.json` again on 2026-09-01. Nothing here is hand-typed except
+`not-running.json`, which the daemon cannot produce because a stopped daemon
+answers nothing.
 
 | File | What it is | How it was captured |
 | --- | --- | --- |
 | `ready.json` | `banshee.status` on a clear machine | `banshee status --json` |
-| `permissions.json` | `banshee.status` with two permission blockers | Banshee switched off in System Settings > Privacy & Security > Accessibility, daemon restarted, `banshee status --json`, grant restored |
+| `permissions.json` | `banshee.status` with the one permission blocker a daemon can report | `tccutil reset Accessibility com.banshee.app` and the same for `ListenEvent`, daemon restarted, `banshee status --json`, Accessibility granted again |
 | `pending-cues.json` | `banshee.status` with a key accepted but not applied | `banshee config set audio.cues.enabled false`, `banshee status --json`, value set back to `true` |
 | `not-running.json` | what the window sees with no daemon | Constructed as `{"running": false}`, per the plan. A stopped daemon sends nothing at all, so there is no reply to record |
 | `recording.json` | `banshee.state_changed` params | Subscribed to `state`, then `banshee record start` |
@@ -21,10 +22,13 @@ produce because a stopped daemon answers nothing.
 holds the microphone open while armed. A hand-written fixture with
 `recording: false` would let a wrong branch order in `stateWord` pass its test.
 
-`permissions.json` carries **two** blockers, not one. Revoking Accessibility
-invalidates Input Monitoring as well. Each blocker's `fix` is a settings path
-(`grant it in System Settings > Privacy & Security > Accessibility`), never a
-terminal command. No `banshee permissions` subcommand exists.
+`permissions.json` carries **one** blocker, which is every grant the daemon
+asks for. Its `fix` is a settings path (`grant it in System Settings > Privacy &
+Security > Accessibility`), never a terminal command. No `banshee permissions`
+subcommand exists. A second permission blocker cannot arrive, so `fixGroups`
+keeping each grant on its own row is no longer covered: `daemon.test.ts` states
+only that a grant does not join the models' row, which is the pair a first run
+really holds.
 
 ## Not captured
 

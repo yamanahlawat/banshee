@@ -3,7 +3,7 @@
 # One-time setup: Keychain Access > Certificate Assistant > Create a Certificate,
 # name "banshee-dev", type "Code Signing", self-signed.
 IDENTITY ?= banshee-dev
-APP_DIR ?= $(HOME)/Applications
+APP_DIR ?= /Applications
 APP := $(APP_DIR)/Banshee.app
 BIN_DIR ?= $(HOME)/.cargo/bin
 BANSHEE := $(APP)/Contents/MacOS/banshee

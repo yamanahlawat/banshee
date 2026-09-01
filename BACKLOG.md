@@ -15,6 +15,11 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   so a daemon slow to load can be kickstarted more than once.
 - No protocol method cancels a download. A person on a metered connection can start 862 MB
   and has no way to stop it from the window.
+- On Linux the daemon spawns `wtype` or `ydotool` by bare name, while `banshee status`
+  reports them from the login shell's `PATH`. A supervised daemon holds a smaller `PATH`, so
+  the checklist can name a typer the daemon cannot run. `connect` resolves an agent CLI and
+  hands the child the `PATH` it searched; dictation does neither. Not reproduced: this
+  machine is macOS.
 - `daemon.log` carries no timestamps, so no interval in it can be measured.
 - Past eight queued utterances the oldest is dropped silently, and `speak` still answers with
   an id for it.

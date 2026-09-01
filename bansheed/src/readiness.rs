@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn a_grant_is_offered_before_a_download() {
         let blockers = assemble(
-            vec![blocker(BlockerKind::Permission, "input_monitoring")],
+            vec![blocker(BlockerKind::Permission, "accessibility")],
             vec![blocker(BlockerKind::Model, "ggml.bin")],
             None,
         );

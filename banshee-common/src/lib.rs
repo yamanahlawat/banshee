@@ -124,6 +124,12 @@ pub fn missing_device(status: &Value) -> Option<&str> {
     status.get("missing_device").and_then(Value::as_str)
 }
 
+/// What `IOHIDCheckAccess` answered in the daemon: `granted`, `denied` or
+/// `undetermined`. `None` from a daemon older than the field.
+pub fn key_press_access(status: &Value) -> Option<&str> {
+    status.get("key_press_access").and_then(Value::as_str)
+}
+
 /// The sentence every surface shows for these two fields. Each client adds its
 /// own lead-in and nothing else, so all of them spell the absent case alike.
 pub fn microphone_label(open: Option<&str>, missing: Option<&str>) -> String {
@@ -382,9 +388,9 @@ mod wire_tests {
             kind: BlockerKind::Permission,
             role: None,
             remedy: None,
-            id: "input_monitoring".to_string(),
-            name: "Input Monitoring".to_string(),
-            consequence: "the hotkey receives no key presses".to_string(),
+            id: "accessibility".to_string(),
+            name: "Accessibility".to_string(),
+            consequence: "dictation cannot type".to_string(),
             fix: "grant it in System Settings".to_string(),
             command: None,
         };
@@ -393,9 +399,9 @@ mod wire_tests {
             wire,
             serde_json::json!({
                 "kind": "permission",
-                "id": "input_monitoring",
-                "name": "Input Monitoring",
-                "consequence": "the hotkey receives no key presses",
+                "id": "accessibility",
+                "name": "Accessibility",
+                "consequence": "dictation cannot type",
                 "fix": "grant it in System Settings",
             })
         );

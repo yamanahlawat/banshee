@@ -36,7 +36,7 @@ import {
 } from './lib/tauri';
 import { agents } from './lib/agents';
 import { table as historyTable } from './lib/history';
-import { daemon, empty, reduceStatus } from './lib/daemon';
+import { daemon, empty, reduceStatus, type Blocker } from './lib/daemon';
 import { forgetCopy } from './lib/copy';
 import { forgetKeys } from './lib/keys';
 import App from './App.svelte';
@@ -106,7 +106,10 @@ it('draws an empty history rather than leaving the body blank', async () => {
 });
 
 it('says what a blocker stops and offers the pane that clears it', async () => {
-  vi.mocked(status).mockResolvedValue(permissions);
+  vi.mocked(status).mockResolvedValue({
+    ...permissions,
+    blockers: permissions.blockers as Blocker[],
+  });
   render(App);
   const open = await screen.findAllByRole('button', { name: /^Open System Settings for / });
   await fireEvent.click(open[0]);
@@ -784,9 +787,9 @@ it('keeps a permission reachable while a download runs', async () => {
     blockers: [
       {
         kind: 'permission',
-        id: 'input_monitoring',
-        name: 'Input Monitoring',
-        consequence: 'the hotkey receives no key presses',
+        id: 'accessibility',
+        name: 'Accessibility',
+        consequence: 'dictation cannot type and the hotkey stays inert',
         fix: 'grant it in System Settings',
       },
       {

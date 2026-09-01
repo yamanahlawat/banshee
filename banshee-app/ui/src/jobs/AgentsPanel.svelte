@@ -5,8 +5,28 @@
 
   let reviewing: { agent: AgentRow; plan: PlannedChange[] } | null = null;
   let rowErrors: Record<string, string> = {};
+  /// What the list has to say about itself. `failed` separates a fault from a
+  /// caveat, because the accent is the colour of something being wrong.
+  let listNote: { text: string; failed: boolean } | null = null;
+  /// Whether a read has answered at all. An empty list before the first answer
+  /// is a panel still looking; after one, it is a machine with no agents.
+  let looked = false;
 
-  onMount(refresh);
+  onMount(look);
+
+  /// Detection answering `false` is not an empty machine. A panel that keeps
+  /// saying it is looking would report a green check the daemon never gave.
+  async function look() {
+    listNote = null;
+    const read = await refresh();
+    looked = true;
+    if (!read) {
+      listNote = {
+        text: 'Banshee could not read which agents are installed. It asks the daemon for that, so the daemon is probably not running.',
+        failed: true,
+      };
+    }
+  }
 
   const SAYS: Record<string, string> = {
     connected: 'Connected',
@@ -46,10 +66,17 @@
   async function apply() {
     if (reviewing === null) return;
     const id = reviewing.agent.id;
+    const reviewing_name = reviewing.agent.name;
     try {
       await applyConnect(id, false);
-      await refresh();
+      const read = await refresh();
       reviewing = null;
+      if (!read) {
+        listNote = {
+          text: `${reviewing_name} is connected. The list could not be read again, so what it shows may be out of date.`,
+          failed: false,
+        };
+      }
     } catch (error) {
       rowErrors = {
         ...rowErrors,
@@ -73,6 +100,12 @@
     </div>
   </div>
 {:else}
+  {#if listNote}
+    <div class="note" class:failed={listNote.failed} role="status">
+      <p>{listNote.text}</p>
+      <button class="btn" on:click={look}>Look again</button>
+    </div>
+  {/if}
   <div class="rows">
     {#each here as agent (agent.id)}
       <div class="row">
@@ -86,7 +119,11 @@
       </div>
       {#if rowErrors[agent.id]}<p class="error">{rowErrors[agent.id]}</p>{/if}
     {:else}
-      <p class="lede">Looking for agents on this machine.</p>
+      {#if !looked}
+        <p class="lede">Looking for agents on this machine.</p>
+      {:else if listNote === null}
+        <p class="lede">No coding agent is installed on this machine.</p>
+      {/if}
     {/each}
   </div>
 
@@ -108,6 +145,24 @@
       'wdth' var(--cut-agent-width);
     font-size: 15px;
     line-height: 1.45;
+  }
+
+  /* A caveat and a fault read the same shape; only the colour separates them,
+     and the words carry the difference for anyone who cannot see it. */
+  .note {
+    margin: 0 0 16px;
+  }
+
+  .note p {
+    max-width: 520px;
+    margin: 0 0 10px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--dim);
+  }
+
+  .note.failed p {
+    color: var(--accent);
   }
 
   .rows {
@@ -156,6 +211,10 @@
     margin: 0 0 10px;
     font-size: 13px;
     color: var(--accent);
+    /* The daemon's message carries the commands it did not run, one per line.
+       Collapsed, they read as one run-on sentence. */
+    white-space: pre-wrap;
+    overflow-x: auto;
   }
 
   .path {

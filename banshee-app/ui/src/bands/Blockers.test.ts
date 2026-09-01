@@ -36,15 +36,12 @@ it('shows every percent and says only the quarters', async () => {
   expect(said()).not.toBe(first);
 });
 
-// Two permission blockers draw the same button. Heard one after the other with
-// no pane in either name, they are the same button twice.
-it('names the pane each System Settings button opens', () => {
+it('names the pane the System Settings button opens', () => {
   const { getByRole } = render(Blockers, {
     blockers: permissions.blockers as Blocker[],
     restart: () => {},
   });
   expect(getByRole('button', { name: /Open System Settings for Accessibility/ })).toBeTruthy();
-  expect(getByRole('button', { name: /Open System Settings for Input Monitoring/ })).toBeTruthy();
 });
 
 // The title of a blocker is the most important line on the surface when one is
@@ -54,10 +51,10 @@ it('titles a blocker with a heading', () => {
     blockers: permissions.blockers as Blocker[],
     restart: () => {},
   });
-  // Two boxes with no count leave the reader counting.
+  // One thing to do carries no count: "1 of 1" sends the reader looking for a
+  // second box that is not there.
   expect(getAllByRole('heading').map((h) => h.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-    '1 of 2 · Accessibility',
-    '2 of 2 · Input Monitoring',
+    'Accessibility',
   ]);
 });
 
@@ -77,15 +74,44 @@ it('offers the restart that makes a granted permission real', async () => {
 });
 
 // Two boxes with no count leave the reader holding "which one did I do" across
-// an app switch.
+// an app switch. A first run holds this pair: the models arrive while the grant
+// is still outstanding.
 it('numbers each thing it still needs', () => {
   const { getAllByRole } = render(Blockers, {
     blockers: permissions.blockers as Blocker[],
+    download: at(26),
     restart: () => {},
   });
   const heads = getAllByRole('heading').map((h) => h.textContent?.replace(/\s+/g, ' ').trim());
-  expect(heads[0]).toMatch(/^1 of 2/);
-  expect(heads[1]).toMatch(/^2 of 2/);
+  expect(heads[0]).toMatch(/^1 of 2 · Getting Banshee's models/);
+  expect(heads[1]).toMatch(/^2 of 2 · Accessibility/);
+});
+
+// A model arriving repairs a model, so that box may stand down for the run. It
+// brings no microphone, so a capture fault has to keep its place beside it.
+it('keeps a microphone fault beside a running download, and stands a model restart down', () => {
+  const restart = (kind: string, name: string): Blocker => ({
+    kind,
+    id: 'recording_pipeline',
+    name,
+    remedy: 'restart',
+    consequence: 'nothing can be recorded',
+    fix: 'connect a microphone, then restart',
+  });
+
+  const microphone = render(Blockers, {
+    blockers: [restart('pipeline', 'Recording pipeline')],
+    download: at(26),
+    restart: () => {},
+  });
+  expect(microphone.getByRole('heading', { name: /microphone is not working/i })).toBeTruthy();
+
+  const model = render(Blockers, {
+    blockers: [restart('model', 'Recording pipeline')],
+    download: at(26),
+    restart: () => {},
+  });
+  expect(model.queryByRole('heading', { name: /needs a restart/i })).toBeNull();
 });
 
 // First run is the one moment a person asks what Banshee is, and it is

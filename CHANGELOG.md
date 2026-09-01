@@ -53,6 +53,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The desktop window ships in a release.** A release now carries
+  `Banshee.app.tar.gz` with all four binaries in it, so the window no longer
+  needs a source build. Install it with `curl … | tar -xzf - -C /Applications`.
+  It is signed but not notarised, so fetch it with `curl` rather than a browser,
+  or clear the quarantine flag once with `xattr -dr com.apple.quarantine
+  /Applications/Banshee.app`.
+- **Banshee installs to `/Applications`.** That is the folder Finder's
+  `Applications` favourite opens, and the one System Settings offers when a
+  permission pane asks which app to add. If you installed an earlier build,
+  delete the bundle left at `~/Applications/Banshee.app` by hand, then run
+  `banshee connect <agent>` once per agent: a registration holds the old
+  absolute path until something rewrites it.
+- **The window connects Claude Code again.** `Connect` failed with `No such
+  file or directory` and applied none of its changes, because the daemon runs
+  with a supervisor's four-directory `PATH` and looked for `claude` there.
+  Banshee now records where it found each agent's CLI and runs that path. The
+  other agents were never affected: their setup writes files and spawns nothing.
+- **Banshee asks for the permission it needs, and asks for one fewer.** The
+  daemon asks macOS for Accessibility as it starts, so Banshee appears in the
+  Privacy & Security list with a switch to turn on. It no longer asks for Input
+  Monitoring: the hotkey works without it, measured, and that pane never listed
+  Banshee to switch on. `banshee status` keeps one line about key presses as a
+  note, instead of reporting a grant that was never made.
 - **A download that cannot reach its host no longer hangs for ever.** The
   fetch had no timeout of any kind, so one unreachable server held the whole
   run and stranded every file behind it. A connect now gives up after ten
