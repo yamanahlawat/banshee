@@ -95,11 +95,11 @@ unfamiliar words (tech jargon, proper nouns) instead of spelling them out. On
 macOS it's `brew install espeak-ng`; `banshee status` prints the command for
 your system.
 
-**2. Grant macOS permissions.** Banshee needs three, or it quietly fails to
-record or type: **Microphone** (capture), **Input Monitoring** (the global
-hotkey), and **Accessibility** (typing the transcription). macOS prompts for
-each the first time Banshee needs it; approve, then restart the daemon —
-permissions don't apply to an already-running process.
+**2. Grant macOS permissions.** Banshee needs two, or it quietly fails to
+record or type: **Microphone** (capture) and **Accessibility** (the global
+hotkey, and typing the transcription). macOS prompts for each the first time
+Banshee needs it; approve, then restart the daemon — permissions don't apply to
+an already-running process.
 
 **3. Start Banshee, then check your setup:**
 
@@ -459,9 +459,9 @@ fix. Beyond that:
   In **System Settings > Sound**, set _Input_ to the built-in microphone and
   leave _Output_ on the earbuds — the built-in mic transcribes better anyway.
 - **Hotkeys or typing stopped working, but no error appears.** macOS withholds
-  input events silently when an Input Monitoring or Accessibility grant is
-  stale. Remove the Banshee entries from both lists in **System Settings >
-  Privacy & Security**, restart the daemon, and approve the fresh prompts.
+  input events silently when an Accessibility grant is stale. Remove the Banshee
+  entry from **System Settings > Privacy & Security > Accessibility**, restart
+  the daemon, and approve the fresh prompt.
 - **Permissions granted, but Banshee keeps asking.** Grants only apply to newly
   started processes. Restart the daemon with `banshee start`.
 
