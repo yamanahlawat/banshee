@@ -69,7 +69,9 @@
   let query = '';
   let finding = false;
   // One instant for the whole paint, so two rows cannot straddle midnight.
-  $: now = ($table.rows, new Date());
+  // Both are read for their dependency alone: the live state moves the pending
+  // caret's time, and adds no row.
+  $: now = ($table.rows, $daemon.live, new Date());
   $: rightNow = formatWhen(now.toISOString(), now);
 
   type Live_ = 'recording' | 'transcribing' | null;
@@ -200,7 +202,7 @@
       // just happened. Nothing measured this count; it trades how slow a
       // machine may be against how long the window waits before believing it.
       for (let left = COMING_BACK; left > 0; left--) {
-        if (await readStatus()) break;
+        if (await readStatus(false)) break;
         await new Promise((wake) => setTimeout(wake, 250));
       }
       await readLatest();
@@ -266,7 +268,8 @@
 
   /// Split from the record, because the two change for different reasons and a
   /// download moves only this one.
-  async function readStatus(): Promise<boolean> {
+  /// Off for the restart poll: launchd is already bringing the daemon back.
+  async function readStatus(andStart = true): Promise<boolean> {
     try {
       const initial = await status();
       wasTranscribing = initial.transcribing === true;
@@ -275,7 +278,7 @@
     } catch (error) {
       const reason = (error as { message?: string })?.message || 'not running';
       daemon.update((s) => ({ ...s, down: reason }));
-      startDaemon().catch(() => {});
+      if (andStart) startDaemon().catch(() => {});
       return false;
     }
   }

@@ -82,7 +82,9 @@
   $: threshold = shownFloat(Number(stt.vad_threshold ?? 0.5));
   $: band = BANDS.find((b) => threshold < b.upTo)?.word ?? 'High';
   $: silence = Number(stt.endpoint_silence_ms ?? 2500);
-  $: vocabulary = (stt.vocabulary ?? []) as string[];
+  // Keyed by word below, and a duplicate in a hand-edited config raises
+  // Svelte's `each_key_duplicate` and renders no panel.
+  $: vocabulary = [...new Set((stt.vocabulary ?? []) as string[])];
   $: preset = String(stt.preset ?? 'balanced');
   $: language = String(stt.language ?? 'en');
   $: translate = stt.translate === true;
