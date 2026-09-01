@@ -87,6 +87,33 @@ it('numbers each thing it still needs', () => {
   expect(heads[1]).toMatch(/^2 of 2 · Accessibility/);
 });
 
+// A model arriving repairs a model, so that box may stand down for the run. It
+// brings no microphone, so a capture fault has to keep its place beside it.
+it('keeps a microphone fault beside a running download, and stands a model restart down', () => {
+  const restart = (kind: string, name: string): Blocker => ({
+    kind,
+    id: 'recording_pipeline',
+    name,
+    remedy: 'restart',
+    consequence: 'nothing can be recorded',
+    fix: 'connect a microphone, then restart',
+  });
+
+  const microphone = render(Blockers, {
+    blockers: [restart('pipeline', 'Recording pipeline')],
+    download: at(26),
+    restart: () => {},
+  });
+  expect(microphone.getByRole('heading', { name: /microphone is not working/i })).toBeTruthy();
+
+  const model = render(Blockers, {
+    blockers: [restart('model', 'Recording pipeline')],
+    download: at(26),
+    restart: () => {},
+  });
+  expect(model.queryByRole('heading', { name: /needs a restart/i })).toBeNull();
+});
+
 // First run is the one moment a person asks what Banshee is, and it is
 // derived rather than stored: nothing dictated yet.
 it('says what Banshee is on a first run, and not afterwards', () => {

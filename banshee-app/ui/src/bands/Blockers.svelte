@@ -100,7 +100,9 @@
           pane: '',
           confirmsWithRestart: false,
           run: restart,
-          settledByADownload: true,
+          // A model arriving repairs a model, so a model restart stands down
+          // for the run. It brings no microphone, so a capture fault does not.
+          settledByADownload: !microphone,
           chooses: false,
         };
       default:
