@@ -48,6 +48,10 @@ curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Bans
   | tar -xzf - -C /Applications
 ```
 
+Writing to `/Applications` needs an admin account. Without one, run
+`mkdir -p ~/Applications`, extract there instead, and read that path
+everywhere below.
+
 The bundle carries all four binaries, so it is a whole install on its own. Run
 `/Applications/Banshee.app/Contents/MacOS/banshee start` once, or link that
 binary onto your `PATH`.
@@ -108,7 +112,7 @@ The menu bar icon answers one question: can I speak right now.
 
 | Idle | Recording | Speaking | Not running |
 |:----:|:---------:|:--------:|:-----------:|
-| <img src="assets/states/idle.png" width="52"> | <img src="assets/states/recording.png" width="52"> | <img src="assets/states/speaking.png" width="52"> | <img src="assets/states/notrunning.png" width="52"> |
+| <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
 
 The states differ by shape, never by colour alone, and the icon is a template
 image, so macOS tints it to match the menu bar in light and dark.

@@ -20,6 +20,11 @@ export function formatWhen(stamp: string, now: Date): string {
   if (sameLocalDay(at, now)) return formatTime(stamp);
   const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
   if (sameLocalDay(at, yesterday)) return `Yesterday ${formatTime(stamp)}`;
+  // The year takes the clock's place rather than joining it: a dictation that
+  // old is looked up by when, not by what minute.
+  if (at.getFullYear() !== now.getFullYear()) {
+    return `${at.getDate()} ${MONTHS[at.getMonth()]} ${at.getFullYear()}`;
+  }
   return `${at.getDate()} ${MONTHS[at.getMonth()]} ${formatTime(stamp)}`;
 }
 

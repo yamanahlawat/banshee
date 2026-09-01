@@ -20,7 +20,7 @@ mod status;
 mod test_support;
 mod text_to_speech;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use args::{Cli, CommandType};
@@ -117,9 +117,15 @@ fn show_progress(progress: banshee_common::DownloadProgress) {
     } else {
         '\n'
     };
-    // Erase to end of line. A shorter line would otherwise leave the tail of
-    // the longer one behind it.
-    print!("{}\x1b[K{ending}", progress_line(&progress));
+    // Erase to end of line, so a shorter line does not leave the tail of the
+    // longer one behind it. A redirected stdout takes neither the erase nor the
+    // carriage return: both reach a log file as themselves.
+    let (erase, ending) = if std::io::stdout().is_terminal() {
+        ("\x1b[K", ending)
+    } else {
+        ("", '\n')
+    };
+    print!("{}{erase}{ending}", progress_line(&progress));
     let _ = std::io::stdout().flush();
 }
 

@@ -16,7 +16,13 @@
   // voice that is not costs 510 KB, and the daemon applies it once the file
   // lands, so choosing one is the whole of the interaction.
   async function choose(voice: Voice, here: boolean) {
-    await write('tts.voice', voice.id);
+    if (!(await write('tts.voice', voice.id))) {
+      // A refusal leaves `current` where it was, so nothing renders the mark
+      // back from where the browser moved it. Checking one clears the group.
+      const loaded = document.getElementById(`voice-${current}`);
+      if (loaded instanceof HTMLInputElement) loaded.checked = true;
+      return;
+    }
     if (!here) {
       await downloadModels().catch(() => report(`${voice.name} would not download.`));
     }

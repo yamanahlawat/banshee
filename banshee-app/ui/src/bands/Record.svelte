@@ -28,6 +28,13 @@
     land()?.focus();
   }
 
+  /// Not `disabled`: `clear` closes the question and puts focus back on this
+  /// button, and a disabled one cannot hold it.
+  function ask() {
+    if (deleting) return;
+    show(true, () => keep);
+  }
+
   // `confirming` closes first: the round trip is not instant, and a second
   // press on a live Delete would run the whole thing again.
   async function clear() {
@@ -65,9 +72,7 @@
     <div class="actions">
       <SaveSwitch {saving} />
       {#if total > 0}
-        <button bind:this={clearer} class="btn btn-ghost" on:click={() => show(true, () => keep)}>
-          Clear
-        </button>
+        <button bind:this={clearer} class="btn btn-ghost" on:click={ask}> Clear </button>
       {/if}
     </div>
   {/if}

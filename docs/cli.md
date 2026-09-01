@@ -1,7 +1,10 @@
 # The commands
 
-Every command talks to the running daemon over its socket. `banshee <command>
---help` prints the same in your terminal.
+Most commands ask the running daemon over its socket. The ones that manage it,
+such as `start`, `serve` and `tray`, do not. Nor do the ones that stand in for
+it: `setup` fetches the models itself, `config set` writes the file, and
+`connect` edits an agent's config directly. `banshee <command> --help` prints
+this table in your terminal.
 
 | Command                         | What it does                                               |
 | ------------------------------- | ---------------------------------------------------------- |

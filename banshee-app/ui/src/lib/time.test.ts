@@ -45,6 +45,14 @@ describe('formatWhen', () => {
   it('dates anything older', () => {
     expect(formatWhen(at(2026, 7, 20, 9, 14), now)).toBe('20 Aug 09:14');
   });
+  it('carries the year for a row from an earlier one', () => {
+    expect(formatWhen(at(2025, 7, 20, 9, 14), now)).toBe('20 Aug 2025');
+  });
+  // The column is 52px, so the year must not make a third line.
+  it('keeps a dated row to the width of one from this year', () => {
+    const thisYear = formatWhen(at(2026, 7, 20, 9, 14), now);
+    expect(formatWhen(at(2025, 7, 20, 9, 14), now).length).toBeLessThanOrEqual(thisYear.length);
+  });
   it('counts back by the calendar, so a clock change cannot skip a day', () => {
     const firstOfMarch = new Date(2026, 2, 1, 0, 30, 0);
     expect(formatWhen(at(2026, 1, 28, 22, 0), firstOfMarch)).toBe('Yesterday 22:00');
