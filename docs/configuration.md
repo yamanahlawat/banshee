@@ -135,7 +135,9 @@ lists every voice Banshee can name and fetches the one you pick.
 
 ## The hotkey
 
-and a session you forget about is still released by the push-to-talk watchdog.
+Hold the key to record and let go to stop. Any recording that runs past 120
+seconds, held or toggled, is ended by the watchdog, which returns the
+microphone and still transcribes what it heard.
 
 The key is rebindable: `banshee config set audio.hotkey F6`, then
 `banshee start`. Legal values are an F-key (`F1`–`F12`), a modifier alone
