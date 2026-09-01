@@ -23,7 +23,7 @@ hears "let's go with python", and writes the file. Nothing was typed.
 
 |                       | Daemon, CLI, agent voice, dictation | Desktop window |
 | --------------------- | ----------------------------------- | -------------- |
-| macOS (Apple Silicon) | yes                                 | from source    |
+| macOS (Apple Silicon) | yes                                 | yes            |
 | Linux (x86_64, arm64) | yes, with [setup](docs/linux.md)    | not yet        |
 | Windows               | not yet                             | not yet        |
 
@@ -40,16 +40,29 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/yamanahlawat/banshee/releases/latest/download/banshee-installer.sh | sh
 ```
 
-Both install the daemon, the CLI and the menu bar icon. The desktop window
-ships inside `Banshee.app`, which only a source build assembles today:
+Both install the daemon, the CLI and the menu bar icon. For the desktop window,
+add the app bundle:
 
 ```bash
-git clone https://github.com/yamanahlawat/banshee.git
-cd banshee
-make install   # the app bundle, with the window; needs Rust and Xcode tools
+curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Banshee.app.tar.gz \
+  | tar -xzf - -C /Applications
 ```
 
-`cargo install --path bansheed` builds the CLI and the daemon alone.
+The bundle carries all four binaries, so it is a whole install on its own. Run
+`/Applications/Banshee.app/Contents/MacOS/banshee start` once, or link that
+binary onto your `PATH`.
+
+Banshee is signed but not yet notarised, so macOS refuses a copy that arrives
+carrying a quarantine flag. `curl` sets none, which is why the command above is
+a `curl`. If you download the tarball in a browser instead, clear the flag once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Banshee.app
+```
+
+To build it yourself, clone the repo and run `make install` (see
+[CONTRIBUTING.md](CONTRIBUTING.md)); `cargo install --path bansheed` builds the
+CLI and the daemon alone.
 
 ## Set up
 

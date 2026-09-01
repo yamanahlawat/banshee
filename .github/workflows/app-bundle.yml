@@ -1,0 +1,94 @@
+# `dist` builds and publishes the binaries; it does not build a Tauri bundle.
+# This job assembles the same `Banshee.app` that `make install` does, signs it
+# with the certificate the release job already uses, and attaches it to the
+# release. It runs after the release is published so the upload has somewhere
+# to go.
+name: App bundle
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to attach the bundle to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    # macos-latest is Apple Silicon, which is the only macOS target Banshee ships.
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: banshee-app/ui/package-lock.json
+
+      # The certificate gives the bundle a stable designated requirement, so a
+      # TCC grant survives an upgrade. It does not notarise: Gatekeeper still
+      # refuses a copy that arrives with a quarantine flag, which is why the
+      # README installs this with curl.
+      - name: import the signing certificate
+        env:
+          CODESIGN_CERTIFICATE: ${{ secrets.CODESIGN_CERTIFICATE }}
+          CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/banshee.keychain-db"
+          password="$(uuidgen)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 900 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$CODESIGN_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$CODESIGN_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$password" "$keychain" > /dev/null
+          # `bundle.sh` asks `security find-identity`, which reads the search list
+          security list-keychain -d user -s "$keychain" \
+            $(security list-keychains -d user | tr -d '"')
+
+      - run: npm ci
+        working-directory: banshee-app/ui
+      - run: cargo build --release --workspace --exclude banshee-app
+      - run: cargo install tauri-cli --version "^2" --locked
+      # Last, and never followed by a plain `cargo build`: see the Makefile.
+      - run: cargo tauri build --no-bundle
+        working-directory: banshee-app
+
+      - name: assemble and sign the bundle
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          ./scripts/bundle.sh target/release "$RUNNER_TEMP/Banshee.app" \
+            "$CODESIGN_IDENTITY" "$version"
+
+      # A tarball, not a zip or a dmg: `curl | tar` sets no quarantine flag, and
+      # a dmg's drag-to-Applications window buys nothing while the app is not
+      # notarised.
+      - name: pack, then verify the packed copy
+        run: |
+          set -euo pipefail
+          tar -czf Banshee.app.tar.gz -C "$RUNNER_TEMP" Banshee.app
+          # Evidence before the claim: unpack what will ship and check it.
+          rm -rf "$RUNNER_TEMP/check" && mkdir -p "$RUNNER_TEMP/check"
+          tar -xzf Banshee.app.tar.gz -C "$RUNNER_TEMP/check"
+          codesign --verify --strict --verbose=2 "$RUNNER_TEMP/check/Banshee.app"
+
+      - run: gh release upload "$TAG" Banshee.app.tar.gz --clobber

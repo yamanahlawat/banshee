@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The desktop window ships in a release.** A release now carries
+  `Banshee.app.tar.gz` with all four binaries in it, so the window no longer
+  needs a source build. Install it with `curl … | tar -xzf - -C /Applications`.
+  It is signed but not notarised, so fetch it with `curl` rather than a browser,
+  or clear the quarantine flag once with `xattr -dr com.apple.quarantine
+  /Applications/Banshee.app`.
 - **Banshee installs to `/Applications`.** That is the folder Finder's
   `Applications` favourite opens, and the one System Settings offers when a
   permission pane asks which app to add. If you installed an earlier build,
