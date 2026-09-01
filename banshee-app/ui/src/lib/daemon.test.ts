@@ -23,6 +23,7 @@ import {
   reduceStatus,
   shownFloat,
   stateWord,
+  type Blocker,
 } from './daemon';
 
 describe('the state word', () => {
@@ -30,7 +31,11 @@ describe('the state word', () => {
     expect(stateWord(reduceStatus(empty(), ready))).toBe('Ready');
   });
   it('is Not ready while a permission is missing', () => {
-    expect(stateWord(reduceStatus(empty(), permissions))).toBe('Not ready');
+    expect(
+      stateWord(
+        reduceStatus(empty(), { ...permissions, blockers: permissions.blockers as Blocker[] }),
+      ),
+    ).toBe('Not ready');
   });
   it('is Recording when the daemon says so, whatever status said', () => {
     const state = reduceLive(reduceStatus(empty(), ready), recording);
@@ -115,8 +120,9 @@ describe('the fix groups', () => {
     expect(groups.length).toBe(1);
     expect(groups[0].length).toBe(2);
   });
-  it('keeps a permission on its own row, because each names its own pane', () => {
-    expect(fixGroups([grant('accessibility'), grant('input_monitoring')]).length).toBe(2);
+  it('keeps a permission off the row that downloads the models', () => {
+    const groups = fixGroups([grant('accessibility'), model('a.bin'), model('b.onnx')]);
+    expect(groups.map((group) => group.length)).toEqual([1, 2]);
   });
 });
 

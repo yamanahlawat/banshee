@@ -3,7 +3,7 @@ import axe from 'axe-core';
 import { beforeEach, expect, it, vi } from 'vitest';
 import ready from './fixtures/ready.json';
 import permissions from './fixtures/permissions.json';
-import { daemon, empty } from './lib/daemon';
+import { daemon, empty, type Blocker } from './lib/daemon';
 
 // `axe.run` builds its tree synchronously from the DOM it is handed, and every
 // onMount here suspends at its first await, so each run below first waits for
@@ -83,7 +83,10 @@ it('the conversation carries no accessibility violations', async () => {
 });
 
 it('a blocked machine carries none either', async () => {
-  vi.mocked(status).mockResolvedValue(permissions);
+  vi.mocked(status).mockResolvedValue({
+    ...permissions,
+    blockers: permissions.blockers as Blocker[],
+  });
   const { container } = render(App);
   await screen.findAllByRole('button', { name: /^Open System Settings for / });
   expect(await violations(container)).toEqual([]);
