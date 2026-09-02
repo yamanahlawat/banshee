@@ -28,6 +28,9 @@ install-updater = false
 # The certificate is self-signed and lives in repo secrets; no Apple membership
 # is involved. Note `dist init` rewrites the comments in this file.
 macos-sign = true
+# The window crate is not a dist package, and a --workspace build would still compile
+# it; the Linux builders have no GTK for that.
+precise-builds = true
 
 # Pin Linux runners to 24.04; the ORT prebuilt needs glibc 2.38+.
 [dist.github-custom-runners]
