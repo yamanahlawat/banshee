@@ -1,47 +1,11 @@
 use super::*;
 use crate::test_support::daemon_state as test_state;
 
-fn get_transcription_request(params: serde_json::Value) -> JsonRpcRequest {
+fn request(method: &str, params: Option<serde_json::Value>) -> JsonRpcRequest {
     JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
-        method: BANSHEE_GET_TRANSCRIPTION.to_string(),
-        params: Some(params),
-        id: Some(serde_json::json!(1)),
-    }
-}
-
-fn ask_user_request(params: serde_json::Value) -> JsonRpcRequest {
-    JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: BANSHEE_ASK_USER.to_string(),
-        params: Some(params),
-        id: Some(serde_json::json!(1)),
-    }
-}
-
-fn connect_plan_request(params: serde_json::Value) -> JsonRpcRequest {
-    JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: BANSHEE_CONNECT_PLAN.to_string(),
-        params: Some(params),
-        id: Some(serde_json::json!(1)),
-    }
-}
-
-fn connect_apply_request(params: serde_json::Value) -> JsonRpcRequest {
-    JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: BANSHEE_CONNECT_APPLY.to_string(),
-        params: Some(params),
-        id: Some(serde_json::json!(1)),
-    }
-}
-
-fn history_request(params: serde_json::Value) -> JsonRpcRequest {
-    JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: BANSHEE_HISTORY.to_string(),
-        params: Some(params),
+        method: method.to_string(),
+        params,
         id: Some(serde_json::json!(1)),
     }
 }
@@ -50,7 +14,7 @@ fn history_request(params: serde_json::Value) -> JsonRpcRequest {
 async fn history_honours_a_limit() {
     let state = crate::test_support::daemon_state_with_history(&["first", "second", "third"]);
 
-    let request = history_request(serde_json::json!({ "limit": 1 }));
+    let request = request(BANSHEE_HISTORY, Some(serde_json::json!({ "limit": 1 })));
     let response = dispatch(request, &state).await;
 
     let JsonRpcResponse::Success { result, .. } = response else {
@@ -62,18 +26,43 @@ async fn history_honours_a_limit() {
 }
 
 #[tokio::test]
-async fn a_disconnect_that_is_not_a_boolean_is_refused() {
+async fn a_flag_that_is_not_a_boolean_is_refused() {
     let state = test_state(std::sync::mpsc::channel().0);
 
-    for request in [
-        connect_plan_request(serde_json::json!({"agent": "cursor", "disconnect": "true"})),
-        connect_apply_request(serde_json::json!({"agent": "cursor", "disconnect": "true"})),
+    for (method, flag, params) in [
+        (
+            BANSHEE_SPEAK,
+            "interrupt",
+            serde_json::json!({"text": "hi", "interrupt": "true"}),
+        ),
+        (
+            BANSHEE_RECORD_START,
+            "dictate",
+            serde_json::json!({"dictate": "true"}),
+        ),
+        (
+            BANSHEE_CONFIGURE,
+            "persist",
+            serde_json::json!({"settings": {}, "persist": "true"}),
+        ),
+        (
+            BANSHEE_CONNECT_PLAN,
+            "disconnect",
+            serde_json::json!({"agent": "cursor", "disconnect": "true"}),
+        ),
+        (
+            BANSHEE_CONNECT_APPLY,
+            "disconnect",
+            serde_json::json!({"agent": "cursor", "disconnect": "true"}),
+        ),
     ] {
-        let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
-            panic!("a string disconnect must not reach the plan");
+        let JsonRpcResponse::Error { error, .. } =
+            dispatch(request(method, Some(params)), &state).await
+        else {
+            panic!("a string {flag} must not be read as a flag by {method}");
         };
-        assert_eq!(error.code, -32602);
-        assert!(error.message.contains("disconnect"), "{}", error.message);
+        assert_eq!(error.code, -32602, "{method}");
+        assert!(error.message.contains(flag), "{method}: {}", error.message);
     }
 }
 
@@ -103,7 +92,10 @@ async fn only_history_being_off_answers_its_own_code() {
 async fn a_history_limit_that_does_not_fit_is_refused() {
     let state = crate::test_support::daemon_state_with_history(&["first"]);
 
-    let request = history_request(serde_json::json!({ "limit": 4_294_967_296u64 }));
+    let request = request(
+        BANSHEE_HISTORY,
+        Some(serde_json::json!({ "limit": 4_294_967_296u64 })),
+    );
     let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
         panic!("a limit past 32 bits must not truncate");
     };
@@ -114,7 +106,7 @@ async fn a_history_limit_that_does_not_fit_is_refused() {
 async fn history_takes_an_explicit_zero_literally() {
     let state = crate::test_support::daemon_state_with_history(&["first", "second", "third"]);
 
-    let request = history_request(serde_json::json!({ "limit": 0 }));
+    let request = request(BANSHEE_HISTORY, Some(serde_json::json!({ "limit": 0 })));
     let response = dispatch(request, &state).await;
 
     let JsonRpcResponse::Success { result, .. } = response else {
@@ -143,7 +135,10 @@ async fn ask_user_returns_the_scoped_answer() {
         let _ = ask.reply.send("yes, ship it".to_string());
     });
 
-    let request = ask_user_request(serde_json::json!({"question": "Ready to ship?"}));
+    let request = request(
+        BANSHEE_ASK_USER,
+        Some(serde_json::json!({"question": "Ready to ship?"})),
+    );
     let response = dispatch(request, &state).await;
 
     let JsonRpcResponse::Success { result, .. } = response else {
@@ -158,7 +153,10 @@ async fn concurrent_ask_user_is_refused_while_armed() {
     let state = test_state(std::sync::mpsc::channel().0);
     state.set_recording_mode(RecordingMode::Armed);
 
-    let request = ask_user_request(serde_json::json!({"question": "Also ready?"}));
+    let request = request(
+        BANSHEE_ASK_USER,
+        Some(serde_json::json!({"question": "Also ready?"})),
+    );
     let response = dispatch(request, &state).await;
 
     let JsonRpcResponse::Error { error, .. } = response else {
@@ -191,15 +189,6 @@ async fn stop_replies_ok_and_signals_shutdown() {
         .expect("shutdown was not signaled");
 }
 
-fn request(method: &str, params: Option<serde_json::Value>) -> JsonRpcRequest {
-    JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: method.to_string(),
-        params,
-        id: Some(serde_json::json!(1)),
-    }
-}
-
 // "No microphone" and "busy" send the caller to different fixes, so the
 // codes must not collapse into one another.
 #[tokio::test]
@@ -218,7 +207,10 @@ async fn recording_rpcs_report_the_cause_not_a_busy_mic() {
         assert_eq!(error.code, expected);
         assert_eq!(state.recording_mode(), RecordingMode::Idle);
 
-        let ask = ask_user_request(serde_json::json!({"question": "ready?"}));
+        let ask = request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "ready?"})),
+        );
         let JsonRpcResponse::Error { error, .. } = dispatch(ask, &state).await else {
             panic!("expected error response");
         };
@@ -485,7 +477,10 @@ async fn stale_cursor_is_clamped_to_zero() {
     let state = test_state(std::sync::mpsc::channel().0);
     state.push_transcription("hello".to_string());
 
-    let request = get_transcription_request(serde_json::json!({"since_id": 999}));
+    let request = request(
+        BANSHEE_GET_TRANSCRIPTION,
+        Some(serde_json::json!({"since_id": 999})),
+    );
     let response = dispatch(request, &state).await;
 
     let JsonRpcResponse::Success { result, .. } = response else {
@@ -501,7 +496,10 @@ async fn caught_up_cursor_returns_empty() {
     let state = test_state(std::sync::mpsc::channel().0);
     state.push_transcription("hello".to_string());
 
-    let request = get_transcription_request(serde_json::json!({"since_id": 1}));
+    let request = request(
+        BANSHEE_GET_TRANSCRIPTION,
+        Some(serde_json::json!({"since_id": 1})),
+    );
     let response = dispatch(request, &state).await;
 
     let JsonRpcResponse::Success { result, .. } = response else {
@@ -517,7 +515,10 @@ async fn an_unknown_agent_slug_is_refused_by_plan_and_apply() {
     let JsonRpcResponse::Error {
         error: plan_error, ..
     } = dispatch(
-        connect_plan_request(serde_json::json!({"agent": "notatool", "disconnect": false})),
+        request(
+            BANSHEE_CONNECT_PLAN,
+            Some(serde_json::json!({"agent": "notatool", "disconnect": false})),
+        ),
         &state,
     )
     .await
@@ -533,7 +534,10 @@ async fn an_unknown_agent_slug_is_refused_by_plan_and_apply() {
     let JsonRpcResponse::Error {
         error: apply_error, ..
     } = dispatch(
-        connect_apply_request(serde_json::json!({"agent": "notatool", "disconnect": false})),
+        request(
+            BANSHEE_CONNECT_APPLY,
+            Some(serde_json::json!({"agent": "notatool", "disconnect": false})),
+        ),
         &state,
     )
     .await
@@ -554,10 +558,22 @@ async fn disconnect_true_is_refused_before_the_agent_is_resolved() {
         "Disconnect is not available yet. Remove Banshee from the agent's config by hand.";
 
     for request in [
-        connect_plan_request(serde_json::json!({"agent": "cursor", "disconnect": true})),
-        connect_apply_request(serde_json::json!({"agent": "cursor", "disconnect": true})),
-        connect_plan_request(serde_json::json!({"agent": "notatool", "disconnect": true})),
-        connect_apply_request(serde_json::json!({"agent": "notatool", "disconnect": true})),
+        request(
+            BANSHEE_CONNECT_PLAN,
+            Some(serde_json::json!({"agent": "cursor", "disconnect": true})),
+        ),
+        request(
+            BANSHEE_CONNECT_APPLY,
+            Some(serde_json::json!({"agent": "cursor", "disconnect": true})),
+        ),
+        request(
+            BANSHEE_CONNECT_PLAN,
+            Some(serde_json::json!({"agent": "notatool", "disconnect": true})),
+        ),
+        request(
+            BANSHEE_CONNECT_APPLY,
+            Some(serde_json::json!({"agent": "notatool", "disconnect": true})),
+        ),
     ] {
         let response = dispatch(request, &state).await;
         let JsonRpcResponse::Error { error, .. } = response else {

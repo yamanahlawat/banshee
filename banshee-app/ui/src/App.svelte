@@ -127,8 +127,8 @@
   // Spelled, because a sentence should not open on a digit. Six agents are
   // detectable today, so the list needs no more than this.
   // Name and lead are declared together. "Record" would collide with the RECORDING state word, so
-  // the panel is named for what is kept. Every lead reads the daemon: the config says only what was
-  // asked for.
+  // the panel is named for what is kept. Every lead reads live state, never the config: the config
+  // says only what was asked for.
   $: panels = {
     Microphone: {
       name: 'Microphone',

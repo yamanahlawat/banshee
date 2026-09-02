@@ -1,5 +1,5 @@
-//! Each call maps RpcError to CommandError unchanged, so callers see the daemon's own code and
-//! message.
+//! A daemon's error reaches the caller with its own code and message; a failure before the
+//! daemon answered keeps the transport's own.
 
 use crate::socket::{Client, RpcError};
 use banshee_common::{
@@ -17,7 +17,8 @@ const PREVIEW_SENTENCE: &str = "This is how I sound.";
 /// client could not read, since that failure is ours, not the daemon's.
 const SHAPE_MISMATCH: i32 = -32700;
 
-/// The daemon's own code and message, unchanged, so the frontend shows the daemon's sentence.
+/// The daemon's code and message when it answered; the transport's or the window's own
+/// message when it did not.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CommandError {
     pub code: i32,
