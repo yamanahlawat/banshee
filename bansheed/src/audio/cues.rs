@@ -58,8 +58,7 @@ impl Cues {
         self.enabled.store(on, Ordering::Relaxed);
     }
 
-    /// A handle with no player behind it, for tests that build a daemon state
-    /// but never sound anything.
+    /// No player behind it, for tests that never sound a cue.
     #[cfg(test)]
     pub fn silent() -> Self {
         Cues {
@@ -69,8 +68,6 @@ impl Cues {
     }
 }
 
-/// The next cue that must be heard, skipping every one that arrives while cues
-/// are off. `None` once the last sender is gone.
 fn next_playable(receiver: &mpsc::Receiver<Cue>, enabled: &AtomicBool) -> Option<Cue> {
     loop {
         let cue = receiver.recv().ok()?;

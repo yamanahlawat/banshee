@@ -12,9 +12,7 @@
   // The config leads, so the mark moves to the voice a write just chose.
   $: current = String(tts.voice ?? voices.current ?? '');
 
-  // The daemon names every voice it can describe, and says which are here. A
-  // voice that is not costs 510 KB, and the daemon applies it once the file
-  // lands, so choosing one is the whole of the interaction.
+  // The daemon applies a voice once its file lands, so choosing one is the whole interaction.
   async function choose(voice: Voice, here: boolean) {
     if (!(await write('tts.voice', voice.id))) {
       // A refusal leaves `current` where it was, so nothing renders the mark

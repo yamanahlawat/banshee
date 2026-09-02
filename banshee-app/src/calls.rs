@@ -1,6 +1,5 @@
-//! One function per job the window does. Each shapes one RPC call and maps
-//! `RpcError` to `CommandError`, so a caller sees the daemon's own code and
-//! message rather than a layer's guess at one.
+//! Each call maps RpcError to CommandError unchanged, so callers see the daemon's own code and
+//! message.
 
 use crate::socket::{Client, RpcError};
 use banshee_common::{
@@ -18,14 +17,11 @@ const PREVIEW_SENTENCE: &str = "This is how I sound.";
 /// client could not read, since that failure is ours, not the daemon's.
 const SHAPE_MISMATCH: i32 = -32700;
 
-/// What every failed command carries back: the daemon's own code and
-/// message, unchanged, so the frontend renders the daemon's sentence rather
-/// than one a client layer invented.
+/// The daemon's own code and message, unchanged, so the frontend shows the daemon's sentence.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CommandError {
     pub code: i32,
     pub message: String,
-    /// Which layer failed, and how far the request got.
     #[serde(skip)]
     pub transport: bool,
     #[serde(skip)]
@@ -43,7 +39,6 @@ impl From<RpcError> for CommandError {
     }
 }
 
-/// A reply that parsed as JSON but not into the shape this call expects.
 fn shape_mismatch(error: serde_json::Error) -> CommandError {
     CommandError {
         code: SHAPE_MISMATCH,

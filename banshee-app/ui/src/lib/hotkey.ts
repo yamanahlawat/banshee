@@ -1,4 +1,3 @@
-// A second copy of the daemon's table, until `status` reports its own.
 // RightControl is absent because rdev never maps it on macOS.
 const MODIFIERS: Record<string, string> = {
   AltRight: 'RightOption',
@@ -22,7 +21,6 @@ export function humanize(hotkey: string): string {
     .join(' + ');
 }
 
-// `null` for a press the daemon can never bind.
 export function hotkeyFrom(event: {
   code: string;
   ctrlKey: boolean;

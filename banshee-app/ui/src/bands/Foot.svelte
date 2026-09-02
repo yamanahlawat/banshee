@@ -1,9 +1,6 @@
 <script lang="ts">
   import { RESTART_SAYS } from '../lib/copy';
   import { arrowStep } from '../lib/keys';
-  // Four values, and the brief holds it to four. This band reports what
-  // Banshee is set to. It is a status line that can be opened, not the
-  // window's navigation, which is what went wrong with the strip it replaces.
   export let values: { id: string; label: string; value: string; pending?: boolean }[];
   export let open: (label: string, id: string) => void;
   export let active: string | null = null;
@@ -34,10 +31,7 @@
       values.findIndex((row) => row.label === active),
     );
 
-  // A cell is a quarter of 480pt, so a device name is often cut. The whole of
-  // it is in the DOM either way, and a screen reader reads it whole, so this
-  // is for the eye alone: a tooltip on a value that fits would be noise, and a
-  // description read back after the name it has already said.
+  // For the eye alone: a screen reader reads the whole value, so a tooltip only on a clipped one.
   function clipped(node: HTMLElement, value: string) {
     let text = value;
     const mark = () => {

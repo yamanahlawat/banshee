@@ -297,7 +297,6 @@ pub struct PlannedChange {
     pub diff: String,
 }
 
-// Whisper model configuration
 pub struct WhisperConfig {
     pub model_name: String,
     pub download_url: String,
@@ -315,7 +314,6 @@ impl WhisperConfig {
     }
 }
 
-// Silero VAD configuration
 pub struct SileroVADConfig {
     pub model_name: String,
     pub download_url: String,
@@ -333,8 +331,7 @@ impl SileroVADConfig {
     }
 }
 
-// Kokoro TTS configuration: the model plus one style file per voice,
-// pinned to a revision so a repo update can't silently change the model
+// Pinned to a revision so a repo update cannot silently change the model
 pub struct KokoroTTSConfig {
     pub model_name: String,
     pub model_url: String,

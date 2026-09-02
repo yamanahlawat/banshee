@@ -6,9 +6,7 @@ use std::sync::Mutex;
 // Optional espeak-ng subprocess that pronounces words misaki would otherwise
 // spell out letter by letter.
 pub struct OovFallback {
-    // Bare name when espeak-ng is on PATH, else the resolved absolute path
     bin: PathBuf,
-    // Lowercased word -> phonemes, None when espeak yields nothing
     cache: Mutex<HashMap<String, Option<String>>>,
 }
 
@@ -24,7 +22,6 @@ impl OovFallback {
         })
     }
 
-    // Kokoro-format phonemes for one word, or None if espeak can't help.
     pub fn phonemize(&self, word: &str) -> Option<String> {
         let key = word.to_lowercase();
         if let Some(hit) = self.cache.lock().unwrap().get(&key) {

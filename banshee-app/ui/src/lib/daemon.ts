@@ -170,21 +170,17 @@ export function shownFloat(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-/// Whole points only, and null when the server sent no length to measure against.
 export function percent(bytes: number, total: number | null): number | null {
   if (total === null || total <= 0) return null;
   return Math.min(100, Math.floor((bytes / total) * 100));
 }
 
-/// A daemon that sends no count has no place to report, so the file names
-/// itself instead.
 function names(progress: Progress): string {
   return progress.label && progress.count
     ? `${progress.label}, ${progress.index} of ${progress.count}`
     : progress.model;
 }
 
-/// One line for the file in flight.
 export function downloadLine(progress: Progress): string {
   const done = percent(progress.bytes, progress.total);
   const named = names(progress);

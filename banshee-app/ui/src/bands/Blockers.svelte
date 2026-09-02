@@ -24,15 +24,12 @@
   /// leaves this box asking for the restart it has just been given.
   export let restart: () => void;
   export let busy = false;
-  /// Nothing has ever been dictated, so this is the one moment a person has the
-  /// question "what is this". Derived, never stored: dictate once and it is
-  /// answered for good.
+  /// True until anything is dictated, the one moment a person asks "what is this". Derived, never
+  /// stored.
   export let first = false;
 
-  /// A grant reaches only a process started after it lands, so opening the pane
-  /// cannot finish the job. The window cannot see the grant either, so after it
-  /// has sent someone to System Settings it offers the restart that makes one
-  /// real.
+  /// A grant reaches only a process started after it lands, and the window cannot see it, so after
+  /// sending someone to System Settings it offers the restart.
   let asked: Record<string, boolean> = {};
 
   $: groups = fixGroups(blockers);
@@ -46,10 +43,8 @@
   $: offset = download ? 1 : 0;
   $: steps = shown.length + offset;
 
-  /// The daemon names the remedy. `kind` says only which part is at fault, and
-  /// the prose beside it is for reading, so neither can be routed on.
-  /// A daemon older than `remedy` names only a command and a kind, so the
-  /// reading it supports is stated once here rather than at each branch.
+  /// A daemon older than remedy names only a command and a kind, so that reading is stated once
+  /// here.
   function remedyOf(first: Blocker): Remedy | null {
     if (first.remedy) return first.remedy;
 
@@ -69,8 +64,6 @@
           label: 'Open System Settings',
           // Heard on its own, "Open System Settings" is any pane in the list.
           pane: first.name,
-          // Opening the pane cannot finish this one: the grant reaches only a
-          // process started afterwards.
           confirmsWithRestart: true,
           run: () => openPermissionPane(first.id),
           // The download brings no grant, so this keeps its place beside one.

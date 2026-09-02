@@ -26,8 +26,6 @@ pub fn next_attempt(attempt: u32, session: Duration) -> u32 {
     }
 }
 
-/// Connects, reads status, subscribes, forwards events; on any drop, emits
-/// daemon:down and reconnects with backoff. Never returns.
 pub async fn run(app: AppHandle, path: PathBuf) {
     let mut attempt = 0u32;
     loop {

@@ -6,7 +6,6 @@ use enigo::{
 };
 use std::{error::Error, thread, time::Duration};
 
-// Let the clipboard settle before we paste.
 const PASTE_SETTLE: Duration = Duration::from_millis(50);
 
 // enigo pastes through X11, so wayland shells out instead. Checked at call
@@ -203,7 +202,6 @@ fn stage(_clipboard: Clipboard, text: &str, old: Option<String>) -> Result<(), B
 
     // The app fetches the selection asynchronously, well after the keystroke.
     const PASTE_WINDOW: Duration = Duration::from_secs(2);
-    // How long the restored text stays served.
     const RESTORE_HOLD: Duration = Duration::from_secs(120);
     // wait_until never says why it returned; an early return means someone
     // else took the clipboard.

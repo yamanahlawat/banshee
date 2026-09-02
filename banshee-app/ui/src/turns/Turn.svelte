@@ -79,9 +79,7 @@
     padding-top: 8px;
   }
 
-  /* Short enough to clear the first line box on its own. At 28px it overlapped
-     the second one too, so every paragraph in the window stepped outward two
-     lines down for a control that is not even drawn. */
+  /* Short enough to clear the first line box on its own. */
   .copy {
     position: relative;
     float: right;
@@ -101,8 +99,7 @@
     pointer-events: none;
   }
 
-  /* The visible box is now under a pointer's size, so the box that answers a
-     click grows behind it, as it does on the underlined controls. */
+  /* The visible box is under a pointer's size, so the hit box grows behind it. */
   .copy::after {
     content: '';
     position: absolute;

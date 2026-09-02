@@ -9,10 +9,8 @@
   import Segmented from '../controls/Segmented.svelte';
   import { claimKeys } from '../lib/keys';
 
-  // The window only ever reads this float back as one of three words, so three
-  // words are what it offers. Each band writes its own midpoint: derived from
-  // the boundaries, never measured against a room. A measurement replaces these
-  // three numbers.
+  // Three words are all the window reads back. The midpoints are derived from the band edges, not
+  // measured against a room.
   const BANDS = [
     { upTo: 1 / 3, word: 'Low', writes: 0.15 },
     { upTo: 2 / 3, word: 'Medium', writes: 0.5 },
@@ -29,8 +27,7 @@
   let spoken: Languages = { languages: [] };
   let adding = false;
   let field: HTMLInputElement | undefined;
-  // Typing a word owns the keyboard: without this Escape closed the whole panel
-  // instead of abandoning the word, and Cmd+F opened Find mid-word.
+  // Typing a word owns the keyboard, or Escape closes the panel and Cmd+F opens Find mid-word.
   let release: (() => void) | null = null;
 
   function beginAdding() {
@@ -88,14 +85,10 @@
   $: preset = String(stt.preset ?? 'balanced');
   $: language = String(stt.language ?? 'en');
   $: translate = stt.translate === true;
-  // The daemon's own word: it reads English whatever `stt.language` says when
-  // the loaded build holds no other language. Working it out from the preset
-  // name would be a second rule for one fact, in a second language.
+  // The daemon's own word, so the preset name is not a second rule for one fact.
   $: englishOnly = $daemon.status?.english_only === true;
-  // Whisper's table names what it can hear, and a code it does not name still
-  // needs its row: a `select` whose value matches no option draws as an empty
-  // control, which reads as broken software. The input device guards the same
-  // way, a few lines down.
+  // A code Whisper's table does not name still needs its row: a select whose value matches no
+  // option draws empty.
   $: languagesOffered =
     language === 'auto' || spoken.languages.some((one) => one.code === language)
       ? spoken.languages
@@ -241,9 +234,8 @@
 </Row>
 
 <style>
-  /* Centred, not stretched. A wrapped flex line sizes its items to the tallest,
-     so chips sharing a line with the taller input grew to match it and the
-     field showed two chip heights at once. */
+  /* Centred, not stretched: a wrapped flex line sizes its items to the tallest, so the input would
+     stretch the chips beside it. */
   .chips {
     display: flex;
     flex-wrap: wrap;

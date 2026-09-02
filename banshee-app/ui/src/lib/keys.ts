@@ -1,6 +1,4 @@
-/// Where an arrow key moves inside a group that is one tab stop: the foot band
-/// and every segmented control. Null when the key is not an arrow, so a caller
-/// can leave the event alone.
+/// Where an arrow moves inside a one-tab-stop group; null when the key is not an arrow.
 export function arrowStep(key: string, at: number, count: number): number | null {
   const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[key];
   if (step === undefined || count === 0) return null;

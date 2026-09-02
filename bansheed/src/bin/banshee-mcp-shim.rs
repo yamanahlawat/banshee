@@ -4,7 +4,6 @@ use banshee_common::{
 };
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-// MCP tool result: a single text content block
 fn tool_text(id: Option<serde_json::Value>, text: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         id,
@@ -12,7 +11,6 @@ fn tool_text(id: Option<serde_json::Value>, text: &str) -> JsonRpcResponse {
     )
 }
 
-// Highest transcription id in a get_transcription result, if any
 fn latest_id(result: &serde_json::Value) -> Option<u64> {
     result
         .get("transcriptions")?

@@ -17,3 +17,7 @@ categories = ["command-line-utilities", "multimedia::audio"]
 [profile.dist]
 inherits = "release"
 lto = "thin"
+strip = true
+
+[patch.crates-io]
+misaki-rs = { git = "https://github.com/yamanahlawat/misaki-rs", rev = "99514c28c072d8a36456b2fcec6f1bd5471bfe06" }

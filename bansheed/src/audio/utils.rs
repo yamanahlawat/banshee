@@ -34,7 +34,7 @@ impl StreamingResampler {
         })
     }
 
-    // Forget carried input and filter history, e.g. across a capture gap
+    // For a capture gap: the carried window must not bridge it
     pub fn reset(&mut self) {
         self.carry.clear();
         if let Some(resampler) = self.resampler.as_mut() {
@@ -42,7 +42,7 @@ impl StreamingResampler {
         }
     }
 
-    // Appends resampled audio to `out`; a partial window waits for the next push
+    // A partial window waits for the next push
     pub fn push(&mut self, samples: &[f32], out: &mut Vec<f32>) -> Result<(), BansheeError> {
         let Some(resampler) = self.resampler.as_mut() else {
             out.extend_from_slice(samples);
@@ -80,14 +80,11 @@ pub fn resample_audio(
         audio_data.to_vec()
     } else {
         println!("Resampling audio from {original_sample_rate} Hz to {target_sample_rate} Hz...");
-        // Setup the input adapter (1 channel, so frames = length)
         let nbr_input_frames = audio_data.len();
 
         let input_adapter = InterleavedSlice::new(audio_data, 1, nbr_input_frames)
             .map_err(|e| BansheeError::Other(format!("Failed to create input adapter: {e}")))?;
 
-        // Setup the output buffer and adapter
-        // Calculate how big the output will be (e.g 1/3 the size), plus some padding
         let out_capacity = (audio_data.len() as f64 * target_sample_rate as f64
             / original_sample_rate as f64)
             .ceil() as usize
@@ -96,7 +93,6 @@ pub fn resample_audio(
         let mut output_adapter = InterleavedSlice::new_mut(&mut output, 1, out_capacity)
             .map_err(|e| BansheeError::Other(format!("Failed to create output adapter: {e}")))?;
 
-        // Create the FFT resampler
         let mut resampler = Fft::<f32>::new(
             original_sample_rate as usize,
             target_sample_rate as usize,
@@ -107,12 +103,10 @@ pub fn resample_audio(
         )
         .map_err(|e| BansheeError::Other(format!("Failed to create resampler: {e}")))?;
 
-        // Process the entire audio in one go
         let (_frames_read, frames_written) = resampler
             .process_all_into_buffer(&input_adapter, &mut output_adapter, nbr_input_frames, None)
             .map_err(|e| BansheeError::Other(format!("Failed to resample audio: {e}")))?;
 
-        // Truncate the output to the actual number of frames written
         output.truncate(frames_written);
         output
     };

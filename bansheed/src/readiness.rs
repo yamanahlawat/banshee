@@ -27,7 +27,6 @@ fn assemble(
     {
         grants.push(Blocker {
             // A model that will not load is a model fault, whatever it stops.
-            // Only a real capture fault belongs to the microphone.
             kind: match error {
                 RecordingError::Model(_) => BlockerKind::Model,
                 RecordingError::Microphone(_) => BlockerKind::Pipeline,

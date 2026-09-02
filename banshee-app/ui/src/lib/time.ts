@@ -3,7 +3,6 @@ export function toDate(stamp: string): Date {
   return new Date(stamp);
 }
 
-// Local clock time, 24-hour, matching the window's mono time column.
 export function formatTime(stamp: string): string {
   const d = toDate(stamp);
   const hh = String(d.getHours()).padStart(2, '0');
