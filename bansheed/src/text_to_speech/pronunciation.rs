@@ -90,7 +90,6 @@ static DICTIONARY: &[(&str, &str)] = &[
     ("toml", "tˈɑːməl"),            // tom-uhl
 ];
 
-// Merge our dictionary into misaki's gold lexicon, before any synthesis.
 pub fn install_dictionary(g2p: &mut G2P) {
     for (word, phonemes) in DICTIONARY {
         let entry = PhonemeEntry::Simple((*phonemes).to_string());
@@ -111,9 +110,7 @@ static LOWER_TO_UPPER: LazyLock<Regex> =
 static ACRONYM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([A-Z])([A-Z][a-z]+)").unwrap());
 static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
-/// Turns identifier punctuation and casing into speakable words and fixes terms
-/// the voice mispronounces: `get_models_path` -> "get models path",
-/// `parseJSONResponse` -> "parse Jason Response".
+/// get_models_path -> "get models path", parseJSONResponse -> "parse Jason Response".
 pub fn normalize(input: &str) -> String {
     // Whole terms such as `macOS` first, before camel-case splitting breaks them
     let mut text = apply_fixups(input.to_string());

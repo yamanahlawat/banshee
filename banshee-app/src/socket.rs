@@ -13,11 +13,8 @@ pub const SOCKET_CLOSED: &str = "the daemon closed the socket";
 /// separates a peer that went away from one that is still there and silent.
 pub const NO_REPLY: &str = "the daemon did not answer";
 
-/// The window's slowest call is `preview_voice`, and the daemon answers that
-/// with an utterance id rather than waiting on playback. So this covers daemon
-/// work only, and is short enough that a wedged daemon does not hold every
-/// command for a minute. `ask_user`, which the daemon bounds at 120 s, is not
-/// a call the window makes.
+/// Bounds daemon work only: preview_voice answers before playback, and the window never calls
+/// ask_user.
 const REPLY_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
@@ -98,8 +95,7 @@ impl Client {
             // A notification carries no `result` and no `error`, so the untagged
             // enum below never matches one; only a reply to some call parses.
             if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&reply) {
-                // A reply left behind by an abandoned call is not this call's
-                // answer, whatever it holds. Read past it.
+                // A reply to an abandoned call can arrive first; read past it.
                 if !answers(&response, id) {
                     continue;
                 }
@@ -118,9 +114,7 @@ impl Client {
         }
     }
 
-    /// Runs until the socket drops; every notification is passed to `on_event`.
-    /// The daemon answers the subscribe call with the same status its pushes
-    /// measure against, so `on_open` sees a snapshot with no gap after it.
+    /// The subscribe reply is the status the pushes measure against, so on_open sees no gap.
     pub async fn subscribe(
         mut self,
         events: &[&str],
@@ -153,7 +147,6 @@ pub fn answers(response: &JsonRpcResponse, id: &Option<serde_json::Value>) -> bo
     reply_id == id
 }
 
-/// A transport failure that happened before the request left the client.
 fn unsent(error: impl std::fmt::Display) -> RpcError {
     RpcError {
         sent: false,

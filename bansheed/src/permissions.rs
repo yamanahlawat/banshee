@@ -222,12 +222,12 @@ pub fn restart_when_granted() {
         if accessibility_granted() {
             return;
         }
-        tracing::warn!("the Accessibility grant is missing; the hotkey is inert until it lands");
+        eprintln!("the Accessibility grant is missing; the hotkey is inert until it lands");
         thread::spawn(|| {
             loop {
                 thread::sleep(POLL);
                 if accessibility_granted() {
-                    tracing::info!("the Accessibility grant landed, restarting to pick it up");
+                    eprintln!("the Accessibility grant landed, restarting to pick it up");
                     std::process::exit(1);
                 }
             }

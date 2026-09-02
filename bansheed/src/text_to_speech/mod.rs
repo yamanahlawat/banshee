@@ -96,7 +96,6 @@ impl SpeechPlayer {
         }
     }
 
-    // Utterances play one at a time, in order; interrupt jumps the queue
     pub fn speak(
         self: &Arc<Self>,
         text: &str,
@@ -141,7 +140,6 @@ impl SpeechPlayer {
         drop(playback);
         self.speaking.send_replace(true);
 
-        // Watcher chains queued utterances and flips `speaking` off at the end
         if needs_watcher {
             let player = Arc::clone(self);
             thread::spawn(move || player.watch_playback());

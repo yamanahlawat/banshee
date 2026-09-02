@@ -52,9 +52,7 @@
   type Job = 'Microphone' | 'Hotkey' | 'Voice' | 'Agents' | 'Record';
   let job: Job | null = null;
 
-  // A panel takes over the body, so an opener standing in that body is
-  // destroyed by the click it is answering. The way back is the opener's id
-  // and never the node, which no longer exists by the time it is wanted.
+  // The click destroys the opener, so the way back is its id, never the node.
   const RETURNS_TO = { ledger: 'ledger', absence: 'nothing-yet', agents: 'no-agents' };
   let cameFrom = '';
 
@@ -128,14 +126,9 @@
 
   // Spelled, because a sentence should not open on a digit. Six agents are
   // detectable today, so the list needs no more than this.
-  // A panel's short name and the statement it opens with are one concept, so
-  // they are declared together. The name may not collide with a state word:
-  // "Record" under a header reading RECORDING reads as capture rather than as
-  // what is kept, and the ledger already names it without the collision.
-  //
-  // Every statement reads the daemon, because the config says what was asked
-  // for and only the daemon says what is running, and every one carries the
-  // sentence for when it is not true.
+  // Name and lead are declared together. "Record" would collide with the RECORDING state word, so
+  // the panel is named for what is kept. Every lead reads the daemon: the config says only what was
+  // asked for.
   $: panels = {
     Microphone: {
       name: 'Microphone',
@@ -188,8 +181,7 @@
   // history file that will not open leaves the two disagreeing.
   $: savingHistory = ($daemon.status?.history_enabled ?? config.daemon?.save_history) !== false;
 
-  // A setting the daemon could not apply live needs the process replaced, and
-  // the window can do that rather than name a command for a terminal.
+  // The window restarts the daemon itself rather than naming a terminal command.
   let restarting = false;
   const COMING_BACK = 12;
   async function restart() {
@@ -224,12 +216,9 @@
     starting = false;
   }
 
-  // A stopped daemon is acting on none of these, so each reads empty.
-  //
-  // The hotkey is the config's, because the daemon reports no bound key, and it
-  // is never applied live. Marking it pending is the only way the foot can stop
-  // naming a key the daemon is not listening for. `audio.input_device` always
-  // applies, so the microphone has no such state.
+  // Empty when the daemon is stopped. The hotkey is never applied live and the daemon reports no
+  // bound key. Pending is the only way the foot stops naming a key nobody listens for.
+  // audio.input_device always applies.
   $: voiceName = ((): string => {
     const id = String(config.tts?.voice ?? '');
     return voices.voices.find((v) => v.id === id)?.name ?? id;
@@ -266,9 +255,7 @@
 
   $: if ($daemon.status) followSaveHistory(savingHistory);
 
-  /// Split from the record, because the two change for different reasons and a
-  /// download moves only this one.
-  /// Off for the restart poll: launchd is already bringing the daemon back.
+  /// andStart is off for the restart poll: launchd is already bringing the daemon back.
   async function readStatus(andStart = true): Promise<boolean> {
     try {
       const initial = await status();

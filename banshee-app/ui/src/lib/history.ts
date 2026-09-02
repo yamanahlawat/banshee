@@ -22,10 +22,8 @@ export function formatCount(n: number): string {
   return n.toLocaleString('en-US');
 }
 
-// One table for the pad, the earlier band and the History panel.
 export type Table = {
   rows: HistoryRow[];
-  // Whether the daemon last said it was keeping anything.
   saving: boolean | null;
   // The one unlimited read's answer, moved by hand afterwards.
   total: number;

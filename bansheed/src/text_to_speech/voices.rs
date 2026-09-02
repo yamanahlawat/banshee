@@ -1,7 +1,6 @@
 use banshee_common::Voice;
 
-/// Display name and one distinguishing word per Kokoro voice. The id is the
-/// value `config.toml` carries.
+/// The id is the value config.toml carries.
 const NAMED: &[(&str, &str, &str)] = &[
     ("af_sky", "Sky", "American, clear"),
     ("af_bella", "Bella", "American, warm"),

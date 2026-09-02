@@ -53,9 +53,8 @@ pub fn blockers(names: &[&str]) -> Vec<Blocker> {
         .into_iter()
         .map(|name| Blocker {
             kind: BlockerKind::Model,
-            // A model has no friendlier name than its filename, so which file
-            // it is rides beside it: a client cannot tell the speech model from
-            // the voice detector without re-deriving the daemon's own rule.
+            // A client cannot tell the speech model from the detector by filename without
+            // re-deriving the daemon's rule
             role: Some(crate::models::download::role(&name)),
             remedy: Some(banshee_common::Remedy::Download),
             name: name.clone(),

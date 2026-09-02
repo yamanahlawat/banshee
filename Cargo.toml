@@ -17,3 +17,4 @@ categories = ["command-line-utilities", "multimedia::audio"]
 [profile.dist]
 inherits = "release"
 lto = "thin"
+strip = true

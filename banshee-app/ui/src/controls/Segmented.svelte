@@ -10,16 +10,9 @@
 
   let group: HTMLDivElement;
 
-  // A radiogroup is one tab stop and the arrows move inside it. Saying it in
-  // the role and then not doing it leaves a screen reader announcing a control
-  // that will not answer.
-  // A daemon value these options do not hold leaves no match, and every cell at
-  // -1 puts the group out of the keyboard's reach.
-  // A daemon round trip is not instant, so the handlers write this directly and
-  // the next arrow steps from where the last one left. The statement re-runs
-  // only when `value` or `options` moves, so the daemon's answer takes it back
-  // whatever it says. `Math.max`, because a value these options do not hold
-  // leaves -1, and that puts the group out of the keyboard's reach.
+  // One tab stop, arrows inside it. The handlers write stop directly because the daemon round trip
+  // is not instant; the statement re-runs only when value or options moves. Math.max: a value the
+  // options do not hold leaves -1 and takes the group out of keyboard reach.
   let stop = 0;
   $: stop = Math.max(
     0,
@@ -59,9 +52,7 @@
 </div>
 
 <style>
-  /* Scoped, so the rule that draws the chosen segment sits beside the attribute
-     that marks it. Split across two files these drifted, and no segment
-     inverted. */
+  /* Scoped, so the rule that draws the chosen segment sits beside the attribute that marks it. */
   .seg {
     /* Inline, so the box is the width of its options. Stretched to a parent it
        shows a fourth cell that no option fills. */

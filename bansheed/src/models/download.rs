@@ -9,7 +9,6 @@ use tokio::io::AsyncWriteExt;
 
 use crate::config::Config;
 
-/// Whole percentage points only, and `None` when the server sent no length.
 pub fn percent(bytes: u64, total: Option<u64>) -> Option<u64> {
     let total = total?;
     (total > 0).then(|| bytes * 100 / total)
@@ -56,7 +55,6 @@ fn speech_megabytes(file: &str) -> u64 {
     }
 }
 
-/// Every file this config needs, and where to fetch it.
 pub fn wanted(config: &Config) -> Vec<Download> {
     let [speech, voice_activity] = crate::models::required(config);
     let whisper = WhisperConfig::new(speech);
@@ -94,7 +92,6 @@ pub fn pending_megabytes(wanted: &[Download], dir: &Path) -> u64 {
         .sum()
 }
 
-/// The files in `wanted` that `dir` does not already hold.
 pub fn still_missing(wanted: &[Download], dir: &Path) -> Vec<Download> {
     wanted
         .iter()
@@ -103,7 +100,6 @@ pub fn still_missing(wanted: &[Download], dir: &Path) -> Vec<Download> {
         .collect()
 }
 
-/// Where the models live, or why they cannot be found.
 pub fn models_dir() -> Result<std::path::PathBuf, BansheeError> {
     get_models_path()
         .ok_or_else(|| BansheeError::Other("Could not find the models directory".to_string()))

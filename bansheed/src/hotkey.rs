@@ -117,7 +117,6 @@ pub const WAYLAND_HOTKEY_HINT: &str = "the global hotkey needs X11. Bind \
      `banshee record start` on press and `banshee record stop` on release in \
      your compositor instead";
 
-/// How to dictate, for the binding and mode in effect.
 pub fn usage_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
     #[cfg(all(unix, not(target_os = "macos")))]
     if crate::dictation::is_wayland() {
@@ -144,7 +143,6 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
         return;
     }
 
-    // Spawn a heavy thread for the global hotkey listener
     thread::spawn(move || {
         let mut tracker = HotkeyTracker::new(hotkey, hotkey_mode);
         // Whether this listener's own start opened the session in flight.
@@ -177,7 +175,6 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
 impl Pipeline {
     // Push-to-talk ended: the ring holds the whole utterance
     fn transcribe_utterance(&mut self, action: TranscribeTarget) {
-        // pull all the floats out of the ring buffer into a standard Vec
         let audio_data = self.source.drain();
 
         println!(
@@ -185,7 +182,6 @@ impl Pipeline {
             self.source.sample_rate
         );
 
-        // Downsample the audio by taking every nth sample
         let final_data =
             match resample_audio(&audio_data, self.source.sample_rate, TARGET_SAMPLE_RATE) {
                 Ok(data) => data,
@@ -205,17 +201,15 @@ impl Pipeline {
 
         println!("Total audio samples after resampling: {}", final_data.len());
 
-        // Chunk the audio into 512 sample frames and run VAD on each frame until we find speech or run out of audio
         let mut speech_chunks = 0;
         let mut total_chunks = 0;
 
-        // Reset the VAD state before processing new audio
         self.vad.reset_state();
         let vad_threshold = self.state.vad_threshold();
 
         for chunk in final_data.chunks(VAD_CHUNK) {
             if chunk.len() < VAD_CHUNK {
-                continue; // Ignore the last chunk if it's smaller than 512 samples
+                continue;
             }
             match self.vad.check_speech(chunk, TARGET_SAMPLE_RATE) {
                 Ok(probability) => {
@@ -356,8 +350,7 @@ impl Pipeline {
         let _ = ask.reply.send(text);
     }
 
-    // Online endpointing: confirm speech onset, then end on trailing silence.
-    // Returns the answer audio at 16 kHz, or None on timeout or error.
+    // Confirms onset, then ends on trailing silence; the audio comes back at 16 kHz
     fn listen_for_answer(&mut self, timeout: Duration) -> Option<Vec<f32>> {
         let mut resampler =
             match StreamingResampler::new(self.source.sample_rate, TARGET_SAMPLE_RATE) {

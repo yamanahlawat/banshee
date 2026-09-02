@@ -10,10 +10,8 @@
   } as const;
 </script>
 
-<!-- The sentence is drawn, not hidden. A bar held the place instead, which said
-     nothing to a reader and told the two modes apart by hue alone. A turn is
-     genuinely on its way here, so this is a place kept rather than a presence
-     invented. -->
+<!-- The sentence is drawn, not hidden: a turn is genuinely on its way, so this is a place kept
+     rather than a presence invented. -->
 <article class="turn">
   <!-- Read, not hidden. A turn hides its own clock because its `sr` line
        already says the time; this row has no such line. -->

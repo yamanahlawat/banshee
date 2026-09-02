@@ -142,7 +142,6 @@ impl WhisperEngine {
             .create_state()
             .map_err(|e| BansheeError::Transcription(e.to_string()))?;
 
-        // Beam search trades speed for accuracy
         let mut params = FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
             beam_size: 5,
             patience: -1.0,
