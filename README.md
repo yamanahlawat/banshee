@@ -70,6 +70,10 @@ CLI and the daemon alone.
 
 ## Set up
 
+With the app bundle installed, the desktop window does all of this for you:
+open it and it fetches the models, asks for the grants and starts the daemon.
+The steps below are the same work from a terminal.
+
 **1. Download the models** (~860 MB: Whisper, Silero VAD, Kokoro):
 
 ```bash
@@ -104,15 +108,23 @@ a fix for anything that is off. It changes nothing itself.
   dictation with a copy button, the day's history, and every setting. It sets
   Banshee up on its own, models and all. Quit it and dictation carries on.
 
+<p align="center">
+  <img src="assets/window.png" width="360"
+       alt="The Banshee window: the last dictation in large type with a copy button, the day's earlier dictations beneath it, and a footer naming the microphone, hotkey, voice and connected agents.">
+</p>
+
 To tap once to start and once to stop instead of holding, set
 `hotkey_mode = "toggle"`. The key is rebindable, and both live in
 [docs/configuration.md](docs/configuration.md).
 
 The menu bar icon answers one question: can I speak right now.
 
-| Idle | Recording | Speaking | Not running |
-|:----:|:---------:|:--------:|:-----------:|
-| <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
+| Idle | Recording | Speaking | Waiting for you | Not running |
+|:----:|:---------:|:--------:|:---------------:|:-----------:|
+| <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/listening.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
+
+Waiting for you means an agent has asked a question and is holding for your
+answer.
 
 The states differ by shape, never by colour alone, and the icon is a template
 image, so macOS tints it to match the menu bar in light and dark.
@@ -137,6 +149,14 @@ Codex and Cursor follow their published formats and wait for a report.
 Pi has its own extension API instead of MCP, so `banshee connect pi` installs a
 native extension that talks to the daemon directly; see
 [integrations/pi](integrations/pi).
+
+The window's Agents panel does the same work: it lists what is installed, shows
+the change before it writes, and says which agents are connected.
+
+<p align="center">
+  <img src="assets/agents.png" width="360"
+       alt="The Agents panel, listing Antigravity, Claude Code, OpenCode and Pi as connected, and noting that Banshee also works with Codex and Cursor.">
+</p>
 
 `banshee-mcp-shim` is the MCP stdio server behind this. Any other MCP host takes
 the same shape, with the shim's full path if the bare name does not resolve:
