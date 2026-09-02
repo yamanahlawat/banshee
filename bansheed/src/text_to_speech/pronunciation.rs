@@ -93,13 +93,7 @@ static DICTIONARY: &[(&str, &str)] = &[
 pub fn install_dictionary(g2p: &mut G2P) {
     for (word, phonemes) in DICTIONARY {
         let entry = PhonemeEntry::Simple((*phonemes).to_string());
-        g2p.lexicon.golds.insert((*word).to_string(), entry.clone());
-        // Capitalized form too, so lookup hits at sentence start.
-        let mut chars = word.chars();
-        if let Some(first) = chars.next() {
-            let capitalized = first.to_uppercase().collect::<String>() + chars.as_str();
-            g2p.lexicon.golds.insert(capitalized, entry);
-        }
+        g2p.lexicon.golds.insert((*word).to_string(), entry);
     }
 }
 
@@ -229,6 +223,24 @@ mod tests {
         for (word, expected) in super::DICTIONARY {
             let (phonemes, _) = g2p.g2p(word).unwrap();
             assert_eq!(phonemes.trim(), *expected, "{word} override not installed");
+        }
+    }
+
+    // Only the lowercase form is installed; the lexicon answers for the capitalized one.
+    #[test]
+    fn dictionary_survives_a_sentence_start() {
+        use misaki_rs::{G2P, Language};
+        let mut g2p = G2P::new(Language::EnglishUS);
+        super::install_dictionary(&mut g2p);
+        for (word, expected) in super::DICTIONARY {
+            let mut chars = word.chars();
+            let first = chars.next().unwrap().to_uppercase().collect::<String>();
+            let sentence = format!("{first}{} is fine.", chars.as_str());
+            let (phonemes, _) = g2p.g2p(&sentence).unwrap();
+            assert!(
+                phonemes.contains(expected),
+                "{word} lost at sentence start in {sentence:?}: got {phonemes}"
+            );
         }
     }
 

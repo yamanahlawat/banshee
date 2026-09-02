@@ -222,11 +222,15 @@ impl KokoroEngine {
             )));
         }
 
+        // Pre-packed weights cost 32 MB of resident memory and bought no synthesis
+        // time: three timed runs each way of a two-sentence utterance all took 1.2 s.
         let session = Session::builder()
             .map_err(|e| BansheeError::Other(e.to_string()))?
             .with_optimization_level(GraphOptimizationLevel::All)
             .map_err(|e| BansheeError::Other(e.to_string()))?
             .with_intra_threads(4)
+            .map_err(|e| BansheeError::Other(e.to_string()))?
+            .with_config_entry("session.disable_prepacking", "1")
             .map_err(|e| BansheeError::Other(e.to_string()))?
             .commit_from_file(&model_path)
             .map_err(|e| BansheeError::Other(e.to_string()))?;
@@ -332,10 +336,10 @@ impl KokoroEngine {
         for tk in tokens {
             // Skip words with a curated gold entry so espeak never overrides it.
             if is_letter_spelled(tk)
-                && !self.g2p.lexicon.golds.contains_key(&tk.text)
+                && !self.g2p.lexicon.in_gold(&tk.text)
                 && let Some(phonemes) = oov.phonemize(&tk.text)
             {
-                // Exact surface: misaki looks up by case.
+                // One casing serves the other, so the word is kept as it was spoken.
                 resolved.push((tk.text.clone(), phonemes));
             }
         }
