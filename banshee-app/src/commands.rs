@@ -1,6 +1,3 @@
-//! The `#[tauri::command]` wrappers TypeScript calls by name. Each locks the
-//! held connection and calls the matching `calls` function.
-
 use crate::calls::{self, CommandError, Devices, Voices};
 use crate::socket::Client;
 use banshee_common::{AgentRow, PlannedChange, utils};
@@ -10,8 +7,7 @@ use tokio::sync::Mutex;
 
 pub const NO_HOME_DIR: &str = "Banshee cannot find your home directory.";
 
-/// The socket path and the connection that runs over it. Resolving the path
-/// once keeps a missing home directory from stopping the window opening.
+/// The path resolves once, so a missing home directory cannot stop the window opening.
 pub struct Daemon {
     path: Option<PathBuf>,
     client: Mutex<Option<Client>>,
@@ -25,7 +21,6 @@ impl Daemon {
         }
     }
 
-    /// The path the event bridge listens on.
     pub fn socket_path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
@@ -53,9 +48,7 @@ fn is_safe_to_retry(error: &CommandError) -> bool {
     error.transport && !error.sent
 }
 
-/// Connects fresh through `path`, replacing whatever was in `slot`. The one
-/// function that opens a connection, used both the first time a command
-/// needs one and every time a later one has died.
+/// The one function that opens a connection; first use and a dead connection's retry both run it.
 pub async fn force_reconnect(slot: &mut Option<Client>, path: &Path) -> Result<(), CommandError> {
     let client = Client::connect(path).await.map_err(|error| CommandError {
         code: -32000,
@@ -67,10 +60,8 @@ pub async fn force_reconnect(slot: &mut Option<Client>, path: &Path) -> Result<(
     Ok(())
 }
 
-/// Connects only when `slot` is empty. A window opened before the daemon, or
-/// reopened after one, reaches its first command with an empty slot; this
-/// runs the same `force_reconnect` a dead connection's retry runs, so
-/// "never connected" and "connected then died" repair themselves one way.
+/// An empty slot, from a window opened before the daemon or after one died, repairs itself the same
+/// way.
 pub async fn ensure_connected(slot: &mut Option<Client>, path: &Path) -> Result<(), CommandError> {
     if slot.is_none() {
         force_reconnect(slot, path).await?;
@@ -78,13 +69,9 @@ pub async fn ensure_connected(slot: &mut Option<Client>, path: &Path) -> Result<
     Ok(())
 }
 
-/// Ensures `$client` holds a connection, runs `$body`, and drops the
-/// connection on any transport failure. Every one of them leaves the framing
-/// unknown: an EOF, a read that failed mid-line, and a reply deadline that
-/// cancelled a read part way through it. Only the ones that never reached the
-/// daemon are then sent again. A generic function here hits a known rustc
-/// limitation with `AsyncFn` closures that borrow their arguments, so this is
-/// a macro.
+/// Every transport failure leaves the framing unknown, so the connection is dropped; only a request
+/// that never reached the daemon is sent again. A macro because an AsyncFn closure that borrows its
+/// arguments hits a known rustc limitation.
 macro_rules! retrying {
     ($daemon:expr, $client:expr, $body:expr) => {{
         let path = $daemon.path_or_error()?;
@@ -362,9 +349,7 @@ fn failed(message: String) -> CommandError {
     }
 }
 
-/// Runs a `banshee` subcommand from the bundle this window ships in. The
-/// socket exists only while the daemon runs, so it cannot carry the call that
-/// starts one.
+/// The socket exists only while the daemon runs, so starting one cannot go over it.
 pub fn run_cli(subcommand: &str) -> Result<(), CommandError> {
     let status = utils::sibling_command("banshee")
         .map_err(|error| failed(error.to_string()))?
@@ -416,8 +401,7 @@ pub async fn start_daemon() -> Result<(), CommandError> {
         .map_err(|error| failed(error.to_string()))?
 }
 
-/// Replaces the running daemon. A setting the daemon reads once, and a pipeline
-/// that died at startup, both need the process itself renewed.
+/// A setting the daemon reads once, and a pipeline dead at startup, both need the process renewed.
 #[tauri::command]
 pub async fn restart_daemon() -> Result<(), CommandError> {
     tauri::async_runtime::spawn_blocking(|| kickstart(utils::DAEMON_AGENT, "start", true))

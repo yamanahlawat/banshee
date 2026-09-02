@@ -148,7 +148,6 @@ mod mac {
         banshee_common::microphone_label(device.open.as_deref(), device.missing.as_deref())
     }
 
-    /// One row of the menu, before it becomes a native menu item.
     enum Row {
         Info(String),
         Separator,
@@ -328,9 +327,8 @@ mod mac {
         })
     }
 
-    /// Subscribes on a worker thread and hands each change to the main thread.
-    /// Any failure to read the socket is the daemon being unreachable, which is
-    /// a state to show rather than an error to report.
+    /// Any failure to read the socket is the daemon being unreachable: a state to show, not an
+    /// error to report.
     async fn watch(proxy: EventLoopProxy<Message>) {
         // send_event fails only once the event loop is gone, which means the
         // process is on its way out and this thread with it
@@ -360,8 +358,6 @@ mod mac {
         }
     }
 
-    /// Reads the last spoken transcription on a worker thread and sends its
-    /// text to the main thread.
     fn spawn_copy_last(proxy: EventLoopProxy<Message>) {
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()

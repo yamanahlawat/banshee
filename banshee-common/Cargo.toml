@@ -16,5 +16,5 @@ dirs = "6.0.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["full"] }
+tokio = { version = "1.52.3", features = ["net", "io-util"] }
 toml = "1.1.2"

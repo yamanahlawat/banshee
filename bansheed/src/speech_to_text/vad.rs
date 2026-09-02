@@ -90,16 +90,13 @@ impl VADEngine {
             .try_extract_tensor::<f32>()
             .map_err(|e| BansheeError::Other(e.to_string()))?;
 
-        // Grab the raw float array for the new state
         let (_, state_data) = outputs["stateN"]
             .try_extract_tensor::<f32>()
             .map_err(|e| BansheeError::Other(e.to_string()))?;
 
-        // Re-build our Array3 from the raw floats!
         self.state = ndarray::Array3::from_shape_vec((2, 1, 128), state_data.to_vec())
             .map_err(|e| BansheeError::Other(e.to_string()))?;
 
-        // Carry the tail of this chunk as context for the next one
         self.context = audio_data[audio_data.len() - CONTEXT_SIZE..].to_vec();
 
         Ok(probability_data[0])

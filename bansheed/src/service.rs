@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use banshee_common::error::BansheeError;
 use banshee_common::utils::sibling;
 
-/// What can be set to start at login. The platform arms decide what they can
-/// honour, so a new entry is one variant rather than a new pair of functions.
+/// The platform arms decide what they honour, so a new entry is a variant, not a new pair of
+/// functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
     Daemon,

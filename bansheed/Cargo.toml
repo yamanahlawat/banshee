@@ -16,23 +16,20 @@ name = "banshee"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.103"
 arboard = "3.6.1"
 audioadapter-buffers = "3.0.0"
 banshee-common = { version = "0.11.1", path = "../banshee-common" }
 chrono = "0.4"
 clap = { version = "4.6.1", features = ["derive"] }
 cpal = "0.17.3"
-crossbeam-channel = "0.5.16"
 dirs = "6.0.0"
-enigo = "0.6.1"
 json5 = "0.4"
 # Default "espeak" feature is off on purpose: it links espeak-ng via cmake and
 # needs an espeak-ng-data dir next to the binary at runtime, which a single-file
 # release install has no place for. text_to_speech::oov shells out instead.
 misaki-rs = { version = "0.3.0", default-features = false }
 ndarray = "0.17.2"
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "tracing", "download-binaries", "tls-rustls", "copy-dylibs", "api-24"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-rustls", "copy-dylibs", "api-24"] }
 rdev = "0.5.3"
 regex = "1.13.0"
 reqwest = { version = "0.13.4", features = ["rustls", "system-proxy"], default-features = false }
@@ -43,12 +40,13 @@ rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 similar = "2"
-tokio = { version = "1.52.3", features = ["full"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "signal", "fs"] }
 toml = "1.1.2"
 toml_edit = { version = "0.25", features = ["serde"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 whisper-rs = "0.16.0"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+enigo = "0.6.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The options dictionary AXIsProcessTrustedWithOptions takes; see permissions.rs.

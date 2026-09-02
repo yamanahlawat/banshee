@@ -1,11 +1,8 @@
 <script lang="ts">
-  // One property of one job. The name is the specimen label, the value is the
-  // specimen: the foot cell's own grammar, at panel scale.
   export let name: string;
   export let note = '';
   export let pending = false;
-  /// A control that cannot sit on one line takes the width and drops beneath
-  /// its label. Most properties are a line; some specimens need a block.
+  /// A control that cannot sit on one line takes the width and drops beneath its label.
   export let block = false;
 </script>
 

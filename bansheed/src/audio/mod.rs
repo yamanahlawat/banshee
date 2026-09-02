@@ -16,7 +16,7 @@ use ringbuf::{
 
 use crate::state::DaemonState;
 
-pub const RING_SECS: usize = 120; // 120 seconds of audio in the ring buffer
+pub const RING_SECS: usize = 120;
 
 // The name [audio] input_device carries to mean "whatever the OS is set to"
 pub const DEFAULT_INPUT_DEVICE: &str = "default";
@@ -117,15 +117,12 @@ enum Target {
     Device(String),
     /// The wanted device is absent, so this one records in its place.
     Substitute { open: String, missing: String },
-    /// Nothing may be opened, and this says why.
+    /// Nothing at all can be opened; the reason goes to the client.
     Unavailable(String),
 }
 
-/// Picks the device to open, given what the config asks for and what exists.
-///
-/// A named device that is absent falls back to the OS default, so dictation
-/// keeps working, and `Substitute` names what is missing so a client can say
-/// so. `Unavailable` is left for the case where nothing at all can be opened.
+/// An absent named device falls back to the OS default so dictation keeps
+/// working; Substitute names what is missing.
 fn choose(wanted: &str, present: &[String], default: Option<&str>) -> Target {
     let wanted = wanted_or_default(wanted);
     if wanted == DEFAULT_INPUT_DEVICE {
@@ -239,7 +236,6 @@ pub fn probe_input_device(input_device: &str) -> Result<(String, Option<String>)
     Ok((selection.open, selection.missing))
 }
 
-/// One opened microphone.
 pub struct Capture {
     pub stream: Stream,
     pub consumer: HeapCons<f32>,

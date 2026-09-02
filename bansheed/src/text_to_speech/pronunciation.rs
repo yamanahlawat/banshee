@@ -90,17 +90,10 @@ static DICTIONARY: &[(&str, &str)] = &[
     ("toml", "tˈɑːməl"),            // tom-uhl
 ];
 
-// Merge our dictionary into misaki's gold lexicon, before any synthesis.
 pub fn install_dictionary(g2p: &mut G2P) {
     for (word, phonemes) in DICTIONARY {
         let entry = PhonemeEntry::Simple((*phonemes).to_string());
-        g2p.lexicon.golds.insert((*word).to_string(), entry.clone());
-        // Capitalized form too, so lookup hits at sentence start.
-        let mut chars = word.chars();
-        if let Some(first) = chars.next() {
-            let capitalized = first.to_uppercase().collect::<String>() + chars.as_str();
-            g2p.lexicon.golds.insert(capitalized, entry);
-        }
+        g2p.lexicon.golds.insert((*word).to_string(), entry);
     }
 }
 
@@ -111,9 +104,7 @@ static LOWER_TO_UPPER: LazyLock<Regex> =
 static ACRONYM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([A-Z])([A-Z][a-z]+)").unwrap());
 static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
-/// Turns identifier punctuation and casing into speakable words and fixes terms
-/// the voice mispronounces: `get_models_path` -> "get models path",
-/// `parseJSONResponse` -> "parse Jason Response".
+/// get_models_path -> "get models path", parseJSONResponse -> "parse Jason Response".
 pub fn normalize(input: &str) -> String {
     // Whole terms such as `macOS` first, before camel-case splitting breaks them
     let mut text = apply_fixups(input.to_string());
@@ -232,6 +223,24 @@ mod tests {
         for (word, expected) in super::DICTIONARY {
             let (phonemes, _) = g2p.g2p(word).unwrap();
             assert_eq!(phonemes.trim(), *expected, "{word} override not installed");
+        }
+    }
+
+    // Only the lowercase form is installed; the lexicon answers for the capitalized one.
+    #[test]
+    fn dictionary_survives_a_sentence_start() {
+        use misaki_rs::{G2P, Language};
+        let mut g2p = G2P::new(Language::EnglishUS);
+        super::install_dictionary(&mut g2p);
+        for (word, expected) in super::DICTIONARY {
+            let mut chars = word.chars();
+            let first = chars.next().unwrap().to_uppercase().collect::<String>();
+            let sentence = format!("{first}{} is fine.", chars.as_str());
+            let (phonemes, _) = g2p.g2p(&sentence).unwrap();
+            assert!(
+                phonemes.contains(expected),
+                "{word} lost at sentence start in {sentence:?}: got {phonemes}"
+            );
         }
     }
 

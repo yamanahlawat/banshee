@@ -106,9 +106,7 @@ fn language<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Err
     Ok(spoken_or_english(value))
 }
 
-/// A language the engine reads, or the config's own word for detect it, which
-/// is not in the engine's table. Both sides of the liberal-read strict-write
-/// split ask this, so it is asked once.
+/// The engine's table plus auto, the config's own word for detect it; read and write both ask this.
 pub fn known_language(value: &str) -> bool {
     value == "auto" || whisper_rs::get_lang_id(value).is_some()
 }
