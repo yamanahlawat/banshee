@@ -33,14 +33,14 @@ function chosen(): string {
 // Written for the preview, not captured from anyone. Uneven by intent: tidy
 // one-liners hide the wrapping.
 const SAID = [
-  'you can do that, it will be a redesign of everything',
-  "what's pending from the task or can i start with ui design",
-  "Did we run post code checks for the previous commits we did? If not, let's do that including the current changes and run the comments feedback guidelines and then we will be ready to commit",
-  "Let's do it.",
-  'So what do we do about it? Should that only work when user restarts banshee?',
-  'if stte preset and details fallback cannot be live at all should we just remove it from the UI',
-  'commit the changes and push the branch',
-  'read the surface brief before you touch anything',
+  'Wrap the upload call in a retry with backoff and log each attempt',
+  'run the tests and tell me what broke',
+  'Why is the second request slower than the first one?',
+  'no, revert that last change',
+  'Rename the handler so its name says what it gives back, not when it runs',
+  'put it behind a flag for now',
+  'explain what this regular expression matches',
+  'commit that with a message about the timeout',
 ];
 
 function rows(): HistoryRow[] {
