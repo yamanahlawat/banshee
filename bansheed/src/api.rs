@@ -146,6 +146,12 @@ impl<'a> Params<'a> {
         self.typed(key, serde_json::Value::as_str, "a string")
     }
 
+    // Absent is false; present and not a boolean is refused, never read as false.
+    fn flag(&self, key: &str) -> Result<bool, Box<JsonRpcResponse>> {
+        self.typed(key, serde_json::Value::as_bool, "a boolean")
+            .map(|value| value.unwrap_or(false))
+    }
+
     fn optional_u64(&self, key: &str) -> Result<Option<u64>, Box<JsonRpcResponse>> {
         self.typed(key, serde_json::Value::as_u64, "a non-negative integer")
     }
@@ -231,10 +237,10 @@ fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse
         Ok(value) => value,
         Err(response) => return *response,
     };
-    let interrupt = params
-        .get("interrupt")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let interrupt = match params.flag("interrupt") {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
     let voice = match params.optional_str("voice") {
         Ok(value) => value,
         Err(response) => return *response,
@@ -266,10 +272,10 @@ fn stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse 
 }
 
 fn record_start(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let dictate = params
-        .get("dictate")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let dictate = match params.flag("dictate") {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
     let action = if dictate {
         TranscribeTarget::Dictate
     } else {
@@ -421,10 +427,10 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
             );
         }
     };
-    let persist = params
-        .get("persist")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let persist = match params.flag("persist") {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
 
     match settings::configure(Some(daemon_state), &assignments, persist) {
         Ok(outcome) => JsonRpcResponse::success(
@@ -465,7 +471,6 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
 
     let state = Arc::clone(daemon_state);
     let dir = dir.clone();
-    let slot = slot;
     tokio::spawn(async move {
         {
             let mut report = |progress| state.report_download(progress);
@@ -574,8 +579,8 @@ async fn connect(
     params: Params<'_>,
     work: fn(connect::Agent) -> Result<serde_json::Value, BansheeError>,
 ) -> JsonRpcResponse {
-    let disconnect = match params.typed("disconnect", serde_json::Value::as_bool, "a boolean") {
-        Ok(value) => value.unwrap_or(false),
+    let disconnect = match params.flag("disconnect") {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     if disconnect {

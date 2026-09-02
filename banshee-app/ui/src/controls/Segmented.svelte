@@ -12,7 +12,8 @@
 
   // One tab stop, arrows inside it. The handlers write stop directly because the daemon round trip
   // is not instant; the statement re-runs only when value or options moves. Math.max: a value the
-  // options do not hold leaves -1 and takes the group out of keyboard reach.
+  // options do not hold would leave -1 and take the group out of keyboard reach, so the first stop
+  // stands in.
   let stop = 0;
   $: stop = Math.max(
     0,

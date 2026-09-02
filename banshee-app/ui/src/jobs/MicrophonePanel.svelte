@@ -27,7 +27,7 @@
   let spoken: Languages = { languages: [] };
   let adding = false;
   let field: HTMLInputElement | undefined;
-  // Typing a word owns the keyboard, or Escape closes the panel and Cmd+F opens Find mid-word.
+  // Typing a word owns the keyboard; otherwise Escape would close the panel and Cmd+F open Find mid-word.
   let release: (() => void) | null = null;
 
   function beginAdding() {

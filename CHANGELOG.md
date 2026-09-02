@@ -56,10 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The daemon holds 169 MB less memory.** The pronunciation lexicon kept every
   word twice, once per casing, and the speech engine pre-packed its weights for
   a speed gain that did not show up in a measurement. An idle daemon with the
-  same models went from 1403 MB to 1234 MB. Nothing changes in what you hear.
+  same models went from 1403 MB to 1234 MB. What you hear is unchanged, apart
+  from the casing fix below.
 
 ### Fixed
 
+- **A flag sent with the wrong type is refused.** `interrupt` on `speak`,
+  `dictate` on `record_start` and `persist` on `configure` used to read a
+  string such as `"true"` as `false` and carry on. They now answer `-32602`
+  naming the flag, as `disconnect` already did.
 - **A word whose two casings sound different keeps both.** The lexicon used to
   swap them, so `Polish` was said as `polish` and the other way round. 361 words
   in the table have such a pair.
