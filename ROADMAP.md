@@ -24,7 +24,12 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
    `stt.provider`. Local stays the default; the tray and `banshee status` say when text or
    audio leaves the machine; keys live in the environment or the Keychain, never in
    `config.toml`. Lands with the honest edit to the README's offline promise.
-3. Output sinks that survive a device change (the cue and Kokoro sinks still open once).
+3. The window on Linux, as an AppImage and an AUR package, built by the bundle workflow with
+   GTK and WebKit installed. The blockers band grows rows for the typers and the daemon's
+   `PATH`, and the launcher stands in for the tray. After the keys, because no Linux user has
+   asked yet and `banshee watch --waybar` already covers the live loop there. It also gives the
+   WebDriver acceptance layer its first host: `tauri-driver` runs on Linux, not on macOS.
+4. Output sinks that survive a device change (the cue and Kokoro sinks still open once).
    Measure whether spoken status dies with the earcons before designing.
 
 ## Community sized

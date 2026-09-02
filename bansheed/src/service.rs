@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 
 use banshee_common::error::BansheeError;
-use banshee_common::utils::sibling;
 
 /// The platform arms decide what they honour, so a new entry is a variant, not a new pair of
 /// functions.
@@ -37,7 +36,8 @@ mod launchd {
 
     use banshee_common::utils::{DAEMON_AGENT, TRAY_AGENT, launchd_target, uid};
 
-    use super::{Agent, home_dir, sibling};
+    use super::{Agent, home_dir};
+    use banshee_common::utils::sibling;
 
     fn label(agent: Agent) -> &'static str {
         match agent {
@@ -293,7 +293,7 @@ pub use unsupported::{install, service_file_path, uninstall};
 
 #[cfg(test)]
 mod sibling_tests {
-    use super::*;
+    use banshee_common::utils::sibling;
     use std::path::PathBuf;
 
     // Builds a scratch directory holding a bundle layout for the test to use.
