@@ -61,6 +61,21 @@ jobs:
           # `bundle.sh` asks `security find-identity`, which reads the search list
           security list-keychain -d user -s "$keychain" \
             $(security list-keychains -d user | tr -d '"')
+          # `find-identity -v` lists only identities whose certificate is trusted, and
+          # a self-signed certificate in a fresh keychain is not, so trust it here the
+          # way CONTRIBUTING.md has a developer do it once in Keychain Access.
+          echo "identities before trust:"; security find-identity -p codesigning | grep -c '"' || true
+          echo "valid before trust:"; security find-identity -p codesigning -v | grep -c '"' || true
+          printf '%s' "$CODESIGN_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -passin "pass:$CODESIGN_CERTIFICATE_PASSWORD" \
+            -clcerts -nokeys -legacy -out "$RUNNER_TEMP/cert.pem" 2>/dev/null \
+            || openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -passin "pass:$CODESIGN_CERTIFICATE_PASSWORD" \
+            -clcerts -nokeys -out "$RUNNER_TEMP/cert.pem"
+          openssl x509 -in "$RUNNER_TEMP/cert.pem" -outform DER -out "$RUNNER_TEMP/cert.cer"
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \
+            "$RUNNER_TEMP/cert.cer"
+          echo "valid after trust:"; security find-identity -p codesigning -v | grep -c '"' || true
 
       - run: npm ci
         working-directory: banshee-app/ui
