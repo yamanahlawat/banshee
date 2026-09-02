@@ -231,6 +231,18 @@ fn kokoro_synthesizes_audible_speech() {
     assert!(peak > 0.05, "output is near-silence, peak {peak}");
 }
 
+// The all-caps form is the one misaki tags NNP and spells out, so it is the one
+// espeak would be asked about.
+#[test]
+fn a_curated_word_is_curated_in_every_casing() {
+    let mut g2p = G2P::new(Language::EnglishUS);
+    super::super::pronunciation::install_dictionary(&mut g2p);
+    for word in ["webhook", "Webhook", "WEBHOOK"] {
+        assert!(curated(&g2p.lexicon, word), "{word} must count as curated");
+    }
+    assert!(!curated(&g2p.lexicon, "Zzzq"));
+}
+
 #[test]
 fn sentences_split_on_terminators() {
     let chunks: Vec<&str> = sentences("Done with the build. Tests pass! Ready?").collect();

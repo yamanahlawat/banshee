@@ -173,7 +173,7 @@ fn a_model_failure_stops_naming_a_device_nothing_holds() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
     state.set_audio_device(Some("Blue Yeti".to_string()));
 
-    let error = super::model_failure(&state, "missing file".to_string());
+    let error = crate::daemon::model_failure(&state, "missing file".to_string());
 
     assert!(matches!(error, crate::state::RecordingError::Model(_)));
     assert_eq!(state.audio_device(), None);

@@ -109,7 +109,7 @@ fn a_bare_key_press_does_not_toggle() {
     );
 }
 
-// Presence is checked, absence is not — a decision, not an accident
+// Presence is checked, absence is not: a decision, not an accident
 #[test]
 fn extra_modifiers_do_not_block_the_chord() {
     let mut t = tracker("Ctrl+Alt+D", HotkeyMode::Hold);

@@ -227,11 +227,7 @@ fn value_at(config: &Config, key: &str) -> Option<serde_json::Value> {
 /// True when the daemon already runs the value written; a key changed and changed back has nothing
 /// to wait for.
 fn in_effect(key: &str, state: &DaemonState, config: &Config) -> bool {
-    // A daemon handed no config yet has nothing to compare against, so its keys
-    // wait. Two absent values must not read as a match.
-    let Some(running) = state.running_config() else {
-        return false;
-    };
+    let running = state.running_config();
     let was = value_at(&running, key);
     was.is_some() && was == value_at(config, key)
 }

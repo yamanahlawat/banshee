@@ -4,10 +4,12 @@ use banshee_common::{Blocker, BlockerKind};
 
 use crate::config::Config;
 
+pub const VAD_MODEL: &str = "silero_vad.onnx";
+
 /// The models the recording pipeline loads at startup, named in one place so a
 /// preflight and the daemon cannot disagree about what has to be on disk.
 pub fn required(config: &Config) -> [&'static str; 2] {
-    [config.stt.preset.model_name(), crate::VAD_MODEL]
+    [config.stt.preset.model_name(), VAD_MODEL]
 }
 
 pub fn missing(names: &[&str]) -> Vec<String> {

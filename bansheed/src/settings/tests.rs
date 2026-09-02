@@ -310,7 +310,9 @@ fn a_vocabulary_write_reaches_the_listener_that_holds_the_engine() {
 #[test]
 fn a_preset_write_reaches_the_listener_that_holds_the_engine() {
     let (commands, taken) = std::sync::mpsc::channel();
-    let state = crate::test_support::daemon_state(commands);
+    let mut running = Config::default();
+    running.stt.preset = crate::config::STTPreset::Fast;
+    let state = crate::test_support::daemon_state_running(running, commands);
 
     let outcome = super::configure(
         Some(&state),
@@ -445,6 +447,20 @@ fn a_setting_that_was_waiting_on_a_file_applies_once_the_download_ends() {
 #[test]
 fn a_setting_whose_file_is_still_missing_keeps_waiting() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let running = state.config().stt.preset.model_name();
+    let models = banshee_common::utils::get_models_path().expect("a home directory");
+    let absent = [
+        crate::config::STTPreset::Fast,
+        crate::config::STTPreset::Balanced,
+        crate::config::STTPreset::Quality,
+    ]
+    .into_iter()
+    .find(|preset| preset.model_name() != running && !models.join(preset.model_name()).exists());
+    // Every model downloaded leaves nothing that can be missing.
+    let Some(preset) = absent else { return };
+    let mut next = Config::default();
+    next.stt.preset = preset;
+    state.set_config(std::sync::Arc::new(next));
     state.record_outcome(&[], &["stt.preset".to_string()]);
 
     super::reapply_pending(&state);
@@ -455,7 +471,12 @@ fn a_setting_whose_file_is_still_missing_keeps_waiting() {
 /// apply to run.
 #[test]
 fn a_restart_only_key_is_left_alone() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let running: Config =
+        toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
+    let state = crate::test_support::daemon_state_running(running, std::sync::mpsc::channel().0);
+    let next: Config =
+        toml::from_str("[audio]\nhotkey = \"LeftCommand\"\n").expect("a legal binding");
+    state.set_config(std::sync::Arc::new(next));
     state.record_outcome(&[], &["audio.hotkey".to_string()]);
 
     super::reapply_pending(&state);
@@ -480,10 +501,9 @@ fn a_key_that_needs_a_restart_becomes_pending_and_a_live_one_does_not() {
 /// that notice untrue.
 #[test]
 fn a_restart_only_key_set_to_the_value_already_running_needs_no_restart() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
     let running: Config =
         toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
-    state.set_config(std::sync::Arc::new(running));
+    let state = crate::test_support::daemon_state_running(running, std::sync::mpsc::channel().0);
     let next: Config =
         toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
 
@@ -502,10 +522,9 @@ fn a_restart_only_key_set_to_the_value_already_running_needs_no_restart() {
 /// to wait, or the window would promise a key that does nothing yet.
 #[test]
 fn a_restart_only_key_set_to_a_different_value_still_waits() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
     let running: Config =
         toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
-    state.set_config(std::sync::Arc::new(running));
+    let state = crate::test_support::daemon_state_running(running, std::sync::mpsc::channel().0);
     let next: Config =
         toml::from_str("[audio]\nhotkey = \"LeftCommand\"\n").expect("a legal binding");
 

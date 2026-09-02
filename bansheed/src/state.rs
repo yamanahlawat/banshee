@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, OnceLock, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64},
     },
     time::{Duration, Instant},
@@ -192,7 +192,7 @@ pub struct DaemonState {
     // A key with no live apply is read once, when the daemon starts, so this is
     // what those keys run for the daemon's whole life. Without it a write cannot
     // tell a change from a change back.
-    running_config: OnceLock<Arc<Config>>,
+    running_config: Arc<Config>,
     // Keys the daemon accepted and wrote but has not applied. A restart empties
     // it by nature; a live path clears its own key.
     pending: Mutex<std::collections::BTreeSet<String>>,
@@ -232,31 +232,27 @@ pub struct DaemonState {
 }
 
 impl DaemonState {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        version: &'static str,
-        stt_model: &'static str,
-        vad_model: &'static str,
-        initial_vad_threshold: f32,
-        wanted_device: String,
+        config: Arc<Config>,
         db_connection: Option<rusqlite::Connection>,
         speech: SpeechPlayer,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
         cues: Cues,
-        barge_in: BargeInMode,
     ) -> Self {
+        let wanted_downloads = crate::models::download::wanted(&config);
         Self {
-            version,
-            stt_model: RwLock::new(stt_model),
-            vad_model,
-            vad_threshold: AtomicU32::new(initial_vad_threshold.to_bits()),
+            version: env!("CARGO_PKG_VERSION"),
+            stt_model: RwLock::new(config.stt.preset.model_name()),
+            vad_model: crate::models::VAD_MODEL,
+            vad_threshold: AtomicU32::new(config.stt.vad_threshold.to_bits()),
             audio_device: RwLock::new(None),
             missing_device: RwLock::new(None),
-            wanted_device: Mutex::new(wanted_device),
+            wanted_device: Mutex::new(config.audio.input_device.clone()),
             tts_voice: RwLock::new(None),
-            wanted_downloads: RwLock::new(Vec::new()),
-            config: RwLock::new(Arc::new(Config::default())),
-            running_config: OnceLock::new(),
+            wanted_downloads: RwLock::new(wanted_downloads),
+            barge_in: Mutex::new(config.audio.barge_in),
+            running_config: Arc::clone(&config),
+            config: RwLock::new(config),
             pending: Mutex::new(std::collections::BTreeSet::new()),
             recording_error: RwLock::new(None),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
@@ -275,7 +271,6 @@ impl DaemonState {
             speech: Arc::new(speech),
             commands,
             cues,
-            barge_in: Mutex::new(barge_in),
             pending_dictate: AtomicBool::new(false),
             typing: AtomicBool::new(false),
             push_to_talk_deadline: AtomicU64::new(0),
@@ -676,22 +671,19 @@ impl DaemonState {
         Arc::clone(&self.config.read().unwrap())
     }
 
-    /// The models the daemon wants are determined by the config that names
-    /// them, so they are rewritten here and nowhere else.
+    /// The models the daemon wants follow the config that names them.
     pub fn set_config(&self, config: Arc<Config>) {
         *self
             .wanted_downloads
             .write()
             .unwrap_or_else(|poison| poison.into_inner()) =
             crate::models::download::wanted(&config);
-        let _ = self.running_config.set(Arc::clone(&config));
         *self.config.write().unwrap() = config;
     }
 
-    /// The config the restart-only keys are running, or `None` before the
-    /// daemon has been handed one, when nothing can be compared against it.
-    pub fn running_config(&self) -> Option<Arc<Config>> {
-        self.running_config.get().cloned()
+    /// The config the restart-only keys are running.
+    pub fn running_config(&self) -> Arc<Config> {
+        Arc::clone(&self.running_config)
     }
 
     pub fn pending(&self) -> Vec<String> {

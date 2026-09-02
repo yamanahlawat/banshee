@@ -1,7 +1,7 @@
 use banshee_common::utils::get_socket_path;
 use banshee_common::{
     BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_STATE_CHANGED, BANSHEE_SUBSCRIBE, DownloadProgress,
-    JsonRpcNotification, JsonRpcRequest,
+    JsonRpcNotification, JsonRpcRequest, SileroVADConfig, WhisperConfig, error::BansheeError,
 };
 use std::fs;
 use std::io;
@@ -16,7 +16,10 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::api::{dispatch, live_state};
-use crate::state::DaemonState;
+use crate::config::Config;
+use crate::speech_to_text::{vad::VADEngine, whisper::WhisperEngine};
+use crate::state::{ConsumerCommand, DaemonState, RecordingError};
+use crate::{audio, history, hotkey, models, permissions, text_to_speech};
 
 // Claimed before model loading, so a lost single-instance race stays cheap
 pub fn claim() -> Result<(std::path::PathBuf, UnixListener), io::Error> {
@@ -31,6 +34,153 @@ pub fn claim() -> Result<(std::path::PathBuf, UnixListener), io::Error> {
     // owner-only: the socket is a command channel into the mic and speakers
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
     Ok((socket_path, listener))
+}
+
+/// Turns a model failure into the reported error, and drops the device name
+/// with the stream this error takes down. `open_capture` writes that name once
+/// `play()` succeeds, and every subscriber is told it.
+pub(crate) fn model_failure(daemon_state: &DaemonState, reason: String) -> RecordingError {
+    daemon_state.set_audio_device(None);
+    RecordingError::Model(reason)
+}
+
+/// What startup built and resolved. `open` and `missing` seed the watchdog, so
+/// its binding never reads them back out of `DaemonState`.
+struct Recording {
+    stream: cpal::Stream,
+    thread: std::thread::JoinHandle<()>,
+    open: String,
+    missing: Option<String>,
+}
+
+/// Capture, the models, and the thread that turns audio into text. All of it or
+/// none: with any piece missing the daemon cannot transcribe, so they share one
+/// error path and one reason for `banshee status` to report.
+fn start_recording(
+    daemon_state: &Arc<DaemonState>,
+    config: &Config,
+    command_receiver: std::sync::mpsc::Receiver<ConsumerCommand>,
+    cues: audio::cues::Cues,
+) -> Result<Recording, RecordingError> {
+    // Startup selects through the same function the watchdog tick uses, so a
+    // device that is absent at boot falls back rather than leaving capture dead
+    let selection =
+        audio::select(&config.audio.input_device).map_err(RecordingError::Microphone)?;
+    // Both failures stringify to BansheeError::Other, so the stage that failed
+    // is only knowable here, at the call
+    let capture = audio::open_capture(Arc::clone(daemon_state), &selection)
+        .map_err(|e| RecordingError::Microphone(e.to_string()))?;
+    match &selection.missing {
+        Some(name) => println!(
+            "Capture opened {}, still waiting for {name}",
+            selection.open
+        ),
+        None => println!("Capture opened {}", selection.open),
+    }
+    println!("Loading Whisper AI...");
+    let speech_to_text = WhisperEngine::new(
+        WhisperConfig::new(config.stt.preset.model_name()),
+        &config.stt.vocabulary,
+        (&config.stt).into(),
+    )
+    .map_err(|e| model_failure(daemon_state, e.to_string()))?;
+    let vad = VADEngine::new(SileroVADConfig::new(models::VAD_MODEL))
+        .map_err(|e| model_failure(daemon_state, e.to_string()))?;
+    let thread = hotkey::hotkey_listener(
+        hotkey::Pipeline {
+            source: hotkey::CaptureSource {
+                consumer: capture.consumer,
+                sample_rate: capture.sample_rate,
+            },
+            speech_to_text,
+            vad,
+            state: Arc::clone(daemon_state),
+            cues,
+            endpoint_silence_ms: config.stt.endpoint_silence_ms,
+        },
+        command_receiver,
+    );
+    // Written once the whole pipeline stands. A model failure drops capture, and
+    // a substitution recorded with nothing open contradicts the accessor.
+    daemon_state.set_missing_device(selection.missing.clone());
+    Ok(Recording {
+        stream: capture.stream,
+        thread,
+        open: selection.open,
+        missing: selection.missing,
+    })
+}
+
+pub async fn start(config: Config) -> Result<(), BansheeError> {
+    let config = Arc::new(config);
+    let (socket_path, listener) = claim()?;
+    permissions::ask_for_accessibility();
+    permissions::restart_when_granted();
+    let db_connection = if config.daemon.save_history {
+        Some(history::open()?)
+    } else {
+        None
+    };
+
+    let (speech_backend, live_voice) = text_to_speech::select_backend(&config.tts)?;
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let cues = audio::cues::start_cue_player(config.audio.cues.enabled);
+    let daemon_state = Arc::new(DaemonState::new(
+        Arc::clone(&config),
+        db_connection,
+        text_to_speech::SpeechPlayer::new(speech_backend),
+        commands,
+        cues.clone(),
+    ));
+
+    if let Some(voice) = live_voice {
+        daemon_state.set_tts_voice(voice);
+    }
+
+    // The watchdog owns the stream past daemon::run: stopping it stops
+    // capture, and the thread is the only thing left to join
+    let recording = match start_recording(&daemon_state, &config, command_receiver, cues) {
+        Ok(started) => {
+            let watchdog = audio::watchdog::spawn(
+                Arc::clone(&daemon_state),
+                started.stream,
+                started.open,
+                started.missing,
+            );
+            Some((watchdog, started.thread))
+        }
+        // A missing mic or model leaves the daemon useful rather than
+        // exiting, which the supervisor reads as a crash and retries
+        Err(error) => {
+            eprintln!("Recording is unavailable: {error}");
+            eprintln!(
+                "The daemon is up: speak, status, and history still work. \
+                     Recording, dictation, and ask_user do not."
+            );
+            eprintln!("Run `banshee status` for the fix.");
+            daemon_state.set_recording_error(error);
+            None
+        }
+    };
+    // After the pipeline, so a press always reaches record_start: with
+    // no pipeline it answers with the error cue rather than nothing
+    hotkey::start_global_hotkey(
+        Arc::clone(&daemon_state),
+        config.audio.hotkey,
+        config.audio.hotkey_mode,
+    );
+    let result = run(&daemon_state, socket_path, listener).await;
+    if let Some((watchdog, consumer_thread)) = recording {
+        // Capture stops first, so no Rebind arrives at a thread that
+        // has already left its loop
+        watchdog.stop();
+        // Drop the Whisper context before atexit: ggml's Metal cleanup
+        // asserts if buffers are still resident
+        let _ = daemon_state.commands().send(ConsumerCommand::Shutdown);
+        let _ = consumer_thread.join();
+    }
+    result?;
+    Ok(())
 }
 
 pub async fn run(

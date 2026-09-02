@@ -8,7 +8,7 @@ use banshee_common::{
     error::BansheeError,
     utils::{get_models_path, get_oov_log_path},
 };
-use misaki_rs::lexicon::PhonemeEntry;
+use misaki_rs::lexicon::{Lexicon, PhonemeEntry};
 use misaki_rs::{G2P, Language, MToken};
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use rodio::buffer::SamplesBuffer;
@@ -336,7 +336,7 @@ impl KokoroEngine {
         for tk in tokens {
             // Skip words with a curated gold entry so espeak never overrides it.
             if is_letter_spelled(tk)
-                && !self.g2p.lexicon.in_gold(&tk.text)
+                && !curated(&self.g2p.lexicon, &tk.text)
                 && let Some(phonemes) = oov.phonemize(&tk.text)
             {
                 // One casing serves the other, so the word is kept as it was spoken.
@@ -539,6 +539,11 @@ impl ActiveUtterance for KokoroUtterance {
 // A word misaki can't resolve is spelled letter-by-letter, giving one all-alphabetic
 // token whose phonemes are the per-letter names joined by spaces. Resolved words are a
 // single contiguous group; hyphenated/numeric tokens aren't all-alphabetic.
+// misaki answers the all-caps form from the lowercase entry, so the guard asks the same way.
+fn curated(lexicon: &Lexicon, word: &str) -> bool {
+    lexicon.in_gold(word) || lexicon.in_gold(&word.to_lowercase())
+}
+
 fn is_letter_spelled(tk: &MToken) -> bool {
     let w = tk.text.trim();
     let is_word = w.chars().count() > 1 && w.chars().all(|c| c.is_alphabetic());

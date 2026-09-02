@@ -52,7 +52,7 @@ fn a_preset_change_with_no_listener_is_not_reported_as_taken() {
 #[test]
 fn the_model_reported_is_the_one_the_listener_loaded() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    assert_eq!(state.stt_model(), "stt");
+    assert_eq!(state.stt_model(), Config::default().stt.preset.model_name());
 
     state.set_stt_model("ggml-large-v3-q5_0.bin");
 
@@ -114,16 +114,11 @@ fn a_microphone_fix_names_the_restart_that_some_faults_need() {
 fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<ConsumerCommand>) {
     let (commands, requests) = std::sync::mpsc::channel();
     let state = DaemonState::new(
-        "0.0.0",
-        "stt",
-        "vad",
-        0.5,
-        "default".to_string(),
+        std::sync::Arc::new(Config::default()),
         None,
         crate::text_to_speech::SpeechPlayer::default(),
         commands,
         crate::audio::cues::Cues::silent(),
-        BargeInMode::Stop,
     );
     (state, requests)
 }

@@ -117,7 +117,7 @@ pub fn role(file: &str) -> FileRole {
         .any(|preset| preset.model_name() == file)
     {
         FileRole::Speech
-    } else if file == crate::VAD_MODEL {
+    } else if file == crate::models::VAD_MODEL {
         FileRole::Detector
     } else if file == banshee_common::KOKORO_MODEL {
         FileRole::Engine
