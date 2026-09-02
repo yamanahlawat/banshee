@@ -3094,7 +3094,7 @@ dependencies = [
 [[package]]
 name = "misaki-rs"
 version = "0.3.0"
-source = "git+https://github.com/yamanahlawat/misaki-rs?rev=75f0d87d3d1a7f5624e86b21186e577f66e79eb9#75f0d87d3d1a7f5624e86b21186e577f66e79eb9"
+source = "git+https://github.com/yamanahlawat/misaki-rs?rev=99514c28c072d8a36456b2fcec6f1bd5471bfe06#99514c28c072d8a36456b2fcec6f1bd5471bfe06"
 dependencies = [
  "fancy-regex",
  "language-tokenizer",
@@ -3295,7 +3295,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",

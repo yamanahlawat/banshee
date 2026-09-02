@@ -20,4 +20,4 @@ lto = "thin"
 strip = true
 
 [patch.crates-io]
-misaki-rs = { git = "https://github.com/yamanahlawat/misaki-rs", rev = "75f0d87d3d1a7f5624e86b21186e577f66e79eb9" }
+misaki-rs = { git = "https://github.com/yamanahlawat/misaki-rs", rev = "99514c28c072d8a36456b2fcec6f1bd5471bfe06" }
