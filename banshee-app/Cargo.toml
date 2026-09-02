@@ -8,6 +8,10 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+# The bundle workflow ships the window; the dist builders have no GTK for it.
+[package.metadata.dist]
+dist = false
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
