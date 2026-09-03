@@ -10,6 +10,7 @@ can do.
 | --- | --- |
 | `banshee` (in `bansheed/`) | The daemon: audio capture, VAD, STT, hotkeys, JSON-RPC API. Also builds `banshee-mcp-shim` (`src/bin/`), the MCP stdio to daemon bridge |
 | `banshee-common` | Shared protocol types (JSON-RPC, errors, config) |
+| `banshee-app` | The desktop window: a Tauri app that is a client of the daemon's socket, shipped inside `Banshee.app` |
 
 The daemon exposes a JSON-RPC 2.0 API over a Unix socket at
 `~/.banshee/banshee.sock`. The CLI and the MCP shim are both just clients of it.
