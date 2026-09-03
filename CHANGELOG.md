@@ -14,9 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Homebrew installs the window.** `brew install --cask
   yamanahlawat/banshee/banshee` puts `Banshee.app` in `/Applications` and the
   `banshee` and `banshee-mcp-shim` commands on your `PATH`, one copy of
-  everything. The cask refuses to install beside the `banshee` formula, which is
-  the same daemon without the window. The README says which path fits which
-  use, and how to uninstall each.
+  everything. Until Banshee is notarised, run
+  `xattr -dr com.apple.quarantine /Applications/Banshee.app` once after it, or
+  macOS refuses the app and kills the command silently. The cask refuses to
+  install beside the `banshee` formula, which is the same daemon without the
+  window. The README says which path fits which use, and how to uninstall each.
 
 ## [0.12.0] - 2026-09-02
 
