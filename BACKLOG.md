@@ -20,9 +20,24 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   the checklist can name a typer the daemon cannot run. `connect` resolves an agent CLI and
   hands the child the `PATH` it searched; dictation does neither. Not reproduced: this
   machine is macOS.
+- `daemon.always_on` is parsed from `config.toml` and read nowhere, so the key does nothing and
+  the configuration page does not list it. Either a consumer or a removal, with the parse kept
+  so an old file still loads.
 - `daemon.log` carries no timestamps, so no interval in it can be measured.
 - Past eight queued utterances the oldest is dropped silently, and `speak` still answers with
   an id for it.
+
+- `banshee status` prints a check mark beside "daemon has the microphone: No microphone" when
+  no device is open. Seen on a fresh 0.12.0 install before the models were fetched. The line
+  should fail, or name the device it has.
+- `banshee status` one second after `banshee start` reports "the daemon is not running": the
+  socket is not bound yet while Whisper loads. Measured on a fresh 0.12.0 install; the same
+  command a few seconds later reports running. `start` should wait for the socket, or `status`
+  should say the daemon is starting.
+- A release published by the release workflow raises no event another workflow can see. The
+  bundle workflow's `release: published` trigger never fired for 0.12.0, and the bundle came
+  from a hand dispatch. #84 chains the bundle after announce; until it merges, a release needs
+  the dispatch by hand.
 
 ## The window
 

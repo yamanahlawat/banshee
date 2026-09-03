@@ -111,3 +111,26 @@ jobs:
           codesign --verify --strict --verbose=2 "$RUNNER_TEMP/check/Banshee.app"
 
       - run: gh release upload "$TAG" Banshee.app.tar.gz --clobber
+
+      # The cask is the macOS install; it names the tarball this run just uploaded.
+      - uses: actions/checkout@v6
+        with:
+          repository: yamanahlawat/homebrew-banshee
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+          persist-credentials: true
+      - name: publish the cask
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          [ "v${version}" = "$TAG" ] || { echo "tag $TAG is not v${version}, the version in Cargo.toml" >&2; exit 1; }
+          sha="$(shasum -a 256 Banshee.app.tar.gz | cut -d' ' -f1)"
+          mkdir -p tap/Casks
+          sed -e "s/@VERSION@/${version}/" -e "s/@SHA256@/${sha}/" packaging/banshee.cask.rb > tap/Casks/banshee.rb
+          brew style tap/Casks/banshee.rb
+          cd tap
+          git config user.name "banshee release"
+          git config user.email "release@banshee.invalid"
+          git add Casks/banshee.rb
+          # A second run for the same tag renders the same file; that is not a failure.
+          git diff --quiet --cached || { git commit -m "banshee cask ${version}" && git push; }
