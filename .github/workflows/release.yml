@@ -344,3 +344,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  custom-app-bundle:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/app-bundle.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit

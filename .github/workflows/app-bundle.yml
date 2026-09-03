@@ -6,8 +6,13 @@
 name: App bundle
 
 on:
-  release:
-    types: [published]
+  # dist calls this after it publishes the release; the release event itself never
+  # reaches another workflow when the release is published with the workflow token.
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -23,11 +28,11 @@ jobs:
     runs-on: macos-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ inputs.tag || github.ref_name }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -50,7 +55,9 @@ jobs:
           keychain="$RUNNER_TEMP/banshee.keychain-db"
           password="$(uuidgen)"
           security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 900 "$keychain"
+          # No auto-lock: the builds between this step and the signing take longer than
+          # any timeout, and a locked keychain makes codesign wait for a prompt forever.
+          security set-keychain-settings "$keychain"
           security unlock-keychain -p "$password" "$keychain"
           printf '%s' "$CODESIGN_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
@@ -61,6 +68,18 @@ jobs:
           # `bundle.sh` asks `security find-identity`, which reads the search list
           security list-keychain -d user -s "$keychain" \
             $(security list-keychains -d user | tr -d '"')
+          # `find-identity -v` lists only identities whose certificate is trusted, and
+          # a self-signed certificate in a fresh keychain is not, so trust it here the
+          # way CONTRIBUTING.md has a developer do it once in Keychain Access.
+          printf '%s' "$CODESIGN_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -passin "pass:$CODESIGN_CERTIFICATE_PASSWORD" \
+            -clcerts -nokeys -legacy -out "$RUNNER_TEMP/cert.pem" 2>/dev/null \
+            || openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -passin "pass:$CODESIGN_CERTIFICATE_PASSWORD" \
+            -clcerts -nokeys -out "$RUNNER_TEMP/cert.pem"
+          openssl x509 -in "$RUNNER_TEMP/cert.pem" -outform DER -out "$RUNNER_TEMP/cert.cer"
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \
+            "$RUNNER_TEMP/cert.cer"
 
       - run: npm ci
         working-directory: banshee-app/ui

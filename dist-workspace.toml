@@ -31,6 +31,9 @@ macos-sign = true
 # The window crate is not a dist package, and a --workspace build would still compile
 # it; the Linux builders have no GTK for that.
 precise-builds = true
+# The bundle workflow listens for the release event, but a release published with the
+# workflow token raises no event another workflow can see, so dist calls it instead.
+post-announce-jobs = ["./app-bundle"]
 
 # Pin Linux runners to 24.04; the ORT prebuilt needs glibc 2.38+.
 [dist.github-custom-runners]
