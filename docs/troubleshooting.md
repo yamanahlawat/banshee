@@ -21,6 +21,11 @@ the foreground when you want to watch it work. Beyond that:
   input events silently when an Accessibility grant is stale. Remove the Banshee
   entry from **System Settings > Privacy & Security > Accessibility**, restart
   the daemon, and approve the fresh prompt.
+- **You reinstalled the app, the Accessibility row is on, and Banshee still says
+  the grant is missing.** Deleting and reinstalling `/Applications/Banshee.app`
+  leaves the old row behind, and a row that looks on does not cover the new copy.
+  Select the row, click the minus button, restart the daemon, and approve the
+  fresh prompt.
 - **Permissions granted, but Banshee keeps asking.** Grants only apply to newly
   started processes. Restart the daemon with `banshee start`.
 

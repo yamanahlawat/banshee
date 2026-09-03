@@ -21,16 +21,61 @@ hears "let's go with python", and writes the file. Nothing was typed.
 
 ## Install
 
-|                       | Daemon, CLI, agent voice, dictation | Desktop window |
-| --------------------- | ----------------------------------- | -------------- |
-| macOS (Apple Silicon) | yes                                 | yes            |
-| Linux (x86_64, arm64) | yes, with [setup](docs/linux.md)    | not yet        |
-| Windows               | not yet                             | not yet        |
+|                       | With the desktop window            | Terminal only                          |
+| --------------------- | ---------------------------------- | -------------------------------------- |
+| macOS (Apple Silicon) | [the cask](#macos-with-the-window) | [the formula](#macos-terminal-only)    |
+| Linux (x86_64, arm64) | not yet                            | [the formula or the installer](#linux) |
+| Windows               | not yet                            | not yet                                |
 
-Needs ~1 GB of disk for the models. Intel Macs are not supported.
+Pick one. Needs ~1 GB of disk for the models. Intel Macs are not supported.
+
+### macOS, with the window
 
 ```bash
-brew install yamanahlawat/banshee/banshee
+brew install --cask yamanahlawat/banshee/banshee
+xattr -dr com.apple.quarantine /Applications/Banshee.app
+```
+
+The second line is needed until Banshee is notarised. Homebrew marks the
+download as quarantined; a quarantined Banshee will not open, and its `banshee`
+command dies with no message.
+
+Then open Banshee from `/Applications`. It fetches the models, asks for the
+two grants and starts the daemon. The `banshee` command is on your `PATH` too.
+
+Installed the app with `curl` before? Delete `/Applications/Banshee.app` first.
+Installed the formula before? Run these first, in this order:
+
+```bash
+banshee tray --uninstall
+banshee service uninstall
+brew uninstall --formula banshee
+```
+
+Without Homebrew: download and unpack the app, which sets no quarantine flag.
+
+```bash
+curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Banshee.app.tar.gz \
+  | tar -xzf - -C /Applications
+```
+
+The `banshee` command is then `/Applications/Banshee.app/Contents/MacOS/banshee`;
+link it onto your `PATH` if you want it short. No admin account? Unpack into
+`~/Applications` and read that path instead.
+
+### macOS, terminal only
+
+```bash
+brew install --formula yamanahlawat/banshee/banshee
+```
+
+The daemon, the `banshee` command and the menu bar icon. To add the window
+later, follow the switch above, then install the cask.
+
+### Linux
+
+```bash
+brew install --formula yamanahlawat/banshee/banshee
 ```
 
 Or without Homebrew:
@@ -40,39 +85,28 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/yamanahlawat/banshee/releases/latest/download/banshee-installer.sh | sh
 ```
 
-Both install the daemon, the CLI and the menu bar icon. For the desktop window,
-add the app bundle:
+The daemon and the `banshee` command. `banshee watch --waybar` feeds a status
+bar. See [docs/linux.md](docs/linux.md) for the typing tool and the service.
 
-```bash
-curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Banshee.app.tar.gz \
-  | tar -xzf - -C /Applications
-```
+### From source
 
-Writing to `/Applications` needs an admin account. Without one, run
-`mkdir -p ~/Applications`, extract there instead, and read that path
-everywhere below.
+Clone the repo and run `make install`; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-The bundle carries all four binaries, so it is a whole install on its own. Run
-`/Applications/Banshee.app/Contents/MacOS/banshee start` once, or link that
-binary onto your `PATH`.
+## Uninstall
 
-Banshee is signed but not yet notarised, so macOS refuses a copy that arrives
-carrying a quarantine flag. `curl` sets none, which is why the command above is
-a `curl`. If you download the tarball in a browser instead, clear the flag once:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/Banshee.app
-```
-
-To build it yourself, clone the repo and run `make install` (see
-[CONTRIBUTING.md](CONTRIBUTING.md)); `cargo install --path bansheed` builds the
-CLI and the daemon alone.
+- The cask: `brew uninstall --zap --cask banshee`. `--zap` also removes
+  `~/.banshee`, which holds the models, the history and `config.toml`.
+- The formula or the installer: `banshee tray --uninstall`, then
+  `banshee service uninstall`, then `brew uninstall --formula banshee` or delete
+  the binaries. Delete `~/.banshee` if you want the models and history gone too.
+- The app from `curl`: the two `banshee` commands above, then delete
+  `/Applications/Banshee.app`, and `~/.banshee` if you want.
 
 ## Set up
 
-With the app bundle installed, the desktop window does all of this for you:
-open it and it fetches the models, asks for the grants and starts the daemon.
-The steps below are the same work from a terminal.
+With the window installed, from the cask or from `curl`, open Banshee. It
+fetches the models, asks for the grants and starts the daemon. The steps below
+are the same work from a terminal.
 
 **1. Download the models** (~860 MB: Whisper, Silero VAD, Kokoro):
 

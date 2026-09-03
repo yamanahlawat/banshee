@@ -140,9 +140,10 @@ seconds, held or toggled, is ended by the watchdog, which returns the
 microphone and still transcribes what it heard.
 
 The key is rebindable: `banshee config set audio.hotkey F6`, then
-`banshee start`. Legal values are an F-key (`F1`–`F12`), a modifier alone
-(`RightOption`, `LeftOption`, `LeftControl`, `LeftCommand`, plus
-`RightCommand` and `Fn` on macOS), or modifiers and a key, as in `Ctrl+Alt+D`.
+`banshee start`. Legal values are an F-key (`F1`–`F12`), a modifier alone, or
+modifiers and a key, as in `Ctrl+Alt+D`. The modifiers are `RightOption`,
+`LeftOption`, `LeftControl` and `LeftCommand`, plus `RightCommand` and `Fn` on
+macOS and `RightControl` on Linux.
 A modifier bound alone still works as a modifier: `RightOption+E` types é, and
 banshee discards the accidental recording instead of transcribing it.
 

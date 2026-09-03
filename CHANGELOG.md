@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-03
+
+### Added
+
+- **Homebrew installs the window.** `brew install --cask
+  yamanahlawat/banshee/banshee` puts `Banshee.app` in `/Applications` and the
+  `banshee` and `banshee-mcp-shim` commands on your `PATH`, one copy of
+  everything. Until Banshee is notarised, run
+  `xattr -dr com.apple.quarantine /Applications/Banshee.app` once after it, or
+  macOS refuses the app and kills the command silently. The cask refuses to
+  install beside the `banshee` formula, which is the same daemon without the
+  window. The README says which path fits which use, and how to uninstall each.
+
 ## [0.12.0] - 2026-09-02
 
 ### Added
@@ -678,7 +691,8 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/yamanahlawat/banshee/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/yamanahlawat/banshee/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/yamanahlawat/banshee/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/yamanahlawat/banshee/compare/v0.10.0...v0.11.0
