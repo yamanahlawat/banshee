@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-09-04
+
+### Added
+
+- **Your coding agent is told to ask out loud.** The MCP handshake now says you
+  are working eyes-free, so the agent asks with `ask_user` instead of printing a
+  question you would have to read. An agent reads this once, when its session
+  starts, so restart the agent to pick it up.
+
+### Fixed
+
+- **A question no longer cuts off the status it was spoken with.** `ask_user`
+  waits for speech already playing to finish before it speaks, and it arms the
+  microphone before that wait, so the hotkey while Banshee talks holds to answer
+  instead of opening a dictation session that leaves the question unasked.
+- **Nothing claims a microphone Banshee has not opened.** The window, the tray
+  and the bar said "No microphone" on a first run, before the models were
+  fetched, on a machine with three of them. Every surface now says the stream is
+  not open, and `banshee status` fails that check and names the download instead
+  of printing a tick beside it.
+
 ## [0.12.1] - 2026-09-03
 
 ### Added
