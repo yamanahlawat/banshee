@@ -301,6 +301,13 @@ fn record_stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRe
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
 }
 
+async fn silence_within(daemon_state: &DaemonState, budget: Duration) -> bool {
+    let mut speaking = daemon_state.speech().subscribe_speaking();
+    tokio::time::timeout(budget, speaking.wait_for(|s| !s))
+        .await
+        .is_ok()
+}
+
 // Echo avoidance by ordering: listen only after playback ends.
 // Bounded so a stalled backend cannot hold the mic armed forever
 async fn playback_ended(daemon_state: &DaemonState, question: &str) -> bool {
@@ -308,10 +315,7 @@ async fn playback_ended(daemon_state: &DaemonState, question: &str) -> bool {
     let playback_budget = Duration::from_millis(
         (PLAYBACK_BASE_MS + words * PLAYBACK_PER_WORD_MS).min(MAX_PLAYBACK_WAIT_MS),
     );
-    let mut speaking = daemon_state.speech().subscribe_speaking();
-    tokio::time::timeout(playback_budget, speaking.wait_for(|s| !s))
-        .await
-        .is_ok()
+    silence_within(daemon_state, playback_budget).await
 }
 
 async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
@@ -328,7 +332,8 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         return unavailable(params.id(), &reason);
     }
 
-    // One armed session at a time; the mode is the lock
+    // One armed session at a time; the mode is the lock. Armed before the wait
+    // below, so a press while Banshee talks holds to answer rather than dictates.
     if !daemon_state.arm_for_ask() {
         return JsonRpcResponse::error(
             params.id(),
@@ -337,9 +342,12 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         );
     }
 
-    // Interrupt: the question must not queue behind stale status speech
+    // A status outruns any budget short of the stalled-backend bound.
+    let settled = silence_within(daemon_state, Duration::from_millis(MAX_PLAYBACK_WAIT_MS)).await;
+
+    // Interrupts only what outran the wait, so a stalled backend costs one budget.
     let clean_question = sanitize(question);
-    if let Err(e) = daemon_state.speech().speak(&clean_question, true, None) {
+    if let Err(e) = daemon_state.speech().speak(&clean_question, !settled, None) {
         daemon_state.set_recording_mode(RecordingMode::Idle);
         return JsonRpcResponse::error(
             params.id(),

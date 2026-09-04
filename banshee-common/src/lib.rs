@@ -132,8 +132,9 @@ pub fn key_press_access(status: &Value) -> Option<&str> {
 
 /// The sentence every surface shows for these two fields. Each client adds its
 /// own lead-in and nothing else, so all of them spell the absent case alike.
+/// Nothing open is not an absent device: a model that fails to load closes capture.
 pub fn microphone_label(open: Option<&str>, missing: Option<&str>) -> String {
-    let open = open.unwrap_or("No microphone");
+    let open = open.unwrap_or("Not open");
     match missing {
         // The quotes keep two multi-word names apart
         Some(missing) => format!("{open} (waiting for \"{missing}\")"),
@@ -534,8 +535,8 @@ mod label_tests {
                 None,
                 "MacBook Pro Microphone",
             ),
-            (None, Some("yeti"), "No microphone (waiting for \"yeti\")"),
-            (None, None, "No microphone"),
+            (None, Some("yeti"), "Not open (waiting for \"yeti\")"),
+            (None, None, "Not open"),
         ] {
             assert_eq!(microphone_label(open, missing), expected);
         }

@@ -79,12 +79,14 @@ fn an_unknown_device_is_left_out_rather_than_named_empty() {
 // the bar names a device that is gone
 #[test]
 fn a_waybar_tooltip_names_what_the_config_still_waits_for() {
-    // Nothing records, so the bar has to say both: no device, and the one
-    // the config is still waiting for
     let line = waybar_line("idle", None, Some("Yeti Nano"));
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
     let tooltip = parsed["tooltip"].as_str().unwrap();
-    assert!(tooltip.contains("No microphone"), "{tooltip}");
+    assert!(tooltip.contains("Not open"), "{tooltip}");
+    assert!(
+        !tooltip.contains("No microphone"),
+        "a closed stream is not an absent device: {tooltip}"
+    );
     assert!(tooltip.contains("\"Yeti Nano\""), "{tooltip}");
 }
 

@@ -120,6 +120,44 @@ async fn history_takes_an_explicit_zero_literally() {
 }
 
 #[tokio::test]
+async fn ask_user_lets_speech_from_the_same_turn_finish() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let (state, cut_short) = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_millis(80),
+        commands,
+    );
+
+    state
+        .speech()
+        .speak("here is what I would change", false, None)
+        .expect("the status starts playing");
+
+    let session_state = Arc::clone(&state);
+    std::thread::spawn(move || {
+        let Ok(ConsumerCommand::Ask(ask)) = command_receiver.recv() else {
+            return;
+        };
+        session_state.set_recording_mode(RecordingMode::Idle);
+        let _ = ask.reply.send("say it is idle".to_string());
+    });
+
+    let request = request(
+        BANSHEE_ASK_USER,
+        Some(serde_json::json!({"question": "What should it say?"})),
+    );
+    let response = dispatch(request, &state).await;
+
+    assert!(
+        matches!(response, JsonRpcResponse::Success { .. }),
+        "the question is still asked"
+    );
+    assert!(
+        !cut_short.load(std::sync::atomic::Ordering::SeqCst),
+        "a status from the same turn must not be cut off mid-sentence"
+    );
+}
+
+#[tokio::test]
 async fn ask_user_returns_the_scoped_answer() {
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let state = test_state(commands);

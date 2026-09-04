@@ -296,6 +296,25 @@ it('offers a way back when the daemon has stopped', async () => {
   expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
 });
 
+it('stops naming a microphone once the daemon has stopped', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  daemon.update((s) => ({
+    ...s,
+    live: { ...s.live, audio_device: 'MacBook Pro Microphone' },
+  }));
+  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await waitFor(() =>
+    expect(panelHeading('Microphone').textContent).toContain('listening through'),
+  );
+
+  daemon.update((s) => ({ ...s, down: 'not running' }));
+  await waitFor(() =>
+    expect(panelHeading('Microphone').textContent).toContain('Banshee is not running'),
+  );
+});
+
 it('does not reflow the paragraph when a copy is confirmed', async () => {
   const { container } = render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
@@ -374,6 +393,35 @@ it('empties the record when the daemon says it is no longer saving', async () =>
   // The daemon refuses the read outright while this is off.
   await waitFor(() => expect(screen.getByText('Nothing is kept')).toBeTruthy());
   expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
+});
+
+it('says the stream is not open, rather than that there is no microphone', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    audio_device: null,
+    download_megabytes: 860,
+    blockers: [
+      {
+        kind: 'model',
+        id: 'ggml-large-v3-turbo-q5_0.bin',
+        name: 'ggml-large-v3-turbo-q5_0.bin',
+        role: 'speech',
+        remedy: 'download',
+        consequence: 'recording, dictation, and ask_user do not work',
+        fix: 'run: banshee setup',
+        command: 'banshee setup',
+      },
+    ],
+  });
+  render(App);
+
+  await waitFor(() => expect(screen.getByText('Not open')).toBeTruthy());
+  expect(screen.queryByText(/no microphone/i)).toBeNull();
+
+  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await waitFor(() => expect(panel('Microphone')).toBeTruthy());
+  expect(panelHeading('Microphone').textContent).toContain('Banshee is not listening yet');
 });
 
 it('asks which speech model to fetch before it fetches one', async () => {

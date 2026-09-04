@@ -4,6 +4,12 @@ use banshee_common::{
 };
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+const INSTRUCTIONS: &str = "The user is working eyes-free and is not reading the screen. \
+     When you need a decision or an answer, ask it with ask_user, never with an on-screen \
+     prompt, menu or written question: the user cannot see those. Speak your status with \
+     speak_status, and keep written output for what has to be read, such as code, paths, \
+     commands and tables.";
+
 fn tool_text(id: Option<serde_json::Value>, text: &str) -> JsonRpcResponse {
     JsonRpcResponse::success(
         id,
@@ -50,7 +56,8 @@ async fn main() {
                         "capabilities": {
                             "tools": {}
                         },
-                        "serverInfo": {"name": "banshee", "version": env!("CARGO_PKG_VERSION")}
+                        "serverInfo": {"name": "banshee", "version": env!("CARGO_PKG_VERSION")},
+                        "instructions": INSTRUCTIONS
                     }),
                 ),
                 "notifications/initialized" => continue,
@@ -60,7 +67,7 @@ async fn main() {
                         "tools": [
                             {
                                 "name": "speak_status",
-                                "description": "Speak a short message aloud to the user, who is working eyes-free and not reading the screen. This spoken message is your reply to them, so do not also repeat it as written text; reserve written output for what must be read on screen, such as code, file paths, commands, URLs, and lists. Use it for decisions you need input on, questions, and letting the user know you have finished. Talk like a colleague in the room: natural, warm, and varied, never scripted. When you finish, say what got done and flag anything still pending, then hand back to the user in your own words each time. When an implementation is done, mention it is ready for review. Do not narrate routine steps or tool activity in between.",
+                                "description": "Speak a short message aloud to the user, who is working eyes-free and not reading the screen. This spoken message is your reply to them, so do not also repeat it as written text; reserve written output for what must be read on screen, such as code, file paths, commands, URLs, and lists. Use it to say what you decided or finished; when you need an answer back, use ask_user instead, which speaks and listens in one step. Talk like a colleague in the room: natural, warm, and varied, never scripted. When you finish, say what got done and flag anything still pending, then hand back to the user in your own words each time. When an implementation is done, mention it is ready for review. Do not narrate routine steps or tool activity in between.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {"text": {"type": "string", "description": "One or two conversational sentences, as if speaking to a colleague. Refer to code, files, and identifiers by their spoken names, for example 'the hotkey listener' rather than a file path or function signature. Keep exact paths, code, URLs, and lists in your normal text output; they do not read well aloud."}},
@@ -81,7 +88,7 @@ async fn main() {
                             },
                             {
                                 "name": "listen_for_prompt",
-                                "description": "Read what the user has said since your last call. After asking a question with speak_status, call this with a timeout_ms to wait for their spoken answer. Returns empty text if the user said nothing.",
+                                "description": "Read what the user has said since your last call. Use it to pick up speech you did not explicitly ask for; when you have a question, prefer ask_user, which speaks it and waits in one step. It returns at once unless you pass timeout_ms, and empty text if the user said nothing.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {"timeout_ms": {"type": "number", "description": "Wait up to this many milliseconds for new speech before returning, e.g. 30000 when expecting an answer"}}

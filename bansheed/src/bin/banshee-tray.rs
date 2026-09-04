@@ -145,7 +145,14 @@ mod mac {
         if indicator == Indicator::NotRunning {
             return "Start with: banshee start".to_string();
         }
-        banshee_common::microphone_label(device.open.as_deref(), device.missing.as_deref())
+        let label =
+            banshee_common::microphone_label(device.open.as_deref(), device.missing.as_deref());
+        // This menu carries no caption, and "Not open" alone names nothing.
+        if device.open.is_some() {
+            label
+        } else {
+            format!("Microphone: {label}")
+        }
     }
 
     enum Row {
@@ -523,6 +530,18 @@ mod mac {
                 open: open.map(str::to_string),
                 missing: missing.map(str::to_string),
             }
+        }
+
+        #[test]
+        fn a_closed_stream_names_the_microphone_and_an_open_one_does_not() {
+            assert_eq!(
+                device_line(Indicator::Idle, &device(None, None)),
+                "Microphone: Not open"
+            );
+            assert_eq!(
+                device_line(Indicator::Idle, &device(Some("Yeti Nano"), None)),
+                "Yeti Nano"
+            );
         }
 
         #[test]
