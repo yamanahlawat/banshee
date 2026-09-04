@@ -333,8 +333,10 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     }
 
     // Speech in flight is as often this turn's own status as it is stale. Waited
-    // out before arming, so nothing reports a listening mic while one is talking
-    silence_within(daemon_state, Duration::from_millis(PLAYBACK_BASE_MS)).await;
+    // out before arming, so nothing reports a listening mic while one is talking,
+    // and bounded only against a stalled backend: a status runs past any budget
+    // shorter than that, and the interrupt below would cut it mid-sentence.
+    silence_within(daemon_state, Duration::from_millis(MAX_PLAYBACK_WAIT_MS)).await;
 
     // One armed session at a time; the mode is the lock
     if !daemon_state.arm_for_ask() {
