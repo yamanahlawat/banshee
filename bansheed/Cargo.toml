@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 arboard = "3.6.1"
 audioadapter-buffers = "3.0.0"
-banshee-common = { version = "0.12.1", path = "../banshee-common" }
+banshee-common = { version = "0.12.2", path = "../banshee-common" }
 chrono = "0.4"
 clap = { version = "4.6.1", features = ["derive"] }
 cpal = "0.17.3"

@@ -158,7 +158,7 @@ export const SYSTEM_DEVICE = 'default';
 // The configured name is deliberately not consulted: it is what was asked for,
 // not what the daemon opened.
 export function microphoneInUse(open: string | null): string {
-  return open ?? 'No microphone';
+  return open ?? 'Not open';
 }
 
 export function deviceLabel(live: string | null): string {

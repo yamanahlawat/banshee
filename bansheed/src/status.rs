@@ -368,23 +368,37 @@ fn report_probe(probed: Result<(String, Option<String>), String>) -> bool {
     }
 }
 
+// A model that fails to load takes capture down with it, so the model blocker
+// holds the fix.
+fn open_fix(blockers: &[Blocker]) -> &str {
+    blockers
+        .iter()
+        .find(|blocker| blocker.kind == BlockerKind::Model)
+        .map_or(MICROPHONE_FIX, |blocker| blocker.fix.as_str())
+}
+
+fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
+    match banshee_common::audio_device(status) {
+        Some(open) => pass(&microphone_line(
+            "daemon has the microphone",
+            Some(open),
+            banshee_common::missing_device(status),
+        )),
+        None => fail("the daemon has no microphone open", open_fix(blockers)),
+    }
+}
+
 // Opening a second stream fails on backends that allow only one, which would
 // report a broken microphone on a healthy machine, so ask the daemon instead.
 // `Silent` counts as live: something answered the socket, so something owns the
-// device. Missing models suppress the pipeline blocker, so no blocker proves
-// capture opened, not that recording works. A substitute records correctly, so
-// it stays a pass.
+// device. A substitute records correctly, so it stays a pass.
 fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     match daemon {
         Daemon::Running { status, blockers } => match blockers
             .iter()
             .find(|blocker| blocker.kind == BlockerKind::Pipeline)
         {
-            None => pass(&microphone_line(
-                "daemon has the microphone",
-                banshee_common::audio_device(status),
-                banshee_common::missing_device(status),
-            )),
+            None => report_open(status, blockers),
             Some(blocker) => fail(
                 &format!("the daemon cannot record: {}", blocker.consequence),
                 &blocker.fix,

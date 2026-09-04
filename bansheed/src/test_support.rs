@@ -26,6 +26,53 @@ impl TtsBackend for NullBackend {
     }
 }
 
+struct Held {
+    until: std::time::Instant,
+    cut_short: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ActiveUtterance for Held {
+    fn is_finished(&mut self) -> bool {
+        std::time::Instant::now() >= self.until
+    }
+    fn stop(&mut self) {
+        self.cut_short
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct HoldingBackend {
+    hold: std::time::Duration,
+    cut_short: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TtsBackend for HoldingBackend {
+    fn start(
+        &self,
+        _text: &str,
+        _voice: Option<&str>,
+    ) -> std::io::Result<Box<dyn ActiveUtterance>> {
+        Ok(Box::new(Held {
+            until: std::time::Instant::now() + self.hold,
+            cut_short: Arc::clone(&self.cut_short),
+        }))
+    }
+}
+
+/// A daemon state whose speech plays for `hold`. The flag goes true if an
+/// utterance is stopped before it finishes.
+pub fn daemon_state_holding_speech(
+    hold: std::time::Duration,
+    commands: std::sync::mpsc::Sender<ConsumerCommand>,
+) -> (Arc<DaemonState>, Arc<std::sync::atomic::AtomicBool>) {
+    let cut_short: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let speech = SpeechPlayer::new(Box::new(HoldingBackend {
+        hold,
+        cut_short: Arc::clone(&cut_short),
+    }));
+    (state(None, speech, commands), cut_short)
+}
+
 /// The voice and rate the last live `[tts]` write handed the backend.
 pub type RecordedTts = Arc<std::sync::Mutex<Vec<(String, f32)>>>;
 

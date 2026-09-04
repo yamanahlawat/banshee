@@ -10,6 +10,47 @@ fn the_microphone_line_leads_with_who_holds_the_device() {
     );
 }
 
+#[test]
+fn a_daemon_with_no_stream_open_fails_and_names_the_download() {
+    let models = crate::models::blockers(&["no-such-model-9f3a.bin"]);
+
+    assert!(!super::report_open(
+        &serde_json::json!({ "audio_device": null }),
+        &models
+    ));
+    assert_eq!(super::open_fix(&models), "run: banshee setup");
+}
+
+#[test]
+fn nothing_open_and_no_model_blocker_falls_back_to_the_microphone_fix() {
+    assert_eq!(super::open_fix(&[]), super::MICROPHONE_FIX);
+}
+
+#[test]
+fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
+    let (commands, _drain) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    state.set_recording_error(crate::state::RecordingError::Model(
+        "missing file.".to_string(),
+    ));
+
+    let blockers = crate::readiness::blockers(&state);
+    let model = blockers
+        .iter()
+        .find(|blocker| blocker.kind == banshee_common::BlockerKind::Model)
+        .expect("a model failure leaves a model blocker");
+
+    assert_eq!(super::open_fix(&blockers), model.fix);
+}
+
+#[test]
+fn a_daemon_that_names_its_device_passes() {
+    assert!(super::report_open(
+        &serde_json::json!({ "audio_device": "MacBook Pro Microphone" }),
+        &[]
+    ));
+}
+
 // No daemon holds the device, so the checklist opens it. It selects the way
 // capture does, so a substitute is a working machine, not a broken one.
 #[test]
