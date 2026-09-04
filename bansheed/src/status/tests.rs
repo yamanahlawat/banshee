@@ -34,10 +34,13 @@ fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
         "missing file.".to_string(),
     ));
 
-    assert_ne!(
-        super::open_fix(&crate::readiness::blockers(&state)),
-        super::MICROPHONE_FIX
-    );
+    let blockers = crate::readiness::blockers(&state);
+    let model = blockers
+        .iter()
+        .find(|blocker| blocker.kind == banshee_common::BlockerKind::Model)
+        .expect("a model failure leaves a model blocker");
+
+    assert_eq!(super::open_fix(&blockers), model.fix);
 }
 
 #[test]
