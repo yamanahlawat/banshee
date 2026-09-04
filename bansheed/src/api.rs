@@ -301,6 +301,13 @@ fn record_stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRe
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
 }
 
+async fn silence_within(daemon_state: &DaemonState, budget: Duration) -> bool {
+    let mut speaking = daemon_state.speech().subscribe_speaking();
+    tokio::time::timeout(budget, speaking.wait_for(|s| !s))
+        .await
+        .is_ok()
+}
+
 // Echo avoidance by ordering: listen only after playback ends.
 // Bounded so a stalled backend cannot hold the mic armed forever
 async fn playback_ended(daemon_state: &DaemonState, question: &str) -> bool {
@@ -308,10 +315,7 @@ async fn playback_ended(daemon_state: &DaemonState, question: &str) -> bool {
     let playback_budget = Duration::from_millis(
         (PLAYBACK_BASE_MS + words * PLAYBACK_PER_WORD_MS).min(MAX_PLAYBACK_WAIT_MS),
     );
-    let mut speaking = daemon_state.speech().subscribe_speaking();
-    tokio::time::timeout(playback_budget, speaking.wait_for(|s| !s))
-        .await
-        .is_ok()
+    silence_within(daemon_state, playback_budget).await
 }
 
 async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
@@ -328,6 +332,10 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         return unavailable(params.id(), &reason);
     }
 
+    // Speech in flight is as often this turn's own status as it is stale. Waited
+    // out before arming, so nothing reports a listening mic while one is talking
+    silence_within(daemon_state, Duration::from_millis(PLAYBACK_BASE_MS)).await;
+
     // One armed session at a time; the mode is the lock
     if !daemon_state.arm_for_ask() {
         return JsonRpcResponse::error(
@@ -337,7 +345,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         );
     }
 
-    // Interrupt: the question must not queue behind stale status speech
+    // Interrupt: the question must not queue behind speech that outran that wait
     let clean_question = sanitize(question);
     if let Err(e) = daemon_state.speech().speak(&clean_question, true, None) {
         daemon_state.set_recording_mode(RecordingMode::Idle);
