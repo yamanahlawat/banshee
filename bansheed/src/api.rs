@@ -332,13 +332,8 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         return unavailable(params.id(), &reason);
     }
 
-    // Speech in flight is as often this turn's own status as it is stale. Waited
-    // out before arming, so nothing reports a listening mic while one is talking,
-    // and bounded only against a stalled backend: a status runs past any budget
-    // shorter than that, and the interrupt below would cut it mid-sentence.
-    silence_within(daemon_state, Duration::from_millis(MAX_PLAYBACK_WAIT_MS)).await;
-
-    // One armed session at a time; the mode is the lock
+    // One armed session at a time; the mode is the lock. Armed before the wait
+    // below, so a press while Banshee talks holds to answer rather than dictates.
     if !daemon_state.arm_for_ask() {
         return JsonRpcResponse::error(
             params.id(),
@@ -347,9 +342,12 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         );
     }
 
-    // Interrupt: the question must not queue behind speech that outran that wait
+    // A status outruns any budget short of the stalled-backend bound.
+    let settled = silence_within(daemon_state, Duration::from_millis(MAX_PLAYBACK_WAIT_MS)).await;
+
+    // Interrupts only what outran the wait, so a stalled backend costs one budget.
     let clean_question = sanitize(question);
-    if let Err(e) = daemon_state.speech().speak(&clean_question, true, None) {
+    if let Err(e) = daemon_state.speech().speak(&clean_question, !settled, None) {
         daemon_state.set_recording_mode(RecordingMode::Idle);
         return JsonRpcResponse::error(
             params.id(),

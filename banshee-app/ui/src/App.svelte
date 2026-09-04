@@ -123,6 +123,7 @@
   // Said on the home screen only while it is true, so it needs no dismissal to
   // remember: connecting one is what clears it.
   $: noAgentYet = live && agentsRead && connected === 0;
+  $: pipelineBroken = blockers.some((blocker) => blocker.kind === 'pipeline');
 
   // Spelled, because a sentence should not open on a digit. Six agents are
   // detectable today, so the list needs no more than this.
@@ -132,9 +133,13 @@
   $: panels = {
     Microphone: {
       name: 'Microphone',
-      lead: $daemon.live.audio_device
-        ? `Banshee is listening through the ${$daemon.live.audio_device}.`
-        : 'Banshee has no microphone.',
+      lead: !live
+        ? 'Banshee is not running, so no microphone is open.'
+        : $daemon.live.audio_device
+          ? `Banshee is listening through the ${$daemon.live.audio_device}.`
+          : pipelineBroken
+            ? 'Banshee cannot open a microphone.'
+            : 'Banshee is not listening yet.',
     },
     Hotkey: {
       name: 'Hotkey',

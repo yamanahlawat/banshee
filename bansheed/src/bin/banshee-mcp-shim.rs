@@ -88,7 +88,7 @@ async fn main() {
                             },
                             {
                                 "name": "listen_for_prompt",
-                                "description": "Read what the user has said since your last call. Use it to pick up speech you did not explicitly ask for; when you have a question, prefer ask_user, which speaks it and waits in one step. Returns empty text if the user said nothing.",
+                                "description": "Read what the user has said since your last call. Use it to pick up speech you did not explicitly ask for; when you have a question, prefer ask_user, which speaks it and waits in one step. It returns at once unless you pass timeout_ms, and empty text if the user said nothing.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {"timeout_ms": {"type": "number", "description": "Wait up to this many milliseconds for new speech before returning, e.g. 30000 when expecting an answer"}}

@@ -132,8 +132,8 @@ describe('microphoneInUse', () => {
     expect(microphoneInUse('MacBook Pro Microphone')).toBe('MacBook Pro Microphone');
   });
 
-  it('says none rather than the device that was asked for', () => {
-    expect(microphoneInUse(null)).toBe('No microphone');
+  it('says the stream is closed, not that the machine has no microphone', () => {
+    expect(microphoneInUse(null)).toBe('Not open');
   });
 });
 
