@@ -10,6 +10,10 @@ the foreground when you want to watch it work. Beyond that:
   watch the `Transcribed` line; if it warns about slower-than-realtime, set
   `preset = "fast"` and run `banshee setup`. On a 2014 dual-core laptop that
   took one clip from 104s to 4.8s.
+- **`banshee status` fails the microphone check on a fresh install.** Capture
+  closes when a model cannot load, so until `banshee setup` has finished there
+  is no open stream and the check fails, naming the download as the fix. Run
+  `banshee setup`, then `banshee start`; the line then names your device.
 - **`banshee record start` says the microphone is busy.** A previous
   push-to-talk never got its `stop`. `banshee record stop` clears it; the
   daemon also releases the mic on its own after two minutes.
@@ -35,4 +39,3 @@ macOS ships the top row as media keys, so a plain `F5` press starts Apple's
 own Dictation and never reaches the daemon; hold `Fn` to send the real key. To
 make F-keys single presses, turn on _Settings → Keyboard → "Use F1, F2, etc.
 keys as standard function keys"_.
-
