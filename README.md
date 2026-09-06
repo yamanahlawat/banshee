@@ -14,10 +14,11 @@ whatever app you are focused on.
 
 ## Demo
 
-<https://github.com/user-attachments/assets/006132bd-9710-4322-a35a-4a5e5004371c>
+<https://github.com/user-attachments/assets/912c94af-baac-4385-b135-07a4eeb11b0e>
 
-The daemon running with the Pi coding agent. It asks which language to use,
-hears "let's go with python", and writes the file. Nothing was typed.
+Claude Code finds a first-run bug in Banshee's own code, says out loud what it
+would change, and asks how far to take the fix. The answer is spoken back.
+Nothing was typed.
 
 ## Install
 
