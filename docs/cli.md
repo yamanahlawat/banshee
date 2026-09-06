@@ -45,4 +45,3 @@ idle
 The first line is the state at connect; the daemon pushes the rest as they
 happen. The command exits non-zero when the daemon stops, so a supervisor can
 restart it. For a single answer rather than a stream, ask `banshee status`.
-

@@ -8,6 +8,13 @@ Pi has its own extension API, so it talks to the Banshee daemon directly over
 `~/.banshee/banshee.sock` rather than going through `banshee-mcp-shim`. Nothing
 extra to install or configure.
 
+## Demo
+
+<https://github.com/user-attachments/assets/006132bd-9710-4322-a35a-4a5e5004371c>
+
+The daemon running with Pi. It asks which language to use, hears "let's go with
+python", and writes the file. Nothing was typed.
+
 ## Install
 
 ```bash
