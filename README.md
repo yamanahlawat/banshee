@@ -20,13 +20,47 @@ Claude Code finds a first-run bug in Banshee's own code, says out loud what it
 would change, and asks how far to take the fix. The answer is spoken back.
 Nothing was typed.
 
-## Install
+## Quickstart
 
-|                       | With the desktop window            | Terminal only                          |
-| --------------------- | ---------------------------------- | -------------------------------------- |
-| macOS (Apple Silicon) | [the cask](#macos-with-the-window) | [the formula](#macos-terminal-only)    |
-| Linux (x86_64, arm64) | not yet                            | [the formula or the installer](#linux) |
-| Windows               | not yet                            | not yet                                |
+macOS on Apple Silicon, with the window. Every other platform and install
+method is under [Other ways to install](#other-ways-to-install).
+
+```bash
+brew install --cask yamanahlawat/banshee/banshee
+xattr -dr com.apple.quarantine /Applications/Banshee.app
+open /Applications/Banshee.app
+```
+
+No Homebrew? [Install without it](#macos-without-homebrew) instead: the
+download carries no quarantine flag, so it needs no `xattr` line.
+
+Banshee downloads the models (~860 MB), asks for the **Microphone** and
+**Accessibility** grants, and starts. Approve both: without them it cannot
+record or type. It restarts itself to pick each grant up.
+
+**1. Say something.** Hold **Right Option**, speak, let go. The text is typed
+into whatever app you are focused on.
+
+**2. Give your coding agent a voice.**
+
+```bash
+banshee connect claude
+```
+
+Restart the agent. It now speaks what it decided and asks you questions out
+loud, and you answer by talking. Other agents are in
+[Connect your coding agent](#connect-your-coding-agent).
+
+**3. If anything is off**, `banshee status` names the fix for everything it
+knows about, and changes nothing itself.
+
+## Other ways to install
+
+|                       | With the desktop window                                                                 | Terminal only                          |
+| --------------------- | --------------------------------------------------------------------------------------- | -------------------------------------- |
+| macOS (Apple Silicon) | [the cask](#macos-with-the-window), or [a direct download](#macos-without-homebrew)       | [the formula](#macos-terminal-only)    |
+| Linux (x86_64, arm64) | not yet                                                                                   | [the formula or the installer](#linux) |
+| Windows               | not yet                                                                                   | not yet                                |
 
 Pick one. Needs ~1 GB of disk for the models. Intel Macs are not supported.
 
@@ -37,23 +71,15 @@ brew install --cask yamanahlawat/banshee/banshee
 xattr -dr com.apple.quarantine /Applications/Banshee.app
 ```
 
-The second line is needed until Banshee is notarised. Homebrew marks the
+The `xattr` line is needed until Banshee is notarised. Homebrew marks the
 download as quarantined; a quarantined Banshee will not open, and its `banshee`
-command dies with no message.
+command dies with no message. The `banshee` command is on your `PATH` as well
+as in the app.
 
-Then open Banshee from `/Applications`. It fetches the models, asks for the
-two grants and starts the daemon. The `banshee` command is on your `PATH` too.
+### macOS, without Homebrew
 
-Installed the app with `curl` before? Delete `/Applications/Banshee.app` first.
-Installed the formula before? Run these first, in this order:
-
-```bash
-banshee tray --uninstall
-banshee service uninstall
-brew uninstall --formula banshee
-```
-
-Without Homebrew: download and unpack the app, which sets no quarantine flag.
+Download and unpack the app, which sets no quarantine flag, so it needs no
+`xattr` line.
 
 ```bash
 curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Banshee.app.tar.gz \
@@ -71,7 +97,7 @@ brew install --formula yamanahlawat/banshee/banshee
 ```
 
 The daemon, the `banshee` command and the menu bar icon. To add the window
-later, follow the switch above, then install the cask.
+later, remove the formula first ([Uninstall](#uninstall)), then install the cask.
 
 ### Linux
 
@@ -93,21 +119,9 @@ bar. See [docs/linux.md](docs/linux.md) for the typing tool and the service.
 
 Clone the repo and run `make install`; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Uninstall
+## Set up from the terminal
 
-- The cask: `brew uninstall --zap --cask banshee`. `--zap` also removes
-  `~/.banshee`, which holds the models, the history and `config.toml`.
-- The formula or the installer: `banshee tray --uninstall`, then
-  `banshee service uninstall`, then `brew uninstall --formula banshee` or delete
-  the binaries. Delete `~/.banshee` if you want the models and history gone too.
-- The app from `curl`: the two `banshee` commands above, then delete
-  `/Applications/Banshee.app`, and `~/.banshee` if you want.
-
-## Set up
-
-With the window installed, from the cask or from `curl`, open Banshee. It
-fetches the models, asks for the grants and starts the daemon. The steps below
-are the same work from a terminal.
+The window does all of this for you. These are the same steps without it.
 
 **1. Download the models** (~860 MB: Whisper, Silero VAD, Kokoro):
 
@@ -139,6 +153,8 @@ a fix for anything that is off. It changes nothing itself.
   is typed into the app you are focused on.
 - **Hold `Shift` and the hotkey** to keep the text instead: `banshee listen`
   prints it.
+- **Talk over it.** Holding the hotkey stops whatever Banshee is saying, so a
+  long answer never traps you. Set `barge_in = "none"` to let it finish.
 - **The window.** Choose `Open Banshee` from the menu bar for the last
   dictation with a copy button, the day's history, and every setting. It sets
   Banshee up on its own, models and all. Quit it and dictation carries on.
@@ -213,6 +229,16 @@ It exposes three tools:
 | `speak_status`      | Say something aloud, for decisions made and work finished         |
 | `ask_user`          | Ask a question aloud, then wait for and return your spoken answer |
 | `listen_for_prompt` | Pick up anything you've said since it last checked                |
+
+## Uninstall
+
+- The cask: `brew uninstall --zap --cask banshee`. `--zap` also removes
+  `~/.banshee`, which holds the models, the history and `config.toml`.
+- The formula or the installer: `banshee tray --uninstall`, then
+  `banshee service uninstall`, then `brew uninstall --formula banshee` or delete
+  the binaries. Delete `~/.banshee` if you want the models and history gone too.
+- The app from `curl`: the two `banshee` commands above, then delete
+  `/Applications/Banshee.app`, and `~/.banshee` if you want.
 
 ## More
 
