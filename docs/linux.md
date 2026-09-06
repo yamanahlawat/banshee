@@ -56,4 +56,3 @@ and style it in your own CSS:
 `restart-interval` matters: the command exits when the daemon stops, and that
 is how the module reconnects once it comes back. The same channel is open to
 any client over `banshee.subscribe`.
-

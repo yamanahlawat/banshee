@@ -146,4 +146,3 @@ modifiers and a key, as in `Ctrl+Alt+D`. The modifiers are `RightOption`,
 macOS and `RightControl` on Linux.
 A modifier bound alone still works as a modifier: `RightOption+E` types é, and
 banshee discards the accidental recording instead of transcribing it.
-
