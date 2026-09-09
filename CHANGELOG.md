@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `ask_user` tool now says why it exists.** Its description tells the agent
+  you cannot see the screen, so a question written as text or put in an on-screen
+  menu never reaches you. An agent reads this once, when its session starts, so
+  restart the agent to pick it up.
+
 ## [0.12.2] - 2026-09-04
 
 ### Added
