@@ -116,6 +116,9 @@
   $: config = ($daemon.status?.config ?? {}) as Record<string, Record<string, unknown>>;
   $: live = word !== 'Not running';
   $: connected = $agents.filter((a) => a.presence === 'connected').length;
+  // Wayland grants no global grab, so the daemon binds nothing and says so.
+  // A daemon older than the field sends nothing, and it did bind the key.
+  $: hotkeyListens = $daemon.status?.hotkey_listens !== false;
   // The window names no key it has not been told. `audio.hotkey_mode` decides
   // the verb, because "Hold" is a lie when a tap is what starts it.
   $: boundKey = humanize(String(config.audio?.hotkey ?? ''));
@@ -143,11 +146,13 @@
     },
     Hotkey: {
       name: 'Hotkey',
-      lead: !boundKey
-        ? 'No key is bound, so nothing starts dictation.'
-        : holdToTalk
-          ? `Hold ${boundKey} to talk.`
-          : `Tap ${boundKey} to start, and again to stop.`,
+      lead: !hotkeyListens
+        ? 'Your compositor holds this binding. Banshee binds no key here.'
+        : !boundKey
+          ? 'No key is bound, so nothing starts dictation.'
+          : holdToTalk
+            ? `Hold ${boundKey} to talk.`
+            : `Tap ${boundKey} to start, and again to stop.`,
     },
     Voice: {
       name: 'Voice',
@@ -241,7 +246,7 @@
       {
         id: 'job-hotkey',
         label: 'Hotkey',
-        value: said(humanize(String(config.audio?.hotkey ?? ''))),
+        value: said(hotkeyListens ? humanize(String(config.audio?.hotkey ?? '')) : 'Compositor'),
         pending: waits('audio.hotkey', 'audio.hotkey_mode'),
       },
       {
@@ -436,7 +441,9 @@
           time={rightNow}
           text="An agent asked a question and is waiting for your answer."
         >
-          {#if boundKey}
+          {#if !hotkeyListens}
+            <p class="how">Press your compositor's Banshee binding to answer.</p>
+          {:else if boundKey}
             <p class="how">{holdToTalk ? 'Hold' : 'Tap'} {boundKey} to answer.</p>
           {/if}
         </Turn>
@@ -474,9 +481,11 @@
       {:else if nothingYet && blockers.length === 0}
         <Absence
           label="Nothing said yet"
-          detail={boundKey
-            ? `${holdToTalk ? 'Hold' : 'Tap'} ${boundKey} and speak. What you say lands in whatever app you are using, and shows up here.`
-            : 'No key is bound yet, so nothing starts dictation. The Hotkey panel below binds one.'}
+          detail={!hotkeyListens
+            ? 'Your compositor starts dictation here. What you say lands in whatever app you are using, and shows up here.'
+            : boundKey
+              ? `${holdToTalk ? 'Hold' : 'Tap'} ${boundKey} and speak. What you say lands in whatever app you are using, and shows up here.`
+              : 'No key is bound yet, so nothing starts dictation. The Hotkey panel below binds one.'}
           action={panels.Record.name}
           id={RETURNS_TO.absence}
           act={() => openJob('Record', RETURNS_TO.absence)}

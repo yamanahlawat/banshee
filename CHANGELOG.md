@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The window stops naming a hotkey nobody listens for.** On Wayland no
+  protocol grants a global hotkey, so Banshee binds none and the compositor
+  holds the binding. The window said `Right Option` in five places and offered
+  a key-capture control that wrote a setting nothing read. It now says the
+  compositor holds it, and the Hotkey panel gives you the two commands to bind.
+
 - **The window's Find hint names a key Linux keyboards have.** The record's
   header said `⌘F`, the macOS Command glyph, on every platform. It now says
   `Ctrl+F` off macOS. The shortcut itself always accepted both.

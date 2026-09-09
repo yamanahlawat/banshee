@@ -196,6 +196,9 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "english_only": crate::speech_to_text::whisper::english_only(
             daemon_state.config().stt.preset.model_name(),
         ),
+        // False where the compositor holds the binding, so the window does not
+        // name a key the daemon never listens for.
+        "hotkey_listens": crate::hotkey::listens(),
         // Stated, so no client invents a narrower definition of ready
         "ready": blockers.is_empty(),
         "blockers": blockers,
