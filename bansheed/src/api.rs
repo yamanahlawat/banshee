@@ -163,6 +163,7 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
     let code = match error {
         RecordingError::Microphone(_) => -32000,
         RecordingError::Model(_) => -32002,
+        RecordingError::Provider(_) => -32006,
     };
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
 }
@@ -194,17 +195,25 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         // The English-only build reads English whatever `stt.language` says.
         // Read off the model the listener loaded, not the configured preset:
         // a preset applied without persist moves one and not the other.
-        "english_only": crate::speech_to_text::english_only(daemon_state.stt_model()),
+        "english_only": daemon_state
+            .stt_model()
+            .is_some_and(crate::speech_to_text::english_only),
         // Stated, so no client invents a narrower definition of ready
         "ready": blockers.is_empty(),
         "blockers": blockers,
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
+        "last_error": daemon_state.last_error(),
         // The providers are read at startup, so the running config answers,
-        // not the file a `persist` write has already replaced.
+        // not the file a `persist` write has already replaced. The key file is
+        // read each time: a key set after startup is "present" before the restart.
         "remote": {
-            "stt": running.stt.provider.is_remote(),
-            "tts": running.tts.provider.is_remote(),
+            "stt": {
+                "remote": running.stt.provider.is_remote(),
+                "host": running.stt.provider.is_remote().then(|| running.stt.remote.host()),
+                "key_present": crate::credentials::Credentials::stt_key_present(),
+            },
+            "tts": { "remote": running.tts.provider.is_remote() },
         },
     });
     with_key_press_access(payload)
@@ -234,6 +243,7 @@ pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
         "speaking": daemon_state.speech().is_speaking(),
         "audio_device": daemon_state.audio_device(),
         "missing_device": daemon_state.missing_device(),
+        "last_error": daemon_state.last_error(),
     })
 }
 
@@ -378,7 +388,11 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     }
 
     match answer.await {
-        Ok(text) => JsonRpcResponse::success(params.id(), serde_json::json!({ "text": text })),
+        Ok(Ok(text)) => JsonRpcResponse::success(params.id(), serde_json::json!({ "text": text })),
+        // Distinct from silence, which answers empty text
+        Ok(Err(reason)) => {
+            JsonRpcResponse::error(params.id(), -32007, format!("Listening failed: {reason}"))
+        }
         Err(_) => {
             daemon_state.set_recording_mode(RecordingMode::Idle);
             JsonRpcResponse::error(params.id(), -32603, "Listening session ended unexpectedly.")
@@ -445,7 +459,7 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
         Err(response) => return *response,
     };
 
-    match settings::configure(Some(daemon_state), &assignments, persist) {
+    match settings::configure(Some(daemon_state), assignments, persist) {
         Ok(outcome) => JsonRpcResponse::success(
             params.id(),
             serde_json::json!({

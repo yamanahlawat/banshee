@@ -8,13 +8,17 @@ override one, create `~/.banshee/config.toml`. The defaults:
 save_history = true    # keep transcriptions in ~/.banshee/banshee.db
 
 [stt]
-provider = "local"       # who listens; local is the only value
+provider = "local"       # local | remote; see "A remote listener" below
 preset = "balanced"      # fast | balanced | quality (see below)
 vad_threshold = 0.5      # 0.0 to 1.0; higher means stricter speech detection
 vocabulary = ["banshee"] # words Whisper keeps mangling, e.g. ["clippy", "tokio"]
 language = "en"          # a Whisper code, or "auto" to detect it
 translate = false        # true answers in English whatever you spoke
 endpoint_silence_ms = 2500  # trailing silence that ends a spoken answer
+
+[stt.remote]                           # read when provider = "remote"
+base_url = "https://api.openai.com/v1" # an OpenAI-compatible server's /v1 root
+model = "whisper-1"                    # the model that server names
 
 [tts]
 provider = "local"     # who speaks; local is the only value
@@ -105,7 +109,8 @@ Most settings take effect at once: `stt.vad_threshold`, `stt.vocabulary`,
 `audio.barge_in`, `audio.cues.enabled`, `tts.voice`, `tts.speed` and
 `daemon.save_history`. The rest are read when the daemon starts, so the command
 tells you to restart. Among them: `audio.hotkey`, `audio.hotkey_mode`,
-`stt.endpoint_silence_ms`, `stt.provider`, `tts.fallback` and `tts.provider`.
+`stt.endpoint_silence_ms`, `stt.provider`, the `[stt.remote]` keys,
+`tts.fallback` and `tts.provider`.
 
 A live setting whose model is not downloaded yet waits for the file. Once
 `banshee setup` fetches it, a running daemon applies the setting as the
@@ -134,6 +139,27 @@ starts using it as the download finishes, with no restart. The exception is a
 daemon that started with no models at all: it has no pipeline to change, so the
 first setup on a new machine still ends with a restart. The window's Voice panel
 lists every voice Banshee can name and fetches the one you pick.
+
+### A remote listener
+
+`provider = "remote"` under `[stt]` sends each utterance to the server in
+`[stt.remote]` and types the text it answers. Any OpenAI-compatible
+transcription server works: OpenAI, Groq, or a Whisper server you run. The
+`preset` is not read; the server's `model` is. Set it up in one go:
+
+```
+banshee config remote
+```
+
+It asks for the server's `/v1` root, the model, and the key in turn. The server
+and model prompts show their current value, and Enter keeps it. The key is typed
+without echo, and Enter keeps the key already on file. The key is stored in
+`~/.banshee/credentials.toml`, which only you can read. Each setting also stands
+alone: `banshee config set stt.remote.api_key` asks for the key by itself. To
+remove the key, pass an empty one: `banshee config set stt.remote.api_key ""`.
+The key is never written to `config.toml` and never appears in a status reply. When
+a transcription fails, the error tone plays, and `banshee status` and the window
+say why. Banshee never falls back to the local model on its own.
 
 ## The hotkey
 

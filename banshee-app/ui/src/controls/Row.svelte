@@ -54,13 +54,7 @@
   }
 
   .note {
-    max-width: 520px;
     margin: 8px 0 0;
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
-    font-size: 13px;
-    line-height: 1.45;
   }
 
   .pending {

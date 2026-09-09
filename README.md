@@ -6,8 +6,10 @@
 
 Banshee gives your AI coding agent a voice. It speaks its decisions and
 questions out loud, and you answer by talking, hands-free, while it works.
-Everything runs on your machine: local Whisper for listening, a local neural
-voice for speaking. No API keys, no audio leaving your laptop.
+Everything runs on your machine by default: local Whisper for listening, a
+local neural voice for speaking. No account. Audio leaves your laptop only if
+you set a remote listener yourself, and then the tray and `banshee status`
+say so.
 
 It is a dictation tool too: hold a hotkey, speak, and the text lands in
 whatever app you are focused on.

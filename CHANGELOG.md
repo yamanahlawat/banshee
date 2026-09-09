@@ -7,14 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A remote listener, when you want one.** `stt.provider = "remote"` sends each
+  utterance to the OpenAI-compatible server in `[stt.remote]`. Set the key with
+  `banshee config set stt.remote.api_key` or in the window; it lives in an
+  owner-only file and never in `config.toml`. The tray, `banshee status` and the
+  window say when audio leaves the machine, and a failed transcription is
+  reported rather than swallowed. Local stays the default. The daemon reads the
+  provider and its keys when it starts, so `banshee config set` tells you to
+  restart.
+
 ### Changed
 
 - **The daemon names who listens and who speaks.** `stt.provider` and
-  `tts.provider` in `config.toml` take `local`, the only value for now. A
-  status reply carries `remote`, which says whether audio or text leaves the
-  machine. Nothing does yet. A config without the keys reads as before. The
-  daemon reads both keys when it starts, so `banshee config set` tells you to
-  restart.
+  `tts.provider` in `config.toml` name the backend. `stt.provider` takes `local`
+  or `remote`. `tts.provider` takes `local`, its only value so far. A status
+  reply carries `remote`, which says whether audio or text leaves the machine. A
+  config without the keys reads as before. The daemon reads both keys when it
+  starts, so `banshee config set` tells you to restart.
 
 ### Fixed
 

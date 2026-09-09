@@ -167,20 +167,6 @@ fn a_device_the_daemon_passed_over_keeps_its_preference_label() {
     );
 }
 
-// open_capture names the device once play() succeeds, and a model failure
-// drops that stream. Every subscriber is told the name, so a stale one
-// shows a microphone that nothing holds.
-#[test]
-fn a_model_failure_stops_naming_a_device_nothing_holds() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    state.set_audio_device(Some("Blue Yeti".to_string()));
-
-    let error = crate::daemon::model_failure(&state, "missing file".to_string());
-
-    assert!(matches!(error, crate::state::RecordingError::Model(_)));
-    assert_eq!(state.audio_device(), None);
-}
-
 #[test]
 fn a_device_nothing_points_at_carries_no_label() {
     assert_eq!(super::device_labels(&device("BlackHole", false), None), "");
@@ -192,5 +178,34 @@ fn no_daemon_means_no_in_use_label_even_for_the_preference() {
         super::device_labels(&device("Built-in", true), None),
         "system default",
         "a device nobody opened must not read as recording"
+    );
+}
+
+// The prompt cannot say "remove it", so an empty answer must not be read as one
+#[test]
+fn nothing_typed_at_the_key_prompt_leaves_the_key_on_file_alone() {
+    assert_eq!(super::key_change(None, || Ok(String::new())).unwrap(), None);
+}
+
+// Removal is the argument a person can only mean on purpose
+#[test]
+fn an_empty_argument_removes_the_key() {
+    assert_eq!(
+        super::key_change(Some(String::new()), || unreachable!()).unwrap(),
+        Some(String::new())
+    );
+}
+
+// A coercion through serde_json turns an all-digit token into a number and
+// strips the quotes off a quoted one
+#[test]
+fn a_key_is_taken_as_it_was_typed() {
+    assert_eq!(
+        super::key_change(None, || Ok("12345".to_string())).unwrap(),
+        Some("12345".to_string())
+    );
+    assert_eq!(
+        super::key_change(Some("\"sk-test\"".to_string()), || unreachable!()).unwrap(),
+        Some("\"sk-test\"".to_string())
     );
 }

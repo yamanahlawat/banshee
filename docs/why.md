@@ -9,8 +9,9 @@ the other half of the conversation.
 - **It never hears itself.** The microphone opens only after the question has
   finished playing, so the daemon can't transcribe its own voice. That's why
   Banshee works on laptop speakers without a headset.
-- **Nothing leaves your machine.** Whisper, Silero VAD, and Kokoro all run
-  locally. No API keys, no cloud tier, no audio uploaded, works on a plane.
+- **Nothing leaves your machine by default.** Whisper, Silero VAD, and Kokoro
+  all run locally. No account, no cloud tier, works on a plane. A remote
+  listener is yours to turn on, and the tray says when it is.
 - **It waits while you think.** Answers end on 2.5s of silence rather than the
   usual few hundred milliseconds, so pausing mid-sentence to think doesn't cut
   you off.

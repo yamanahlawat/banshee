@@ -319,13 +319,29 @@ pub async fn watch(waybar: bool) -> Result<(), BansheeError> {
     }
 }
 
-pub async fn config(key: String, value: String) -> Result<(), BansheeError> {
-    // So `0.6` arrives as a number and `de` as a string
-    let value: serde_json::Value =
-        serde_json::from_str(&value).unwrap_or_else(|_| serde_json::Value::String(value.clone()));
-    let assignments = settings::Assignments::from([(key.clone(), value)]);
+/// One line from stdin, `None` when it is empty.
+fn ask_line(prompt: &str) -> Result<Option<String>, BansheeError> {
+    eprint!("{prompt}");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let answer = line.trim().to_string();
+    Ok((!answer.is_empty()).then_some(answer))
+}
 
-    let outcome = match utils::call_daemon(
+// A pipe is read as one line, so `printf 'sk-…\n' | banshee config set stt.remote.api_key` works
+fn ask_key() -> Result<String, BansheeError> {
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        Ok(rpassword::prompt_password(
+            "Key for the remote listener (not shown): ",
+        )?)
+    } else {
+        Ok(ask_line("")?.unwrap_or_default())
+    }
+}
+
+/// Answers whether a restart is needed.
+async fn write_settings(assignments: settings::Assignments) -> Result<bool, BansheeError> {
+    match utils::call_daemon(
         banshee_common::BANSHEE_CONFIGURE,
         serde_json::json!({ "settings": &assignments, "persist": true }),
     )
@@ -336,12 +352,61 @@ pub async fn config(key: String, value: String) -> Result<(), BansheeError> {
             .and_then(|keys| keys.as_array())
             .is_some_and(|keys| !keys.is_empty())),
         // A daemon that is down never writes, so the CLI can be the one writer
-        Err(error) if daemon_is_down(&error) => settings::configure(None, &assignments, true)
+        Err(error) if daemon_is_down(&error) => settings::configure(None, assignments, true)
             .map(|outcome| !outcome.restart_required.is_empty()),
         Err(error) => Err(error),
-    };
+    }
+}
 
-    match outcome {
+/// What to write, or `None` for nothing typed. The key is taken as typed,
+/// because a coercion mangles a quoted token and refuses an all-digit one. An
+/// empty argument removes the key, and the prompt has no way to ask for that.
+fn key_change(
+    argument: Option<String>,
+    prompt: impl FnOnce() -> Result<String, BansheeError>,
+) -> Result<Option<String>, BansheeError> {
+    Ok(match argument {
+        Some(argument) => Some(argument),
+        None => match prompt()? {
+            typed if typed.is_empty() => None,
+            typed => Some(typed),
+        },
+    })
+}
+
+async fn config_api_key(change: Option<String>) -> Result<(), BansheeError> {
+    let Some(key) = change else {
+        println!("No key was typed; the key on file is unchanged.");
+        return Ok(());
+    };
+    // The credentials file reads the empty string as the key being gone
+    let done = if key.is_empty() { "Removed" } else { "Set" };
+    let assignments = settings::Assignments::from([(settings::API_KEY.to_string(), key.into())]);
+    match write_settings(assignments).await {
+        Ok(restart_required) => {
+            println!("{done} {}.", settings::API_KEY);
+            if restart_required {
+                println!("Restart to use it: banshee start");
+            }
+        }
+        Err(error) => fail(&error),
+    }
+    Ok(())
+}
+
+pub async fn config(key: String, value: Option<String>) -> Result<(), BansheeError> {
+    if key == settings::API_KEY {
+        return config_api_key(key_change(value, ask_key)?).await;
+    }
+    let Some(value) = value else {
+        fail(&BansheeError::Rejected(format!("'{key}' needs a value")))
+    };
+    // So `0.6` arrives as a number and `de` as a string
+    let value: serde_json::Value =
+        serde_json::from_str(&value).unwrap_or_else(|_| serde_json::Value::String(value.clone()));
+    let assignments = settings::Assignments::from([(key.clone(), value)]);
+
+    match write_settings(assignments).await {
         Ok(restart_required) => {
             println!("Set {key} in config.toml.");
             if restart_required {
@@ -351,6 +416,38 @@ pub async fn config(key: String, value: String) -> Result<(), BansheeError> {
         Err(error) => {
             fail(&error);
         }
+    }
+    Ok(())
+}
+
+pub async fn config_remote() -> Result<(), BansheeError> {
+    let current = Config::load().unwrap_or_default().stt.remote;
+    // The server is asked first: a key alone assumes OpenAI, and the person may
+    // be calling Groq or a server of their own.
+    let base_url =
+        ask_line(&format!("Server /v1 root [{}]: ", current.base_url))?.unwrap_or(current.base_url);
+    let model = ask_line(&format!("Model [{}]: ", current.model))?.unwrap_or(current.model);
+    let mut assignments = settings::Assignments::from([
+        ("stt.provider".to_string(), "remote".into()),
+        ("stt.remote.base_url".to_string(), base_url.clone().into()),
+        ("stt.remote.model".to_string(), model.clone().into()),
+    ]);
+    if let Some(key) = key_change(None, ask_key)? {
+        assignments.insert(settings::API_KEY.to_string(), key.into());
+    }
+
+    match write_settings(assignments).await {
+        Ok(_) => {
+            let host = crate::config::host_of(&base_url);
+            println!("Listening through {host} with {model}.");
+            if crate::credentials::Credentials::stt_key_present() {
+                println!("The key is set.");
+            } else {
+                println!("No key is set yet: banshee config set stt.remote.api_key");
+            }
+            println!("Restart to use it: banshee start");
+        }
+        Err(error) => fail(&error),
     }
     Ok(())
 }
@@ -500,6 +597,15 @@ pub fn start(config_result: Result<Config, BansheeError>) -> Result<(), BansheeE
                 println!();
                 println!("Models not downloaded yet: {}.", missing.join(", "));
                 println!("It runs without them, but cannot record. Run: banshee setup");
+            }
+            // A remote listener downloads nothing, so the models say nothing
+            // about whether it can hear.
+            if config.stt.provider.is_remote()
+                && !crate::credentials::Credentials::stt_key_present()
+            {
+                blocked = true;
+                println!();
+                println!("No key for the remote listener: banshee config set stt.remote.api_key");
             }
             Some((config.audio.hotkey, config.audio.hotkey_mode))
         }

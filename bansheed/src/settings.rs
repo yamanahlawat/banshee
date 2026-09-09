@@ -84,15 +84,18 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
         // A listener that has gone leaves the words unread, so say so rather
         // than report a prompt nothing holds
         Live::Vocabulary => state.set_vocabulary(config.stt.vocabulary.clone()),
-        Live::Preset => apply_preset(state, config.stt.preset.model_name()),
+        Live::Preset => apply_preset(state, config),
         Live::Speech => state.set_speech((&config.stt).into()),
     }
 }
 
 /// Nothing loads when the model is already behind the engine or still to download; a download is
-/// minutes, so the key stays unapplied.
-fn apply_preset(state: &DaemonState, model: &'static str) -> bool {
-    if state.stt_model() == model {
+/// minutes, so the key stays unapplied. A remote listener loads no file, so nothing has to load.
+fn apply_preset(state: &DaemonState, config: &Config) -> bool {
+    let Some(model) = crate::models::stt_file(config) else {
+        return true;
+    };
+    if state.stt_model() == Some(model) {
         return true;
     }
     let absent = crate::models::missing(&[model]);
@@ -100,7 +103,12 @@ fn apply_preset(state: &DaemonState, model: &'static str) -> bool {
         eprintln!("banshee: {model} is not downloaded yet, so the preset is unchanged");
         return false;
     }
-    state.load_stt_model(model)
+    // The engine that loads this starts on the pending restart, and a listener
+    // that holds no file holds no engine to load into.
+    if state.stt_model().is_none() {
+        return true;
+    }
+    state.load_stt_model(config.stt.preset)
 }
 
 fn history_for(config: &Config) -> Result<Option<rusqlite::Connection>, BansheeError> {
@@ -166,8 +174,11 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
 
     let rendered = document.to_string();
     // `Config`'s types and `deny_unknown_fields` are the only definition of a legal setting
-    let validated: Config =
-        toml::from_str(&rendered).map_err(|error| BansheeError::Rejected(error.to_string()))?;
+    let validated: Config = Config::parse(&rendered).map_err(|error| match error {
+        // The caller wrote this document, so a value its types refuse is input
+        BansheeError::Toml(toml) => BansheeError::Rejected(toml.to_string()),
+        refused => refused,
+    })?;
     Ok((rendered, validated))
 }
 
@@ -185,6 +196,20 @@ fn refuse_unknown_language(assignments: &Assignments) -> Result<(), BansheeError
             )))
         }
         _ => Ok(()),
+    }
+}
+
+pub const API_KEY: &str = "stt.remote.api_key";
+
+/// The key goes to the credentials file and never into the TOML, so it leaves
+/// the map before `edit` sees it.
+fn take_api_key(assignments: &mut Assignments) -> Result<Option<String>, BansheeError> {
+    match assignments.remove(API_KEY) {
+        None => Ok(None),
+        Some(serde_json::Value::String(key)) => Ok(Some(key)),
+        Some(_) => Err(BansheeError::Rejected(format!(
+            "'{API_KEY}' takes the key as a string"
+        ))),
     }
 }
 
@@ -265,16 +290,18 @@ fn apply_each<'a>(
 /// second writer to race with.
 pub fn configure(
     state: Option<&DaemonState>,
-    assignments: &Assignments,
+    mut assignments: Assignments,
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
-    if !persist && let Some(key) = startup_only(assignments) {
+    refuse_unknown_language(&assignments)?;
+
+    if !persist && let Some(key) = startup_only(&assignments) {
         return Err(BansheeError::Rejected(format!(
             "'{key}' is read when the daemon starts, so it needs persist: true"
         )));
     }
 
-    refuse_unknown_language(assignments)?;
+    let api_key = take_api_key(&mut assignments)?;
 
     let _writing = WRITING
         .lock()
@@ -283,28 +310,32 @@ pub fn configure(
     let path = Config::path()?;
     let existing = Config::read(&path)?;
 
-    let (rendered, config) = edit(&existing, assignments)?;
+    let (rendered, config) = edit(&existing, &assignments)?;
 
-    if persist {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // A partial write would truncate a file the user hand-edits, and a shared
-        // staging name would let two processes interleave their bytes
-        let staged = path.with_extension(format!("toml.{}", std::process::id()));
-        std::fs::write(&staged, &rendered)?;
-        std::fs::rename(&staged, &path)?;
+    // Last of the checks, first of the writes: a key stored before `edit`
+    // refused a value beside it would be on disk under an error the caller
+    // reads as "nothing was stored"
+    if let Some(key) = &api_key {
+        crate::credentials::Credentials::set_stt_api_key(Some(key))?;
+    }
+
+    // The key alone changes nothing in config.toml, so there is nothing to write
+    if persist && !assignments.is_empty() {
+        banshee_common::utils::write_atomically(&path, rendered.as_bytes(), None)?;
     }
 
     // A live key needs a restart too when no daemon runs, so with no state
     // every key is one.
-    let outcome = match state {
+    let mut outcome = match state {
         Some(state) => apply_each(state, &config, assignments.keys()),
         None => Outcome {
             applied: Vec::new(),
             restart_required: assignments.keys().cloned().collect(),
         },
     };
+    if api_key.is_some() {
+        outcome.restart_required.push(API_KEY.to_string());
+    }
 
     if let Some(state) = state {
         state.record_outcome(&outcome.applied, &outcome.restart_required);

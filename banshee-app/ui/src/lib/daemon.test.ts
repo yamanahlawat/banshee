@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import ready from '../fixtures/ready.json';
+import remote from '../fixtures/remote.json';
 import permissions from '../fixtures/permissions.json';
 import recording from '../fixtures/recording.json';
 import armed from '../fixtures/armed.json';
@@ -96,19 +97,21 @@ describe('the status reply carries the live flags', () => {
     expect(reduceStatus(held, withoutSpeaking as never).live.speaking).toBe(true);
   });
   it('takes only the live flags, not the rest of the reply', () => {
-    expect(Object.keys(liveFrom(ready)).sort()).toEqual(Object.keys(empty().live).sort());
+    // `remote.json` carries every live flag, so the comparison is not filtered
+    // down to what the fixture happens to hold.
+    expect(Object.keys(liveFrom(remote)).sort()).toEqual(Object.keys(empty().live).sort());
   });
 });
 
 describe('the fix groups', () => {
-  const model = (id: string) => ({
+  const model = (id: string): Blocker => ({
     kind: 'model',
     id,
     name: id,
     consequence: 'c',
     fix: 'run: banshee setup',
   });
-  const grant = (id: string) => ({
+  const grant = (id: string): Blocker => ({
     kind: 'permission',
     id,
     name: id,
@@ -263,4 +266,14 @@ it('names the file once when the server sent no length', () => {
 it('gives Listening a form of its own', () => {
   expect(lampForm('Listening')).toBe('listening');
   expect(lampForm('Ready')).toBe('idle');
+});
+
+it('carries the last error in the live state and clears it', () => {
+  const failed = reduceLive(empty(), { last_error: 'the remote listener refused the key' });
+  expect(failed.live.last_error).toBe('the remote listener refused the key');
+  expect(reduceLive(failed, { last_error: null }).live.last_error).toBeNull();
+});
+
+it('reads the last error off a status reply', () => {
+  expect(liveFrom({ running: true, last_error: 'x' } as never).last_error).toBe('x');
 });

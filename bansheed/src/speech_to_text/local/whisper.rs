@@ -1,6 +1,7 @@
 use banshee_common::{error::BansheeError, utils::get_models_path};
 use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
 
+use crate::config::STTPreset;
 use crate::speech_to_text::{Speech, Transcriber, english_only};
 
 const NO_SPEECH_PROB_GATE: f32 = 0.6;
@@ -173,10 +174,16 @@ impl Transcriber for WhisperEngine {
     /// Puts a different model behind the engine, keeping the words it leans on.
     /// The new context is built before the old one is dropped, so a load that
     /// fails leaves the engine transcribing with what it already had.
-    fn reload(&mut self, model: &'static str) -> Result<(), BansheeError> {
+    fn reload(&mut self, preset: STTPreset) -> Result<Option<&'static str>, BansheeError> {
+        let model = preset.model_name();
         self.context = Self::open(model)?;
         self.english_only = english_only(model);
-        Ok(())
+        Ok(Some(model))
+    }
+
+    /// The model runs on this machine, so a smaller one is the whole fix.
+    fn slow_advice(&self) -> Option<&'static str> {
+        Some("Set [stt] preset = \"fast\" in config.toml, then run banshee setup.")
     }
 }
 

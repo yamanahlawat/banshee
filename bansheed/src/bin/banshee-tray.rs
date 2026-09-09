@@ -111,6 +111,7 @@ mod mac {
         // before it costs a redraw
         Device(Device),
         History(bool),
+        Remote(Option<String>),
         Quit,
         Open,
         CopyLast,
@@ -139,6 +140,14 @@ mod mac {
             .unwrap_or(false)
     }
 
+    // A daemon that is down sends audio nowhere.
+    fn remote_line(indicator: Indicator, host: Option<&str>) -> String {
+        match host {
+            Some(host) if indicator != Indicator::NotRunning => format!("Audio goes to {host}"),
+            _ => "Audio stays on this machine".to_string(),
+        }
+    }
+
     // Reads as the state, then what it is listening with. A dead daemon has no
     // device to name, so the second line carries the way back instead.
     fn device_line(indicator: Indicator, device: &Device) -> String {
@@ -165,10 +174,16 @@ mod mac {
         indicator != Indicator::NotRunning && history_enabled
     }
 
-    fn menu_rows(indicator: Indicator, device: &Device, history_enabled: bool) -> Vec<Row> {
+    fn menu_rows(
+        indicator: Indicator,
+        device: &Device,
+        history_enabled: bool,
+        remote: Option<&str>,
+    ) -> Vec<Row> {
         vec![
             Row::Info(indicator.label().to_string()),
             Row::Info(device_line(indicator, device)),
+            Row::Info(remote_line(indicator, remote)),
             Row::Separator,
             Row::Action(
                 COPY_LAST_ID,
@@ -182,8 +197,13 @@ mod mac {
     }
 
     #[cfg(test)]
-    fn menu_labels(indicator: Indicator, device: &Device, history_enabled: bool) -> Vec<String> {
-        menu_rows(indicator, device, history_enabled)
+    fn menu_labels(
+        indicator: Indicator,
+        device: &Device,
+        history_enabled: bool,
+        remote: Option<&str>,
+    ) -> Vec<String> {
+        menu_rows(indicator, device, history_enabled, remote)
             .into_iter()
             .map(|row| match row {
                 Row::Info(text) | Row::Action(_, text, _) => text,
@@ -196,6 +216,7 @@ mod mac {
         tray: TrayIcon,
         state_item: MenuItem,
         device_item: MenuItem,
+        remote_item: MenuItem,
         copy_item: MenuItem,
         // The menu owns the native objects; dropping it empties the tray
         _menu: Menu,
@@ -206,6 +227,7 @@ mod mac {
         indicator: Indicator,
         device: Device,
         history_enabled: bool,
+        remote_host: Option<String>,
         proxy: EventLoopProxy<Message>,
     }
 
@@ -215,6 +237,8 @@ mod mac {
             ui.state_item.set_text(self.indicator.label());
             ui.device_item
                 .set_text(device_line(self.indicator, &self.device));
+            ui.remote_item
+                .set_text(remote_line(self.indicator, self.remote_host.as_deref()));
             ui.copy_item
                 .set_enabled(copy_last_enabled(self.indicator, self.history_enabled));
             if let Err(error) = draw(&ui.tray, self.indicator) {
@@ -270,6 +294,11 @@ mod mac {
                     self.history_enabled = enabled;
                     moved
                 }
+                Message::Remote(host) => {
+                    let moved = self.remote_host != host;
+                    self.remote_host = host;
+                    moved
+                }
                 Message::Open => {
                     return open_the_window()
                         .unwrap_or_else(|error| eprintln!("banshee-tray: {error}"));
@@ -292,7 +321,7 @@ mod mac {
         let mut info_items: Vec<MenuItem> = Vec::new();
         let mut copy_item: Option<MenuItem> = None;
         let mut items: Vec<Box<dyn IsMenuItem>> = Vec::new();
-        for row in menu_rows(Indicator::NotRunning, &Device::default(), false) {
+        for row in menu_rows(Indicator::NotRunning, &Device::default(), false, None) {
             match row {
                 // Informational, so neither row takes a click
                 Row::Info(text) => {
@@ -310,8 +339,8 @@ mod mac {
                 }
             }
         }
-        let [state_item, device_item] = <[MenuItem; 2]>::try_from(info_items)
-            .map_err(|_| "menu_rows must carry exactly two info rows")?;
+        let [state_item, device_item, remote_item] = <[MenuItem; 3]>::try_from(info_items)
+            .map_err(|_| "menu_rows must carry exactly three info rows")?;
         let copy_item = copy_item.ok_or("menu_rows must include the copy action")?;
 
         let menu = Menu::new();
@@ -329,6 +358,7 @@ mod mac {
             tray,
             state_item,
             device_item,
+            remote_item,
             copy_item,
             _menu: menu,
         })
@@ -345,6 +375,9 @@ mod mac {
                 if !send(Message::Device(Device::of(&status)))
                     || !send(Message::State(Indicator::of(Some(&status))))
                     || !send(Message::History(history_enabled_of(&status)))
+                    || !send(Message::Remote(
+                        banshee_common::remote_stt_host(&status).map(str::to_string),
+                    ))
                 {
                     return;
                 }
@@ -499,6 +532,7 @@ mod mac {
             indicator: Indicator::NotRunning,
             device: Device::default(),
             history_enabled: false,
+            remote_host: None,
             proxy: event_loop.create_proxy(),
         };
         event_loop.run_app(&mut app)?;
@@ -550,12 +584,14 @@ mod mac {
                 Indicator::Idle,
                 &device(Some("MacBook Pro Microphone"), None),
                 true,
+                None,
             );
             assert_eq!(
                 labels,
                 vec![
                     "Idle",
                     "MacBook Pro Microphone",
+                    "Audio stays on this machine",
                     "---",
                     "Copy last dictation",
                     "Open Banshee",
@@ -568,7 +604,7 @@ mod mac {
         #[test]
         fn the_copy_row_is_disabled_when_history_is_off() {
             fn copy_enabled(indicator: Indicator, history_enabled: bool) -> bool {
-                menu_rows(indicator, &Device::default(), history_enabled)
+                menu_rows(indicator, &Device::default(), history_enabled, None)
                     .into_iter()
                     .find_map(|row| match row {
                         Row::Action(id, _, enabled) if id == COPY_LAST_ID => Some(enabled),
@@ -586,7 +622,7 @@ mod mac {
         #[test]
         fn the_open_row_stays_live_even_when_the_daemon_is_not() {
             for indicator in [Indicator::Idle, Indicator::NotRunning] {
-                let open = menu_rows(indicator, &Device::default(), false)
+                let open = menu_rows(indicator, &Device::default(), false, None)
                     .into_iter()
                     .find_map(|row| match row {
                         Row::Action(id, _, enabled) if id == OPEN_ID => Some(enabled),
@@ -598,17 +634,37 @@ mod mac {
         }
 
         #[test]
-        fn the_menu_carries_exactly_two_info_rows() {
+        fn the_menu_carries_exactly_three_info_rows() {
             for indicator in [Indicator::Idle, Indicator::NotRunning] {
-                let info_rows = menu_rows(indicator, &Device::default(), true)
+                let info_rows = menu_rows(indicator, &Device::default(), true, None)
                     .into_iter()
                     .filter(|row| matches!(row, Row::Info(_)))
                     .count();
                 assert_eq!(
-                    info_rows, 2,
-                    "{indicator:?} must carry exactly two info rows"
+                    info_rows, 3,
+                    "{indicator:?} must carry exactly three info rows"
                 );
             }
+        }
+
+        #[test]
+        fn a_remote_listener_names_its_host() {
+            assert_eq!(
+                remote_line(Indicator::Idle, None),
+                "Audio stays on this machine"
+            );
+            assert_eq!(
+                remote_line(Indicator::Idle, Some("api.openai.com")),
+                "Audio goes to api.openai.com"
+            );
+        }
+
+        #[test]
+        fn the_host_drops_with_the_daemon() {
+            assert_eq!(
+                remote_line(Indicator::NotRunning, Some("api.openai.com")),
+                "Audio stays on this machine"
+            );
         }
 
         #[test]

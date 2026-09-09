@@ -113,8 +113,39 @@ body {
 .turn .text,
 .absence .label,
 .absence .detail,
-.row .note {
+.note {
   overflow-wrap: anywhere;
+}
+
+/* The margin around a note belongs to whatever it sits under, so each surface
+   states its own. */
+.note {
+  max-width: 520px;
+  font-variation-settings:
+    'wght' var(--cut-agent-weight),
+    'wdth' var(--cut-agent-width);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.note.failed {
+  color: var(--accent);
+}
+
+/* Every text input starts here, so a surface states only the line it draws and
+   the type it sets. */
+.field {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+}
+
+/* The measured token, never the ink at the browser's own opacity. */
+.field::placeholder {
+  color: var(--dim);
 }
 
 body {

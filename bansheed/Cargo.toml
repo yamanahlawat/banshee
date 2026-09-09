@@ -32,9 +32,10 @@ ndarray = "0.17.2"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-rustls", "copy-dylibs", "api-24"] }
 rdev = "0.5.3"
 regex = "1.13.0"
-reqwest = { version = "0.13.4", features = ["rustls", "system-proxy"], default-features = false }
+reqwest = { version = "0.13.4", features = ["rustls", "system-proxy", "blocking", "multipart", "json"], default-features = false }
 ringbuf = "0.5.0"
 rodio = { version = "0.22.2", default-features = false, features = ["playback"] }
+rpassword = "7.5.4"
 rubato = "3.0.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }

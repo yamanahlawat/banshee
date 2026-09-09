@@ -5,6 +5,7 @@
   import { PRESETS } from '../lib/presets';
   import { listDevices, listLanguages, type Devices, type Languages } from '../lib/tauri';
   import Row from '../controls/Row.svelte';
+  import Field from '../controls/Field.svelte';
   import Picker from '../controls/Picker.svelte';
   import Segmented from '../controls/Segmented.svelte';
   import { claimKeys } from '../lib/keys';
@@ -22,6 +23,10 @@
   const ANSWER = [
     { value: 'spoken', label: 'What I said' },
     { value: 'english', label: 'English' },
+  ];
+  const LISTENING = [
+    { value: 'local', label: 'On this machine' },
+    { value: 'remote', label: 'A remote server' },
   ];
   let devices: Devices = { devices: [], current: null };
   let spoken: Languages = { languages: [] };
@@ -83,6 +88,10 @@
   // Svelte's `each_key_duplicate` and renders no panel.
   $: vocabulary = [...new Set((stt.vocabulary ?? []) as string[])];
   $: preset = String(stt.preset ?? 'balanced');
+  $: provider = String(stt.provider ?? 'local');
+  $: remoteTable = (stt.remote ?? {}) as Record<string, unknown>;
+  $: keyPlaceholder = $daemon.status?.remote?.stt?.key_present ? 'Set' : 'Not set';
+  $: lastError = $daemon.live.last_error;
   $: language = String(stt.language ?? 'en');
   $: translate = stt.translate === true;
   // The daemon's own word, so the preset name is not a second rule for one fact.
@@ -122,6 +131,10 @@
   }
 </script>
 
+{#if lastError}
+  <p class="note failed" role="status">The last dictation failed: {lastError}.</p>
+{/if}
+
 <Row name="Input" block pending={$daemon.pending.has('audio.input_device')}>
   <Picker label="Input device" value={current} change={(next) => write('audio.input_device', next)}>
     <option value={SYSTEM_DEVICE}>{deviceLabel($daemon.live.audio_device)}</option>
@@ -152,14 +165,53 @@
   </Picker>
 </Row>
 
-<Row name="Transcription" pending={$waitsOnARestart.has('stt.preset')}>
+<Row
+  name="Listening with"
+  note={provider === 'remote' ? 'Audio goes to the server below.' : 'Audio stays on this machine.'}
+  pending={$waitsOnARestart.has('stt.provider')}
+>
   <Segmented
-    label="Transcription"
-    value={preset}
-    options={PRESETS}
-    change={(next) => write('stt.preset', next)}
+    label="Listening with"
+    value={provider}
+    options={LISTENING}
+    change={(next) => write('stt.provider', next)}
   />
 </Row>
+
+{#if provider === 'remote'}
+  <Row name="Server" block pending={$waitsOnARestart.has('stt.remote.base_url')}>
+    <Field
+      label="Server"
+      value={String(remoteTable.base_url ?? '')}
+      commit={(next) => write('stt.remote.base_url', next)}
+    />
+  </Row>
+  <Row name="Model" block pending={$waitsOnARestart.has('stt.remote.model')}>
+    <Field
+      label="Model"
+      value={String(remoteTable.model ?? '')}
+      commit={(next) => write('stt.remote.model', next)}
+    />
+  </Row>
+  <!-- Write-only. The daemon says whether a key is set and never what it is. -->
+  <Row name="Key" block pending={$waitsOnARestart.has('stt.remote.api_key')}>
+    <Field
+      label="Key"
+      masked
+      placeholder={keyPlaceholder}
+      commit={(next) => (next === '' ? undefined : write('stt.remote.api_key', next))}
+    />
+  </Row>
+{:else}
+  <Row name="Transcription" pending={$waitsOnARestart.has('stt.preset')}>
+    <Segmented
+      label="Transcription"
+      value={preset}
+      options={PRESETS}
+      change={(next) => write('stt.preset', next)}
+    />
+  </Row>
+{/if}
 
 <!-- Beside the preset it depends on: the English-only model rules every other
      language out, and the two read as one decision only if they sit together. -->
@@ -247,5 +299,9 @@
   .add {
     background: transparent;
     width: 110px;
+  }
+
+  .failed {
+    margin: 0 0 12px;
   }
 </style>

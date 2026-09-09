@@ -1,10 +1,16 @@
 pub mod local;
+pub mod remote;
 pub mod vad;
 
 use banshee_common::error::BansheeError;
 
-use crate::config::{STTConfig, SttProvider};
+use crate::config::{STTConfig, STTPreset, SttProvider};
 use local::whisper::WhisperEngine;
+use remote::openai_compatible::RemoteTranscriber;
+
+/// The rate every `Transcriber` reads, and the rate the pipeline resamples the
+/// microphone to before the VAD sees a chunk.
+pub const SAMPLE_RATE: u32 = 16_000;
 
 /// What language the next transcription reads the audio as, and whether it
 /// answers in English whatever was said.
@@ -34,19 +40,37 @@ pub fn english_only(model_name: &str) -> bool {
 
 // One thread owns the engine and calls it, so `Send` without `Sync`
 pub trait Transcriber: Send {
-    /// `audio` is mono `f32` at 16 kHz.
+    /// `audio` is mono `f32` at `SAMPLE_RATE`.
     fn transcribe(&self, audio: &[f32]) -> Result<String, BansheeError>;
     fn set_vocabulary(&mut self, words: &[String]);
     fn set_speech(&mut self, speech: Speech);
-    /// The `stt.preset` changed. On `Ok(())` the listener records `model` as the
-    /// loaded model.
-    fn reload(&mut self, model: &'static str) -> Result<(), BansheeError>;
+    /// `stt.preset` changed live. Answers the model file now loaded, or `None`
+    /// for a provider that loads no file.
+    fn reload(&mut self, preset: STTPreset) -> Result<Option<&'static str>, BansheeError>;
+    /// What shortens a transcription that ran far slower than realtime, or
+    /// `None` where the wait is not this machine's to shorten.
+    fn slow_advice(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 pub fn select_transcriber(stt: &STTConfig) -> Result<Box<dyn Transcriber>, BansheeError> {
     match stt.provider {
         SttProvider::Local => {
             let engine = WhisperEngine::new(stt.preset.model_name(), &stt.vocabulary, stt.into())?;
+            Ok(Box::new(engine))
+        }
+        SttProvider::Remote => {
+            let key = crate::credentials::Credentials::load()?
+                .stt_api_key
+                .ok_or_else(|| {
+                    BansheeError::Other(
+                        "no key for the remote listener; set one with: banshee config set stt.remote.api_key"
+                            .to_string(),
+                    )
+                })?;
+            println!("Listening through {}", stt.remote.host());
+            let engine = RemoteTranscriber::new(&stt.remote, key, &stt.vocabulary, stt.into())?;
             Ok(Box::new(engine))
         }
     }

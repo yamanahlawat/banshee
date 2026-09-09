@@ -101,7 +101,7 @@ fn the_spoken_language_applies_without_a_restart() {
 fn a_language_the_engine_does_not_know_is_refused_at_the_boundary() {
     let error = super::configure(
         None,
-        &assignments(&[("stt.language", "klingon".into())]),
+        assignments(&[("stt.language", "klingon".into())]),
         false,
     )
     .expect_err("an unknown code must not be written");
@@ -111,7 +111,7 @@ fn a_language_the_engine_does_not_know_is_refused_at_the_boundary() {
 
 #[test]
 fn a_language_the_engine_knows_is_written() {
-    super::configure(None, &assignments(&[("stt.language", "de".into())]), false)
+    super::configure(None, assignments(&[("stt.language", "de".into())]), false)
         .expect("de is a language whisper knows");
 }
 
@@ -137,7 +137,7 @@ fn a_barge_in_write_reaches_the_running_daemon() {
 
     let outcome = super::configure(
         Some(&state),
-        &assignments(&[("audio.barge_in", "none".into())]),
+        assignments(&[("audio.barge_in", "none".into())]),
         false,
     )
     .expect("a known key and a legal value must apply");
@@ -157,7 +157,7 @@ fn a_cues_write_reaches_the_running_daemon() {
 
     let outcome = super::configure(
         Some(&state),
-        &assignments(&[("audio.cues.enabled", true.into())]),
+        assignments(&[("audio.cues.enabled", true.into())]),
         false,
     )
     .expect("a known key and a legal value must apply");
@@ -180,7 +180,7 @@ fn a_save_history_write_reaches_the_running_daemon() {
 
     let outcome = super::configure(
         Some(&state),
-        &assignments(&[("daemon.save_history", false.into())]),
+        assignments(&[("daemon.save_history", false.into())]),
         false,
     )
     .expect("a known key and a legal value must apply");
@@ -200,7 +200,7 @@ fn a_voice_write_reaches_the_running_daemon() {
 
     let outcome = super::configure(
         Some(&state),
-        &assignments(&[("tts.voice", "am_adam".into())]),
+        assignments(&[("tts.voice", "am_adam".into())]),
         false,
     )
     .expect("a known key and a legal value must apply");
@@ -229,7 +229,7 @@ fn a_speed_write_reaches_the_running_daemon() {
 
     let outcome = super::configure(
         Some(&state),
-        &assignments(&[("tts.speed", 1.5.into())]),
+        assignments(&[("tts.speed", 1.5.into())]),
         false,
     )
     .expect("a known key and a legal value must apply");
@@ -250,7 +250,7 @@ fn a_backend_that_refuses_the_voice_is_not_reported_as_applied() {
 
     let outcome = super::configure(
         Some(&state),
-        &assignments(&[("tts.voice", "am_adam".into())]),
+        assignments(&[("tts.voice", "am_adam".into())]),
         false,
     )
     .expect("a known key and a legal value must reach the backend");
@@ -273,7 +273,7 @@ fn the_voice_and_the_speed_together_reach_the_backend_once() {
 
     let outcome = super::configure(
         Some(&state),
-        &assignments(&[("tts.voice", "am_adam".into()), ("tts.speed", 1.5.into())]),
+        assignments(&[("tts.voice", "am_adam".into()), ("tts.speed", 1.5.into())]),
         false,
     )
     .expect("two known keys and legal values must apply");
@@ -293,7 +293,7 @@ fn a_vocabulary_write_reaches_the_listener_that_holds_the_engine() {
 
     let outcome = super::configure(
         Some(&state),
-        &assignments(&[("stt.vocabulary", vec!["banshee", "tokio"].into())]),
+        assignments(&[("stt.vocabulary", vec!["banshee", "tokio"].into())]),
         false,
     )
     .expect("a known key and a legal value must apply");
@@ -307,6 +307,9 @@ fn a_vocabulary_write_reaches_the_listener_that_holds_the_engine() {
     assert_eq!(outcome.applied, vec!["stt.vocabulary".to_string()]);
 }
 
+// These ask `apply_preset` directly: `configure` reads the config.toml this
+// machine holds, so a write driven through it decides by whose machine runs the
+// test.
 #[test]
 fn a_preset_write_reaches_the_listener_that_holds_the_engine() {
     let (commands, taken) = std::sync::mpsc::channel();
@@ -314,22 +317,15 @@ fn a_preset_write_reaches_the_listener_that_holds_the_engine() {
     running.stt.preset = crate::config::STTPreset::Fast;
     let state = crate::test_support::daemon_state_running(running, commands);
 
-    let outcome = super::configure(
-        Some(&state),
-        &assignments(&[("stt.preset", "balanced".into())]),
-        false,
-    )
-    .expect("a known key and a legal value must apply");
+    let applied = super::apply_preset(&state, &Config::default());
 
     // The model is the one the daemon already runs on a real machine, so
     // this asserts what the arm decided rather than what is on this disk.
-    match (taken.try_recv(), outcome.applied.is_empty()) {
-        (Ok(crate::state::ConsumerCommand::Reload(model)), false) => {
-            assert_eq!(model, "ggml-large-v3-turbo-q5_0.bin");
+    match (taken.try_recv(), applied) {
+        (Ok(crate::state::ConsumerCommand::Reload(preset)), true) => {
+            assert_eq!(preset.model_name(), "ggml-large-v3-turbo-q5_0.bin");
         }
-        (Err(_), true) => {
-            assert_eq!(outcome.restart_required, vec!["stt.preset".to_string()]);
-        }
+        (Err(_), false) => {}
         _ => panic!("the arm handed over a model and reported nothing, or the reverse"),
     }
 }
@@ -341,17 +337,53 @@ fn a_preset_write_reaches_the_listener_that_holds_the_engine() {
 fn a_preset_already_behind_the_engine_loads_nothing() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
-    state.set_stt_model("ggml-large-v3-turbo-q5_0.bin");
+    state.set_stt_model(Some("ggml-large-v3-turbo-q5_0.bin"));
 
-    let outcome = super::configure(
-        Some(&state),
-        &assignments(&[("stt.preset", "balanced".into())]),
-        false,
-    )
-    .expect("a known key and a legal value must apply");
-
+    assert!(super::apply_preset(&state, &Config::default()));
     assert!(taken.try_recv().is_err(), "the model was already loaded");
-    assert_eq!(outcome.applied, vec!["stt.preset".to_string()]);
+}
+
+#[test]
+fn a_preset_write_under_a_remote_listener_is_applied_and_loads_nothing() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    let mut file = Config::default();
+    file.stt.provider = crate::config::SttProvider::Remote;
+    file.stt.preset = crate::config::STTPreset::Fast;
+
+    assert!(super::apply_preset(&state, &file));
+    assert!(
+        taken.try_recv().is_err(),
+        "nothing is loaded for a remote listener"
+    );
+}
+
+/// The file can name a local listener while a remote one is still running. The
+/// engine that loads the preset starts on the pending restart.
+#[test]
+fn a_preset_written_for_a_listener_that_is_not_running_yet_loads_nothing() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let mut running = Config::default();
+    running.stt.provider = crate::config::SttProvider::Remote;
+    let state = crate::test_support::daemon_state_running(running, commands);
+    let mut file = Config::default();
+    file.stt.preset = crate::config::STTPreset::Fast;
+    let model = file.stt.preset.model_name();
+
+    let applied = super::apply_preset(&state, &file);
+
+    assert!(
+        taken.try_recv().is_err(),
+        "a remote listener holds no engine to load into"
+    );
+    // Whether the file is on this disk decides the answer, so the download
+    // nudge is asserted only on a machine that has not downloaded it.
+    if !crate::models::missing(&[model]).is_empty() {
+        assert!(
+            !applied,
+            "a model that is not downloaded leaves the preset waiting"
+        );
+    }
 }
 
 #[test]
@@ -571,5 +603,59 @@ fn a_value_outside_its_range_is_refused() {
     assert!(
         error.to_string().contains("0.0 and 1.0"),
         "the error must state the range: {error}"
+    );
+}
+
+#[test]
+fn the_api_key_is_split_off_and_never_rendered() {
+    let mut rest = assignments(&[
+        ("stt.remote.api_key", "sk-test".into()),
+        ("stt.remote.model", "whisper-1".into()),
+    ]);
+    let key = super::take_api_key(&mut rest).unwrap();
+    assert_eq!(key.as_deref(), Some("sk-test"));
+    assert!(!rest.contains_key("stt.remote.api_key"));
+
+    let (rendered, _) = edit("[stt]\nprovider = \"remote\"\n", &rest).unwrap();
+    assert!(
+        !rendered.contains("sk-test"),
+        "the key must not be rendered: {rendered}"
+    );
+    assert!(rendered.contains("model = \"whisper-1\""));
+}
+
+// A file hand-edited to hold the key renders back into the document `edit`
+// validates
+#[test]
+fn a_key_already_in_the_file_is_refused_without_the_reply_carrying_it() {
+    let error = edit(
+        "[stt.remote]\napi_key = \"sk-test\"\n",
+        &assignments(&[("stt.remote.model", "whisper-1".into())]),
+    )
+    .expect_err("the key must not validate from config.toml");
+    assert!(
+        error
+            .to_string()
+            .contains("banshee config set stt.remote.api_key"),
+        "{error}"
+    );
+    assert!(
+        !error.to_string().contains("sk-test"),
+        "the reply must not echo the key: {error}"
+    );
+}
+
+#[test]
+fn a_key_that_is_not_a_string_is_refused() {
+    let error = super::take_api_key(&mut assignments(&[("stt.remote.api_key", 42.into())]))
+        .expect_err("a number is not a key");
+    assert!(error.to_string().contains("stt.remote.api_key"));
+}
+
+#[test]
+fn the_api_key_needs_a_restart_like_the_other_startup_keys() {
+    assert_eq!(
+        startup_only(&assignments(&[("stt.remote.api_key", "sk".into())])),
+        Some(&"stt.remote.api_key".to_string())
     );
 }

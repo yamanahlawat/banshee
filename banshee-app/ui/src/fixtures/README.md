@@ -1,9 +1,9 @@
 # Fixtures
 
-Real daemon replies, captured from Banshee 0.11.1 on macOS 25.6.0: 2026-08-27,
-and `permissions.json` again on 2026-09-01. Nothing here is hand-typed except
-`not-running.json`, which the daemon cannot produce because a stopped daemon
-answers nothing.
+Real daemon replies, captured on macOS 25.6.0: Banshee 0.11.1 on 2026-08-27,
+`permissions.json` again on 2026-09-01, and `remote.json` from Banshee 0.12.2 on
+2026-09-09. Nothing here is hand-typed except `not-running.json`, which the
+daemon cannot produce because a stopped daemon answers nothing.
 
 | File | What it is | How it was captured |
 | --- | --- | --- |
@@ -15,6 +15,7 @@ answers nothing.
 | `transcribing.json` | `banshee.state_changed` params | Same subscription, after `banshee record stop` |
 | `speaking.json` | `banshee.state_changed` params | Same subscription, during `banshee speak` |
 | `armed.json` | `banshee.state_changed` params | Same subscription, while an agent held the microphone open through `ask_user` |
+| `remote.json` | `banshee.status` with a remote listener set and its key present | `banshee config set stt.provider remote`, `stt.remote.model` set to `gpt-4o-transcribe`, `base_url` left at the OpenAI default so no private host enters the repo, the key set, daemon restarted, `banshee status --json` |
 
 ## Two of these carry the discriminating case
 

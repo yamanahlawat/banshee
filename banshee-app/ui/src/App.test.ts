@@ -467,7 +467,7 @@ it('offers a restart, not a download, when the files are already there', async (
       {
         kind: 'model',
         id: 'recording_pipeline',
-        name: 'Recording pipeline',
+        name: 'Banshee needs a restart',
         remedy: 'restart',
         consequence: 'a model would not load',
         fix: 'restart it: banshee start',
@@ -545,7 +545,7 @@ it('says which file is downloading and how far it has come', async () => {
       {
         kind: 'model',
         id: 'recording_pipeline',
-        name: 'Recording pipeline',
+        name: 'Banshee needs a restart',
         remedy: 'restart',
         consequence: 'a model would not load',
         fix: 'restart it: banshee start',
@@ -561,7 +561,7 @@ it('says which file is downloading and how far it has come', async () => {
         {
           kind: 'model',
           id: 'recording_pipeline',
-          name: 'Recording pipeline',
+          name: 'Banshee needs a restart',
           remedy: 'restart',
           consequence: 'a model would not load',
           fix: 'restart it: banshee start',
@@ -992,7 +992,7 @@ it('does not call an unplugged microphone a restart', async () => {
       {
         kind: 'pipeline',
         id: 'recording_pipeline',
-        name: 'Recording pipeline',
+        name: 'The microphone is not working',
         remedy: 'restart',
         consequence: 'the microphone would not open: no device',
         fix: 'connect the microphone, grant it in Privacy & Security, or fix [audio] input_device. If recording does not recover on its own, restart: banshee start',

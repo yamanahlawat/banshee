@@ -1,0 +1,83 @@
+{
+  "running": true,
+  "version": "0.12.2",
+  "stt_model": null,
+  "vad_model": "silero_vad.onnx",
+  "audio_device": "MacBook Pro Microphone",
+  "missing_device": null,
+  "recording": false,
+  "armed": false,
+  "transcribing": false,
+  "speaking": false,
+  "uptime_seconds": 5,
+  "vad_threshold": 0.5,
+  "history_enabled": true,
+  "download_megabytes": 0,
+  "english_only": false,
+  "ready": true,
+  "blockers": [],
+  "config": {
+    "daemon": {
+      "always_on": true,
+      "save_history": true
+    },
+    "audio": {
+      "input_device": "default",
+      "hotkey": "RightCommand",
+      "hotkey_mode": "toggle",
+      "barge_in": "stop",
+      "cues": {
+        "enabled": true,
+        "start": null,
+        "stop": null,
+        "ready": null,
+        "error": null
+      }
+    },
+    "stt": {
+      "provider": "remote",
+      "remote": {
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-transcribe"
+      },
+      "preset": "balanced",
+      "language": "en",
+      "translate": false,
+      "vad_threshold": 0.5,
+      "vocabulary": [
+        "pydantic",
+        "shadcn",
+        "pydantic ai",
+        "redis",
+        "tmux",
+        "commit",
+        "omarchy",
+        "claude",
+        "claude code",
+        "pi",
+        "cuda",
+        "banshee"
+      ],
+      "endpoint_silence_ms": 2500
+    },
+    "tts": {
+      "provider": "local",
+      "voice": "af_sky",
+      "speed": 1.2000000476837158,
+      "fallback": "system"
+    }
+  },
+  "pending": [],
+  "last_error": null,
+  "remote": {
+    "stt": {
+      "remote": true,
+      "host": "api.openai.com",
+      "key_present": true
+    },
+    "tts": {
+      "remote": false
+    }
+  },
+  "key_press_access": "granted"
+}

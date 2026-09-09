@@ -36,6 +36,29 @@ pub fn sibling_command(name: &str) -> Result<std::process::Command, BansheeError
 pub const DAEMON_AGENT: &str = "com.banshee.daemon";
 pub const TRAY_AGENT: &str = "com.banshee.tray";
 
+/// Writes `bytes` to `path` through a staged file and a rename, so a partial
+/// write never truncates a file the user hand-edits. `mode` applies from the
+/// first byte on disk, and the rename carries it with the inode.
+pub fn write_atomically(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let extension = path.extension().unwrap_or_default().to_string_lossy();
+    // A staging name shared between processes lets two of them interleave their
+    // bytes.
+    let staged = path.with_extension(format!("{extension}.{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    if let Some(mode) = mode {
+        options.mode(mode);
+    }
+    options.open(&staged)?.write_all(bytes)?;
+    std::fs::rename(&staged, path)
+}
+
 /// What launchctl calls one job of the logged-in user.
 pub fn launchd_target(label: &str) -> String {
     format!("gui/{}/{label}", uid())
@@ -61,6 +84,11 @@ pub fn get_models_path() -> Option<PathBuf> {
 pub fn get_config_path() -> Option<PathBuf> {
     let base_path = dirs::home_dir()?;
     Some(base_path.join(".banshee").join("config.toml"))
+}
+
+pub fn get_credentials_path() -> Option<PathBuf> {
+    let base_path = dirs::home_dir()?;
+    Some(base_path.join(".banshee").join("credentials.toml"))
 }
 
 pub fn get_db_path() -> Option<PathBuf> {

@@ -49,6 +49,9 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     for name in crate::models::required(&config) {
         healthy &= check_model(&models_dir, name);
     }
+    if config.stt.provider.is_remote() {
+        healthy &= check_remote_key();
+    }
     let kokoro = KokoroTTSConfig::new(&config.tts.voice);
     let kokoro_present = models_dir.join(&kokoro.model_name).exists()
         && models_dir.join(&kokoro.voice_name).exists();
@@ -197,6 +200,26 @@ fn check_model(models_dir: &Path, name: &str) -> bool {
     } else {
         fail(&format!("model missing: {name}"), "run: banshee setup")
     }
+}
+
+fn check_remote_key() -> bool {
+    match crate::credentials::Credentials::load() {
+        Ok(credentials) if credentials.stt_api_key.is_some() => pass("remote listener key present"),
+        Ok(_) => fail(
+            "no key for the remote listener",
+            "banshee config set stt.remote.api_key",
+        ),
+        // Setting the key again reads the same file first, so the fix starts by
+        // removing it.
+        Err(error) => fail(&error.to_string(), &remove_the_credentials_file()),
+    }
+}
+
+fn remove_the_credentials_file() -> String {
+    let path = crate::credentials::Credentials::path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "~/.banshee/credentials.toml".to_string());
+    format!("rm {path}, then: banshee config set stt.remote.api_key")
 }
 
 // What the socket says about a daemon. Read once, because the microphone check
@@ -394,9 +417,11 @@ fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
 // device. A substitute records correctly, so it stays a pass.
 fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     match daemon {
+        // A listener that will not answer takes capture down with it, so both
+        // kinds leave the daemon unable to record and both name their own fix.
         Daemon::Running { status, blockers } => match blockers
             .iter()
-            .find(|blocker| blocker.kind == BlockerKind::Pipeline)
+            .find(|blocker| matches!(blocker.kind, BlockerKind::Pipeline | BlockerKind::Provider))
         {
             None => report_open(status, blockers),
             Some(blocker) => fail(
@@ -489,12 +514,24 @@ fn report_settings(config: &Config, daemon: &Daemon) {
         config.tts.speed,
         on_off(config.daemon.save_history)
     ));
-    let stt_remote = live(daemon, |status| status["remote"]["stt"].as_bool())
+    let stt_remote = live(daemon, |status| status["remote"]["stt"]["remote"].as_bool())
         .unwrap_or(config.stt.provider.is_remote());
-    let tts_remote = live(daemon, |status| status["remote"]["tts"].as_bool())
+    let tts_remote = live(daemon, |status| status["remote"]["tts"]["remote"].as_bool())
         .unwrap_or(config.tts.provider.is_remote());
     if !stt_remote && !tts_remote {
         note("audio and text stay on this machine");
+    }
+    if stt_remote {
+        let host = live(daemon, |status| {
+            banshee_common::remote_stt_host(status).map(str::to_string)
+        })
+        .unwrap_or_else(|| config.stt.remote.host());
+        note(&format!("audio goes to {host} for listening"));
+    }
+    if let Some(error) = live(daemon, |status| {
+        status["last_error"].as_str().map(str::to_string)
+    }) {
+        note(&format!("the last transcription failed: {error}"));
     }
 }
 

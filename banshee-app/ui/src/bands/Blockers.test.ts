@@ -2,7 +2,7 @@ import { fireEvent, render } from '@testing-library/svelte';
 import { expect, it } from 'vitest';
 import Blockers from './Blockers.svelte';
 import permissions from '../fixtures/permissions.json';
-import type { Blocker } from '../lib/daemon';
+import type { Blocker, BlockerKind } from '../lib/daemon';
 
 const at = (bytes: number) => ({
   label: 'Speech model',
@@ -90,7 +90,7 @@ it('numbers each thing it still needs', () => {
 // A model arriving repairs a model, so that box may stand down for the run. It
 // brings no microphone, so a capture fault has to keep its place beside it.
 it('keeps a microphone fault beside a running download, and stands a model restart down', () => {
-  const restart = (kind: string, name: string): Blocker => ({
+  const restart = (kind: BlockerKind, name: string): Blocker => ({
     kind,
     id: 'recording_pipeline',
     name,
@@ -100,18 +100,39 @@ it('keeps a microphone fault beside a running download, and stands a model resta
   });
 
   const microphone = render(Blockers, {
-    blockers: [restart('pipeline', 'Recording pipeline')],
+    blockers: [restart('pipeline', 'The microphone is not working')],
     download: at(26),
     restart: () => {},
   });
   expect(microphone.getByRole('heading', { name: /microphone is not working/i })).toBeTruthy();
 
   const model = render(Blockers, {
-    blockers: [restart('model', 'Recording pipeline')],
+    blockers: [restart('model', 'Banshee needs a restart')],
     download: at(26),
     restart: () => {},
   });
   expect(model.queryByRole('heading', { name: /needs a restart/i })).toBeNull();
+});
+
+// The microphone headline sends the reader to their hardware.
+it('names the remote listener when the fault is the server, not the microphone', () => {
+  const { getByRole, queryByRole } = render(Blockers, {
+    blockers: [
+      {
+        kind: 'provider',
+        id: 'recording_pipeline',
+        name: 'The remote listener is not reachable',
+        remedy: 'restart',
+        consequence: 'dictation and ask_user do not work until the key or server is fixed',
+        fix: 'set the key: banshee config set stt.remote.api_key, or fix [stt.remote] base_url, then restart: banshee start',
+        command: 'banshee start',
+      } satisfies Blocker,
+    ],
+    restart: () => {},
+  });
+  expect(getByRole('heading', { name: /remote listener is not reachable/i })).toBeTruthy();
+  expect(queryByRole('heading', { name: /microphone/i })).toBeNull();
+  expect(getByRole('button', { name: 'Restart' })).toBeTruthy();
 });
 
 // First run is the one moment a person asks what Banshee is, and it is

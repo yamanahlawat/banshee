@@ -35,7 +35,7 @@ pub enum TranscribeTarget {
 }
 
 pub struct AskCommand {
-    pub reply: tokio::sync::oneshot::Sender<String>,
+    pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     pub timeout: Duration,
 }
 
@@ -51,7 +51,7 @@ pub enum ConsumerCommand {
     // so the dictation that follows is whole.
     Retune(Vec<String>),
     Speak(crate::speech_to_text::Speech),
-    Reload(&'static str),
+    Reload(crate::config::STTPreset),
     // A new stream opened, so the old ring is dead. The rate comes with it:
     // devices do not share one.
     Rebind {
@@ -95,12 +95,14 @@ struct TranscriptionRing {
     entries: VecDeque<TranscriptionEntry>,
 }
 
-/// Why the recording pipeline did not start. A missing mic and a missing model
-/// need different fixes, so they stay distinct out to the RPC error code.
+/// Why the recording pipeline did not start. A missing mic, a missing model and
+/// a remote listener that will not answer need different fixes, so they stay
+/// distinct out to the RPC error code.
 #[derive(Clone)]
 pub enum RecordingError {
     Microphone(String),
     Model(String),
+    Provider(String),
 }
 
 impl std::fmt::Display for RecordingError {
@@ -108,6 +110,7 @@ impl std::fmt::Display for RecordingError {
         match self {
             RecordingError::Microphone(e) => write!(f, "the microphone would not open: {e}"),
             RecordingError::Model(e) => write!(f, "a model would not load: {e}"),
+            RecordingError::Provider(e) => write!(f, "the remote listener is not reachable: {e}"),
         }
     }
 }
@@ -119,13 +122,18 @@ impl RecordingError {
     pub fn consequence(&self) -> String {
         match self {
             RecordingError::Model(_) => "a model would not load".to_string(),
+            RecordingError::Provider(_) => {
+                "dictation and ask_user do not work until the key or server is fixed".to_string()
+            }
             RecordingError::Microphone(_) => self.to_string().trim_end_matches('.').to_string(),
         }
     }
 
     pub fn command(&self) -> Option<&'static str> {
         match self {
-            RecordingError::Microphone(_) | RecordingError::Model(_) => Some("banshee start"),
+            RecordingError::Microphone(_)
+            | RecordingError::Model(_)
+            | RecordingError::Provider(_) => Some("banshee start"),
         }
     }
 
@@ -139,6 +147,10 @@ impl RecordingError {
                  restart: banshee start"
             }
             RecordingError::Model(_) => "restart it: banshee start",
+            RecordingError::Provider(_) => {
+                "set the key: banshee config set stt.remote.api_key, or fix \
+                 [stt.remote] base_url, then restart: banshee start"
+            }
         }
     }
 }
@@ -173,7 +185,7 @@ pub struct DaemonState {
     // The model the listener has loaded, not the one the file names. The
     // window reads the blockers built from this, so a preset that was asked
     // for and never loaded must not clear them.
-    stt_model: RwLock<&'static str>,
+    stt_model: RwLock<Option<&'static str>>,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: RwLock<Option<String>>,
@@ -206,6 +218,8 @@ pub struct DaemonState {
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
+    // Why the last transcription failed, cleared by the next one that succeeds.
+    last_error: watch::Sender<Option<String>>,
     // One counter for the whole device picture. It moves only when a setter
     // writes a value that differs, because the watchdog rewrites the same one
     // every rescan and each move wakes the push task of every subscriber.
@@ -242,7 +256,7 @@ impl DaemonState {
         let wanted_downloads = crate::models::download::wanted(&config);
         Self {
             version: env!("CARGO_PKG_VERSION"),
-            stt_model: RwLock::new(config.stt.preset.model_name()),
+            stt_model: RwLock::new(crate::models::stt_file(&config)),
             vad_model: crate::models::VAD_MODEL,
             vad_threshold: AtomicU32::new(config.stt.vad_threshold.to_bits()),
             audio_device: RwLock::new(None),
@@ -265,6 +279,7 @@ impl DaemonState {
             latest_transcription_id: watch::channel(0).0,
             recording_active: watch::channel(false).0,
             transcribing: watch::channel(false).0,
+            last_error: watch::channel(None).0,
             device_changes: watch::channel(0).0,
             downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
             downloading: AtomicBool::new(false),
@@ -486,6 +501,26 @@ impl DaemonState {
         self.transcribing.subscribe()
     }
 
+    /// Each move wakes the push task of every subscriber, so an error that has
+    /// not changed sends nothing.
+    pub fn set_last_error(&self, error: Option<String>) {
+        self.last_error.send_if_modified(|current| {
+            if *current == error {
+                return false;
+            }
+            *current = error;
+            true
+        });
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.borrow().clone()
+    }
+
+    pub fn subscribe_last_error(&self) -> watch::Receiver<Option<String>> {
+        self.last_error.subscribe()
+    }
+
     pub fn subscribe_downloads(&self) -> broadcast::Receiver<DownloadProgress> {
         self.downloads.subscribe()
     }
@@ -530,15 +565,15 @@ impl DaemonState {
         self.version
     }
 
-    pub fn stt_model(&self) -> &'static str {
+    pub fn stt_model(&self) -> Option<&'static str> {
         *self
             .stt_model
             .read()
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    /// The listener records what it loaded, as the speech backend does.
-    pub fn set_stt_model(&self, model: &'static str) {
+    /// `None` for a listener that loads no file.
+    pub fn set_stt_model(&self, model: Option<&'static str>) {
         *self
             .stt_model
             .write()
@@ -738,8 +773,8 @@ impl DaemonState {
         self.commands.send(ConsumerCommand::Speak(speech)).is_ok()
     }
 
-    pub fn load_stt_model(&self, model: &'static str) -> bool {
-        self.commands.send(ConsumerCommand::Reload(model)).is_ok()
+    pub fn load_stt_model(&self, preset: crate::config::STTPreset) -> bool {
+        self.commands.send(ConsumerCommand::Reload(preset)).is_ok()
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {

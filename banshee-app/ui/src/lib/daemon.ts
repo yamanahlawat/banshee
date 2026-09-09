@@ -5,8 +5,9 @@ import { derived, writable } from 'svelte/store';
 /// daemon older than them.
 export type Remedy = 'download' | 'restart' | 'grant';
 export type FileRole = 'speech' | 'detector' | 'engine' | 'voice';
+export type BlockerKind = 'permission' | 'model' | 'pipeline' | 'provider';
 export type Blocker = {
-  kind: string;
+  kind: BlockerKind;
   id: string;
   name: string;
   role?: FileRole;
@@ -23,6 +24,10 @@ export type Status = Record<string, unknown> & {
   config?: Record<string, Record<string, unknown>>;
   pending?: string[];
   history_enabled?: boolean;
+  remote?: {
+    stt: { remote: boolean; host: string | null; key_present: boolean };
+    tts: { remote: boolean };
+  };
 };
 export type Live = {
   recording: boolean;
@@ -31,6 +36,7 @@ export type Live = {
   transcribing: boolean;
   audio_device: string | null;
   missing_device: string | null;
+  last_error: string | null;
 };
 export type Daemon = {
   status: Status | null;
@@ -69,6 +75,7 @@ export function empty(): Daemon {
       transcribing: false,
       audio_device: null,
       missing_device: null,
+      last_error: null,
     },
     pending: new Set(),
     down: null,

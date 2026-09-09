@@ -124,6 +124,13 @@ pub fn missing_device(status: &Value) -> Option<&str> {
     status.get("missing_device").and_then(Value::as_str)
 }
 
+/// Where a remote listener sends the audio. `None` for a local one.
+pub fn remote_stt_host(status: &Value) -> Option<&str> {
+    // A daemon older than the nested shape answers a boolean at `remote.stt`,
+    // and indexing a `Value::Bool` gives `Null`, so it reads as local.
+    status["remote"]["stt"]["host"].as_str()
+}
+
 /// What `IOHIDCheckAccess` answered in the daemon: `granted`, `denied` or
 /// `undetermined`. `None` from a daemon older than the field.
 pub fn key_press_access(status: &Value) -> Option<&str> {
@@ -211,6 +218,8 @@ pub enum BlockerKind {
     Permission,
     Model,
     Pipeline,
+    /// The server that hears the audio, as against the machine that captures it.
+    Provider,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -540,5 +549,21 @@ mod label_tests {
         ] {
             assert_eq!(microphone_label(open, missing), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::remote_stt_host;
+
+    #[test]
+    fn the_remote_host_is_read_off_the_status_reply() {
+        let local = serde_json::json!({"remote": {"stt": {"remote": false, "host": null}}});
+        assert_eq!(remote_stt_host(&local), None);
+        let remote =
+            serde_json::json!({"remote": {"stt": {"remote": true, "host": "api.groq.com"}}});
+        assert_eq!(remote_stt_host(&remote), Some("api.groq.com"));
+        let older = serde_json::json!({"remote": {"stt": false, "tts": false}});
+        assert_eq!(remote_stt_host(&older), None);
     }
 }

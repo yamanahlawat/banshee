@@ -138,7 +138,7 @@ async fn ask_user_lets_speech_from_the_same_turn_finish() {
             return;
         };
         session_state.set_recording_mode(RecordingMode::Idle);
-        let _ = ask.reply.send("say it is idle".to_string());
+        let _ = ask.reply.send(Ok("say it is idle".to_string()));
     });
 
     let request = request(
@@ -170,7 +170,7 @@ async fn ask_user_returns_the_scoped_answer() {
         };
         assert_eq!(session_state.recording_mode(), RecordingMode::Armed);
         session_state.set_recording_mode(RecordingMode::Idle);
-        let _ = ask.reply.send("yes, ship it".to_string());
+        let _ = ask.reply.send(Ok("yes, ship it".to_string()));
     });
 
     let request = request(
@@ -392,18 +392,39 @@ fn english_only_follows_the_model_the_listener_loaded() {
     let state = test_state(std::sync::mpsc::channel().0);
     assert_eq!(status_payload(&state)["english_only"], false);
 
-    state.set_stt_model("ggml-base.en.bin");
+    state.set_stt_model(Some("ggml-base.en.bin"));
     assert_eq!(status_payload(&state)["english_only"], true);
+}
+
+#[test]
+fn a_remote_listener_reports_no_model_and_is_not_english_only() {
+    let mut config = crate::config::Config::default();
+    config.stt.provider = crate::config::SttProvider::Remote;
+    let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
+    let status = status_payload(&state);
+    assert_eq!(status["stt_model"], serde_json::Value::Null);
+    assert_eq!(status["english_only"], false);
 }
 
 #[test]
 fn status_says_nothing_leaves_the_machine_while_every_provider_is_local() {
     let state = test_state(std::sync::mpsc::channel().0);
-    let status = status_payload(&state);
-    assert_eq!(
-        status["remote"],
-        serde_json::json!({ "stt": false, "tts": false })
-    );
+    let remote = &status_payload(&state)["remote"];
+    assert_eq!(remote["stt"]["remote"], false);
+    assert_eq!(remote["stt"]["host"], serde_json::Value::Null);
+    assert!(remote["stt"]["key_present"].is_boolean());
+    assert_eq!(remote["tts"]["remote"], false);
+}
+
+#[test]
+fn status_names_the_host_a_remote_listener_sends_audio_to() {
+    let mut config = crate::config::Config::default();
+    config.stt.provider = crate::config::SttProvider::Remote;
+    config.stt.remote.base_url = "https://api.groq.com/openai/v1".to_string();
+    let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
+    let remote = &status_payload(&state)["remote"];
+    assert_eq!(remote["stt"]["remote"], true);
+    assert_eq!(remote["stt"]["host"], "api.groq.com");
 }
 
 #[test]
@@ -688,4 +709,86 @@ async fn speak_passes_the_voice_parameter_to_the_backend() {
 
     assert!(matches!(response, JsonRpcResponse::Success { .. }));
     assert_eq!(*captured.lock().unwrap(), vec![Some("am_adam".to_string())]);
+}
+
+#[tokio::test]
+async fn ask_user_names_the_provider_fault_with_its_own_code() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_recording_error(crate::state::RecordingError::Provider(
+        "the remote listener refused the key".to_string(),
+    ));
+
+    let request = request(
+        BANSHEE_ASK_USER,
+        Some(serde_json::json!({"question": "Ready?"})),
+    );
+    let response = dispatch(request, &state).await;
+
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected error response");
+    };
+    assert_eq!(error.code, -32006);
+    assert!(
+        error.message.contains("remote listener"),
+        "{}",
+        error.message
+    );
+}
+
+/// Silence answers `{"text": ""}`; a listener that failed answers an error, so
+/// the agent never mistakes one for the other.
+#[tokio::test]
+async fn ask_user_answers_an_error_when_the_listen_failed() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+
+    let session_state = Arc::clone(&state);
+    std::thread::spawn(move || {
+        let Ok(ConsumerCommand::Ask(ask)) = command_receiver.recv() else {
+            return;
+        };
+        session_state.set_recording_mode(RecordingMode::Idle);
+        let _ = ask
+            .reply
+            .send(Err("the remote listener refused the key".to_string()));
+    });
+
+    let request = request(
+        BANSHEE_ASK_USER,
+        Some(serde_json::json!({"question": "Ready to ship?"})),
+    );
+    let response = dispatch(request, &state).await;
+
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected error response");
+    };
+    assert_eq!(error.code, -32007);
+    assert!(
+        error.message.contains("refused the key"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn the_last_error_rides_in_status_and_in_the_pushed_state() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    assert_eq!(
+        status_payload(&state)["last_error"],
+        serde_json::Value::Null
+    );
+    assert_eq!(live_state(&state)["last_error"], serde_json::Value::Null);
+
+    state.set_last_error(Some("the remote listener refused the key".to_string()));
+    assert_eq!(
+        status_payload(&state)["last_error"],
+        "the remote listener refused the key"
+    );
+    assert_eq!(
+        live_state(&state)["last_error"],
+        "the remote listener refused the key"
+    );
+
+    state.set_last_error(None);
+    assert_eq!(live_state(&state)["last_error"], serde_json::Value::Null);
 }

@@ -6,6 +6,7 @@
     fixGroups,
     fixProse,
     type Blocker,
+    type BlockerKind,
     type Progress,
     type Remedy,
   } from '../lib/daemon';
@@ -27,6 +28,8 @@
   /// True until anything is dictated, the one moment a person asks "what is this". Derived, never
   /// stored.
   export let first = false;
+  /// The host a remote listener sends audio to.
+  export let remoteHost: string | null = null;
 
   /// A grant reaches only a process started after it lands, and the window cannot see it, so after
   /// sending someone to System Settings it offers the restart.
@@ -54,9 +57,14 @@
     return null;
   }
 
+  // The restart alone fixes none of these faults, so the label says how much it is worth.
+  const RESTART_LABELS: Partial<Record<BlockerKind, string>> = {
+    pipeline: 'Restart anyway',
+    provider: 'Restart',
+  };
+
   function decide(group: Blocker[]) {
     const first = group[0];
-    const microphone = first.kind === 'pipeline';
     switch (remedyOf(first)) {
       case 'grant':
         return {
@@ -85,17 +93,14 @@
         };
       case 'restart':
         return {
-          // A microphone fault and a model fault share one remedy, and its own
-          // fix says to connect the device first, so the restart is named as
-          // the last resort it is.
-          title: microphone ? 'The microphone is not working' : 'Banshee needs a restart',
-          label: microphone ? 'Restart anyway' : 'Restart Banshee',
+          title: first.name,
+          label: RESTART_LABELS[first.kind] ?? 'Restart Banshee',
           pane: '',
           confirmsWithRestart: false,
           run: restart,
           // A model arriving repairs a model, so a model restart stands down
-          // for the run. It brings no microphone, so a capture fault does not.
-          settledByADownload: !microphone,
+          // for the run. It brings neither a microphone nor a key.
+          settledByADownload: first.kind === 'model',
           chooses: false,
         };
       default:
@@ -131,8 +136,10 @@
        screen to dismiss: the window states what is true, and this stops being
        true once the first thing is said. -->
   <p class="opening">
-    Banshee types what you say into whatever app you are using, and nothing you say leaves this
-    machine. It needs {spell(steps)}
+    Banshee types what you say into whatever app you are using, and
+    {#if remoteHost}what you say goes to {remoteHost} to be heard.{:else}nothing you say leaves this
+      machine.{/if}
+    It needs {spell(steps)}
     {steps === 1 ? 'thing' : 'things'} first.
   </p>
 {/if}

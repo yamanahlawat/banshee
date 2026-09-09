@@ -394,6 +394,7 @@
           preset={String(config.stt?.preset ?? 'balanced')}
           megabytes={Number($daemon.status?.download_megabytes ?? 0)}
           first={savingHistory && nothingYet}
+          remoteHost={$daemon.status?.remote?.stt?.host ?? null}
         />
       {/if}
 

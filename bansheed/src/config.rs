@@ -81,7 +81,7 @@ impl Default for AudioConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum STTPreset {
     Fast,
@@ -151,15 +151,75 @@ fn rate<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
 #[serde(rename_all = "lowercase")]
 pub enum SttProvider {
     Local,
+    Remote,
 }
 
 impl SttProvider {
     pub fn is_remote(self) -> bool {
         match self {
             SttProvider::Local => false,
+            SttProvider::Remote => true,
         }
     }
 }
+
+// The message names the dotted key, because the same refusal reaches the window
+// as a toast, where no line and column are shown.
+fn non_empty<'de, D: Deserializer<'de>>(deserializer: D, key: &str) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Err(serde::de::Error::custom(format!("{key} needs a value")));
+    }
+    Ok(value)
+}
+
+fn remote_base_url<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    non_empty(deserializer, "stt.remote.base_url")
+}
+
+fn remote_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    non_empty(deserializer, "stt.remote.model")
+}
+
+/// Where `[stt] provider = "remote"` sends the audio. The key is not here: it
+/// lives in the credentials file, and `api_key` in this table is refused.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemoteSttConfig {
+    /// The `/v1` root, as in `https://api.openai.com/v1`.
+    #[serde(deserialize_with = "remote_base_url")]
+    pub base_url: String,
+    #[serde(deserialize_with = "remote_model")]
+    pub model: String,
+}
+
+impl Default for RemoteSttConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "whisper-1".to_string(),
+        }
+    }
+}
+
+/// The host a person recognises in "audio goes to api.openai.com", and nothing
+/// else the URL carries. Empty when the string is no URL, because a name is
+/// worth having only if it is the real one.
+pub fn host_of(base_url: &str) -> String {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+impl RemoteSttConfig {
+    pub fn host(&self) -> String {
+        host_of(&self.base_url)
+    }
+}
+
+const API_KEY_REFUSAL: &str =
+    "api_key does not belong in config.toml; set it with: banshee config set stt.remote.api_key";
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -179,6 +239,7 @@ impl TtsProvider {
 #[serde(default, deny_unknown_fields)]
 pub struct STTConfig {
     pub provider: SttProvider,
+    pub remote: RemoteSttConfig,
     pub preset: STTPreset,
     /// A Whisper language code, or `auto` to detect it. The English-only build
     /// holds no other language, so `preset = "fast"` reads English whatever
@@ -197,6 +258,7 @@ impl Default for STTConfig {
     fn default() -> Self {
         Self {
             provider: SttProvider::Local,
+            remote: RemoteSttConfig::default(),
             preset: STTPreset::Balanced,
             language: "en".to_string(),
             translate: false,
@@ -265,9 +327,24 @@ impl Config {
         }
     }
 
+    /// Parses a config document, and refuses an `api_key` in it.
+    pub fn parse(text: &str) -> Result<Self, BansheeError> {
+        toml::from_str(text).map_err(|error| {
+            // toml renders a parse error with the offending line above it, so
+            // the parser's own text would carry the key into stderr, the log and
+            // an RPC reply. Every other fault keeps its span, which is how a
+            // person finds the byte at fault.
+            if error.message().starts_with("unknown field `api_key`") {
+                BansheeError::Rejected(API_KEY_REFUSAL.to_string())
+            } else {
+                error.into()
+            }
+        })
+    }
+
     pub fn load() -> Result<Self, BansheeError> {
         let contents = Config::read(&Config::path()?)?;
-        Ok(toml::from_str(&contents)?)
+        Config::parse(&contents)
     }
 }
 
@@ -359,5 +436,109 @@ mod tests {
             error.to_string().contains("local"),
             "the error must list the legal values: {error}"
         );
+    }
+
+    #[test]
+    fn a_remote_listener_parses_with_its_table() {
+        let config: Config = toml::from_str(
+            "[stt]\nprovider = \"remote\"\n\n[stt.remote]\nbase_url = \"https://api.groq.com/openai/v1\"\nmodel = \"whisper-large-v3-turbo\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.stt.provider, SttProvider::Remote);
+        assert!(config.stt.provider.is_remote());
+        assert_eq!(config.stt.remote.base_url, "https://api.groq.com/openai/v1");
+        assert_eq!(config.stt.remote.model, "whisper-large-v3-turbo");
+        assert_eq!(config.stt.remote.host(), "api.groq.com");
+    }
+
+    /// A pasted URL can carry a user, a password and a port. The window says
+    /// "audio goes to {host}", where none of them belong.
+    #[test]
+    fn only_the_host_survives_a_url_that_carries_a_user_and_a_port() {
+        assert_eq!(
+            host_of("https://someone:sk-secret@listener.example:8443/v1"),
+            "listener.example"
+        );
+    }
+
+    #[test]
+    fn a_base_url_that_is_not_a_url_names_no_host() {
+        assert_eq!(host_of("not a url"), "");
+    }
+
+    #[test]
+    fn the_remote_table_defaults_to_openai() {
+        let config: Config = toml::from_str("[stt]\nprovider = \"remote\"\n").unwrap();
+        assert_eq!(config.stt.remote.base_url, "https://api.openai.com/v1");
+        assert_eq!(config.stt.remote.model, "whisper-1");
+        assert_eq!(config.stt.remote.host(), "api.openai.com");
+    }
+
+    // toml renders a parse error with the offending line, so passing it through
+    // would echo the key.
+    #[test]
+    fn a_key_in_the_config_file_is_refused_and_the_message_names_the_command() {
+        let error = Config::parse("[stt.remote]\napi_key = \"sk-test\"\n")
+            .expect_err("the key must not parse from config.toml");
+        assert!(
+            error
+                .to_string()
+                .contains("banshee config set stt.remote.api_key"),
+            "the error must name the command: {error}"
+        );
+        assert!(
+            !error.to_string().contains("sk-test"),
+            "the refusal must not echo the key: {error}"
+        );
+    }
+
+    // `[stt] api_key` is the other place a person reaches for.
+    #[test]
+    fn a_key_under_the_stt_table_is_refused_the_same_way() {
+        let error = Config::parse("[stt]\napi_key = \"sk-test\"\n")
+            .expect_err("the key must not parse from config.toml");
+        assert!(
+            error
+                .to_string()
+                .contains("banshee config set stt.remote.api_key"),
+            "the error must name the command: {error}"
+        );
+        assert!(
+            !error.to_string().contains("sk-test"),
+            "the refusal must not echo the key: {error}"
+        );
+    }
+
+    /// The window's Server row commits an empty field, and an empty server sends
+    /// the audio nowhere, so the refusal lives where the value is read.
+    #[test]
+    fn an_empty_remote_server_is_refused() {
+        let error = Config::parse("[stt.remote]\nbase_url = \"\"\n")
+            .expect_err("an empty server must not parse");
+        assert!(
+            error
+                .to_string()
+                .contains("stt.remote.base_url needs a value"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_remote_model_is_refused() {
+        let error = Config::parse("[stt.remote]\nmodel = \"\"\n")
+            .expect_err("an empty model must not parse");
+        assert!(
+            error.to_string().contains("stt.remote.model needs a value"),
+            "{error}"
+        );
+    }
+
+    // The line and column are the only way a person finds the byte that broke a
+    // file they hand-edited.
+    #[test]
+    fn a_fault_that_is_not_the_key_keeps_the_line_toml_points_at() {
+        let error = Config::parse("[audio]\nhotkey = \"banana\"\n")
+            .expect_err("an unknown binding must not parse");
+        assert!(error.to_string().contains("hotkey = \"banana\""), "{error}");
     }
 }

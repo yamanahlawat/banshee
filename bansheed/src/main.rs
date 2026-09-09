@@ -5,6 +5,7 @@ mod binding;
 mod cli;
 mod config;
 mod connect;
+mod credentials;
 mod daemon;
 mod dictation;
 mod history;
@@ -44,6 +45,9 @@ async fn main() -> Result<(), BansheeError> {
         CommandType::Config {
             action: args::ConfigAction::Set { key, value },
         } => cli::config(key, value).await,
+        CommandType::Config {
+            action: args::ConfigAction::Remote,
+        } => cli::config_remote().await,
         CommandType::Setup => cli::setup(config_result).await,
         CommandType::Status { json } => cli::status(json, config_result).await,
         CommandType::Listen => cli::listen().await,
