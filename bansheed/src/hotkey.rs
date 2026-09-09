@@ -11,8 +11,8 @@ use crate::audio::utils::{StreamingResampler, resample_audio};
 use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
 use crate::config::HotkeyMode;
 use crate::dictation::type_text;
+use crate::speech_to_text::Transcriber;
 use crate::speech_to_text::vad::VADEngine;
-use crate::speech_to_text::whisper::WhisperEngine;
 use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode, TranscribeTarget};
 
 const TARGET_SAMPLE_RATE: u32 = 16000;
@@ -47,7 +47,7 @@ impl CaptureSource {
 // Everything the audio consumer thread owns
 pub struct Pipeline {
     pub source: CaptureSource,
-    pub speech_to_text: WhisperEngine,
+    pub speech_to_text: Box<dyn Transcriber>,
     pub vad: VADEngine,
     pub state: Arc<DaemonState>,
     pub cues: Cues,
@@ -94,17 +94,12 @@ pub fn hotkey_listener(
                 ConsumerCommand::Speak(speech) => pipeline.speech_to_text.set_speech(speech),
                 // The load takes seconds and holds this thread. Nothing is lost:
                 // a press queues behind it and the ring still holds the audio.
-                ConsumerCommand::Reload(model) => {
-                    match pipeline
-                        .speech_to_text
-                        .reload(banshee_common::WhisperConfig::new(model))
-                    {
-                        Ok(()) => pipeline.state.set_stt_model(model),
-                        Err(error) => {
-                            eprintln!("banshee: the transcription model did not load: {error}")
-                        }
+                ConsumerCommand::Reload(model) => match pipeline.speech_to_text.reload(model) {
+                    Ok(()) => pipeline.state.set_stt_model(model),
+                    Err(error) => {
+                        eprintln!("banshee: the transcription model did not load: {error}")
                     }
-                }
+                },
                 ConsumerCommand::Shutdown => break,
             }
         }

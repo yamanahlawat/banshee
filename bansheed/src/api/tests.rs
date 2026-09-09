@@ -385,6 +385,27 @@ fn status_reports_nothing_pending_on_a_fresh_daemon() {
     assert_eq!(status_payload(&state)["pending"], serde_json::json!([]));
 }
 
+/// A preset applied without `persist` reloads the model and leaves the file
+/// config where it was, so the flag has to follow the model.
+#[test]
+fn english_only_follows_the_model_the_listener_loaded() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    assert_eq!(status_payload(&state)["english_only"], false);
+
+    state.set_stt_model("ggml-base.en.bin");
+    assert_eq!(status_payload(&state)["english_only"], true);
+}
+
+#[test]
+fn status_says_nothing_leaves_the_machine_while_every_provider_is_local() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let status = status_payload(&state);
+    assert_eq!(
+        status["remote"],
+        serde_json::json!({ "stt": false, "tts": false })
+    );
+}
+
 #[test]
 fn the_pushed_state_carries_the_device_and_what_it_waits_for() {
     let state = test_state(std::sync::mpsc::channel().0);

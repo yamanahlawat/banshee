@@ -16,7 +16,7 @@ use rodio::mixer::Mixer;
 use rodio::{DeviceSinkBuilder, Player};
 
 use super::oov::OovFallback;
-use super::{ActiveUtterance, TtsBackend, lock};
+use crate::text_to_speech::{ActiveUtterance, TtsBackend, lock};
 
 const SAMPLE_RATE: std::num::NonZero<u32> = std::num::NonZero::new(24_000).unwrap();
 const CHANNELS: std::num::NonZero<u16> = std::num::NonZero::new(1).unwrap();
@@ -238,7 +238,7 @@ impl KokoroEngine {
         let voice = read_voice_file(&voice_path)?;
 
         let mut g2p = G2P::new(Language::EnglishUS);
-        super::pronunciation::install_dictionary(&mut g2p);
+        crate::text_to_speech::pronunciation::install_dictionary(&mut g2p);
 
         let oov = OovFallback::detect();
         if oov.is_none() {

@@ -1,6 +1,6 @@
 use std::process::{Child, Command};
 
-use super::{ActiveUtterance, TtsBackend};
+use crate::text_to_speech::{ActiveUtterance, TtsBackend};
 
 // macOS `say` fallback: zero-download, one child process per utterance
 pub struct SayBackend;

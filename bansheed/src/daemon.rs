@@ -1,7 +1,7 @@
 use banshee_common::utils::get_socket_path;
 use banshee_common::{
     BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_STATE_CHANGED, BANSHEE_SUBSCRIBE, DownloadProgress,
-    JsonRpcNotification, JsonRpcRequest, SileroVADConfig, WhisperConfig, error::BansheeError,
+    JsonRpcNotification, JsonRpcRequest, SileroVADConfig, error::BansheeError,
 };
 use std::fs;
 use std::io;
@@ -17,7 +17,7 @@ use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::api::{dispatch, live_state};
 use crate::config::Config;
-use crate::speech_to_text::{vad::VADEngine, whisper::WhisperEngine};
+use crate::speech_to_text::vad::VADEngine;
 use crate::state::{ConsumerCommand, DaemonState, RecordingError};
 use crate::{audio, history, hotkey, models, permissions, text_to_speech};
 
@@ -77,13 +77,8 @@ fn start_recording(
         ),
         None => println!("Capture opened {}", selection.open),
     }
-    println!("Loading Whisper AI...");
-    let speech_to_text = WhisperEngine::new(
-        WhisperConfig::new(config.stt.preset.model_name()),
-        &config.stt.vocabulary,
-        (&config.stt).into(),
-    )
-    .map_err(|e| model_failure(daemon_state, e.to_string()))?;
+    let speech_to_text = crate::speech_to_text::select_transcriber(&config.stt)
+        .map_err(|e| model_failure(daemon_state, e.to_string()))?;
     let vad = VADEngine::new(SileroVADConfig::new(models::VAD_MODEL))
         .map_err(|e| model_failure(daemon_state, e.to_string()))?;
     let thread = hotkey::hotkey_listener(

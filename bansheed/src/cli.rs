@@ -247,7 +247,7 @@ pub async fn voices() -> Result<(), BansheeError> {
         Err(error) if daemon_is_down(&error) => (
             models::installed_voices()
                 .iter()
-                .map(|id| text_to_speech::voices::describe(id, true))
+                .map(|id| text_to_speech::local::voices::describe(id, true))
                 .collect(),
             None,
         ),

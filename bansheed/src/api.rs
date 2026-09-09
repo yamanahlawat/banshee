@@ -169,6 +169,7 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
 
 pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     let blockers = readiness::blockers(daemon_state);
+    let running = daemon_state.running_config();
     let payload = serde_json::json!({
         "running": true,
         "version": daemon_state.version(),
@@ -191,16 +192,20 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             })
             .unwrap_or(0),
         // The English-only build reads English whatever `stt.language` says.
-        // Stated here rather than worked out from the preset name by every
-        // client that has to know.
-        "english_only": crate::speech_to_text::whisper::english_only(
-            daemon_state.config().stt.preset.model_name(),
-        ),
+        // Read off the model the listener loaded, not the configured preset:
+        // a preset applied without persist moves one and not the other.
+        "english_only": crate::speech_to_text::english_only(daemon_state.stt_model()),
         // Stated, so no client invents a narrower definition of ready
         "ready": blockers.is_empty(),
         "blockers": blockers,
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
+        // The providers are read at startup, so the running config answers,
+        // not the file a `persist` write has already replaced.
+        "remote": {
+            "stt": running.stt.provider.is_remote(),
+            "tts": running.tts.provider.is_remote(),
+        },
     });
     with_key_press_access(payload)
 }
@@ -502,7 +507,7 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
 // cannot filters to the installed ones itself.
 fn list_voices(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     let installed = crate::models::installed_voices();
-    let mut ids: Vec<String> = crate::text_to_speech::voices::catalogue()
+    let mut ids: Vec<String> = crate::text_to_speech::local::voices::catalogue()
         .map(str::to_string)
         .collect();
     for id in &installed {
@@ -512,7 +517,7 @@ fn list_voices(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRe
     }
     let voices: Vec<_> = ids
         .iter()
-        .map(|id| crate::text_to_speech::voices::describe(id, installed.contains(id)))
+        .map(|id| crate::text_to_speech::local::voices::describe(id, installed.contains(id)))
         .collect();
     JsonRpcResponse::success(
         params.id(),
@@ -525,7 +530,7 @@ fn list_voices(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRe
 fn list_languages(params: Params<'_>) -> JsonRpcResponse {
     JsonRpcResponse::success(
         params.id(),
-        serde_json::json!({ "languages": crate::speech_to_text::languages::all() }),
+        serde_json::json!({ "languages": crate::speech_to_text::local::languages::all() }),
     )
 }
 

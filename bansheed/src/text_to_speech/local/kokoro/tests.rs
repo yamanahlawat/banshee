@@ -236,7 +236,7 @@ fn kokoro_synthesizes_audible_speech() {
 #[test]
 fn a_curated_word_is_curated_in_every_casing() {
     let mut g2p = G2P::new(Language::EnglishUS);
-    super::super::pronunciation::install_dictionary(&mut g2p);
+    crate::text_to_speech::pronunciation::install_dictionary(&mut g2p);
     for word in ["webhook", "Webhook", "WEBHOOK"] {
         assert!(curated(&g2p.lexicon, word), "{word} must count as curated");
     }

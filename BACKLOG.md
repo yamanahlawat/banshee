@@ -8,9 +8,6 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
 - The hotkey fires a dictation while the window captures a new one. The daemon binds the key
   at OS level, so window focus does not stop it, and no protocol method suspends it. A fix
   needs a suspend with a timeout, so a window that dies does not leave the hotkey dead.
-- `english_only` reports the configured preset, not the model the daemon loaded. The window
-  reads that field to enable its Language picker, so it can offer a language the running
-  model cannot transcribe, and nothing says the two differ.
 - Reading the status starts the daemon as a side effect. The restart poll asks twelve times,
   so a daemon slow to load can be kickstarted more than once.
 - No protocol method cancels a download. A person on a metered connection can start 862 MB

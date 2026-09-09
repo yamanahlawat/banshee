@@ -147,9 +147,38 @@ fn rate<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
     Ok(value)
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SttProvider {
+    Local,
+}
+
+impl SttProvider {
+    pub fn is_remote(self) -> bool {
+        match self {
+            SttProvider::Local => false,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TtsProvider {
+    Local,
+}
+
+impl TtsProvider {
+    pub fn is_remote(self) -> bool {
+        match self {
+            TtsProvider::Local => false,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct STTConfig {
+    pub provider: SttProvider,
     pub preset: STTPreset,
     /// A Whisper language code, or `auto` to detect it. The English-only build
     /// holds no other language, so `preset = "fast"` reads English whatever
@@ -167,6 +196,7 @@ pub struct STTConfig {
 impl Default for STTConfig {
     fn default() -> Self {
         Self {
+            provider: SttProvider::Local,
             preset: STTPreset::Balanced,
             language: "en".to_string(),
             translate: false,
@@ -187,6 +217,7 @@ pub enum TTSFallback {
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct TTSConfig {
+    pub provider: TtsProvider,
     pub voice: String,
     #[serde(deserialize_with = "rate")]
     pub speed: f32,
@@ -196,6 +227,7 @@ pub struct TTSConfig {
 impl Default for TTSConfig {
     fn default() -> Self {
         Self {
+            provider: TtsProvider::Local,
             voice: "af_sky".to_string(),
             speed: 1.2,
             fallback: TTSFallback::System,
@@ -301,6 +333,31 @@ mod tests {
         assert_eq!(
             config.audio.hotkey,
             crate::binding::Hotkey::Modifier(rdev::Key::AltGr)
+        );
+    }
+
+    #[test]
+    fn a_config_without_the_key_reads_as_local() {
+        let config: Config =
+            toml::from_str("[stt]\npreset = \"fast\"\n\n[tts]\nvoice = \"af_sky\"\n").unwrap();
+        assert_eq!(config.stt.provider, SttProvider::Local);
+        assert_eq!(config.tts.provider, TtsProvider::Local);
+    }
+
+    #[test]
+    fn a_provider_the_daemon_does_not_have_is_refused_and_the_message_names_local() {
+        let error = toml::from_str::<Config>("[stt]\nprovider = \"cloud\"\n")
+            .expect_err("an unknown listener must not parse");
+        assert!(
+            error.to_string().contains("local"),
+            "the error must list the legal values: {error}"
+        );
+
+        let error = toml::from_str::<Config>("[tts]\nprovider = \"cloud\"\n")
+            .expect_err("an unknown voice provider must not parse");
+        assert!(
+            error.to_string().contains("local"),
+            "the error must list the legal values: {error}"
         );
     }
 }

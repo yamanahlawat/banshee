@@ -134,7 +134,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 
 // Optional dependency, so it reports but never fails the health check.
 fn check_espeak() {
-    if crate::text_to_speech::oov::OovFallback::available() {
+    if crate::text_to_speech::local::oov::OovFallback::available() {
         pass("espeak-ng present (pronounces unknown words)");
     } else {
         note(&format!(
@@ -467,12 +467,9 @@ fn report_settings(config: &Config, daemon: &Daemon) {
         config.audio.hotkey,
         on_off(config.audio.cues.enabled)
     ));
-    let vad_threshold = match daemon {
-        Daemon::Running { status, .. } | Daemon::Legacy(status) => {
-            status.get("vad_threshold").and_then(|v| v.as_f64())
-        }
-        _ => None,
-    }
+    let vad_threshold = live(daemon, |status| {
+        status.get("vad_threshold").and_then(|v| v.as_f64())
+    })
     .map_or(config.stt.vad_threshold, |live| live as f32);
 
     note(&format!(
@@ -492,6 +489,22 @@ fn report_settings(config: &Config, daemon: &Daemon) {
         config.tts.speed,
         on_off(config.daemon.save_history)
     ));
+    let stt_remote = live(daemon, |status| status["remote"]["stt"].as_bool())
+        .unwrap_or(config.stt.provider.is_remote());
+    let tts_remote = live(daemon, |status| status["remote"]["tts"].as_bool())
+        .unwrap_or(config.tts.provider.is_remote());
+    if !stt_remote && !tts_remote {
+        note("audio and text stay on this machine");
+    }
+}
+
+/// A value read off the running daemon's status reply; `None` when no daemon
+/// answers, so the caller falls back to the file.
+fn live<T>(daemon: &Daemon, read: impl Fn(&serde_json::Value) -> Option<T>) -> Option<T> {
+    match daemon {
+        Daemon::Running { status, .. } | Daemon::Legacy(status) => read(status),
+        _ => None,
+    }
 }
 
 // Two install shapes exist on macOS, so status names the one that answered.

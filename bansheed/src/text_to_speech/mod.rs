@@ -1,9 +1,6 @@
-pub mod kokoro;
-pub mod oov;
+pub mod local;
 pub mod pronunciation;
 pub mod sanitizer;
-pub mod say;
-pub mod voices;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -13,9 +10,9 @@ use std::time::Duration;
 use banshee_common::{KokoroTTSConfig, error::BansheeError};
 use tokio::sync::watch;
 
-use crate::config::{TTSConfig, TTSFallback};
-use kokoro::{KokoroBackend, KokoroEngine};
-use say::SayBackend;
+use crate::config::{TTSConfig, TTSFallback, TtsProvider};
+use local::kokoro::{KokoroBackend, KokoroEngine};
+use local::say::SayBackend;
 
 const MAX_QUEUED_UTTERANCES: usize = 8;
 
@@ -39,6 +36,15 @@ pub trait ActiveUtterance: Send {
 /// The backend, and the voice it speaks in. `None` under the system fallback,
 /// which speaks in whatever voice the OS is set to.
 pub fn select_backend(
+    tts_config: &TTSConfig,
+) -> Result<(Box<dyn TtsBackend>, Option<String>), BansheeError> {
+    match tts_config.provider {
+        TtsProvider::Local => select_local_backend(tts_config),
+    }
+}
+
+/// Kokoro, or the OS voice when `tts.fallback` allows it and Kokoro cannot load.
+fn select_local_backend(
     tts_config: &TTSConfig,
 ) -> Result<(Box<dyn TtsBackend>, Option<String>), BansheeError> {
     let kokoro_config = KokoroTTSConfig::new(&tts_config.voice);

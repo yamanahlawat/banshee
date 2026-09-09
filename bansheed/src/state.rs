@@ -50,7 +50,7 @@ pub enum ConsumerCommand {
     // so either can land while the microphone is open. The ring holds the audio,
     // so the dictation that follows is whole.
     Retune(Vec<String>),
-    Speak(crate::speech_to_text::whisper::Speech),
+    Speak(crate::speech_to_text::Speech),
     Reload(&'static str),
     // A new stream opened, so the old ring is dead. The rate comes with it:
     // devices do not share one.
@@ -733,8 +733,8 @@ impl DaemonState {
     }
 
     /// What language the next utterance is read as, and whether it answers in
-    /// English. Whisper reads both per utterance, so no model moves.
-    pub fn set_speech(&self, speech: crate::speech_to_text::whisper::Speech) -> bool {
+    /// English. The engine reads both per utterance, so no model moves.
+    pub fn set_speech(&self, speech: crate::speech_to_text::Speech) -> bool {
         self.commands.send(ConsumerCommand::Speak(speech)).is_ok()
     }
 

@@ -7,12 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The daemon names who listens and who speaks.** `stt.provider` and
+  `tts.provider` in `config.toml` take `local`, the only value for now. A
+  status reply carries `remote`, which says whether audio or text leaves the
+  machine. Nothing does yet. A config without the keys reads as before. The
+  daemon reads both keys when it starts, so `banshee config set` tells you to
+  restart.
+
 ### Fixed
 
 - **The `ask_user` tool now says why it exists.** Its description tells the agent
   you cannot see the screen, so a question written as text or put in an on-screen
   menu never reaches you. An agent reads this once, when its session starts, so
   restart the agent to pick it up.
+- **`english_only` in the status reply follows the model the daemon loaded.**
+  A preset applied without `persist` moved the model and left the flag on the
+  configured preset, so the window could offer a language the running model
+  cannot read.
 
 ## [0.12.2] - 2026-09-04
 

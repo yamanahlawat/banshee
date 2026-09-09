@@ -8,6 +8,7 @@ override one, create `~/.banshee/config.toml`. The defaults:
 save_history = true    # keep transcriptions in ~/.banshee/banshee.db
 
 [stt]
+provider = "local"       # who listens; local is the only value
 preset = "balanced"      # fast | balanced | quality (see below)
 vad_threshold = 0.5      # 0.0 to 1.0; higher means stricter speech detection
 vocabulary = ["banshee"] # words Whisper keeps mangling, e.g. ["clippy", "tokio"]
@@ -16,6 +17,7 @@ translate = false        # true answers in English whatever you spoke
 endpoint_silence_ms = 2500  # trailing silence that ends a spoken answer
 
 [tts]
+provider = "local"     # who speaks; local is the only value
 voice = "af_sky"       # any voice from the Kokoro voices directory
 speed = 1.2            # playback speed multiplier
 fallback = "system"    # system = use `say` when Kokoro is unavailable | none
@@ -101,9 +103,9 @@ ones. This works whether or not the daemon is running.
 Most settings take effect at once: `stt.vad_threshold`, `stt.vocabulary`,
 `stt.preset`, `stt.language`, `stt.translate`, `audio.input_device`,
 `audio.barge_in`, `audio.cues.enabled`, `tts.voice`, `tts.speed` and
-`daemon.save_history`. Four are read when the daemon starts, so the command
-tells you to restart: `audio.hotkey`, `audio.hotkey_mode`,
-`stt.endpoint_silence_ms` and `tts.fallback`.
+`daemon.save_history`. The rest are read when the daemon starts, so the command
+tells you to restart. Among them: `audio.hotkey`, `audio.hotkey_mode`,
+`stt.endpoint_silence_ms`, `stt.provider`, `tts.fallback` and `tts.provider`.
 
 A live setting whose model is not downloaded yet waits for the file. Once
 `banshee setup` fetches it, a running daemon applies the setting as the

@@ -363,6 +363,36 @@ fn the_tts_fallback_still_needs_a_restart() {
 }
 
 #[test]
+fn a_provider_write_is_kept_by_the_file() {
+    let (rendered, config) = edit(
+        "[stt]\nlanguage = \"en\"\n",
+        &assignments(&[("stt.provider", "local".into())]),
+    )
+    .unwrap();
+    assert!(
+        rendered.contains("provider = \"local\""),
+        "the key must land under [stt]: {rendered}"
+    );
+    assert_eq!(config.stt.provider, crate::config::SttProvider::Local);
+}
+
+/// The provider keys are startup-only too, so the same rule holds for them.
+#[test]
+fn a_provider_set_to_the_value_already_running_needs_no_restart() {
+    let state =
+        crate::test_support::daemon_state_running(Config::default(), std::sync::mpsc::channel().0);
+    let keys = vec!["stt.provider".to_string(), "tts.provider".to_string()];
+    let outcome = super::apply_each(&state, &Config::default(), keys.iter());
+
+    assert!(
+        outcome.restart_required.is_empty(),
+        "nothing changed, so nothing waits: {:?}",
+        outcome.restart_required
+    );
+    assert_eq!(outcome.applied, keys);
+}
+
+#[test]
 fn the_input_device_no_longer_needs_a_restart() {
     assert_eq!(
         startup_only(&assignments(&[("audio.input_device", "yeti".into())])),
