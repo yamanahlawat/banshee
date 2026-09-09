@@ -117,6 +117,18 @@ pub const WAYLAND_HOTKEY_HINT: &str = "the global hotkey needs X11. Bind \
      `banshee record start` on press and `banshee record stop` on release in \
      your compositor instead";
 
+/// Whether the daemon binds the global hotkey itself in this session. False on
+/// Wayland: no protocol grants a global grab there, so the compositor holds the
+/// binding. A client reads this before it names a key, because naming one the
+/// daemon never listens for is a promise it cannot keep.
+pub fn listens() -> bool {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if crate::dictation::is_wayland() {
+        return false;
+    }
+    true
+}
+
 pub fn usage_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
     #[cfg(all(unix, not(target_os = "macos")))]
     if crate::dictation::is_wayland() {
@@ -143,8 +155,8 @@ fn bound_key_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
 // rdev needs X11's XRecord, which wayland does not serve: listen either errors
 // or attaches to Xwayland and never sees a key. Say so instead of looking broken.
 pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_mode: HotkeyMode) {
-    #[cfg(all(unix, not(target_os = "macos")))]
-    if crate::dictation::is_wayland() {
+    if !listens() {
+        #[cfg(all(unix, not(target_os = "macos")))]
         println!("Wayland session: {WAYLAND_HOTKEY_HINT}.");
         return;
     }

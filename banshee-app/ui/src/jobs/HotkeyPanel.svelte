@@ -22,6 +22,9 @@
 
   onDestroy(() => release?.());
 
+  // The daemon binds no key on Wayland, so the capture control below would
+  // write a setting nobody reads. The compositor holds the binding instead.
+  $: listens = $daemon.status?.hotkey_listens !== false;
   $: audio = ($daemon.status?.config?.audio ?? {}) as Record<string, unknown>;
   $: key = String(audio.hotkey ?? '');
   $: mode = String(audio.hotkey_mode ?? 'hold');
@@ -75,35 +78,45 @@
 
 <svelte:window on:keydown={onKeyDown} on:keyup={onKeyUp} />
 
-<Row name="The key" pending={$daemon.pending.has('audio.hotkey')}>
-  <button class="key" on:click={() => (recording ? stop() : begin())}>
-    {recording ? 'Press a key' : humanize(key) || 'Not set'}
-    <span class="sr">— change the hotkey</span>
-  </button>
-  <button class="btn" on:click={() => (recording ? stop() : begin())}>
-    {recording ? 'Cancel' : 'Change'}
-  </button>
-</Row>
+{#if listens}
+  <Row name="The key" pending={$daemon.pending.has('audio.hotkey')}>
+    <button class="key" on:click={() => (recording ? stop() : begin())}>
+      {recording ? 'Press a key' : humanize(key) || 'Not set'}
+      <span class="sr">— change the hotkey</span>
+    </button>
+    <button class="btn" on:click={() => (recording ? stop() : begin())}>
+      {recording ? 'Cancel' : 'Change'}
+    </button>
+  </Row>
 
-{#if refusal}
-  <p class="refusal">{refusal}</p>
+  {#if refusal}
+    <p class="refusal">{refusal}</p>
+  {/if}
+
+  <Row
+    name="Press behaviour"
+    note="Hold: speak while the key is down. Tap: press once to start, once to stop."
+    pending={$daemon.pending.has('audio.hotkey_mode')}
+  >
+    <Segmented
+      label="Press behaviour"
+      value={mode}
+      options={[
+        { value: 'hold', label: 'Hold' },
+        { value: 'toggle', label: 'Tap' },
+      ]}
+      change={(next) => write('audio.hotkey_mode', next)}
+    />
+  </Row>
+{:else}
+  <p class="compositor">
+    Wayland grants no global hotkey, so Banshee binds none. Bind these two commands to one key in
+    your compositor. Put the first on the press and the second on the release.
+  </p>
+  <pre class="commands">banshee record start --dictate
+banshee record stop</pre>
+  <p class="compositor">docs/linux.md gives the Hyprland and Omarchy syntax.</p>
 {/if}
-
-<Row
-  name="Press behaviour"
-  note="Hold: speak while the key is down. Tap: press once to start, once to stop."
-  pending={$daemon.pending.has('audio.hotkey_mode')}
->
-  <Segmented
-    label="Press behaviour"
-    value={mode}
-    options={[
-      { value: 'hold', label: 'Hold' },
-      { value: 'toggle', label: 'Tap' },
-    ]}
-    change={(next) => write('audio.hotkey_mode', next)}
-  />
-</Row>
 
 <Row name="While Banshee is talking" pending={$daemon.pending.has('audio.barge_in')}>
   <Segmented
@@ -131,6 +144,24 @@
 </Row>
 
 <style>
+  .compositor {
+    margin: 0 0 12px;
+    color: var(--ink-dim);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .commands {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    background: var(--sunk, rgba(255, 255, 255, 0.04));
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink);
+    overflow-x: auto;
+  }
+
   /* A button, because this underline is the one the pickers wear and it has to
      mean the same thing on both: press here to change what it says. */
   .key {
