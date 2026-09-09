@@ -1,5 +1,6 @@
 <script lang="ts">
   import { formatCount } from '../lib/history';
+  import { findChord } from '../lib/keys';
   import SaveSwitch from '../controls/SaveSwitch.svelte';
 
   export let total: number;
@@ -21,7 +22,7 @@
   <SaveSwitch {saving} />
 
   {#if saving && total > 1}
-    <span class="hint caps mono">&#8984;F to find</span>
+    <span class="hint caps mono">{findChord()} to find</span>
   {/if}
 </div>
 

@@ -184,7 +184,7 @@ mod systemd {
 
     use banshee_common::error::BansheeError;
 
-    const UNIT: &str = "banshee.service";
+    const UNIT: &str = banshee_common::utils::DAEMON_UNIT;
 
     pub fn service_file_path() -> Option<PathBuf> {
         Some(dirs::config_dir()?.join("systemd/user").join(UNIT))

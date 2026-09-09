@@ -122,6 +122,12 @@ pub fn usage_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
     if crate::dictation::is_wayland() {
         return format!("{WAYLAND_HOTKEY_HINT}.");
     }
+    bound_key_hint(hotkey, hotkey_mode)
+}
+
+// Split from `usage_hint`, which answers from the live session. A test cannot
+// choose the session it runs under, so it reads this half instead.
+fn bound_key_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
     let press = match hotkey_mode {
         HotkeyMode::Toggle => format!("Tap {hotkey} and speak, then tap it again to stop."),
         HotkeyMode::Hold => format!("Hold {hotkey} and speak, then release to stop."),
@@ -498,11 +504,11 @@ mod hint_tests {
 
     #[test]
     fn the_hint_matches_the_mode_in_effect() {
-        let toggle = usage_hint(Hotkey::default(), HotkeyMode::Toggle);
+        let toggle = bound_key_hint(Hotkey::default(), HotkeyMode::Toggle);
         assert!(toggle.contains("again"), "toggle must say to press twice");
         assert!(!toggle.contains("release"), "toggle must not say release");
 
-        let hold = usage_hint(Hotkey::default(), HotkeyMode::Hold);
+        let hold = bound_key_hint(Hotkey::default(), HotkeyMode::Hold);
         assert!(hold.contains("release"), "hold must say to release");
         assert!(!hold.contains("again"), "hold must not say to press twice");
     }
@@ -512,7 +518,7 @@ mod hint_tests {
     fn the_hint_names_the_key_the_listener_matches() {
         let rebound = hotkey("F6").unwrap();
         for mode in [HotkeyMode::Toggle, HotkeyMode::Hold] {
-            let hint = usage_hint(rebound, mode);
+            let hint = bound_key_hint(rebound, mode);
             assert!(hint.contains("F6"), "the bound key must be named: {hint}");
             assert!(
                 !hint.contains("RightOption"),

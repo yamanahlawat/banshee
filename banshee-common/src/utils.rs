@@ -36,6 +36,10 @@ pub fn sibling_command(name: &str) -> Result<std::process::Command, BansheeError
 pub const DAEMON_AGENT: &str = "com.banshee.daemon";
 pub const TRAY_AGENT: &str = "com.banshee.tray";
 
+/// systemd's name for the daemon's user unit. `bansheed` writes the file and
+/// `banshee-app` starts it, so the spelling is shared.
+pub const DAEMON_UNIT: &str = "banshee.service";
+
 /// What launchctl calls one job of the logged-in user.
 pub fn launchd_target(label: &str) -> String {
     format!("gui/{}/{label}", uid())

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Banshee
+Comment=Give your AI coding agent a voice
+Exec="@BIN_DIR@/banshee-app"
+Icon=banshee
+Terminal=false
+Categories=Utility;
+StartupWMClass=banshee-app
