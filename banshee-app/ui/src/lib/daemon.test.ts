@@ -17,7 +17,6 @@ import {
   lampForm,
   liveFrom,
   markPending,
-  microphoneInUse,
   percent,
   spokenProgress,
   reduceLive,
@@ -126,17 +125,6 @@ describe('the fix groups', () => {
   it('keeps a permission off the row that downloads the models', () => {
     const groups = fixGroups([grant('accessibility'), model('a.bin'), model('b.onnx')]);
     expect(groups.map((group) => group.length)).toEqual([1, 2]);
-  });
-});
-
-// The cases `microphone_label` covers, so the two cannot drift apart.
-describe('microphoneInUse', () => {
-  it('names the device the daemon opened', () => {
-    expect(microphoneInUse('MacBook Pro Microphone')).toBe('MacBook Pro Microphone');
-  });
-
-  it('says the stream is closed, not that the machine has no microphone', () => {
-    expect(microphoneInUse(null)).toBe('Not open');
   });
 });
 

@@ -35,7 +35,14 @@ import { table as historyTable } from './lib/history';
 import { forgetKeys } from './lib/keys';
 import App from './App.svelte';
 
-const JOBS = ['Microphone', 'Hotkey', 'Voice', 'Agents'];
+// The job, and the caps text of the foot cell that opens it. The Microphone
+// cell reports where listening happens, so the two names differ.
+const JOBS = [
+  ['Microphone', 'Listening'],
+  ['Hotkey', 'Hotkey'],
+  ['Voice', 'Voice'],
+  ['Agents', 'Agents'],
+];
 
 async function violations(container: HTMLElement): Promise<string[]> {
   const results = await axe.run(container, {
@@ -92,10 +99,10 @@ it('a blocked machine carries none either', async () => {
   expect(await violations(container)).toEqual([]);
 });
 
-it.each(JOBS)('the %s panel carries none', async (job) => {
+it.each(JOBS)('the %s panel carries none', async (_job, cell) => {
   const { container } = render(App);
   await waitFor(() => expect(screen.getByText('Yes.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: new RegExp(job) }));
+  await fireEvent.click(screen.getByRole('button', { name: new RegExp(cell) }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Done' })).toBeTruthy());
   expect(await violations(container)).toEqual([]);
 });

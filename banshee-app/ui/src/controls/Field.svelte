@@ -6,8 +6,13 @@
   export let value = '';
   export let placeholder = '';
   export let masked = false;
+  /// The world's mark for a thing that is not there, for a field whose value is
+  /// missing rather than merely empty.
+  export let dashed = false;
   /// `false` means the daemon refused it. Anything else is taken.
   export let commit: (next: string) => boolean | void | Promise<boolean | void>;
+  /// Called when Escape leaves the field, for a caller that opened it.
+  export let cancel: (() => void) | undefined = undefined;
 
   let draft = value;
   $: draft = value;
@@ -51,6 +56,7 @@
       draft = value;
       letGo();
       input.blur();
+      cancel?.();
     }
   }
 
@@ -60,6 +66,7 @@
 
 <input
   class="field"
+  class:dashed
   type={masked ? 'password' : 'text'}
   aria-label={label}
   autocomplete={masked ? 'off' : undefined}
@@ -81,5 +88,12 @@
     border-radius: 0;
     padding: 6px 0;
     margin: 0;
+  }
+
+  /* A dashed accent line is what this world draws around a thing that is not
+     there, and an underline is the form of it a control can carry. */
+  .dashed {
+    border-bottom-style: dashed;
+    border-bottom-color: var(--accent);
   }
 </style>

@@ -25,6 +25,24 @@ const STATES: Record<string, unknown> = {
   armed: { ...ready, recording: true, armed: true },
   saving_off: { ...ready, config: { ...ready.config, daemon: { save_history: false } } },
   pending: { ...ready, pending: ['audio.hotkey', 'daemon.save_history'] },
+  // The listener the config asks for and the one the daemon runs, in each
+  // direction. Neither has any other way to be looked at: the pair only
+  // disagrees between a write and the restart that applies it.
+  'to-remote': {
+    ...remote,
+    remote: { stt: { remote: false, host: null, key_present: true }, tts: { remote: false } },
+    pending: ['stt.provider'],
+  },
+  'to-local': {
+    ...remote,
+    config: { ...remote.config, stt: { ...remote.config.stt, provider: 'local' } },
+    pending: ['stt.provider'],
+  },
+  'no-key': {
+    ...remote,
+    remote: { stt: { remote: true, host: 'api.openai.com', key_present: false }, tts: {} },
+  },
+  'stt-failed': { ...remote, last_error: 'the remote listener refused the key' },
 };
 
 function chosen(): string {

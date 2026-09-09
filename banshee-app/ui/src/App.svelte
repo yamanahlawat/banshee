@@ -5,7 +5,6 @@
     downloadLine,
     endsTheRun,
     lampForm,
-    microphoneInUse,
     reduceLive,
     reduceStatus,
     waitsOnARestart,
@@ -13,7 +12,7 @@
     type Live,
     type Status,
   } from './lib/daemon';
-  import { announcement, problem, report, spell } from './lib/copy';
+  import { announcement, problem, report, RESTART_SAYS, spell } from './lib/copy';
   import { followSaveHistory, readAll, readLatest, readNewest, table } from './lib/history';
   import { agents, refresh as readAgents } from './lib/agents';
   import {
@@ -125,17 +124,25 @@
   $: noAgentYet = live && agentsRead && connected === 0;
   $: pipelineBroken = blockers.some((blocker) => blocker.kind === 'pipeline');
 
-  // The host the daemon actually reached. It is null until a restart applies a
-  // remote listener, so the address that was set is read separately below.
-  $: remoteHost = $daemon.status?.remote?.stt?.host ?? null;
-  $: askedForRemote = String(config.stt?.provider ?? 'local') === 'remote';
-  $: askedForHost = hostOf(String((config.stt?.remote as Record<string, unknown>)?.base_url ?? ''));
+  // The daemon says which listener is in force; the config says only which one
+  // was asked for. The heading, the panel's note and the foot cell all read
+  // this one pair, so no two of them can state a different truth.
+  $: inForceRemote = $daemon.status?.remote?.stt?.remote === true;
+  // Empty, not null, when the address the listener runs on is no URL, so the
+  // absence of a name is the falsy test and never a null one.
+  $: remoteHost = $daemon.status?.remote?.stt?.host || null;
+  $: flipsOnRestart = live && $waitsOnARestart.has('stt.provider');
+  // A remote listener the daemon cannot name still gets a whole sentence.
+  $: heardAt = remoteHost ?? 'a remote server';
+  $: willSendTo =
+    hostOf(String((config.stt?.remote as Record<string, unknown>)?.base_url ?? '')) ??
+    'a remote server';
 
-  function hostOf(url: string): string {
+  function hostOf(url: string): string | null {
     try {
-      return new URL(url).hostname;
+      return new URL(url).hostname || null;
     } catch {
-      return url;
+      return null;
     }
   }
 
@@ -143,17 +150,19 @@
   // detectable today, so the list needs no more than this.
   // Name and lead are declared together. "Record" would collide with the RECORDING state word, so
   // the panel is named for what is kept. Every lead reads live state, never the config: the config
-  // says only what was asked for. The one exception is the sentence about a remote listener that
-  // waits on a restart, and that sentence says in its own words that it is not in force yet.
+  // says only what was asked for. The one exception is the sentence about a listener that waits on
+  // a restart, and that sentence says in its own words that it is not in force yet.
   $: panels = {
     Microphone: {
       name: 'Microphone',
       lead: !live
         ? 'Banshee is not running, so no microphone is open.'
-        : remoteHost
-          ? `Banshee sends what you say to ${remoteHost} to be heard.`
-          : askedForRemote
-            ? `Banshee will send what you say to ${askedForHost} when it restarts.`
+        : inForceRemote
+          ? flipsOnRestart
+            ? `Banshee sends what you say to ${heardAt} until it restarts.`
+            : `Banshee sends what you say to ${heardAt} to be heard.`
+          : flipsOnRestart
+            ? `Banshee will send what you say to ${willSendTo} when it restarts.`
             : $daemon.live.audio_device
               ? `Banshee is listening through the ${$daemon.live.audio_device}.`
               : pipelineBroken
@@ -248,22 +257,29 @@
     return voices.voices.find((v) => v.id === id)?.name ?? id;
   })();
 
-  $: footValues = ((): { id: string; label: Job; value: string; pending?: boolean }[] => {
+  $: footValues = ((): {
+    id: string;
+    label: Job;
+    title?: string;
+    value: string;
+    pending?: string;
+  }[] => {
     const said = (value: string) => (live ? value : '');
-    const waits = (...keys: string[]) => live && keys.some((key) => $waitsOnARestart.has(key));
+    const waits = (...keys: string[]) =>
+      live && keys.some((key) => $waitsOnARestart.has(key)) ? RESTART_SAYS : undefined;
     return [
       {
-        // The host, not the device: under a remote listener the microphone is
-        // where the words are heard, not where they are picked up.
+        // Where the words are heard, not the device they are picked up on: the
+        // cell reports the one fact the panel's whole group is about.
         id: 'job-microphone',
         label: 'Microphone',
-        value: said(remoteHost ?? microphoneInUse($daemon.live.audio_device)),
-        pending: waits(
-          'stt.provider',
-          'stt.remote.base_url',
-          'stt.remote.model',
-          'stt.remote.api_key',
-        ),
+        title: 'Listening',
+        value: said(inForceRemote ? (remoteHost ?? 'A remote server') : 'On this machine'),
+        pending: flipsOnRestart
+          ? inForceRemote
+            ? 'changing to this machine when Banshee restarts'
+            : `changing to ${willSendTo} when Banshee restarts`
+          : undefined,
       },
       {
         id: 'job-hotkey',

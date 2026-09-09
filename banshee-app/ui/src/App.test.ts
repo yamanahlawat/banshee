@@ -305,7 +305,7 @@ it('stops naming a microphone once the daemon has stopped', async () => {
     ...s,
     live: { ...s.live, audio_device: 'MacBook Pro Microphone' },
   }));
-  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
   await waitFor(() =>
     expect(panelHeading('Microphone').textContent).toContain('listening through'),
   );
@@ -323,7 +323,7 @@ it('says where audio goes when a remote server listens', async () => {
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
   await waitFor(() =>
     expect(panelHeading('Microphone').textContent).toContain(
       'Banshee sends what you say to api.openai.com to be heard.',
@@ -331,14 +331,84 @@ it('says where audio goes when a remote server listens', async () => {
   );
 });
 
+// The cell reports where listening happens, which is the one fact the panel's
+// listener group is about. The device it is picked up on is in that panel.
 it('names the host in the foot rather than the microphone', async () => {
   vi.mocked(status).mockResolvedValue(remote);
   const { container } = render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
   const cell = container.querySelector('#job-microphone') as HTMLElement;
+  expect(cell.textContent).toContain('Listening');
   expect(cell.textContent).toContain('api.openai.com');
   expect(cell.textContent).not.toContain('MacBook Pro Microphone');
+});
+
+it('says the listening happens on this machine when it does', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const cell = container.querySelector('#job-microphone') as HTMLElement;
+  expect(cell.textContent).toContain('On this machine');
+  expect(cell.querySelector('.pending')).toBeNull();
+});
+
+it('names a remote listener the daemon cannot name', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...remote,
+    // The daemon answers with an empty host when the address is no URL, and
+    // with null only when the listener is local.
+    remote: { stt: { remote: true, host: '', key_present: true }, tts: { remote: false } },
+  });
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const cell = container.querySelector('#job-microphone') as HTMLElement;
+  expect(cell.textContent).toContain('A remote server');
+
+  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
+  await waitFor(() =>
+    expect(panelHeading('Microphone').textContent).toContain(
+      'Banshee sends what you say to a remote server to be heard.',
+    ),
+  );
+});
+
+// The mark says the value is not the one coming, so the phrase beside it names
+// what is coming rather than repeating that a restart is owed.
+it('marks the value in force and says which way it is changing', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...remote,
+    remote: { stt: { remote: false, host: null, key_present: true }, tts: { remote: false } },
+    pending: ['stt.provider'],
+  });
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const cell = container.querySelector('#job-microphone') as HTMLElement;
+  expect(screen.getByText('On this machine').classList.contains('pending')).toBe(true);
+  expect(cell.textContent).toContain('changing to api.openai.com when Banshee restarts');
+});
+
+it('says the listening comes back to this machine while it waits', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...remote,
+    config: { ...remote.config, stt: { ...remote.config.stt, provider: 'local' } },
+    pending: ['stt.provider'],
+  });
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const cell = container.querySelector('#job-microphone') as HTMLElement;
+  expect(screen.getByText('api.openai.com').classList.contains('pending')).toBe(true);
+  expect(cell.textContent).toContain('changing to this machine when Banshee restarts');
+
+  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
+  await waitFor(() =>
+    expect(panelHeading('Microphone').textContent).toContain(
+      'Banshee sends what you say to api.openai.com until it restarts.',
+    ),
+  );
 });
 
 // The lead is otherwise the live device, which is still the truth about where
@@ -352,10 +422,33 @@ it('says a remote listener is coming while it waits on a restart', async () => {
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
   await waitFor(() =>
     expect(panelHeading('Microphone').textContent).toContain(
       'Banshee will send what you say to api.openai.com when it restarts.',
+    ),
+  );
+});
+
+// A sentence with a hole in it was the first thing the flip rendered, because
+// the address is set after the choice is.
+it('names no host it does not have, in the heading or the foot', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...remote,
+    config: { ...remote.config, stt: { ...remote.config.stt, remote: { model: 'whisper-1' } } },
+    remote: { stt: { remote: false, host: null, key_present: false }, tts: { remote: false } },
+    pending: ['stt.provider'],
+  });
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const cell = container.querySelector('#job-microphone') as HTMLElement;
+  expect(cell.textContent).toContain('changing to a remote server when Banshee restarts');
+
+  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
+  await waitFor(() =>
+    expect(panelHeading('Microphone').textContent).toBe(
+      'Banshee will send what you say to a remote server when it restarts.',
     ),
   );
 });
@@ -440,7 +533,7 @@ it('empties the record when the daemon says it is no longer saving', async () =>
   expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
 });
 
-it('says the stream is not open, rather than that there is no microphone', async () => {
+it('says no stream is open, rather than that there is no microphone', async () => {
   vi.mocked(status).mockResolvedValue({
     ...ready,
     ready: false,
@@ -461,10 +554,12 @@ it('says the stream is not open, rather than that there is no microphone', async
   });
   render(App);
 
-  await waitFor(() => expect(screen.getByText('Not open')).toBeTruthy());
+  // The foot says where listening happens, and the panel says whether any
+  // stream is open. Neither says the machine has no microphone.
+  await waitFor(() => expect(screen.getByText('On this machine')).toBeTruthy());
   expect(screen.queryByText(/no microphone/i)).toBeNull();
 
-  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
   await waitFor(() => expect(panel('Microphone')).toBeTruthy());
   expect(panelHeading('Microphone').textContent).toContain('Banshee is not listening yet');
 });
@@ -979,7 +1074,7 @@ it('offers a language, and asks what to answer in only once it can mean somethin
   });
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
   await waitFor(() => expect(screen.getByRole('combobox', { name: 'Language' })).toBeTruthy());
 
   expect(screen.queryByRole('radiogroup', { name: 'Answer in' })).toBeNull();
@@ -1008,7 +1103,7 @@ it('will not offer a language the fast model cannot hear', async () => {
   });
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
 
   const picker = await screen.findByRole('combobox', { name: 'Language' });
   expect(picker.hasAttribute('disabled')).toBe(true);
@@ -1062,7 +1157,7 @@ it('offers detection among the languages', async () => {
   });
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
 
   const picker = await screen.findByRole('combobox', { name: 'Language' });
   expect(screen.getByRole('option', { name: 'Detect it' })).toBeTruthy();
@@ -1075,7 +1170,7 @@ it('puts the keyboard in a panel when it opens, and back where it came from', as
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
-  const opener = screen.getByRole('button', { name: /^Microphone/ });
+  const opener = screen.getByRole('button', { name: /^Listening/ });
   opener.focus();
   await fireEvent.click(opener);
 
@@ -1085,7 +1180,7 @@ it('puts the keyboard in a panel when it opens, and back where it came from', as
 
   await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
   await waitFor(() =>
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Microphone/ })),
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Listening/ })),
   );
 });
 
@@ -1142,7 +1237,7 @@ it('keeps a row for a language the daemon did not name', async () => {
   });
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
 
   const picker = await screen.findByRole('combobox', { name: 'Language' });
   expect((picker as HTMLSelectElement).value).toBe('cy');
@@ -1153,7 +1248,7 @@ it('says when the language list did not arrive', async () => {
   vi.mocked(listLanguages).mockRejectedValue(new Error('no such method'));
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
 
   await waitFor(() => expect(screen.getByText(/could not list the languages/)).toBeTruthy());
 });
@@ -1220,7 +1315,7 @@ it('makes the foot one tab stop the arrows move inside', async () => {
 it('sets sensitivity by band, and writes a float for it', async () => {
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
 
   const group = await screen.findByRole('radiogroup', { name: 'Sensitivity' });
   expect(group).toBeTruthy();
@@ -1277,7 +1372,7 @@ it('makes keeping the record the primary, and names what would be lost', async (
 it('keeps the panel open when Escape abandons a vocabulary word', async () => {
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
   await fireEvent.click(await screen.findByRole('button', { name: 'Add a word' }));
 
   const field = screen.getByRole('textbox', { name: 'New word' });
