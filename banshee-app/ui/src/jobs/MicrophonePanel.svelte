@@ -9,6 +9,11 @@
   import Picker from '../controls/Picker.svelte';
   import Segmented from '../controls/Segmented.svelte';
   import { claimKeys } from '../lib/keys';
+  import { announce, PENDING_SAYS } from '../lib/copy';
+
+  // The choice and its consequence are one reading, so the group names the
+  // sentence its radiogroup is described by.
+  const LISTENER_NOTE = 'listener-note';
 
   // Three words are all the window reads back. The midpoints are derived from the band edges, not
   // measured against a room.
@@ -90,8 +95,32 @@
   $: preset = String(stt.preset ?? 'balanced');
   $: provider = String(stt.provider ?? 'local');
   $: remoteTable = (stt.remote ?? {}) as Record<string, unknown>;
-  $: keyPlaceholder = $daemon.status?.remote?.stt?.key_present ? 'Set' : 'Not set';
+  $: keyPresent = $daemon.status?.remote?.stt?.key_present === true;
+  $: keyPlaceholder = keyPresent ? 'Set' : 'Not set';
+  $: listenerNote =
+    provider === 'remote'
+      ? 'Audio goes to the server below.'
+      : keyPresent
+        ? 'Audio stays on this machine. The server and key you set are still saved.'
+        : 'Audio stays on this machine.';
+  // The daemon sends the vocabulary as the remote request's prompt, so under a
+  // remote listener these words leave the machine too.
+  $: vocabularyNote =
+    provider === 'remote'
+      ? 'Words Banshee should expect to hear. They go to the server with your audio.'
+      : 'Words Banshee should expect to hear.';
   $: lastError = $daemon.live.last_error;
+
+  // Three fields appear or leave with no event of their own, so the change is
+  // said. Seeded from the first status the panel sees, because arriving on a
+  // remote listener is not a disclosure.
+  let heard: string | null = null;
+  $: if ($daemon.status) {
+    if (heard !== null && heard !== provider) {
+      announce(provider === 'remote' ? 'Server, model and key are below.' : 'Model is below.');
+    }
+    heard = provider;
+  }
   $: language = String(stt.language ?? 'en');
   $: translate = stt.translate === true;
   // The daemon's own word, so the preset name is not a second rule for one fact.
@@ -112,6 +141,10 @@
   // `endpoint_silence_ms` is a plain u64 in the daemon, so a hand-edited config
   // can hold a value none of these offer.
   $: offered = QUIET.includes(silence) ? QUIET : [silence, ...QUIET];
+
+  function quietFor(ms: number): string {
+    return `After ${ms / 1000} second${ms === 1000 ? '' : 's'} of quiet`;
+  }
   // The config is what a write changes, so it leads.
   $: current = String(
     ($daemon.status?.config?.audio?.input_device as string) ??
@@ -123,6 +156,13 @@
   $: names = devices.devices.map((d) => d.name);
   $: options = names.includes(current) || current === SYSTEM_DEVICE ? names : [current, ...names];
 
+  // The daemon reads an empty key as removal.
+  async function removeKey() {
+    if (await write('stt.remote.api_key', '')) {
+      announce('The key is removed. It takes effect when Banshee restarts.');
+    }
+  }
+
   function addWord(raw: string) {
     stopAdding();
     const word = raw.trim();
@@ -130,10 +170,6 @@
     write('stt.vocabulary', [...vocabulary, word]);
   }
 </script>
-
-{#if lastError}
-  <p class="note failed" role="status">The last dictation failed: {lastError}.</p>
-{/if}
 
 <Row name="Input" block pending={$daemon.pending.has('audio.input_device')}>
   <Picker label="Input device" value={current} change={(next) => write('audio.input_device', next)}>
@@ -160,58 +196,106 @@
     change={(next) => write('stt.endpoint_silence_ms', Number(next))}
   >
     {#each offered as ms (ms)}
-      <option value={String(ms)}>After {ms / 1000} seconds of quiet</option>
+      <option value={String(ms)}>{quietFor(ms)}</option>
     {/each}
   </Picker>
 </Row>
 
+<!-- One decision with dependents, so one group: the parts sit 8px apart inside
+     it and 22px of void holds it away from the settings it does not belong to. -->
 <Row
-  name="Listening with"
-  note={provider === 'remote' ? 'Audio goes to the server below.' : 'Audio stays on this machine.'}
+  name="Listening"
+  block
+  note={listenerNote}
+  noteId={LISTENER_NOTE}
   pending={$waitsOnARestart.has('stt.provider')}
 >
   <Segmented
-    label="Listening with"
+    label="Listening"
     value={provider}
     options={LISTENING}
+    describedBy={LISTENER_NOTE}
     change={(next) => write('stt.provider', next)}
   />
-</Row>
 
-{#if provider === 'remote'}
-  <Row name="Server" block pending={$waitsOnARestart.has('stt.remote.base_url')}>
-    <Field
-      label="Server"
-      value={String(remoteTable.base_url ?? '')}
-      commit={(next) => write('stt.remote.base_url', next)}
-    />
-  </Row>
-  <Row name="Model" block pending={$waitsOnARestart.has('stt.remote.model')}>
-    <Field
-      label="Model"
-      value={String(remoteTable.model ?? '')}
-      commit={(next) => write('stt.remote.model', next)}
-    />
-  </Row>
-  <!-- Write-only. The daemon says whether a key is set and never what it is. -->
-  <Row name="Key" block pending={$waitsOnARestart.has('stt.remote.api_key')}>
-    <Field
-      label="Key"
-      masked
-      placeholder={keyPlaceholder}
-      commit={(next) => (next === '' ? undefined : write('stt.remote.api_key', next))}
-    />
-  </Row>
-{:else}
-  <Row name="Transcription" pending={$waitsOnARestart.has('stt.preset')}>
-    <Segmented
-      label="Transcription"
-      value={preset}
-      options={PRESETS}
-      change={(next) => write('stt.preset', next)}
-    />
-  </Row>
-{/if}
+  <div class="parts" slot="under">
+    {#if provider === 'remote'}
+      <div class="part">
+        <span class="sub mono">server</span>
+        <div class="control">
+          <Field
+            label="Server"
+            value={String(remoteTable.base_url ?? '')}
+            placeholder="https://api.openai.com/v1"
+            commit={(next) => write('stt.remote.base_url', next)}
+          />
+        </div>
+        {#if $waitsOnARestart.has('stt.remote.base_url')}
+          <p class="note pending">{PENDING_SAYS}</p>
+        {/if}
+      </div>
+      <div class="part">
+        <span class="sub mono">model</span>
+        <div class="control">
+          <Field
+            label="Model"
+            value={String(remoteTable.model ?? '')}
+            placeholder="whisper-1"
+            commit={(next) => write('stt.remote.model', next)}
+          />
+        </div>
+        {#if $waitsOnARestart.has('stt.remote.model')}
+          <p class="note pending">{PENDING_SAYS}</p>
+        {/if}
+      </div>
+      <!-- Write-only. The daemon says whether a key is set and never what it is. -->
+      <div class="part">
+        <span class="sub mono">key</span>
+        <div class="control">
+          <Field
+            label="Key"
+            masked
+            placeholder={keyPlaceholder}
+            commit={(next) => (next === '' ? undefined : write('stt.remote.api_key', next))}
+          />
+          {#if keyPresent}
+            <button
+              class="caps btn-underline remove"
+              aria-label="Remove the key"
+              on:click={removeKey}
+            >
+              Remove
+            </button>
+          {/if}
+        </div>
+        {#if $waitsOnARestart.has('stt.remote.api_key')}
+          <p class="note pending">{PENDING_SAYS}</p>
+        {/if}
+      </div>
+    {:else}
+      <div class="part">
+        <span class="sub mono">model</span>
+        <div class="control">
+          <Segmented
+            label="Model"
+            value={preset}
+            options={PRESETS}
+            change={(next) => write('stt.preset', next)}
+          />
+        </div>
+        {#if $waitsOnARestart.has('stt.preset')}
+          <p class="note pending">{PENDING_SAYS}</p>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Beside the key and the server that caused it, not at the head of the
+         panel where the reader has already left the group. -->
+    {#if lastError}
+      <p class="note failed" role="status">The last dictation failed: {lastError}.</p>
+    {/if}
+  </div>
+</Row>
 
 <!-- Beside the preset it depends on: the English-only model rules every other
      language out, and the two read as one decision only if they sit together. -->
@@ -243,12 +327,7 @@
   </Row>
 {/if}
 
-<Row
-  name="Vocabulary"
-  block
-  note="Words Banshee should expect to hear."
-  pending={$daemon.pending.has('stt.vocabulary')}
->
+<Row name="Vocabulary" block note={vocabularyNote} pending={$daemon.pending.has('stt.vocabulary')}>
   <div class="chips">
     {#each vocabulary as word (word)}
       <span class="chip">
@@ -301,7 +380,42 @@
     width: 110px;
   }
 
+  /* Inside the group, so the interval is the 8px that says these parts belong
+     to the choice above them rather than the 22px between properties. */
+  .parts {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .part {
+    display: grid;
+    grid-template-columns: 56px 1fr;
+    column-gap: 12px;
+    align-items: baseline;
+  }
+
+  /* Subordinate to the one accent caps name the group carries, so the mono role
+     without the caps register, and the measured dim rather than an opacity. */
+  .sub {
+    font-size: 11px;
+    color: var(--dim);
+  }
+
+  /* The note lines up under the control it belongs to, not under the label. */
+  .part .note {
+    grid-column: 2;
+    margin: 6px 0 0;
+  }
+
+  /* A resting rule, or an 11px word beside a field reads as part of the value. */
+  .remove {
+    color: var(--ink);
+    border-bottom-color: currentcolor;
+  }
+
   .failed {
-    margin: 0 0 12px;
+    margin: 0;
   }
 </style>

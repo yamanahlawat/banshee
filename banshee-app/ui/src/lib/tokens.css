@@ -132,6 +132,22 @@ body {
   color: var(--accent);
 }
 
+/* A value the daemon has not taken yet. A row says it beneath its control and a
+   sub-row beneath its own, so the colour is stated once for both. */
+.note.pending {
+  color: var(--accent);
+}
+
+/* A control and its readout, or a control and the button that acts on it, sit
+   beside each other: the slider and its number are one reading, not two. It is
+   also what makes `.field` grow, since that flex needs a flex parent. */
+.control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 /* Every text input starts here, so a surface states only the line it draws and
    the type it sets. */
 .field {

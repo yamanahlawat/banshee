@@ -4,6 +4,7 @@
 import ready from '../fixtures/ready.json';
 import permissions from '../fixtures/permissions.json';
 import notRunning from '../fixtures/not-running.json';
+import remote from '../fixtures/remote.json';
 import type { HistoryRow } from './tauri';
 
 // A write changes what `status` answers next, as the daemon's would.
@@ -12,6 +13,7 @@ const written: Record<string, unknown> = {};
 const STATES: Record<string, unknown> = {
   ready,
   permissions,
+  remote,
   'not-running': notRunning,
   'no-agents': ready,
   'copy-fails': ready,

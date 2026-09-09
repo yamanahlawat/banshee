@@ -62,6 +62,7 @@
   class="field"
   type={masked ? 'password' : 'text'}
   aria-label={label}
+  autocomplete={masked ? 'off' : undefined}
   {placeholder}
   value={draft}
   on:input={(e) => (draft = e.currentTarget.value)}

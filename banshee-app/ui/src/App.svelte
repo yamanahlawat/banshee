@@ -125,21 +125,40 @@
   $: noAgentYet = live && agentsRead && connected === 0;
   $: pipelineBroken = blockers.some((blocker) => blocker.kind === 'pipeline');
 
+  // The host the daemon actually reached. It is null until a restart applies a
+  // remote listener, so the address that was set is read separately below.
+  $: remoteHost = $daemon.status?.remote?.stt?.host ?? null;
+  $: askedForRemote = String(config.stt?.provider ?? 'local') === 'remote';
+  $: askedForHost = hostOf(String((config.stt?.remote as Record<string, unknown>)?.base_url ?? ''));
+
+  function hostOf(url: string): string {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return url;
+    }
+  }
+
   // Spelled, because a sentence should not open on a digit. Six agents are
   // detectable today, so the list needs no more than this.
   // Name and lead are declared together. "Record" would collide with the RECORDING state word, so
   // the panel is named for what is kept. Every lead reads live state, never the config: the config
-  // says only what was asked for.
+  // says only what was asked for. The one exception is the sentence about a remote listener that
+  // waits on a restart, and that sentence says in its own words that it is not in force yet.
   $: panels = {
     Microphone: {
       name: 'Microphone',
       lead: !live
         ? 'Banshee is not running, so no microphone is open.'
-        : $daemon.live.audio_device
-          ? `Banshee is listening through the ${$daemon.live.audio_device}.`
-          : pipelineBroken
-            ? 'Banshee cannot open a microphone.'
-            : 'Banshee is not listening yet.',
+        : remoteHost
+          ? `Banshee sends what you say to ${remoteHost} to be heard.`
+          : askedForRemote
+            ? `Banshee will send what you say to ${askedForHost} when it restarts.`
+            : $daemon.live.audio_device
+              ? `Banshee is listening through the ${$daemon.live.audio_device}.`
+              : pipelineBroken
+                ? 'Banshee cannot open a microphone.'
+                : 'Banshee is not listening yet.',
     },
     Hotkey: {
       name: 'Hotkey',
@@ -234,9 +253,17 @@
     const waits = (...keys: string[]) => live && keys.some((key) => $waitsOnARestart.has(key));
     return [
       {
+        // The host, not the device: under a remote listener the microphone is
+        // where the words are heard, not where they are picked up.
         id: 'job-microphone',
         label: 'Microphone',
-        value: said(microphoneInUse($daemon.live.audio_device)),
+        value: said(remoteHost ?? microphoneInUse($daemon.live.audio_device)),
+        pending: waits(
+          'stt.provider',
+          'stt.remote.base_url',
+          'stt.remote.model',
+          'stt.remote.api_key',
+        ),
       },
       {
         id: 'job-hotkey',
@@ -394,7 +421,7 @@
           preset={String(config.stt?.preset ?? 'balanced')}
           megabytes={Number($daemon.status?.download_megabytes ?? 0)}
           first={savingHistory && nothingYet}
-          remoteHost={$daemon.status?.remote?.stt?.host ?? null}
+          {remoteHost}
         />
       {/if}
 

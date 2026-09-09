@@ -2,6 +2,10 @@
 /// cannot differ between the marks that carry it.
 export const RESTART_SAYS = '— set, and in effect when Banshee restarts';
 
+/// The same fact as a sentence, for a row or a sub-row that has the width to
+/// say it in full.
+export const PENDING_SAYS = 'Set. It takes effect when Banshee restarts.';
+
 import { writable } from 'svelte/store';
 import { copyText } from './tauri';
 

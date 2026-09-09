@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/sve
 import { beforeEach, expect, it, vi } from 'vitest';
 import ready from './fixtures/ready.json';
 import permissions from './fixtures/permissions.json';
+import remote from './fixtures/remote.json';
 
 // Local noon, because the history helpers read the local calendar day.
 const NOW = new Date(2026, 7, 27, 12, 0, 0);
@@ -312,6 +313,50 @@ it('stops naming a microphone once the daemon has stopped', async () => {
   daemon.update((s) => ({ ...s, down: 'not running' }));
   await waitFor(() =>
     expect(panelHeading('Microphone').textContent).toContain('Banshee is not running'),
+  );
+});
+
+// The device the words were picked up on is not where they went, and the panel
+// that says so is the one a person opens to check.
+it('says where audio goes when a remote server listens', async () => {
+  vi.mocked(status).mockResolvedValue(remote);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await waitFor(() =>
+    expect(panelHeading('Microphone').textContent).toContain(
+      'Banshee sends what you say to api.openai.com to be heard.',
+    ),
+  );
+});
+
+it('names the host in the foot rather than the microphone', async () => {
+  vi.mocked(status).mockResolvedValue(remote);
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const cell = container.querySelector('#job-microphone') as HTMLElement;
+  expect(cell.textContent).toContain('api.openai.com');
+  expect(cell.textContent).not.toContain('MacBook Pro Microphone');
+});
+
+// The lead is otherwise the live device, which is still the truth about where
+// nothing goes yet.
+it('says a remote listener is coming while it waits on a restart', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...remote,
+    remote: { stt: { remote: false, host: null, key_present: true }, tts: { remote: false } },
+    pending: ['stt.provider'],
+  });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: /^Microphone/ }));
+  await waitFor(() =>
+    expect(panelHeading('Microphone').textContent).toContain(
+      'Banshee will send what you say to api.openai.com when it restarts.',
+    ),
   );
 });
 
