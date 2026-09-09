@@ -177,6 +177,59 @@ mod tests {
             true
         )));
     }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn starting_the_daemon_leaves_a_running_unit_alone() {
+        assert_eq!(
+            super::systemctl_args(banshee_common::utils::DAEMON_AGENT, false),
+            Some(vec![
+                "--user".to_string(),
+                "start".to_string(),
+                "banshee.service".to_string(),
+            ])
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn restarting_the_daemon_tears_the_unit_down_first() {
+        assert_eq!(
+            super::systemctl_args(banshee_common::utils::DAEMON_AGENT, true),
+            Some(vec![
+                "--user".to_string(),
+                "restart".to_string(),
+                "banshee.service".to_string(),
+            ])
+        );
+    }
+
+    // Nothing may start a tray unit before phase 2 writes one.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_tray_label_reaches_no_systemctl_call() {
+        assert_eq!(
+            super::systemctl_args(banshee_common::utils::TRAY_AGENT, false),
+            None
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_daemon_label_names_the_unit_that_bansheed_writes() {
+        assert_eq!(
+            super::systemd_unit(banshee_common::utils::DAEMON_AGENT),
+            Some("banshee.service")
+        );
+    }
+
+    // The tray unit lands with the Linux tray. Until it is written, a caller
+    // must not be handed a name it cannot start.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_tray_label_names_no_unit_yet() {
+        assert_eq!(super::systemd_unit(banshee_common::utils::TRAY_AGENT), None);
+    }
 }
 
 #[tauri::command]
@@ -369,6 +422,7 @@ pub fn run_cli(subcommand: &str) -> Result<(), CommandError> {
 ///
 /// It fails when the job was never bootstrapped, and the subcommand that
 /// installs it runs only then, because installing tears a running job down.
+#[cfg(target_os = "macos")]
 fn kickstart(label: &str, install: &str, replace: bool) -> Result<(), CommandError> {
     let target = utils::launchd_target(label);
     let mut args = vec!["kickstart"];
@@ -384,6 +438,39 @@ fn kickstart(label: &str, install: &str, replace: bool) -> Result<(), CommandErr
         return Ok(());
     }
     run_cli(install)
+}
+
+/// The systemd arm. `start` leaves a running unit alone and `restart` tears it
+/// down, which is what `replace` means on launchd. Any failure falls through to
+/// the CLI: the label may name a unit nobody wrote yet, such as a fresh
+/// install where `banshee start` has not run.
+#[cfg(not(target_os = "macos"))]
+fn kickstart(label: &str, install: &str, replace: bool) -> Result<(), CommandError> {
+    if let Some(args) = systemctl_args(label, replace) {
+        let started = std::process::Command::new("systemctl").args(&args).status();
+        if matches!(&started, Ok(status) if status.success()) {
+            return Ok(());
+        }
+    }
+    run_cli(install)
+}
+
+/// Split from the call, so a test can read the argv without starting a unit.
+#[cfg(not(target_os = "macos"))]
+fn systemctl_args(label: &str, replace: bool) -> Option<Vec<String>> {
+    let unit = systemd_unit(label)?;
+    let verb = if replace { "restart" } else { "start" };
+    Some(vec!["--user".to_string(), verb.to_string(), unit.to_string()])
+}
+
+/// The unit that runs the job a launchd label names. `None` where no unit file
+/// exists, so a caller cannot start one that was never written.
+#[cfg(not(target_os = "macos"))]
+fn systemd_unit(label: &str) -> Option<&'static str> {
+    match label {
+        utils::DAEMON_AGENT => Some(utils::DAEMON_UNIT),
+        _ => None,
+    }
 }
 
 /// Puts the menu bar icon up. Not a second copy of the binary, which the

@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The desktop window now builds and installs on Linux.** Run `make
+  install-window` from a source clone to build it; it needs GTK, WebKitGTK
+  and Node 22. The install adds a desktop entry and icons, so your launcher
+  finds Banshee. There is still no tray icon on Linux.
+
 ### Fixed
+
+- **The window's Find hint names a key Linux keyboards have.** The record's
+  header said `⌘F`, the macOS Command glyph, on every platform. It now says
+  `Ctrl+F` off macOS. The shortcut itself always accepted both.
 
 - **The `ask_user` tool now says why it exists.** Its description tells the agent
   you cannot see the screen, so a question written as text or put in an on-screen
