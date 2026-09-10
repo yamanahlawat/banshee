@@ -183,57 +183,96 @@ mod systemd {
     use std::process::Command;
 
     use banshee_common::error::BansheeError;
+    use banshee_common::utils::{DAEMON_AGENT, TRAY_AGENT, sibling, systemd_unit};
 
-    const UNIT: &str = banshee_common::utils::DAEMON_UNIT;
+    fn label(agent: Agent) -> &'static str {
+        match agent {
+            Agent::Daemon => DAEMON_AGENT,
+            Agent::Tray => TRAY_AGENT,
+        }
+    }
+
+    fn unit_name(agent: Agent) -> &'static str {
+        systemd_unit(label(agent)).expect("every agent names its own unit")
+    }
+
+    fn unit_path(agent: Agent) -> Option<PathBuf> {
+        Some(
+            dirs::config_dir()?
+                .join("systemd/user")
+                .join(unit_name(agent)),
+        )
+    }
 
     pub fn service_file_path() -> Option<PathBuf> {
-        Some(dirs::config_dir()?.join("systemd/user").join(UNIT))
+        unit_path(Agent::Daemon)
+    }
+
+    /// The command this binary runs as, quoted the way a shell needs.
+    fn exec_start(agent: Agent) -> Result<String, BansheeError> {
+        let binary = std::env::current_exe()?;
+        Ok(match agent {
+            Agent::Daemon => format!("\"{}\" serve", binary.display()),
+            Agent::Tray => format!("\"{}\"", sibling(&binary, "banshee-tray")?.display()),
+        })
+    }
+
+    /// The daemon opens the microphone and is useful with no desktop, so it
+    /// waits on pipewire and wants the boot target. The tray has no bar to
+    /// sit in without a session, so it waits on the session instead, and
+    /// stops when the session does.
+    fn content(agent: Agent, exec_start: &str) -> String {
+        match agent {
+            Agent::Daemon => format!(
+                r#"[Unit]
+Description=Banshee voice daemon
+After=pipewire.service
+
+[Service]
+ExecStart={exec_start}
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+"#
+            ),
+            Agent::Tray => format!(
+                r#"[Unit]
+Description=Banshee menu bar icon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart={exec_start}
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
+"#
+            ),
+        }
     }
 
     pub fn install(agent: Agent) -> Result<String, BansheeError> {
-        if agent != Agent::Daemon {
-            return Err(BansheeError::Other(
-                "the menu bar icon is macOS only; here use: banshee watch --waybar".into(),
-            ));
-        }
-        let unit = service_file_path()
-            .ok_or_else(|| BansheeError::Other("config dir not found".into()))?;
-        let binary = std::env::current_exe()?;
+        let unit =
+            unit_path(agent).ok_or_else(|| BansheeError::Other("config dir not found".into()))?;
         if let Some(dir) = unit.parent() {
             std::fs::create_dir_all(dir)?;
         }
 
         // No log paths: systemd captures stdout/stderr into the journal.
-        // After=pipewire.service so the mic exists before the daemon opens it
-        let content = format!(
-            r#"[Unit]
-Description=Banshee voice daemon
-After=pipewire.service
-
-[Service]
-ExecStart="{}" serve
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-"#,
-            binary.display()
-        );
-
-        std::fs::write(&unit, content)?;
+        std::fs::write(&unit, content(agent, &exec_start(agent)?))?;
         systemctl(&["daemon-reload"])?;
-        systemctl(&["enable", UNIT])?;
+        systemctl(&["enable", unit_name(agent)])?;
         // restart, not start: a reinstall must hand over to the new binary
-        systemctl(&["restart", UNIT])?;
-        Ok("journalctl --user -u banshee -f".to_string())
+        systemctl(&["restart", unit_name(agent)])?;
+        let service = unit_name(agent).trim_end_matches(".service");
+        Ok(format!("journalctl --user -u {service} -f"))
     }
 
     pub fn uninstall(agent: Agent) -> Result<bool, BansheeError> {
-        if agent != Agent::Daemon {
-            return Ok(false);
-        }
-        let _ = systemctl(&["disable", "--now", UNIT]);
-        match service_file_path() {
+        let _ = systemctl(&["disable", "--now", unit_name(agent)]);
+        match unit_path(agent) {
             Some(unit) if unit.exists() => {
                 std::fs::remove_file(&unit)?;
                 let _ = systemctl(&["daemon-reload"]);

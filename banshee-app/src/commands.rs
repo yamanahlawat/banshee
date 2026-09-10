@@ -204,31 +204,17 @@ mod tests {
         );
     }
 
-    // Nothing may start a tray unit before phase 2 writes one.
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn the_tray_label_reaches_no_systemctl_call() {
+    fn starting_the_tray_names_its_unit() {
         assert_eq!(
             super::systemctl_args(banshee_common::utils::TRAY_AGENT, false),
-            None
+            Some(vec![
+                "--user".to_string(),
+                "start".to_string(),
+                "banshee-tray.service".to_string(),
+            ])
         );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn the_daemon_label_names_the_unit_that_bansheed_writes() {
-        assert_eq!(
-            super::systemd_unit(banshee_common::utils::DAEMON_AGENT),
-            Some("banshee.service")
-        );
-    }
-
-    // The tray unit lands with the Linux tray. Until it is written, a caller
-    // must not be handed a name it cannot start.
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn the_tray_label_names_no_unit_yet() {
-        assert_eq!(super::systemd_unit(banshee_common::utils::TRAY_AGENT), None);
     }
 }
 
@@ -458,19 +444,9 @@ fn kickstart(label: &str, install: &str, replace: bool) -> Result<(), CommandErr
 /// Split from the call, so a test can read the argv without starting a unit.
 #[cfg(not(target_os = "macos"))]
 fn systemctl_args(label: &str, replace: bool) -> Option<Vec<String>> {
-    let unit = systemd_unit(label)?;
+    let unit = utils::systemd_unit(label)?;
     let verb = if replace { "restart" } else { "start" };
     Some(vec!["--user".to_string(), verb.to_string(), unit.to_string()])
-}
-
-/// The unit that runs the job a launchd label names. `None` where no unit file
-/// exists, so a caller cannot start one that was never written.
-#[cfg(not(target_os = "macos"))]
-fn systemd_unit(label: &str) -> Option<&'static str> {
-    match label {
-        utils::DAEMON_AGENT => Some(utils::DAEMON_UNIT),
-        _ => None,
-    }
 }
 
 /// Puts the menu bar icon up. Not a second copy of the binary, which the

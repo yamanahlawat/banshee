@@ -87,15 +87,14 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     // Same cfg as `is_wayland`, so every unix target that loses it explains why.
     #[cfg(all(unix, not(target_os = "macos")))]
     if crate::dictation::is_wayland() {
-        // The table dictation actually runs, so the checklist cannot name a stale tool
+        // The same search dictation runs, so the checklist cannot name a stale tool
         let path = crate::connect::resolved_path();
-        let typer = crate::dictation::WAYLAND_TYPERS
-            .into_iter()
-            .map(|(binary, _)| binary)
-            .find(|binary| resolve(binary, &path).is_some());
-        match typer {
-            Some(tool) => {
-                pass(&format!("wayland session: dictation types via {tool}"));
+        match crate::dictation::resolve_wayland_typer(&path) {
+            Some((binary, _)) => {
+                pass(&format!(
+                    "wayland session: typing tool found at {}",
+                    binary.display()
+                ));
             }
             None => note(
                 "wayland session: install 'wtype' (or 'ydotool') or dictation cannot type anywhere",
@@ -144,22 +143,26 @@ fn check_espeak() {
     }
 }
 
-fn espeak_install_hint() -> &'static str {
+fn espeak_install_hint() -> String {
+    package_install_hint("espeak-ng")
+}
+
+pub(crate) fn package_install_hint(package: &str) -> String {
     if cfg!(target_os = "macos") {
-        return "brew install espeak-ng";
+        return format!("brew install {package}");
     }
-    for (mgr, cmd) in [
-        ("apt", "sudo apt install espeak-ng"),
-        ("dnf", "sudo dnf install espeak-ng"),
-        ("pacman", "sudo pacman -S espeak-ng"),
-        ("zypper", "sudo zypper install espeak-ng"),
-        ("apk", "sudo apk add espeak-ng"),
+    for (mgr, verb) in [
+        ("apt", "install"),
+        ("dnf", "install"),
+        ("pacman", "-S"),
+        ("zypper", "install"),
+        ("apk", "add"),
     ] {
         if runs(mgr) {
-            return cmd;
+            return format!("sudo {mgr} {verb} {package}");
         }
     }
-    "your package manager's espeak-ng package"
+    format!("your package manager's {package} package")
 }
 
 fn runs(bin: &str) -> bool {

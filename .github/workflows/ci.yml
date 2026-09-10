@@ -64,7 +64,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxtst-dev libxi-dev libxdo-dev
+      # libgtk-3-dev is for the tray, which links gtk on every platform but macOS.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxtst-dev libxi-dev libxdo-dev libgtk-3-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The same pinned model the macos job checks; see the reason there.

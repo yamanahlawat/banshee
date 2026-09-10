@@ -9,12 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The menu bar icon now runs on Linux.** `banshee tray` puts the mark in any
+  bar that hosts StatusNotifierItem, and the desktop window starts it for you.
+  The menu names the state and the microphone, copies your last dictation, and
+  opens the window. Right click opens it; left click waits on a fix upstream.
+
 - **The desktop window now builds and installs on Linux.** Run `make
   install-window` from a source clone to build it; it needs GTK, WebKitGTK
   and Node 22. The install adds a desktop entry and icons, so your launcher
-  finds Banshee. There is still no tray icon on Linux.
+  finds Banshee.
+
+- **The window now shows a blocker when no Wayland typer is installed.** Off
+  macOS, dictation types by shelling out to `wtype` or `ydotool`. `banshee
+  status` already named a missing one, but the window's blockers band stayed
+  empty. It now lists a blocker for the missing tool, and names `wtype` and
+  `ydotool` as the fix.
 
 ### Fixed
+
+- **Dictation runs the typing tool it told you about.** The daemon looked up
+  `wtype` and `ydotool` in its own `PATH`, while `banshee status` looked in the
+  login shell's. A supervised daemon holds the smaller one, so the checklist
+  could name a tool the daemon could not run. One search now answers both, and
+  every installed tool gets a turn before dictation reports a failure.
 
 - **The window stops naming a hotkey nobody listens for.** On Wayland no
   protocol grants a global hotkey, so Banshee binds none and the compositor

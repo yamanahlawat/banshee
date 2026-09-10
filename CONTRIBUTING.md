@@ -41,8 +41,8 @@ cargo build --release --workspace --exclude banshee-app
 ```
 
 This produces `target/release/banshee` and `target/release/banshee-mcp-shim`.
-`banshee-tray` also builds, but it exits immediately and points you at
-`banshee watch --waybar`. See [docs/linux.md](docs/linux.md). An `nvidia`
+`banshee-tray` also builds, and `banshee tray` runs it. See
+[docs/linux.md](docs/linux.md). An `nvidia`
 feature adds CUDA acceleration: add `--features nvidia`.
 
 To also link the binaries onto your `PATH` and register the `systemd --user`
@@ -126,7 +126,7 @@ service.
 `make install-window` depends on `install`, so it builds and installs the
 daemon, the CLI and the desktop window together. See
 [docs/linux.md](docs/linux.md) for what it needs. There is no signing step.
-There is no tray icon yet. Run `banshee watch --waybar` instead.
+`banshee tray` puts the mark in the bar.
 
 ## Submitting changes
 

@@ -4,7 +4,6 @@ use tauri::{Emitter, Manager};
 
 // Opening a menu bar app is what puts its icon up. Off this thread, because
 // launchd can take seconds and the window must not wait for it.
-#[cfg(target_os = "macos")]
 fn start_the_icon() {
     std::thread::spawn(|| {
         if let Err(error) = commands::open_the_tray() {
@@ -12,11 +11,6 @@ fn start_the_icon() {
         }
     });
 }
-
-// No tray process runs here yet. `banshee watch --waybar` reports the state
-// until phase 2 lands one.
-#[cfg(not(target_os = "macos"))]
-fn start_the_icon() {}
 
 fn main() {
     tauri::Builder::default()
