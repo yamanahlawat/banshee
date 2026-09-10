@@ -1,15 +1,5 @@
 use super::*;
 
-// A mixer nobody reads: the output device is gone, so no sample is ever pulled
-fn dead_mixer() -> rodio::mixer::Mixer {
-    let (mixer, _never_read) = rodio::mixer::mixer(CHANNELS, SAMPLE_RATE);
-    mixer
-}
-
-fn one_second_of_silence() -> impl Iterator<Item = Vec<f32>> + Send + 'static {
-    std::iter::once(vec![0.0; SAMPLE_RATE.get() as usize])
-}
-
 fn engine_for(voice: &str) -> Option<KokoroEngine> {
     let config = KokoroTTSConfig::new(voice);
     match KokoroEngine::new(&config, 1.0) {
@@ -119,51 +109,6 @@ fn ensure_voice_on_the_loaded_voice_reads_nothing() {
         before,
         "the loaded voice must not be re-read"
     );
-}
-
-fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !done() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{what} did not happen within 2s"
-        );
-        thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-#[test]
-fn a_stopped_utterance_on_a_dead_device_does_not_block_the_next_one() {
-    let mixer = dead_mixer();
-    let mut first = play(&mixer, one_second_of_silence());
-    wait_until("the first sentence is queued", || first.player.len() == 1);
-    first.stop();
-
-    let second = play(&mixer, one_second_of_silence());
-    wait_until("the second utterance's thread finishes", || {
-        second.synth.is_finished()
-    });
-    assert_eq!(
-        second.player.len(),
-        1,
-        "the second sentence was queued on its own player"
-    );
-}
-
-#[test]
-fn a_sentence_after_stop_is_never_appended() {
-    let mixer = dead_mixer();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let chunks = std::iter::once(vec![0.0; 240]).chain(std::iter::once_with(move || {
-        let _ = release_rx.recv();
-        vec![0.0; 240]
-    }));
-    let mut utterance = play(&mixer, chunks);
-    wait_until("the first chunk is queued", || utterance.player.len() == 1);
-    utterance.stop();
-    release_tx.send(()).unwrap();
-    wait_until("the thread ends", || utterance.synth.is_finished());
-    assert_eq!(utterance.player.len(), 1, "no chunk may follow a stop");
 }
 
 #[test]

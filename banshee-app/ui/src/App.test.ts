@@ -1,8 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, expect, it, vi } from 'vitest';
-import ready from './fixtures/ready.json';
-import permissions from './fixtures/permissions.json';
-import remote from './fixtures/remote.json';
+import ready from './mocks/ready.json';
+import permissions from './mocks/permissions.json';
+import remote from './mocks/remote.json';
 
 // Local noon, because the history helpers read the local calendar day.
 const NOW = new Date(2026, 7, 27, 12, 0, 0);
@@ -38,7 +38,7 @@ import {
 import { agents } from './lib/agents';
 import { table as historyTable } from './lib/history';
 import { daemon, empty, reduceStatus, type Blocker } from './lib/daemon';
-import { forgetCopy } from './lib/copy';
+import { forgetCopy, RESTART_SAYS } from './lib/copy';
 import { forgetKeys } from './lib/keys';
 import App from './App.svelte';
 
@@ -358,7 +358,10 @@ it('names a remote listener the daemon cannot name', async () => {
     ...remote,
     // The daemon answers with an empty host when the address is no URL, and
     // with null only when the listener is local.
-    remote: { stt: { remote: true, host: '', key_present: true }, tts: { remote: false } },
+    remote: {
+      stt: { remote: true, host: '', key_present: true },
+      tts: { remote: false, host: null, speaker_started: true, key_present: false },
+    },
   });
   const { container } = render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
@@ -379,7 +382,10 @@ it('names a remote listener the daemon cannot name', async () => {
 it('marks the value in force and says which way it is changing', async () => {
   vi.mocked(status).mockResolvedValue({
     ...remote,
-    remote: { stt: { remote: false, host: null, key_present: true }, tts: { remote: false } },
+    remote: {
+      stt: { remote: false, host: null, key_present: true },
+      tts: { remote: false, host: null, speaker_started: true, key_present: false },
+    },
     pending: ['stt.provider'],
   });
   const { container } = render(App);
@@ -416,7 +422,10 @@ it('says the listening comes back to this machine while it waits', async () => {
 it('says a remote listener is coming while it waits on a restart', async () => {
   vi.mocked(status).mockResolvedValue({
     ...remote,
-    remote: { stt: { remote: false, host: null, key_present: true }, tts: { remote: false } },
+    remote: {
+      stt: { remote: false, host: null, key_present: true },
+      tts: { remote: false, host: null, speaker_started: true, key_present: false },
+    },
     pending: ['stt.provider'],
   });
   render(App);
@@ -436,7 +445,10 @@ it('names no host it does not have, in the heading or the foot', async () => {
   vi.mocked(status).mockResolvedValue({
     ...remote,
     config: { ...remote.config, stt: { ...remote.config.stt, remote: { model: 'whisper-1' } } },
-    remote: { stt: { remote: false, host: null, key_present: false }, tts: { remote: false } },
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: false, host: null, speaker_started: true, key_present: false },
+    },
     pending: ['stt.provider'],
   });
   const { container } = render(App);
@@ -1272,7 +1284,7 @@ it('gives the waiting agent the lead, and names the key that answers it', async 
   // Armed arrives as a live push mid-session, after the config is known. Set
   // before mount, the turn draws before the window has been told which key.
   daemon.update((s) => ({ ...s, live: { ...s.live, armed: true } }));
-  // hotkey_mode is toggle in the ready fixture, so the verb is Tap, not Hold.
+  // hotkey_mode is toggle in `ready.json`, so the verb is Tap, not Hold.
   await waitFor(() => expect(screen.getByText(/Tap Right Command to answer/)).toBeTruthy());
 
   // Normalized, because the sentence wraps in the source and textContent keeps
@@ -1506,4 +1518,400 @@ it('takes one delete however many times the button is pressed', async () => {
   await fireEvent.click(destroy);
   release();
   await waitFor(() => expect(vi.mocked(clearHistory).mock.calls.length).toBe(1));
+});
+
+// The heading reads the daemon for what is in force and the config for what was
+// asked, so the four forms cannot contradict the panel below them.
+it('says where text goes in the Voice heading and in the foot', async () => {
+  const remoteSpeaker = {
+    ...ready,
+    config: {
+      ...ready.config,
+      tts: {
+        ...ready.config.tts,
+        provider: 'remote',
+        remote: {
+          base_url: 'https://api.openai.com/v1',
+          model: 'gpt-4o-mini-tts',
+          voice: 'marin',
+          instructions: '',
+        },
+      },
+    },
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: true, host: 'api.openai.com', speaker_started: true, key_present: true },
+    },
+  };
+  vi.mocked(status).mockResolvedValue(remoteSpeaker);
+  render(App);
+
+  const cell = await waitFor(() => {
+    const found = screen.getByRole('button', { name: /^Voice/ });
+    expect(found.textContent).toContain('marin');
+    return found;
+  });
+
+  await fireEvent.click(cell);
+  await waitFor(() =>
+    expect(screen.getByText('Banshee speaks through api.openai.com as marin.')).toBeTruthy(),
+  );
+});
+
+it('says the speaker is waiting on a restart, in whichever direction it waits', async () => {
+  const base = {
+    ...ready,
+    config: {
+      ...ready.config,
+      tts: {
+        ...ready.config.tts,
+        provider: 'remote',
+        remote: {
+          base_url: 'https://api.openai.com/v1',
+          model: 'tts-1',
+          voice: 'marin',
+          instructions: '',
+        },
+      },
+    },
+  };
+  vi.mocked(status).mockResolvedValue({
+    ...base,
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: false, host: null, speaker_started: true, key_present: true },
+    },
+    pending: ['tts.provider'],
+  });
+  const going = render(App);
+  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await waitFor(() =>
+    expect(
+      screen.getByText('Banshee will speak through api.openai.com when it restarts.'),
+    ).toBeTruthy(),
+  );
+  going.unmount();
+
+  vi.mocked(status).mockResolvedValue({
+    ...base,
+    config: { ...base.config, tts: { ...base.config.tts, provider: 'local' } },
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: true, host: 'api.openai.com', speaker_started: true, key_present: true },
+    },
+    pending: ['tts.provider'],
+  });
+  render(App);
+  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await waitFor(() =>
+    expect(
+      screen.getByText('Banshee speaks through api.openai.com until it restarts.'),
+    ).toBeTruthy(),
+  );
+});
+
+// The reader flipped Speaking back to this machine, and the speaker they
+// flipped away from never started. It spoke nothing through that host, so the
+// lead says the restart is coming and claims no speech through the server.
+it('says a speaker that never started speaks through no host while a flip waits', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: {
+      ...ready.config,
+      tts: {
+        ...ready.config.tts,
+        provider: 'local',
+        remote: {
+          base_url: 'https://api.openai.com/v1',
+          model: 'tts-1',
+          voice: 'marin',
+          instructions: '',
+        },
+      },
+    },
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: true, host: 'api.openai.com', speaker_started: false, key_present: true },
+    },
+    pending: ['tts.provider'],
+  });
+  render(App);
+  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await waitFor(() =>
+    expect(
+      screen.getByText(
+        'Banshee cannot speak through api.openai.com. Your choice takes effect when it restarts.',
+      ),
+    ).toBeTruthy(),
+  );
+});
+
+// Kokoro speaks for every user who has not set a remote speaker up, so the two
+// local arms of the heading are the ones most people read.
+it('names the local voice Kokoro speaks in', async () => {
+  render(App);
+  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await waitFor(() => expect(screen.getByText('Banshee speaks as Sky.')).toBeTruthy());
+});
+
+it('says a local speaker with no voice set has none yet', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: { ...ready.config, tts: { ...ready.config.tts, voice: '' } },
+  });
+  render(App);
+  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await waitFor(() => expect(screen.getByText('Banshee has no voice yet.')).toBeTruthy());
+});
+
+// A remote speaker with no voice named refuses to start, so nothing is spoken
+// and nothing leaves the machine. The heading names the one thing that fixes it.
+it('says a remote speaker with no voice cannot speak', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: {
+      ...ready.config,
+      tts: {
+        ...ready.config.tts,
+        provider: 'remote',
+        remote: {
+          base_url: 'https://api.openai.com/v1',
+          model: 'tts-1',
+          voice: '',
+          instructions: '',
+        },
+      },
+    },
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: true, host: 'api.openai.com', speaker_started: false, key_present: true },
+    },
+  });
+  render(App);
+  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await waitFor(() =>
+    expect(
+      screen.getByText('Banshee cannot speak through api.openai.com until you name a voice.'),
+    ).toBeTruthy(),
+  );
+});
+
+// A remote speaker with no key speaks nothing, so the heading may not say it
+// speaks. It names the one thing that fixes it.
+it('says a remote speaker with no key cannot speak', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: {
+      ...ready.config,
+      tts: {
+        ...ready.config.tts,
+        provider: 'remote',
+        remote: {
+          base_url: 'https://api.openai.com/v1',
+          model: 'tts-1',
+          voice: 'marin',
+          instructions: '',
+        },
+      },
+    },
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: true, host: 'api.openai.com', speaker_started: false, key_present: false },
+    },
+  });
+  render(App);
+  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await waitFor(() =>
+    expect(
+      screen.getByText('Banshee cannot speak through api.openai.com until you paste a key.'),
+    ).toBeTruthy(),
+  );
+});
+
+// A key pasted and a voice named still leave the speaker unstarted when the
+// server refuses the daemon at startup. The heading may not say it speaks, and
+// there is no one field to name as the fix.
+it('says a remote speaker that never started cannot speak', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: {
+      ...ready.config,
+      tts: {
+        ...ready.config.tts,
+        provider: 'remote',
+        remote: {
+          base_url: 'https://api.openai.com/v1',
+          model: 'tts-1',
+          voice: 'marin',
+          instructions: '',
+        },
+      },
+    },
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: true, host: 'api.openai.com', speaker_started: false, key_present: true },
+    },
+  });
+  render(App);
+  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await waitFor(() =>
+    expect(screen.getByText('Banshee cannot speak through api.openai.com.')).toBeTruthy(),
+  );
+});
+
+// The daemon chose its speaker at startup, so the live table can lose the name
+// while that speaker still takes every reply. The reply says one is speaking
+// and the table has no name for it, so the sentence names the host alone.
+it('names the host alone when a started speaker has lost its name', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    config: {
+      ...ready.config,
+      tts: {
+        ...ready.config.tts,
+        provider: 'remote',
+        remote: {
+          base_url: 'https://api.openai.com/v1',
+          model: 'tts-1',
+          voice: '',
+          instructions: '',
+        },
+      },
+    },
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: true, host: 'api.openai.com', speaker_started: true, key_present: true },
+    },
+  });
+  render(App);
+  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await waitFor(() =>
+    expect(screen.getByText('Banshee speaks through api.openai.com.')).toBeTruthy(),
+  );
+});
+
+// The first line a person reads names every machine their words touch. A
+// speaker that did not start sends the text nowhere, so naming its host there
+// would claim an egress this machine does not have.
+it('names no speaker host on a first run when the speaker did not start', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  vi.mocked(status).mockResolvedValue({
+    ...permissions,
+    blockers: permissions.blockers as Blocker[],
+    remote: {
+      stt: { remote: true, host: 'api.groq.com', key_present: true },
+      tts: { remote: true, host: 'api.openai.com', speaker_started: false, key_present: false },
+    },
+  });
+  render(App);
+  const opening = await waitFor(() => screen.getByText(/types what you say/));
+  expect(opening.textContent).toContain('what you say goes to api.groq.com to be heard');
+  expect(opening.textContent).not.toContain('api.openai.com');
+});
+
+// The voice is not missing when the daemon is down, so the heading says which
+// of the two is wrong.
+it('blames the stopped daemon rather than the voice', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, running: false });
+  render(App);
+  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await waitFor(() =>
+    expect(screen.getByText('Banshee is not running, so nothing is spoken.')).toBeTruthy(),
+  );
+});
+
+// Every key in the speaker's table waits on the same restart, and the cell read
+// a hand-written list of them, so the two added last carried no mark. A key of
+// another job's is the discriminating half: it marks that job's cell instead.
+const VOICE_WAITS: [string, boolean][] = [
+  ['tts.voice', true],
+  ['tts.speed', true],
+  ['tts.remote.base_url', true],
+  ['tts.remote.model', true],
+  ['tts.remote.voice', true],
+  ['tts.remote.instructions', true],
+  ['tts.remote.api_key', true],
+  ['tts.remote.response_format', true],
+  ['tts.remote.sample_rate', true],
+  ['stt.language', false],
+  ['audio.hotkey', false],
+];
+
+it.each(VOICE_WAITS)('marks the voice cell for %s: %s', async (key, marked) => {
+  vi.mocked(status).mockResolvedValue({ ...ready, pending: [key] });
+  const { container } = render(App);
+  const cell = () => container.querySelector('#job-voice')?.textContent ?? '';
+  // The name arriving is what says the reply and the voice list both landed, so
+  // an unmarked cell is not merely one nothing has reached yet.
+  await waitFor(() => expect(cell()).toContain('Sky'));
+  if (marked) await waitFor(() => expect(cell()).toContain(RESTART_SAYS));
+  else expect(cell()).not.toContain(RESTART_SAYS);
+});
+
+// A stopped daemon has no key to apply and the cell shows no value either, so a
+// mark on it would point at nothing.
+it('marks no waiting voice key while the daemon is down', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    running: false,
+    pending: ['tts.remote.model'],
+  });
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
+  expect(container.querySelector('#job-voice')?.textContent).not.toContain(RESTART_SAYS);
+});
+
+// The voice in force is the one being replaced, so the cell names what it
+// changes to, as LISTENING does.
+it('says what the voice changes to, in whichever direction it waits', async () => {
+  const base = {
+    ...ready,
+    config: {
+      ...ready.config,
+      tts: {
+        ...ready.config.tts,
+        provider: 'remote',
+        remote: {
+          base_url: 'https://api.openai.com/v1',
+          model: 'tts-1',
+          voice: 'marin',
+          instructions: '',
+        },
+      },
+    },
+  };
+  vi.mocked(status).mockResolvedValue({
+    ...base,
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: false, host: null, speaker_started: true, key_present: true },
+    },
+    pending: ['tts.provider'],
+  });
+  const going = render(App);
+  await waitFor(() =>
+    expect(going.container.querySelector('#job-voice')?.textContent).toContain(
+      'changing to api.openai.com when Banshee restarts',
+    ),
+  );
+  expect(going.container.querySelector('#job-voice')?.textContent).not.toContain(
+    'set, and in effect',
+  );
+  going.unmount();
+
+  vi.mocked(status).mockResolvedValue({
+    ...base,
+    config: { ...base.config, tts: { ...base.config.tts, provider: 'local' } },
+    remote: {
+      stt: { remote: false, host: null, key_present: false },
+      tts: { remote: true, host: 'api.openai.com', speaker_started: true, key_present: true },
+    },
+    pending: ['tts.provider'],
+  });
+  const back = render(App);
+  await waitFor(() =>
+    expect(back.container.querySelector('#job-voice')?.textContent).toContain(
+      'changing to this machine when Banshee restarts',
+    ),
+  );
 });

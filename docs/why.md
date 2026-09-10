@@ -11,7 +11,8 @@ the other half of the conversation.
   Banshee works on laptop speakers without a headset.
 - **Nothing leaves your machine by default.** Whisper, Silero VAD, and Kokoro
   all run locally. No account, no cloud tier, works on a plane. A remote
-  listener is yours to turn on, and the tray says when it is.
+  listener and a remote voice are yours to turn on, and the tray says when
+  either is.
 - **It waits while you think.** Answers end on 2.5s of silence rather than the
   usual few hundred milliseconds, so pausing mid-sentence to think doesn't cut
   you off.

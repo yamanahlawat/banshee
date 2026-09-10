@@ -26,7 +26,15 @@ export type Status = Record<string, unknown> & {
   history_enabled?: boolean;
   remote?: {
     stt: { remote: boolean; host: string | null; key_present: boolean };
-    tts: { remote: boolean };
+    tts: {
+      remote: boolean;
+      host: string | null;
+      /// Whether the speaker the config names is the one running. False
+      /// whenever the system voice took over instead, a local Kokoro that
+      /// failed to load included.
+      speaker_started: boolean;
+      key_present: boolean;
+    };
   };
 };
 export type Live = {
@@ -37,6 +45,7 @@ export type Live = {
   audio_device: string | null;
   missing_device: string | null;
   last_error: string | null;
+  last_speech_error: string | null;
 };
 export type Daemon = {
   status: Status | null;
@@ -76,6 +85,7 @@ export function empty(): Daemon {
       audio_device: null,
       missing_device: null,
       last_error: null,
+      last_speech_error: null,
     },
     pending: new Set(),
     down: null,
@@ -110,9 +120,12 @@ export function reduceLive(state: Daemon, live: Partial<Live>): Daemon {
 export function markPending(state: Daemon, keys: string[]): Daemon {
   return { ...state, pending: new Set([...state.pending, ...keys]) };
 }
+export function isDown(state: Daemon): boolean {
+  return state.down !== null || state.status?.running === false;
+}
 // `recording` is true whenever `armed` is, so the narrower flag is tested first.
 export function stateWord(state: Daemon): Word {
-  if (state.down !== null || state.status?.running === false) return 'Not running';
+  if (isDown(state)) return 'Not running';
   if (state.live.transcribing) return 'Working';
   if (state.live.armed) return 'Listening';
   if (state.live.recording) return 'Recording';
@@ -228,3 +241,76 @@ export const waitsOnARestart = derived(daemon, (state) => {
   const keys = [...state.pending].filter((key) => !(fetching && WAITS_ON_A_FILE.has(key)));
   return new Set(keys);
 });
+
+// What one side of the pipeline is doing, read once so the panel that
+// configures it and the line that reports it cannot state a different truth.
+// `host` is the side in force and `willUse` is the side the config asks for.
+type Side = {
+  live: boolean;
+  remote: boolean;
+  keyPresent: boolean;
+  pending: boolean;
+  host: string | null;
+  willUse: string | null;
+};
+
+export type Listening = Side & { device: string | null; pipelineBroken: boolean };
+
+export type Speech = Side & { started: boolean; voiceName: string };
+
+function hostOf(url: string): string | null {
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+// The daemon answers an empty host, not null, when the address the side runs on
+// is no URL, so one absence reaches every reader.
+function inForce(host: string | null | undefined): string | null {
+  return host || null;
+}
+
+function table(config: Record<string, unknown>): Record<string, unknown> {
+  return (config.remote ?? {}) as Record<string, unknown>;
+}
+
+export function listeningFacts(state: Daemon, waits: Set<string>): Listening {
+  const stt = (state.status?.config?.stt ?? {}) as Record<string, unknown>;
+  return {
+    live: !isDown(state),
+    remote: state.status?.remote?.stt?.remote === true,
+    keyPresent: state.status?.remote?.stt?.key_present === true,
+    pending: waits.has('stt.provider'),
+    host: inForce(state.status?.remote?.stt?.host),
+    willUse: hostOf(String(table(stt).base_url ?? '')),
+    device: state.live.audio_device,
+    pipelineBroken: (state.status?.blockers ?? []).some((one) => one.kind === 'pipeline'),
+  };
+}
+
+export function speechFacts(
+  state: Daemon,
+  waits: Set<string>,
+  voices: { id: string; name: string }[],
+): Speech {
+  const tts = (state.status?.config?.tts ?? {}) as Record<string, unknown>;
+  const remote = state.status?.remote?.tts?.remote === true;
+  const id = String(tts.voice ?? '');
+  return {
+    live: !isDown(state),
+    remote,
+    started: state.status?.remote?.tts?.speaker_started === true,
+    keyPresent: state.status?.remote?.tts?.key_present === true,
+    pending: waits.has('tts.provider'),
+    host: inForce(state.status?.remote?.tts?.host),
+    willUse: hostOf(String(table(tts).base_url ?? '')),
+    // The config leads, as it does for every value the window shows. A remote
+    // speaker names its voice in its own table, and Kokoro's list holds no
+    // entry for it, so there is no name to look up.
+    voiceName: remote
+      ? String(table(tts).voice ?? '')
+      : (voices.find((one) => one.id === id)?.name ?? id),
+  };
+}

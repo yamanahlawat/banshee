@@ -4,6 +4,7 @@ use banshee_common::error::BansheeError;
 use reqwest::blocking::{Client, multipart};
 
 use crate::config::{RemoteSttConfig, STTPreset};
+use crate::credentials;
 use crate::speech_to_text::{SAMPLE_RATE, Speech, Transcriber};
 
 use super::wav::pcm16_wav;
@@ -72,29 +73,21 @@ impl RemoteTranscriber {
         format!("{}/audio/{path}", self.base_url)
     }
 
-    /// The name a person recognises, read off the URL rather than kept beside it.
+    /// The name a person recognises, read off the URL.
     fn host(&self) -> String {
         crate::config::host_of(&self.base_url)
     }
-
-    fn describe_send_error(&self, error: &reqwest::Error) -> String {
-        let host = self.host();
-        if error.is_timeout() {
-            format!("{host} did not answer in time")
-        } else if error.is_connect() {
-            format!("{host} could not be reached")
-        } else {
-            format!("the request to {host} failed: {error}")
-        }
-    }
 }
 
-/// What a non-success answer leaves in the daemon log. A refused status drops
-/// the body, because a server may echo the key it refused back into it.
-fn log_line(status: reqwest::StatusCode, body: &str) -> String {
-    match status.as_u16() {
-        401 | 403 => format!("banshee: the remote listener answered {status}"),
-        _ => format!("banshee: the remote listener answered {status}: {body}"),
+/// What a non-success answer leaves in the daemon log: one line, with every
+/// key-shaped run replaced. `said` is nothing for a body that was never read.
+fn log_line(status: reqwest::StatusCode, said: Option<&str>, api_key: &str) -> String {
+    match said {
+        Some(body) => format!(
+            "banshee: the remote listener answered {status}: {}",
+            credentials::one_line(&credentials::redacted(body, api_key))
+        ),
+        None => format!("banshee: the remote listener answered {status}"),
     }
 }
 
@@ -133,13 +126,15 @@ impl Transcriber for RemoteTranscriber {
             .bearer_auth(&self.api_key)
             .multipart(form)
             .send()
-            .map_err(|error| BansheeError::Transcription(self.describe_send_error(&error)))?;
+            .map_err(|error| {
+                BansheeError::Transcription(credentials::describe_send_error(&self.host(), &error))
+            })?;
 
         let status = response.status();
         if !status.is_success() {
             // The body may name the fault; it goes to the log, never to a person
-            let body = response.text().unwrap_or_default();
-            eprintln!("{}", log_line(status, &body));
+            let said = credentials::may_read_body(status).then(|| credentials::read_body(response));
+            eprintln!("{}", log_line(status, said.as_deref(), &self.api_key));
             return Err(BansheeError::Transcription(describe_status(status)));
         }
         let reply: Reply = response.json().map_err(|error| {
@@ -170,6 +165,9 @@ mod tests {
     use crate::speech_to_text::{Speech, Transcriber};
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    /// Shaped like a key and issued by nobody.
+    const FAKE_KEY: &str = "sk-proj-7Qm4Xb2vR8tL1yWn3cZa";
 
     struct Served {
         request: String,
@@ -280,21 +278,58 @@ mod tests {
         assert!(!request.contains("name=\"language\""));
     }
 
-    // The daemon log is a surface the key must never reach
     #[test]
-    fn a_refused_status_is_logged_without_the_body_that_may_echo_the_key() {
+    fn a_body_that_was_never_read_leaves_no_body_in_the_log() {
         use reqwest::StatusCode;
         assert_eq!(
-            super::log_line(
-                StatusCode::UNAUTHORIZED,
-                "your key sk-live-SECRET123 is not valid"
-            ),
+            super::log_line(StatusCode::UNAUTHORIZED, None, FAKE_KEY),
             "banshee: the remote listener answered 401 Unauthorized"
         );
-        let forbidden = super::log_line(StatusCode::FORBIDDEN, "sk-live-SECRET123");
-        assert!(!forbidden.contains("sk-live-SECRET123"), "{forbidden}");
-        let gateway = super::log_line(StatusCode::BAD_GATEWAY, "the upstream model is down");
+        let gateway = super::log_line(
+            StatusCode::BAD_GATEWAY,
+            Some("the upstream model is down"),
+            FAKE_KEY,
+        );
         assert!(gateway.contains("the upstream model is down"), "{gateway}");
+    }
+
+    // The daemon log is a surface no key may reach. A server that echoes the
+    // key it was sent, or any other key, is redacted before the line is made.
+    #[test]
+    fn a_key_a_server_echoes_never_reaches_the_log() {
+        let body = format!(
+            r#"{{"error":"/audio/transcriptions: Invalid model name passed in model={FAKE_KEY}. Call `/v1/models`"}}"#
+        );
+        let line = super::log_line(
+            reqwest::StatusCode::BAD_REQUEST,
+            Some(&body),
+            "gsk_8Hn2Qv6Lp0Rt4Ws9",
+        );
+        assert!(!line.contains("sk-proj"), "{line}");
+        assert!(line.contains("model=<redacted>"), "{line}");
+        assert!(line.contains("Invalid model name"), "{line}");
+
+        let held = super::log_line(
+            reqwest::StatusCode::BAD_REQUEST,
+            Some("kokoro-9f3c2ab7d14e5b6079f3 is not a model"),
+            "kokoro-9f3c2ab7d14e5b6079f3",
+        );
+        assert!(!held.contains("kokoro-9f3c"), "{held}");
+        assert!(held.contains("<redacted> is not a model"), "{held}");
+    }
+
+    // One answer leaves one line, so a body cannot forge a line of its own in
+    // the daemon log.
+    #[test]
+    fn a_body_that_arrives_in_lines_leaves_one_line() {
+        let line = super::log_line(
+            reqwest::StatusCode::BAD_GATEWAY,
+            Some("no such model\nbanshee: the listener is fine and idle"),
+            FAKE_KEY,
+        );
+        assert!(!line.chars().any(char::is_control), "{line}");
+        assert_eq!(line.matches("banshee:").count(), 2, "{line}");
+        assert!(line.lines().count() == 1, "{line}");
     }
 
     #[test]

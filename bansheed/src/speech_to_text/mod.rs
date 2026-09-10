@@ -61,14 +61,11 @@ pub fn select_transcriber(stt: &STTConfig) -> Result<Box<dyn Transcriber>, Bansh
             Ok(Box::new(engine))
         }
         SttProvider::Remote => {
+            let side = crate::credentials::RemoteKey::Stt;
             let key = crate::credentials::Credentials::load()?
-                .stt_api_key
-                .ok_or_else(|| {
-                    BansheeError::Other(
-                        "no key for the remote listener; set one with: banshee config set stt.remote.api_key"
-                            .to_string(),
-                    )
-                })?;
+                .key(side)
+                .ok_or_else(|| BansheeError::Other(side.no_key()))?
+                .to_string();
             println!("Listening through {}", stt.remote.host());
             let engine = RemoteTranscriber::new(&stt.remote, key, &stt.vocabulary, stt.into())?;
             Ok(Box::new(engine))

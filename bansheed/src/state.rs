@@ -180,6 +180,18 @@ fn replace_if_new(field: &RwLock<Option<String>>, name: Option<String>) -> bool 
     true
 }
 
+/// Each move wakes the push task of every subscriber, so a value that has not
+/// changed sends nothing.
+fn send_if_new(channel: &watch::Sender<Option<String>>, value: Option<String>) {
+    channel.send_if_modified(|current| {
+        if *current == value {
+            return false;
+        }
+        *current = value;
+        true
+    });
+}
+
 pub struct DaemonState {
     version: &'static str,
     // The model the listener has loaded, not the one the file names. The
@@ -197,6 +209,10 @@ pub struct DaemonState {
     wanted_device: Mutex<String>,
     // Follows a live `tts.voice`, so the voice reported is the one now loaded
     tts_voice: RwLock<Option<String>>,
+    // Said once by the branch that built the speaker. A live `[tts]` write moves
+    // the voice above and not this: a backend that takes a voice name is still
+    // the fallback.
+    speaker_started: bool,
     wanted_downloads: RwLock<Vec<crate::models::download::Download>>,
     // The file as last parsed. `vad_threshold`, `wanted_device` and `barge_in`
     // beside it are live values the file may no longer agree with.
@@ -220,6 +236,8 @@ pub struct DaemonState {
     transcribing: watch::Sender<bool>,
     // Why the last transcription failed, cleared by the next one that succeeds.
     last_error: watch::Sender<Option<String>>,
+    // Why the last spoken reply failed, cleared by the next one that plays.
+    last_speech_error: watch::Sender<Option<String>>,
     // One counter for the whole device picture. It moves only when a setter
     // writes a value that differs, because the watchdog rewrites the same one
     // every rescan and each move wakes the push task of every subscriber.
@@ -250,6 +268,7 @@ impl DaemonState {
         config: Arc<Config>,
         db_connection: Option<rusqlite::Connection>,
         speech: SpeechPlayer,
+        speaker: crate::text_to_speech::Speaker,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
         cues: Cues,
     ) -> Self {
@@ -262,7 +281,8 @@ impl DaemonState {
             audio_device: RwLock::new(None),
             missing_device: RwLock::new(None),
             wanted_device: Mutex::new(config.audio.input_device.clone()),
-            tts_voice: RwLock::new(None),
+            speaker_started: speaker.started(),
+            tts_voice: RwLock::new(speaker.voice()),
             wanted_downloads: RwLock::new(wanted_downloads),
             barge_in: Mutex::new(config.audio.barge_in),
             running_config: Arc::clone(&config),
@@ -280,6 +300,7 @@ impl DaemonState {
             recording_active: watch::channel(false).0,
             transcribing: watch::channel(false).0,
             last_error: watch::channel(None).0,
+            last_speech_error: watch::channel(None).0,
             device_changes: watch::channel(0).0,
             downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
             downloading: AtomicBool::new(false),
@@ -501,16 +522,8 @@ impl DaemonState {
         self.transcribing.subscribe()
     }
 
-    /// Each move wakes the push task of every subscriber, so an error that has
-    /// not changed sends nothing.
     pub fn set_last_error(&self, error: Option<String>) {
-        self.last_error.send_if_modified(|current| {
-            if *current == error {
-                return false;
-            }
-            *current = error;
-            true
-        });
+        send_if_new(&self.last_error, error);
     }
 
     pub fn last_error(&self) -> Option<String> {
@@ -519,6 +532,20 @@ impl DaemonState {
 
     pub fn subscribe_last_error(&self) -> watch::Receiver<Option<String>> {
         self.last_error.subscribe()
+    }
+
+    /// The speaking half of the pair. One field per side, so a failed listen
+    /// and a failed reply never overwrite each other.
+    pub fn set_last_speech_error(&self, error: Option<String>) {
+        send_if_new(&self.last_speech_error, error);
+    }
+
+    pub fn last_speech_error(&self) -> Option<String> {
+        self.last_speech_error.borrow().clone()
+    }
+
+    pub fn subscribe_last_speech_error(&self) -> watch::Receiver<Option<String>> {
+        self.last_speech_error.subscribe()
     }
 
     pub fn subscribe_downloads(&self) -> broadcast::Receiver<DownloadProgress> {
@@ -663,6 +690,12 @@ impl DaemonState {
             .read()
             .unwrap_or_else(|poison| poison.into_inner())
             .clone()
+    }
+
+    /// Whether the speaker `[tts]` names is the one running. False under the OS
+    /// voice, which sends no text out whatever the config asks for.
+    pub fn speaker_started(&self) -> bool {
+        self.speaker_started
     }
 
     /// True when the backend took the change. The voice the window marks as

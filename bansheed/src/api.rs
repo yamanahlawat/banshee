@@ -171,6 +171,9 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
 pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     let blockers = readiness::blockers(daemon_state);
     let running = daemon_state.running_config();
+    // Read once for the two sides below, so one reply cannot answer from two
+    // states of the file. A file that will not parse holds no key either way.
+    let credentials = crate::credentials::Credentials::load().ok();
     let payload = serde_json::json!({
         "running": true,
         "version": daemon_state.version(),
@@ -204,19 +207,42 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
         "last_error": daemon_state.last_error(),
+        "last_speech_error": daemon_state.last_speech_error(),
         // The providers are read at startup, so the running config answers,
         // not the file a `persist` write has already replaced. The key file is
         // read each time: a key set after startup is "present" before the restart.
-        "remote": {
-            "stt": {
-                "remote": running.stt.provider.is_remote(),
-                "host": running.stt.provider.is_remote().then(|| running.stt.remote.host()),
-                "key_present": crate::credentials::Credentials::stt_key_present(),
-            },
-            "tts": { "remote": running.tts.provider.is_remote() },
-        },
+        "remote": remote_report(
+            &running,
+            |side| credentials.as_ref().is_some_and(|held| held.key(side).is_some()),
+            daemon_state.speaker_started(),
+        ),
     });
     with_key_press_access(payload)
+}
+
+/// Where each side sends what it handles, and whether its key is set. The key
+/// read is a parameter so a test can answer for one side without a key file.
+/// `speaker_started` says whether the speaker the config names is the one
+/// running. It is false under a local provider whose Kokoro failed to load,
+/// because the system voice speaks then too.
+fn remote_report(
+    config: &crate::config::Config,
+    key_present: impl Fn(crate::credentials::RemoteKey) -> bool,
+    speaker_started: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "stt": {
+            "remote": config.stt.provider.is_remote(),
+            "host": config.stt.provider.is_remote().then(|| config.stt.remote.host()),
+            "key_present": key_present(crate::credentials::RemoteKey::Stt),
+        },
+        "tts": {
+            "remote": config.tts.provider.is_remote(),
+            "host": config.tts.provider.is_remote().then(|| config.tts.remote.host()),
+            "speaker_started": speaker_started,
+            "key_present": key_present(crate::credentials::RemoteKey::Tts),
+        },
+    })
 }
 
 /// Only the daemon can answer this, so only its reply carries it.
@@ -244,6 +270,7 @@ pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
         "audio_device": daemon_state.audio_device(),
         "missing_device": daemon_state.missing_device(),
         "last_error": daemon_state.last_error(),
+        "last_speech_error": daemon_state.last_speech_error(),
     })
 }
 

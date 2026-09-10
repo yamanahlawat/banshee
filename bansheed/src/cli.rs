@@ -328,12 +328,17 @@ fn ask_line(prompt: &str) -> Result<Option<String>, BansheeError> {
     Ok((!answer.is_empty()).then_some(answer))
 }
 
-// A pipe is read as one line, so `printf 'sk-…\n' | banshee config set stt.remote.api_key` works
-fn ask_key() -> Result<String, BansheeError> {
+fn key_prompt(side: crate::credentials::RemoteKey) -> &'static str {
+    match side {
+        crate::credentials::RemoteKey::Stt => "Key for the remote listener (not shown): ",
+        crate::credentials::RemoteKey::Tts => "Key for the remote speaker (not shown): ",
+    }
+}
+
+// A pipe is read as one line, so `printf 'sk-…\n' | banshee config set tts.remote.api_key` works
+fn ask_key(side: crate::credentials::RemoteKey) -> Result<String, BansheeError> {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        Ok(rpassword::prompt_password(
-            "Key for the remote listener (not shown): ",
-        )?)
+        Ok(rpassword::prompt_password(key_prompt(side))?)
     } else {
         Ok(ask_line("")?.unwrap_or_default())
     }
@@ -374,17 +379,20 @@ fn key_change(
     })
 }
 
-async fn config_api_key(change: Option<String>) -> Result<(), BansheeError> {
+async fn config_api_key(
+    side: crate::credentials::RemoteKey,
+    change: Option<String>,
+) -> Result<(), BansheeError> {
     let Some(key) = change else {
         println!("No key was typed; the key on file is unchanged.");
         return Ok(());
     };
     // The credentials file reads the empty string as the key being gone
     let done = if key.is_empty() { "Removed" } else { "Set" };
-    let assignments = settings::Assignments::from([(settings::API_KEY.to_string(), key.into())]);
+    let assignments = settings::Assignments::from([(side.setting().to_string(), key.into())]);
     match write_settings(assignments).await {
         Ok(restart_required) => {
-            println!("{done} {}.", settings::API_KEY);
+            println!("{done} {}.", side.setting());
             if restart_required {
                 println!("Restart to use it: banshee start");
             }
@@ -395,8 +403,8 @@ async fn config_api_key(change: Option<String>) -> Result<(), BansheeError> {
 }
 
 pub async fn config(key: String, value: Option<String>) -> Result<(), BansheeError> {
-    if key == settings::API_KEY {
-        return config_api_key(key_change(value, ask_key)?).await;
+    if let Some(side) = crate::credentials::RemoteKey::of_setting(&key) {
+        return config_api_key(side, key_change(value, || ask_key(side))?).await;
     }
     let Some(value) = value else {
         fail(&BansheeError::Rejected(format!("'{key}' needs a value")))
@@ -420,36 +428,96 @@ pub async fn config(key: String, value: Option<String>) -> Result<(), BansheeErr
     Ok(())
 }
 
+/// A speaker with no voice leaves `tts.provider` where it is: the speech
+/// endpoint has no default voice, so switching the speaker on without one
+/// refuses it at every startup.
+fn speaker_sends_text_out(voice: &str) -> bool {
+    !voice.is_empty()
+}
+
 pub async fn config_remote() -> Result<(), BansheeError> {
-    let current = Config::load().unwrap_or_default().stt.remote;
-    // The server is asked first: a key alone assumes OpenAI, and the person may
-    // be calling Groq or a server of their own.
-    let base_url =
-        ask_line(&format!("Server /v1 root [{}]: ", current.base_url))?.unwrap_or(current.base_url);
-    let model = ask_line(&format!("Model [{}]: ", current.model))?.unwrap_or(current.model);
+    use crate::credentials::RemoteKey;
+
+    let config = Config::load().unwrap_or_default();
+    let listener = config.stt.remote;
+    let speaker = config.tts.remote;
+
+    // The server is asked first on each side: a key alone assumes OpenAI, and
+    // the person may be calling Groq or a server of their own.
+    println!("The listener: what hears your audio.");
+    let stt_base_url = ask_line(&format!("Server /v1 root [{}]: ", listener.base_url))?
+        .unwrap_or(listener.base_url);
+    let stt_model = ask_line(&format!("Model [{}]: ", listener.model))?.unwrap_or(listener.model);
+    let stt_key = key_change(None, || ask_key(RemoteKey::Stt))?;
+
+    println!();
+    println!("The speaker: what says Banshee's replies.");
+    let tts_base_url =
+        ask_line(&format!("Server /v1 root [{}]: ", speaker.base_url))?.unwrap_or(speaker.base_url);
+    let tts_model = ask_line(&format!("Model [{}]: ", speaker.model))?.unwrap_or(speaker.model);
+    let tts_voice = ask_line(&format!("Voice [{}]: ", speaker.voice))?.unwrap_or(speaker.voice);
+    let tts_key = key_change(None, || ask_key(RemoteKey::Tts))?;
+
     let mut assignments = settings::Assignments::from([
         ("stt.provider".to_string(), "remote".into()),
-        ("stt.remote.base_url".to_string(), base_url.clone().into()),
-        ("stt.remote.model".to_string(), model.clone().into()),
+        (
+            "stt.remote.base_url".to_string(),
+            stt_base_url.clone().into(),
+        ),
+        ("stt.remote.model".to_string(), stt_model.clone().into()),
+        (
+            "tts.remote.base_url".to_string(),
+            tts_base_url.clone().into(),
+        ),
+        ("tts.remote.model".to_string(), tts_model.clone().into()),
+        ("tts.remote.voice".to_string(), tts_voice.clone().into()),
     ]);
-    if let Some(key) = key_change(None, ask_key)? {
-        assignments.insert(settings::API_KEY.to_string(), key.into());
+    if speaker_sends_text_out(&tts_voice) {
+        assignments.insert("tts.provider".to_string(), "remote".into());
+    }
+    if let Some(key) = stt_key {
+        assignments.insert(RemoteKey::Stt.setting().to_string(), key.into());
+    }
+    if let Some(key) = tts_key {
+        assignments.insert(RemoteKey::Tts.setting().to_string(), key.into());
     }
 
     match write_settings(assignments).await {
         Ok(_) => {
-            let host = crate::config::host_of(&base_url);
-            println!("Listening through {host} with {model}.");
-            if crate::credentials::Credentials::stt_key_present() {
-                println!("The key is set.");
+            println!();
+            println!(
+                "Listening through {} with {stt_model}.",
+                crate::config::host_of(&stt_base_url)
+            );
+            report_key(RemoteKey::Stt);
+            // The prompt above asks for the speaker's key either way; only a
+            // speaker that sends text out reports it.
+            if speaker_sends_text_out(&tts_voice) {
+                println!(
+                    "Speaking through {} as {tts_voice} with {tts_model}.",
+                    crate::config::host_of(&tts_base_url)
+                );
+                report_key(RemoteKey::Tts);
             } else {
-                println!("No key is set yet: banshee config set stt.remote.api_key");
+                println!("The speaker stays on this machine: name a voice to send text out.");
             }
             println!("Restart to use it: banshee start");
         }
         Err(error) => fail(&error),
     }
     Ok(())
+}
+
+fn report_key(side: crate::credentials::RemoteKey) {
+    if crate::credentials::Credentials::present(side) {
+        println!("The {} key is set.", side.side());
+    } else {
+        println!(
+            "No key for the remote {} yet: banshee config set {}",
+            side.side(),
+            side.setting()
+        );
+    }
 }
 
 pub async fn setup(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
@@ -600,12 +668,17 @@ pub fn start(config_result: Result<Config, BansheeError>) -> Result<(), BansheeE
             }
             // A remote listener downloads nothing, so the models say nothing
             // about whether it can hear.
+            let listener = crate::credentials::RemoteKey::Stt;
             if config.stt.provider.is_remote()
-                && !crate::credentials::Credentials::stt_key_present()
+                && !crate::credentials::Credentials::present(listener)
             {
                 blocked = true;
                 println!();
-                println!("No key for the remote listener: banshee config set stt.remote.api_key");
+                println!(
+                    "No key for the remote {}: banshee config set {}",
+                    listener.side(),
+                    listener.setting()
+                );
             }
             Some((config.audio.hotkey, config.audio.hotkey_mode))
         }

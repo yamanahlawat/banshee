@@ -128,20 +128,28 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         None
     };
 
-    let (speech_backend, live_voice) = text_to_speech::select_backend(&config.tts)?;
+    // Created before the backend, because the backend holds the sender and the
+    // drain holds the state the backend must not see
+    let (faults, fault_reports) = std::sync::mpsc::channel();
+    let (speech_backend, speaker) = text_to_speech::select_backend(&config.tts, faults)?;
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let cues = audio::cues::start_cue_player(config.audio.cues.enabled);
     let daemon_state = Arc::new(DaemonState::new(
         Arc::clone(&config),
         db_connection,
         text_to_speech::SpeechPlayer::new(speech_backend),
+        speaker,
         commands,
         cues.clone(),
     ));
 
-    if let Some(voice) = live_voice {
-        daemon_state.set_tts_voice(voice);
-    }
+    // After the state, which the drain writes, and after the backend, which
+    // may already have sent a startup fault into the channel's buffer
+    let draining_state = Arc::clone(&daemon_state);
+    let draining_cues = cues.clone();
+    std::thread::spawn(move || {
+        text_to_speech::drain_faults(draining_state, draining_cues, fault_reports)
+    });
 
     // The watchdog owns the stream past daemon::run: stopping it stops
     // capture, and the thread is the only thing left to join
@@ -294,6 +302,7 @@ struct StateWatches {
     transcribing: watch::Receiver<bool>,
     devices: watch::Receiver<u64>,
     last_error: watch::Receiver<Option<String>>,
+    last_speech_error: watch::Receiver<Option<String>>,
 }
 
 /// Sends one connection its state changes, until the daemon stops or the client
@@ -313,6 +322,7 @@ async fn push_changes(
             woken = watches.transcribing.changed() => woken,
             woken = watches.devices.changed() => woken,
             woken = watches.last_error.changed() => woken,
+            woken = watches.last_speech_error.changed() => woken,
         };
         if woken.is_err() {
             break;
@@ -366,6 +376,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
                     transcribing: state.subscribe_transcribing(),
                     devices: state.device_changes(),
                     last_error: state.subscribe_last_error(),
+                    last_speech_error: state.subscribe_last_speech_error(),
                 },
                 live_state(&state),
             )

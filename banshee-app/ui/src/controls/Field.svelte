@@ -13,6 +13,8 @@
   export let commit: (next: string) => boolean | void | Promise<boolean | void>;
   /// Called when Escape leaves the field, for a caller that opened it.
   export let cancel: (() => void) | undefined = undefined;
+  // Bound by a caller that has to focus a field it just swapped in.
+  export let input: HTMLInputElement | undefined = undefined;
 
   let draft = value;
   $: draft = value;
@@ -65,6 +67,7 @@
 </script>
 
 <input
+  bind:this={input}
   class="field"
   class:dashed
   type={masked ? 'password' : 'text'}

@@ -21,10 +21,18 @@ base_url = "https://api.openai.com/v1" # an OpenAI-compatible server's /v1 root
 model = "whisper-1"                    # the model that server names
 
 [tts]
-provider = "local"     # who speaks; local is the only value
+provider = "local"     # local | remote; see "A remote voice" below
 voice = "af_sky"       # any voice from the Kokoro voices directory
 speed = 1.2            # playback speed multiplier
-fallback = "system"    # system = use `say` when Kokoro is unavailable | none
+fallback = "system"    # system = use `say` when the voice is unavailable | none
+
+[tts.remote]                           # read when provider = "remote"
+base_url = "https://api.openai.com/v1" # an OpenAI-compatible server's /v1 root
+model = "tts-1"                        # the model that server names
+voice = ""                             # a voice that server names; required
+instructions = ""                      # tone and delivery, for a model that reads it
+response_format = "wav"                # wav | pcm; what the server is asked to send
+# sample_rate = 22050                  # unset; only pcm needs it
 
 [audio]
 input_device = "default"  # "default" = follow the OS; otherwise match a device name
@@ -110,7 +118,7 @@ Most settings take effect at once: `stt.vad_threshold`, `stt.vocabulary`,
 `daemon.save_history`. The rest are read when the daemon starts, so the command
 tells you to restart. Among them: `audio.hotkey`, `audio.hotkey_mode`,
 `stt.endpoint_silence_ms`, `stt.provider`, the `[stt.remote]` keys,
-`tts.fallback` and `tts.provider`.
+`tts.fallback`, `tts.provider` and the `[tts.remote]` keys.
 
 A live setting whose model is not downloaded yet waits for the file. Once
 `banshee setup` fetches it, a running daemon applies the setting as the
@@ -145,21 +153,70 @@ lists every voice Banshee can name and fetches the one you pick.
 `provider = "remote"` under `[stt]` sends each utterance to the server in
 `[stt.remote]` and types the text it answers. Any OpenAI-compatible
 transcription server works: OpenAI, Groq, or a Whisper server you run. The
-`preset` is not read; the server's `model` is. Set it up in one go:
+`preset` is not read; the server's `model` is. Set both sides up in one go:
 
 ```
 banshee config remote
 ```
 
-It asks for the server's `/v1` root, the model, and the key in turn. The server
-and model prompts show their current value, and Enter keeps it. The key is typed
-without echo, and Enter keeps the key already on file. The key is stored in
+It asks about the listener first, then the speaker. For the listener it asks for
+the server's `/v1` root, the model, and the key. Every prompt but the key shows
+its current value, and Enter keeps it. The key is typed without echo, and Enter
+keeps the key already on file. The key is stored in
 `~/.banshee/credentials.toml`, which only you can read. Each setting also stands
 alone: `banshee config set stt.remote.api_key` asks for the key by itself. To
 remove the key, pass an empty one: `banshee config set stt.remote.api_key ""`.
 The key is never written to `config.toml` and never appears in a status reply. When
 a transcription fails, the error tone plays, and `banshee status` and the window
 say why. Banshee never falls back to the local model on its own.
+
+### A remote voice
+
+`provider = "remote"` under `[tts]` sends each reply's text to the server in
+`[tts.remote]` and plays the audio it answers. Any OpenAI-compatible
+`/audio/speech` endpoint works. `tts.voice` is not read; `tts.remote.voice` is.
+The speaker needs one: the endpoint has no call that lists voices, so Banshee
+cannot pick one for you. `instructions` is optional. A model such as
+`gpt-4o-mini-tts` takes tone and delivery from it. The default `tts-1` ignores
+it. A server may also refuse the whole request over the field: Groq answers
+``unknown field `instructions` in request body``. Leave `instructions` empty
+unless the model you name reads it. `tts.speed` still applies, and it stays
+live: a write reaches the server on the next reply.
+
+`response_format` is what the server is asked to send. The default is `wav`,
+because every OpenAI-compatible server offers it. A WAV file also states its
+own rate and channel count, so Banshee plays it at the rate the server chose.
+`pcm` saves the 44-byte header, and OpenAI and Kokoro-FastAPI both answer it.
+Bare samples describe nothing, so Banshee reads them as 16-bit mono at 24000
+Hz. `sample_rate` changes that rate, for a server that answers `pcm` at
+another one. Banshee sends the field to the server only when you set it.
+
+Banshee identifies every answer from its own bytes. It refuses one it cannot
+play, and it names what arrived. A server that sends MP3, Ogg or an error page
+in place of audio says so in `banshee status`. Nothing plays as noise. Bare
+samples are the one answer no byte can prove, so Banshee reads unrecognised
+bytes as samples only under `response_format = "pcm"`.
+
+`banshee config remote` sets both sides up. After the listener it asks for the
+speaker's server, model, voice and key. Banshee switches the speaker on only
+once it has a voice. Each setting also stands alone:
+`banshee config set tts.remote.api_key` asks for the key by itself, and
+`banshee config set tts.remote.voice marin` names the voice. The key lives in
+`~/.banshee/credentials.toml` beside the listener's, in its own table, and never
+in `config.toml` or a status reply. The daemon reads `tts.provider` and the
+`[tts.remote]` keys when it starts, so a change to one of them ends with a
+restart.
+
+With `fallback = "system"`, an utterance the server refuses plays the error
+tone, and the system voice says it instead. You still hear an agent's question.
+With `fallback = "none"` the tone plays and Banshee says nothing. A question
+asked through `ask_user` still opens the microphone after it, so you hear the
+tone and then silence while Banshee waits for your answer. Either way three
+places say why: `banshee status`, the status reply's `last_speech_error` and
+the window's Voice panel. A reply that fails after its first words ends
+where it stopped. A restart in the system voice mid-sentence is worse than a
+stop. A speaker that will not start never stops the daemon, so dictation goes
+on. `tts.provider` stays what you set, and Banshee never rewrites it.
 
 ## The hotkey
 

@@ -88,10 +88,10 @@ pub enum ConfigAction {
     Set {
         /// A section and a field from config.toml, as in stt.vad_threshold
         key: String,
-        /// Left out for stt.remote.api_key, which is then read without echo
+        /// Left out for stt.remote.api_key or tts.remote.api_key, which is then read without echo
         value: Option<String>,
     },
-    /// Set up a remote listener: the server, the model and the key, asked in turn
+    /// Set up a remote listener and speaker: each server, model, voice and key in turn
     Remote,
 }
 

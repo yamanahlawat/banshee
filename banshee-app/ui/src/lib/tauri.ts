@@ -3,22 +3,22 @@ import { listen as tauriListen, type EventCallback, type UnlistenFn } from '@tau
 import type { Status } from './daemon';
 
 // `import.meta.env.DEV` is replaced with `false` in a production build, so the
-// preview branch and its module are dropped rather than merely unreachable.
-const PREVIEW =
+// branch and its module are dropped rather than merely unreachable.
+const USE_MOCKS =
   import.meta.env.DEV &&
   !import.meta.env.VITEST &&
   !(typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window);
 
 function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (PREVIEW) return import('./preview').then((m) => m.answer<T>(command, args));
+  if (USE_MOCKS) return import('../mocks/bridge').then((m) => m.answer<T>(command, args));
   return invoke<T>(command, args);
 }
 
-// The daemon pushes nothing into a browser, so a preview listens to silence
-// rather than throwing on a bridge that is not there.
+// The daemon pushes nothing into a browser, so the mocks listen to silence
+// rather than throw on a bridge that is not there.
 export function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
-  if (PREVIEW) {
-    return import('./preview').then((m) =>
+  if (USE_MOCKS) {
+    return import('../mocks/bridge').then((m) =>
       m.push(event, (payload) => handler({ payload } as Parameters<EventCallback<T>>[0])),
     );
   }

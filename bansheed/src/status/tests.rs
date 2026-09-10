@@ -68,6 +68,36 @@ fn a_microphone_that_will_not_open_fails_the_checklist() {
     )));
 }
 
+// The checklist names the host either way, because that is the server the
+// config asks for. Only the daemon says whether text reaches it.
+#[test]
+fn the_speech_note_says_text_stays_here_until_the_speaker_starts() {
+    assert_eq!(
+        super::speech_line("api.openai.com", true),
+        "text goes to api.openai.com for speaking"
+    );
+    assert_eq!(
+        super::speech_line("api.openai.com", false),
+        "the speaker on api.openai.com did not start, so text stays on this machine"
+    );
+}
+
+// Each speaker keeps its voice in its own table, and the settings line has
+// room for one. `tts.voice` is Kokoro's, and a remote server has never heard
+// of it.
+#[test]
+fn the_settings_line_names_the_voice_of_the_speaker_in_force() {
+    let mut config = crate::config::Config::default();
+    config.tts.voice = "af_sky".to_string();
+    config.tts.remote.voice = "marin".to_string();
+
+    assert_eq!(
+        super::settings_voice(&config, true),
+        config.tts.remote.voice
+    );
+    assert_eq!(super::settings_voice(&config, false), config.tts.voice);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn the_key_press_note_states_what_the_daemon_measured() {

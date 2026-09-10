@@ -3,14 +3,17 @@
 
   export let name: string;
   export let note = '';
-  /// Passed when a control has to point at the note with `aria-describedby`.
+  // Passed when a control has to point at the note with `aria-describedby`.
   export let noteId: string | undefined = undefined;
   export let pending = false;
-  /// A control that cannot sit on one line takes the width and drops beneath its label.
+  // A control that cannot sit on one line takes the width and drops beneath its label.
   export let block = false;
+  // For a control with no baseline of its own, such as a range input, which
+  // would otherwise drop its label to the bottom of the row.
+  export let centred = false;
 </script>
 
-<div class="row" class:block>
+<div class="row" class:block class:centred>
   <span class="name caps">{name}</span>
   <div class="value">
     <div class="control"><slot /></div>
@@ -39,6 +42,10 @@
   .block {
     grid-template-columns: 1fr;
     row-gap: 8px;
+  }
+
+  .centred {
+    align-items: center;
   }
 
   .name {

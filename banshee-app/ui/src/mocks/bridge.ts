@@ -1,19 +1,58 @@
-// Stands in for the Tauri bridge in an ordinary browser. Reached only under
-// `import.meta.env.DEV` and only when Tauri is absent, so it cannot ship.
-// `?state=` picks which daemon reply to answer with.
-import ready from '../fixtures/ready.json';
-import permissions from '../fixtures/permissions.json';
-import notRunning from '../fixtures/not-running.json';
-import remote from '../fixtures/remote.json';
-import type { HistoryRow } from './tauri';
+// Reached only under `import.meta.env.DEV` and only when Tauri is absent, so
+// it cannot ship.
+import ready from './ready.json';
+import permissions from './permissions.json';
+import notRunning from './not-running.json';
+import remote from './remote.json';
+import remoteSpeech from './remote-speech.json';
+import type { HistoryRow } from '../lib/tauri';
 
 // A write changes what `status` answers next, as the daemon's would.
 const written: Record<string, unknown> = {};
+
+const HOST = 'api.openai.com';
+const OPENAI = `https://${HOST}/v1`;
+
+// What the daemon runs, beside a config that says only what was asked for. A
+// side the daemon runs remotely always reaches this one host.
+function inForce(
+  listener: { remote: boolean; key: boolean },
+  speaker: { remote: boolean; started: boolean; key: boolean },
+) {
+  return {
+    stt: {
+      remote: listener.remote,
+      host: listener.remote ? HOST : null,
+      key_present: listener.key,
+    },
+    tts: {
+      remote: speaker.remote,
+      host: speaker.remote ? HOST : null,
+      speaker_started: speaker.started,
+      key_present: speaker.key,
+    },
+  };
+}
+
+// The speaker the config asks for, with the table a remote one reads. The
+// window shows neither `response_format` nor `sample_rate`, so this names them
+// no value to look at.
+function asks(provider: string, model: string, voice: string) {
+  return {
+    ...remote.config,
+    tts: {
+      ...remote.config.tts,
+      provider,
+      remote: { base_url: OPENAI, model, voice, instructions: '' },
+    },
+  };
+}
 
 const STATES: Record<string, unknown> = {
   ready,
   permissions,
   remote,
+  'remote-speech': remoteSpeech,
   'not-running': notRunning,
   'no-agents': ready,
   'copy-fails': ready,
@@ -30,7 +69,7 @@ const STATES: Record<string, unknown> = {
   // disagrees between a write and the restart that applies it.
   'to-remote': {
     ...remote,
-    remote: { stt: { remote: false, host: null, key_present: true }, tts: { remote: false } },
+    remote: inForce({ remote: false, key: true }, { remote: false, started: true, key: false }),
     pending: ['stt.provider'],
   },
   'to-local': {
@@ -40,9 +79,56 @@ const STATES: Record<string, unknown> = {
   },
   'no-key': {
     ...remote,
-    remote: { stt: { remote: true, host: 'api.openai.com', key_present: false }, tts: {} },
+    remote: inForce({ remote: true, key: false }, { remote: false, started: true, key: false }),
   },
   'stt-failed': { ...remote, last_error: 'the remote listener refused the key' },
+  // The speaker the config asks for and the one the daemon runs, in each
+  // direction. Neither has any other way to be looked at.
+  'to-remote-voice': {
+    ...remote,
+    config: asks('remote', 'gpt-4o-mini-tts', 'marin'),
+    remote: inForce({ remote: true, key: true }, { remote: false, started: true, key: true }),
+    pending: ['tts.provider'],
+  },
+  'to-local-voice': {
+    ...remote,
+    config: asks('local', 'gpt-4o-mini-tts', 'marin'),
+    remote: inForce({ remote: true, key: true }, { remote: true, started: true, key: true }),
+    pending: ['tts.provider'],
+  },
+  // A key set and no voice named. The speaker refuses to start here, and no
+  // other state reaches that form.
+  'no-voice-named': {
+    ...remote,
+    config: asks('remote', 'gpt-4o-mini-tts', ''),
+    remote: inForce({ remote: true, key: true }, { remote: true, started: false, key: true }),
+  },
+  'no-voice': {
+    ...remote,
+    config: asks('remote', 'tts-1', ''),
+    remote: inForce({ remote: true, key: true }, { remote: true, started: false, key: false }),
+  },
+  'speech-failed': {
+    ...remote,
+    config: asks('remote', 'gpt-4o-mini-tts', 'marin'),
+    remote: inForce({ remote: true, key: true }, { remote: true, started: true, key: true }),
+    last_speech_error: 'the remote speaker refused the key',
+  },
+  // A key pasted, a voice named, and the speaker still did not start, so no
+  // one field is the fix. No other state reaches that form.
+  'speaker-not-started': {
+    ...remote,
+    config: asks('remote', 'gpt-4o-mini-tts', 'marin'),
+    remote: inForce({ remote: true, key: true }, { remote: true, started: false, key: true }),
+  },
+  // The reader left a speaker that never started, and the flip waits on the
+  // restart. Both halves of that are true at once here and nowhere else.
+  'to-local-not-started': {
+    ...remote,
+    config: asks('local', 'gpt-4o-mini-tts', 'marin'),
+    remote: inForce({ remote: true, key: true }, { remote: true, started: false, key: true }),
+    pending: ['tts.provider'],
+  },
 };
 
 function chosen(): string {
@@ -50,8 +136,8 @@ function chosen(): string {
   return new URLSearchParams(window.location.search).get('state') ?? 'ready';
 }
 
-// Written for the preview, not captured from anyone. Uneven by intent: tidy
-// one-liners hide the wrapping.
+// Written here, not captured from anyone. Uneven by intent: tidy one-liners
+// hide the wrapping.
 const SAID = [
   'Wrap the upload call in a retry with backoff and log each attempt',
   'run the tests and tell me what broke',
@@ -121,7 +207,7 @@ const ANSWERS: Record<string, () => unknown> = {
     current: 'OnePlus Buds 3',
   }),
   // Whisper's own order: English first, the rest by how much training data each
-  // had. A short slice of it, because the preview needs a list and not the list.
+  // had. A short slice of it, because a mock needs a list and not the list.
   list_languages: () => ({
     languages: [
       { code: 'en', name: 'English' },
@@ -167,9 +253,9 @@ const ANSWERS: Record<string, () => unknown> = {
   ],
 };
 
-/// The daemon pushes nothing into a browser, so the preview scripts the one
-/// stream that has no other way to be seen. Without this the download bar,
-/// which stands in for the longest wait in the product, is unreviewable.
+// The daemon pushes nothing into a browser, so this module scripts the one
+// stream that has no other way to be seen. Without this the download bar,
+// which stands in for the longest wait in the product, is unreviewable.
 export function push(event: string, deliver: (payload: unknown) => void): () => void {
   if (event !== 'daemon:downloads' || chosen() !== 'downloading') return () => {};
   const files = [

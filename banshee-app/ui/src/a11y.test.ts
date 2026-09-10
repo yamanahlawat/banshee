@@ -1,8 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import axe from 'axe-core';
 import { beforeEach, expect, it, vi } from 'vitest';
-import ready from './fixtures/ready.json';
-import permissions from './fixtures/permissions.json';
+import ready from './mocks/ready.json';
+import permissions from './mocks/permissions.json';
 import { daemon, empty, type Blocker } from './lib/daemon';
 
 // `axe.run` builds its tree synchronously from the DOM it is handed, and every

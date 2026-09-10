@@ -32,6 +32,28 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   bundle workflow's `release: published` trigger never fired for 0.12.0, and the bundle came
   from a hand dispatch. #84 chains the bundle after announce; until it merges, a release needs
   the dispatch by hand.
+- The remote speaker takes one shape only: an OpenAI-compatible `/audio/speech` endpoint.
+  ElevenLabs and any other API shape need a backend of their own.
+- The remote speaker's voice is a plain field the person fills in. The endpoint has no call
+  that lists voices, so nothing can offer the names the server accepts. A fetched list stays
+  out on purpose: `/v1/audio/voices` exists on two servers and neither OpenAI nor Groq, and a
+  server that refuses a voice names the ones it accepts, which the failure reason already
+  shows. Type a wrong voice once and read the answer.
+- The daemon chooses the speaker once, when it starts. No call picks a speaker for one
+  utterance, so every reply goes to the same one.
+- An utterance that fails after its first chunk ends where it stopped. The samples already
+  played are words the listener has heard, so no fallback starts the reply again.
+- Both remote keys live in `~/.banshee/credentials.toml`, which only the owner can read. The
+  macOS Keychain holds neither, so a key stays a file on disk.
+- The status reply says what the config asked for, not what `select_backend` built. A speaker
+  that refuses to start still reports its host on every surface, so each surface guards the
+  cases it knows. A reply that named the built backend would remove those guards.
+- `banshee config remote` cannot decline the speaker and offers no way back to a local one.
+  `speaker_provider` reads the voice, and Enter keeps the value on file, so a second run flips
+  `tts.provider` to remote whenever a voice is on file.
+- `banshee setup` downloads the Kokoro model whatever `tts.provider` says, while
+  `banshee status` skips the Kokoro check under a remote speaker. The two disagree about what
+  a remote-speaker machine needs.
 
 ## The window
 
@@ -52,8 +74,20 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   one name.
 - No control on the home screen has a resting affordance, so what can be pressed is learned
   rather than seen.
+- Speech has no panel of its own. The Voice panel holds the local voice and the remote
+  speaker, so both sets of controls grow inside one screen.
+- The remote key row is duplicated whole between the Microphone panel and the Voice panel:
+  about 40 lines of script and markup, plus the `.held` style rule, in each of them. Only the
+  setting name differs.
 
 ## Testing
 
 - No WebDriver acceptance layer, so nothing exercises the Rust socket and the Svelte face
   together.
+- `banshee status` has no test harness for the checklist. Each check prints to stdout and
+  `run` probes a live daemon, so the speaker's voice check and the espeak gate carry no test.
+- A `resolve.alias` in `vite.config.ts` that points at `src/mocks` passes both mock guards.
+  The lint rules read the specifier a module writes, and the bundle check reads the literals
+  a mock holds, so an aliased import of `not-running.json` ships unseen. Every other mock
+  file holds a guarded literal, and `{"running": false}` is harmless, so the route needs a
+  visible config change to be worth anything. Left open on purpose.

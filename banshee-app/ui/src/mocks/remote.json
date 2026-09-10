@@ -62,6 +62,14 @@
     },
     "tts": {
       "provider": "local",
+      "remote": {
+        "base_url": "https://api.openai.com/v1",
+        "model": "tts-1",
+        "voice": "",
+        "instructions": "",
+        "response_format": "wav",
+        "sample_rate": null
+      },
       "voice": "af_sky",
       "speed": 1.2000000476837158,
       "fallback": "system"
@@ -69,6 +77,7 @@
   },
   "pending": [],
   "last_error": null,
+  "last_speech_error": null,
   "remote": {
     "stt": {
       "remote": true,
@@ -76,7 +85,10 @@
       "key_present": true
     },
     "tts": {
-      "remote": false
+      "remote": false,
+      "host": null,
+      "speaker_started": true,
+      "key_present": false
     }
   },
   "key_press_access": "granted"

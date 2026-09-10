@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import ready from '../fixtures/ready.json';
-import remote from '../fixtures/remote.json';
-import permissions from '../fixtures/permissions.json';
-import recording from '../fixtures/recording.json';
-import armed from '../fixtures/armed.json';
-import transcribing from '../fixtures/transcribing.json';
-import speaking from '../fixtures/speaking.json';
-import notRunning from '../fixtures/not-running.json';
-import pendingCues from '../fixtures/pending-cues.json';
+import ready from '../mocks/ready.json';
+import remote from '../mocks/remote.json';
+import permissions from '../mocks/permissions.json';
+import recording from '../mocks/recording.json';
+import armed from '../mocks/armed.json';
+import transcribing from '../mocks/transcribing.json';
+import speaking from '../mocks/speaking.json';
+import notRunning from '../mocks/not-running.json';
+import pendingCues from '../mocks/pending-cues.json';
 import {
   deviceLabel,
   downloadLine,
@@ -23,7 +23,10 @@ import {
   reduceStatus,
   shownFloat,
   stateWord,
+  listeningFacts,
+  speechFacts,
   type Blocker,
+  type Status,
 } from './daemon';
 
 describe('the state word', () => {
@@ -60,7 +63,7 @@ describe('the state word', () => {
     expect(stateWord({ ...reduceStatus(empty(), ready), down: 'closed' })).toBe('Not running');
     expect(lampForm('Not running')).toBe('notrunning');
   });
-  it('is Not running when the daemon fixture itself says so', () => {
+  it('is Not running when the mock reply itself says so', () => {
     expect(stateWord(reduceStatus(empty(), notRunning))).toBe('Not running');
   });
   it('stays Not running when a live event clears down but status is still stale', () => {
@@ -97,7 +100,7 @@ describe('the status reply carries the live flags', () => {
   });
   it('takes only the live flags, not the rest of the reply', () => {
     // `remote.json` carries every live flag, so the comparison is not filtered
-    // down to what the fixture happens to hold.
+    // down to what the mock happens to hold.
     expect(Object.keys(liveFrom(remote)).sort()).toEqual(Object.keys(empty().live).sort());
   });
 });
@@ -264,4 +267,117 @@ it('carries the last error in the live state and clears it', () => {
 
 it('reads the last error off a status reply', () => {
   expect(liveFrom({ running: true, last_error: 'x' } as never).last_error).toBe('x');
+});
+
+describe('the facts each side reports', () => {
+  const NO_KEYS = new Set<string>();
+  const KOKORO = [{ id: 'af_sky', name: 'Sky' }];
+  const running = () => reduceStatus(empty(), remote as unknown as Status);
+
+  it('reads the listener the daemon runs, and the server the config asks for', () => {
+    const facts = listeningFacts(running(), NO_KEYS);
+    expect(facts.remote).toBe(remote.remote.stt.remote);
+    expect(facts.host).toBe(remote.remote.stt.host);
+    expect(facts.keyPresent).toBe(remote.remote.stt.key_present);
+    expect(facts.willUse).toBe(new URL(remote.config.stt.remote.base_url).hostname);
+    expect(facts.device).toBe(remote.audio_device);
+    expect(facts.live).toBe(true);
+  });
+
+  it('reads the speaker the daemon runs, and not the provider the config names', () => {
+    const facts = speechFacts(running(), NO_KEYS, KOKORO);
+    expect(remote.config.tts.provider).toBe('local');
+    expect(facts.remote).toBe(remote.remote.tts.remote);
+    expect(facts.started).toBe(remote.remote.tts.speaker_started);
+    expect(facts.keyPresent).toBe(remote.remote.tts.key_present);
+    expect(facts.host).toBe(remote.remote.tts.host);
+  });
+
+  // The daemon answers an empty host when the address the side runs on is no
+  // URL, and every sentence over these facts tests for an absent name.
+  it('names no host when the daemon answers an empty one', () => {
+    const state = reduceStatus(empty(), {
+      ...(remote as unknown as Status),
+      remote: {
+        stt: { remote: true, host: '', key_present: true },
+        tts: { remote: true, host: '', speaker_started: true, key_present: true },
+      },
+    });
+    expect(listeningFacts(state, NO_KEYS).host).toBeNull();
+    expect(speechFacts(state, NO_KEYS, KOKORO).host).toBeNull();
+  });
+
+  it('names no server when the config holds no URL to read one from', () => {
+    const state = reduceStatus(empty(), {
+      ...(remote as unknown as Status),
+      config: { stt: { remote: { base_url: 'api.openai.com' } }, tts: {} },
+    });
+    expect(listeningFacts(state, NO_KEYS).willUse).toBeNull();
+    expect(speechFacts(state, NO_KEYS, KOKORO).willUse).toBeNull();
+  });
+
+  // Kokoro's list holds no entry for a voice a server names, so the name comes
+  // from the table the speaker in force reads.
+  it('takes a local voice from the list and a remote one from its own table', () => {
+    expect(speechFacts(running(), NO_KEYS, KOKORO).voiceName).toBe('Sky');
+
+    const spoken = reduceStatus(empty(), {
+      ...(remote as unknown as Status),
+      remote: {
+        stt: remote.remote.stt,
+        tts: { remote: true, host: 'api.openai.com', speaker_started: true, key_present: true },
+      },
+      config: {
+        ...remote.config,
+        tts: { ...remote.config.tts, remote: { ...remote.config.tts.remote, voice: 'marin' } },
+      },
+    });
+    expect(speechFacts(spoken, NO_KEYS, KOKORO).voiceName).toBe('marin');
+  });
+
+  // A voice the daemon holds that Kokoro's list does not name still reaches the
+  // reader, because the list arrives from a call of its own and can be empty.
+  it('falls back to the voice the config names', () => {
+    expect(speechFacts(running(), NO_KEYS, []).voiceName).toBe(remote.config.tts.voice);
+  });
+
+  it('gives each side only the restart its own provider waits on', () => {
+    const state = running();
+    expect(listeningFacts(state, new Set(['stt.provider'])).pending).toBe(true);
+    expect(speechFacts(state, new Set(['stt.provider']), KOKORO).pending).toBe(false);
+    expect(listeningFacts(state, new Set(['tts.provider'])).pending).toBe(false);
+    expect(speechFacts(state, new Set(['tts.provider']), KOKORO).pending).toBe(true);
+  });
+
+  it('says neither side is live while the daemon is down', () => {
+    const state = reduceStatus(empty(), notRunning as Status);
+    expect(listeningFacts(state, NO_KEYS).live).toBe(false);
+    expect(speechFacts(state, NO_KEYS, KOKORO).live).toBe(false);
+  });
+
+  // A blocker of any other kind is not a broken pipeline: the lead says the
+  // microphone will not open, and a permission the reader has yet to grant is a
+  // different sentence with a different fix.
+  it('reads a broken pipeline, and no other blocker as one', () => {
+    const broken = reduceStatus(empty(), {
+      ...(remote as unknown as Status),
+      blockers: [
+        {
+          kind: 'pipeline',
+          id: 'audio',
+          name: 'The microphone is not working',
+          consequence: 'nothing is heard',
+          fix: 'restart it',
+        },
+      ],
+    });
+    expect(listeningFacts(broken, NO_KEYS).pipelineBroken).toBe(true);
+
+    const ungranted = reduceStatus(empty(), {
+      ...permissions,
+      blockers: permissions.blockers as Blocker[],
+    });
+    expect(ungranted.status?.blockers).toHaveLength(1);
+    expect(listeningFacts(ungranted, NO_KEYS).pipelineBroken).toBe(false);
+  });
 });

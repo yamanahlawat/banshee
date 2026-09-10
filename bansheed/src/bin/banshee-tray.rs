@@ -111,7 +111,7 @@ mod mac {
         // before it costs a redraw
         Device(Device),
         History(bool),
-        Remote(Option<String>),
+        Remote(Remote),
         Quit,
         Open,
         CopyLast,
@@ -140,11 +140,45 @@ mod mac {
             .unwrap_or(false)
     }
 
-    // A daemon that is down sends audio nowhere.
-    fn remote_line(indicator: Indicator, host: Option<&str>) -> String {
-        match host {
-            Some(host) if indicator != Indicator::NotRunning => format!("Audio goes to {host}"),
-            _ => "Audio stays on this machine".to_string(),
+    /// Where the audio goes and where the text goes. Both `None` on a machine
+    /// that keeps each on itself.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Remote {
+        audio: Option<String>,
+        text: Option<String>,
+    }
+
+    impl Remote {
+        fn of(status: &Value) -> Self {
+            Self {
+                audio: banshee_common::remote_stt_host(status).map(str::to_string),
+                text: speech_host(status),
+            }
+        }
+    }
+
+    /// The host the text goes to, or nothing while it stays on this machine.
+    fn speech_host(status: &Value) -> Option<String> {
+        // The `remote` object the daemon builds from what it started, not the
+        // live table: that table can name another voice, or none, while the
+        // speaker on that host still takes every reply
+        let host = banshee_common::remote_tts_host(status)?;
+        banshee_common::speaker_started(status).then(|| host.to_string())
+    }
+
+    // A daemon that is down sends nothing anywhere.
+    fn remote_line(indicator: Indicator, remote: &Remote) -> String {
+        if indicator == Indicator::NotRunning {
+            return "Audio and text stay on this machine".to_string();
+        }
+        match (remote.audio.as_deref(), remote.text.as_deref()) {
+            (None, None) => "Audio and text stay on this machine".to_string(),
+            (Some(audio), None) => format!("Audio goes to {audio}"),
+            (None, Some(text)) => format!("Text goes to {text}"),
+            (Some(audio), Some(text)) if audio == text => {
+                format!("Audio and text go to {audio}")
+            }
+            (Some(audio), Some(text)) => format!("Audio goes to {audio}, text to {text}"),
         }
     }
 
@@ -178,7 +212,7 @@ mod mac {
         indicator: Indicator,
         device: &Device,
         history_enabled: bool,
-        remote: Option<&str>,
+        remote: &Remote,
     ) -> Vec<Row> {
         vec![
             Row::Info(indicator.label().to_string()),
@@ -201,7 +235,7 @@ mod mac {
         indicator: Indicator,
         device: &Device,
         history_enabled: bool,
-        remote: Option<&str>,
+        remote: &Remote,
     ) -> Vec<String> {
         menu_rows(indicator, device, history_enabled, remote)
             .into_iter()
@@ -227,7 +261,7 @@ mod mac {
         indicator: Indicator,
         device: Device,
         history_enabled: bool,
-        remote_host: Option<String>,
+        remote: Remote,
         proxy: EventLoopProxy<Message>,
     }
 
@@ -238,7 +272,7 @@ mod mac {
             ui.device_item
                 .set_text(device_line(self.indicator, &self.device));
             ui.remote_item
-                .set_text(remote_line(self.indicator, self.remote_host.as_deref()));
+                .set_text(remote_line(self.indicator, &self.remote));
             ui.copy_item
                 .set_enabled(copy_last_enabled(self.indicator, self.history_enabled));
             if let Err(error) = draw(&ui.tray, self.indicator) {
@@ -294,9 +328,9 @@ mod mac {
                     self.history_enabled = enabled;
                     moved
                 }
-                Message::Remote(host) => {
-                    let moved = self.remote_host != host;
-                    self.remote_host = host;
+                Message::Remote(remote) => {
+                    let moved = self.remote != remote;
+                    self.remote = remote;
                     moved
                 }
                 Message::Open => {
@@ -321,7 +355,12 @@ mod mac {
         let mut info_items: Vec<MenuItem> = Vec::new();
         let mut copy_item: Option<MenuItem> = None;
         let mut items: Vec<Box<dyn IsMenuItem>> = Vec::new();
-        for row in menu_rows(Indicator::NotRunning, &Device::default(), false, None) {
+        for row in menu_rows(
+            Indicator::NotRunning,
+            &Device::default(),
+            false,
+            &Remote::default(),
+        ) {
             match row {
                 // Informational, so neither row takes a click
                 Row::Info(text) => {
@@ -375,9 +414,7 @@ mod mac {
                 if !send(Message::Device(Device::of(&status)))
                     || !send(Message::State(Indicator::of(Some(&status))))
                     || !send(Message::History(history_enabled_of(&status)))
-                    || !send(Message::Remote(
-                        banshee_common::remote_stt_host(&status).map(str::to_string),
-                    ))
+                    || !send(Message::Remote(Remote::of(&status)))
                 {
                     return;
                 }
@@ -532,7 +569,7 @@ mod mac {
             indicator: Indicator::NotRunning,
             device: Device::default(),
             history_enabled: false,
-            remote_host: None,
+            remote: Remote::default(),
             proxy: event_loop.create_proxy(),
         };
         event_loop.run_app(&mut app)?;
@@ -584,14 +621,14 @@ mod mac {
                 Indicator::Idle,
                 &device(Some("MacBook Pro Microphone"), None),
                 true,
-                None,
+                &Remote::default(),
             );
             assert_eq!(
                 labels,
                 vec![
                     "Idle",
                     "MacBook Pro Microphone",
-                    "Audio stays on this machine",
+                    "Audio and text stay on this machine",
                     "---",
                     "Copy last dictation",
                     "Open Banshee",
@@ -604,13 +641,18 @@ mod mac {
         #[test]
         fn the_copy_row_is_disabled_when_history_is_off() {
             fn copy_enabled(indicator: Indicator, history_enabled: bool) -> bool {
-                menu_rows(indicator, &Device::default(), history_enabled, None)
-                    .into_iter()
-                    .find_map(|row| match row {
-                        Row::Action(id, _, enabled) if id == COPY_LAST_ID => Some(enabled),
-                        _ => None,
-                    })
-                    .expect("menu_rows must include the copy action")
+                menu_rows(
+                    indicator,
+                    &Device::default(),
+                    history_enabled,
+                    &Remote::default(),
+                )
+                .into_iter()
+                .find_map(|row| match row {
+                    Row::Action(id, _, enabled) if id == COPY_LAST_ID => Some(enabled),
+                    _ => None,
+                })
+                .expect("menu_rows must include the copy action")
             }
 
             assert!(!copy_enabled(Indicator::Idle, false));
@@ -622,7 +664,7 @@ mod mac {
         #[test]
         fn the_open_row_stays_live_even_when_the_daemon_is_not() {
             for indicator in [Indicator::Idle, Indicator::NotRunning] {
-                let open = menu_rows(indicator, &Device::default(), false, None)
+                let open = menu_rows(indicator, &Device::default(), false, &Remote::default())
                     .into_iter()
                     .find_map(|row| match row {
                         Row::Action(id, _, enabled) if id == OPEN_ID => Some(enabled),
@@ -636,7 +678,7 @@ mod mac {
         #[test]
         fn the_menu_carries_exactly_three_info_rows() {
             for indicator in [Indicator::Idle, Indicator::NotRunning] {
-                let info_rows = menu_rows(indicator, &Device::default(), true, None)
+                let info_rows = menu_rows(indicator, &Device::default(), true, &Remote::default())
                     .into_iter()
                     .filter(|row| matches!(row, Row::Info(_)))
                     .count();
@@ -647,23 +689,100 @@ mod mac {
             }
         }
 
+        fn hosts(audio: Option<&str>, text: Option<&str>) -> Remote {
+            Remote {
+                audio: audio.map(str::to_string),
+                text: text.map(str::to_string),
+            }
+        }
+
+        // One row for both sides, because a menu with two near-identical lines
+        // reads as noise rather than as one fact about this machine.
         #[test]
-        fn a_remote_listener_names_its_host() {
+        fn the_row_says_which_sides_leave_the_machine() {
+            let line = |audio, text| remote_line(Indicator::Idle, &hosts(audio, text));
+            assert_eq!(line(None, None), "Audio and text stay on this machine");
             assert_eq!(
-                remote_line(Indicator::Idle, None),
-                "Audio stays on this machine"
+                line(Some("api.groq.com"), None),
+                "Audio goes to api.groq.com"
             );
             assert_eq!(
-                remote_line(Indicator::Idle, Some("api.openai.com")),
-                "Audio goes to api.openai.com"
+                line(None, Some("api.openai.com")),
+                "Text goes to api.openai.com"
+            );
+            assert_eq!(
+                line(Some("api.groq.com"), Some("api.openai.com")),
+                "Audio goes to api.groq.com, text to api.openai.com"
+            );
+            assert_eq!(
+                line(Some("api.openai.com"), Some("api.openai.com")),
+                "Audio and text go to api.openai.com"
+            );
+        }
+
+        // A daemon that is down sends nothing anywhere.
+        #[test]
+        fn the_hosts_drop_with_the_daemon() {
+            assert_eq!(
+                remote_line(
+                    Indicator::NotRunning,
+                    &hosts(Some("api.groq.com"), Some("api.openai.com"))
+                ),
+                "Audio and text stay on this machine"
             );
         }
 
         #[test]
-        fn the_host_drops_with_the_daemon() {
+        fn both_hosts_are_read_off_the_status_reply() {
+            let reply = serde_json::json!({
+                "remote": {
+                    "stt": {"remote": true, "host": "api.groq.com"},
+                    "tts": {"remote": true, "host": "api.openai.com", "speaker_started": true},
+                }
+            });
             assert_eq!(
-                remote_line(Indicator::NotRunning, Some("api.openai.com")),
-                "Audio stays on this machine"
+                Remote::of(&reply),
+                hosts(Some("api.groq.com"), Some("api.openai.com"))
+            );
+            let older = serde_json::json!({"remote": {"stt": false, "tts": false}});
+            assert_eq!(Remote::of(&older), hosts(None, None));
+        }
+
+        // A speaker that did not start speaks nothing, so the reply is spoken
+        // here and the row may not say the text leaves. The host stands in the
+        // reply either way: it is where the text would have gone.
+        #[test]
+        fn a_speaker_that_did_not_start_sends_no_text_anywhere() {
+            let reply = serde_json::json!({
+                "remote": {
+                    "stt": {"remote": false, "host": null},
+                    "tts": {"remote": true, "host": "api.openai.com", "speaker_started": false},
+                }
+            });
+            assert_eq!(Remote::of(&reply), hosts(None, None));
+            assert_eq!(
+                remote_line(Indicator::Idle, &Remote::of(&reply)),
+                "Audio and text stay on this machine"
+            );
+        }
+
+        // The speaker is chosen at startup, so a voice cleared in the file
+        // since then changes nothing until the restart. A row that read the
+        // live voice beside the frozen host would claim a privacy this
+        // machine does not have.
+        #[test]
+        fn a_voice_cleared_after_startup_still_names_the_host() {
+            let reply = serde_json::json!({
+                "config": {"tts": {"remote": {"voice": ""}}},
+                "remote": {
+                    "stt": {"remote": false, "host": null},
+                    "tts": {"remote": true, "host": "api.openai.com", "speaker_started": true},
+                }
+            });
+            assert_eq!(Remote::of(&reply), hosts(None, Some("api.openai.com")));
+            assert_eq!(
+                remote_line(Indicator::Idle, &Remote::of(&reply)),
+                "Text goes to api.openai.com"
             );
         }
 

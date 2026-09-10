@@ -209,3 +209,26 @@ fn a_key_is_taken_as_it_was_typed() {
         Some("\"sk-test\"".to_string())
     );
 }
+
+// The prompt names the side, so a person answering two in a row knows which
+// one is being asked for
+#[test]
+fn each_side_has_its_own_key_prompt() {
+    use crate::credentials::RemoteKey;
+    assert_eq!(
+        super::key_prompt(RemoteKey::Stt),
+        "Key for the remote listener (not shown): "
+    );
+    assert_eq!(
+        super::key_prompt(RemoteKey::Tts),
+        "Key for the remote speaker (not shown): "
+    );
+}
+
+// The speaker is worth turning on only once it has a voice: the endpoint has no
+// default one, so an empty voice would refuse the backend at every startup.
+#[test]
+fn the_speaker_is_only_switched_on_once_it_has_a_voice() {
+    assert!(super::speaker_sends_text_out("marin"));
+    assert!(!super::speaker_sends_text_out(""));
+}

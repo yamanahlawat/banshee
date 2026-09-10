@@ -1,21 +1,32 @@
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
-  import { daemon, deviceLabel, shownFloat, waitsOnARestart, SYSTEM_DEVICE } from '../lib/daemon';
+  import { onDestroy } from 'svelte';
+  import {
+    daemon,
+    deviceLabel,
+    listeningFacts,
+    shownFloat,
+    waitsOnARestart,
+    SYSTEM_DEVICE,
+  } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { PRESETS } from '../lib/presets';
   import { listDevices, listLanguages, type Devices, type Languages } from '../lib/tauri';
   import Row from '../controls/Row.svelte';
   import Field from '../controls/Field.svelte';
+  import KeyRow from '../controls/KeyRow.svelte';
   import Picker from '../controls/Picker.svelte';
   import Segmented from '../controls/Segmented.svelte';
+  import ProviderGroup from '../controls/ProviderGroup.svelte';
+  import SubRow from '../controls/SubRow.svelte';
   import { claimKeys } from '../lib/keys';
-  import { announce } from '../lib/copy';
+  import { announcer, listeningNote } from '../lib/copy';
 
   // The choice and its consequence are one reading, so the group names the
   // sentence its radiogroup is described by.
   const LISTENER_NOTE = 'listener-note';
-  // The whole group waits on one restart, so the group states it once.
-  const TAKES_EFFECT = 'Your choice takes effect when Banshee restarts.';
+  // The group is read with a standing failure as well as with its note: a
+  // failure that arrived before the panel opened announces nothing.
+  const DICTATION_FAILURE = 'dictation-failure';
 
   // Three words are all the window reads back. The midpoints are derived from the band edges, not
   // measured against a room.
@@ -97,55 +108,33 @@
   $: preset = String(stt.preset ?? 'balanced');
   $: provider = String(stt.provider ?? 'local');
   $: remoteTable = (stt.remote ?? {}) as Record<string, unknown>;
-  $: keyPresent = $daemon.status?.remote?.stt?.key_present === true;
   // The daemon says which listener is in force; `provider` above says only
   // which one was asked for. One sentence reads both, so the group cannot say
   // two things at once.
-  $: inForceRemote = $daemon.status?.remote?.stt?.remote === true;
-  // Empty, not null, when the address the listener runs on is no URL, so the
-  // sentence cannot be left with a hole in it.
-  $: goesTo = $daemon.status?.remote?.stt?.host || 'a remote server';
-  $: pendingProvider = $waitsOnARestart.has('stt.provider');
-  $: listenerNote = pendingProvider
-    ? inForceRemote
-      ? `Audio still goes to ${goesTo}. ${TAKES_EFFECT}`
-      : `Audio still stays on this machine. ${TAKES_EFFECT}`
-    : inForceRemote
-      ? `Audio goes to ${goesTo}.`
-      : keyPresent
-        ? 'Audio stays on this machine. The server and key you set are still saved.'
-        : 'Audio stays on this machine.';
+  $: listening = listeningFacts($daemon, $waitsOnARestart);
+  $: listenerNote = listeningNote(listening);
   // The daemon sends the vocabulary as the remote request's prompt, so under a
   // remote listener these words leave the machine too.
-  $: vocabularyNote = inForceRemote
+  $: vocabularyNote = listening.remote
     ? 'Words Banshee should expect to hear. They go to the server with your audio.'
     : 'Words Banshee should expect to hear.';
   $: lastError = $daemon.live.last_error;
   $: failureSays = lastError ? `The last dictation failed: ${lastError}.` : '';
 
   // A failure arrives on a push, with no control moving and no reader
-  // necessarily looking. Seeded from the first value the panel sees, so opening
-  // on an old failure says nothing.
-  let sawFailure: string | null | undefined;
-  $: {
-    if (sawFailure !== undefined && failureSays !== '' && lastError !== sawFailure) {
-      announce(failureSays);
-    }
-    sawFailure = lastError;
-  }
+  // necessarily looking.
+  const sawFailure = announcer<string | null>();
+  $: sawFailure(lastError, failureSays);
 
   // Three fields appear or leave with no event of their own, and where the
   // audio goes changes with them, so a reader who is not looking hears the
-  // consequence before the layout. Seeded from the first status the panel sees,
-  // because arriving on a remote listener is not a disclosure.
-  let heard: string | null = null;
+  // consequence before the layout.
+  const sawProvider = announcer<string>();
   $: if ($daemon.status) {
-    if (heard !== null && heard !== provider) {
-      announce(
-        `${listenerNote} ${provider === 'remote' ? 'Server, model and key are below.' : 'Model is below.'}`,
-      );
-    }
-    heard = provider;
+    sawProvider(
+      provider,
+      `${listenerNote} ${provider === 'remote' ? 'Server, model and key are below.' : 'Model is below.'}`,
+    );
   }
   $: language = String(stt.language ?? 'en');
   $: translate = stt.translate === true;
@@ -181,23 +170,6 @@
   // control.
   $: names = devices.devices.map((d) => d.name);
   $: options = names.includes(current) || current === SYSTEM_DEVICE ? names : [current, ...names];
-
-  // The daemon reads an empty key as removal.
-  async function removeKey() {
-    if (await write('stt.remote.api_key', '')) {
-      announce('The key is removed. It takes effect when Banshee restarts.');
-    }
-  }
-
-  // The key it holds cannot be shown, so replacing one is a field that arrives
-  // where the line saying it is set stood.
-  let replacing = false;
-  let keyBox: HTMLElement | undefined;
-  async function replaceKey() {
-    replacing = true;
-    await tick();
-    keyBox?.querySelector('input')?.focus();
-  }
 
   function addWord(raw: string) {
     stopAdding();
@@ -237,100 +209,51 @@
   </Picker>
 </Row>
 
-<!-- One decision with dependents, so one group: the parts sit 8px apart inside
-     it, and the 22px under the row above plus this padding is the 28px that
-     holds the whole group away from the properties around it. -->
-<div class="apart">
-  <Row name="Listening" block note={listenerNote} noteId={LISTENER_NOTE}>
-    <Segmented
-      label="Listening"
-      value={provider}
-      options={LISTENING}
-      describedBy={LISTENER_NOTE}
-      change={(next) => write('stt.provider', next)}
-    />
+<ProviderGroup
+  name="Listening"
+  label="Listening"
+  value={provider}
+  options={LISTENING}
+  note={listenerNote}
+  noteId={LISTENER_NOTE}
+  alsoId={failureSays ? DICTATION_FAILURE : undefined}
+  change={(next) => write('stt.provider', next)}
+>
+  {#if provider === 'remote'}
+    <SubRow name="server">
+      <Field
+        label="Server"
+        value={String(remoteTable.base_url ?? '')}
+        placeholder="https://api.openai.com/v1"
+        commit={(next) => write('stt.remote.base_url', next)}
+      />
+    </SubRow>
+    <SubRow name="model">
+      <Field
+        label="Model"
+        value={String(remoteTable.model ?? '')}
+        placeholder="whisper-1"
+        commit={(next) => write('stt.remote.model', next)}
+      />
+    </SubRow>
+    <KeyRow setting="stt.remote.api_key" present={listening.keyPresent} />
+  {:else}
+    <SubRow name="model">
+      <Segmented
+        label="Model"
+        value={preset}
+        options={PRESETS}
+        change={(next) => write('stt.preset', next)}
+      />
+    </SubRow>
+  {/if}
 
-    <div class="parts" slot="under">
-      {#if provider === 'remote'}
-        <div class="part">
-          <span class="sub mono">server</span>
-          <div class="control">
-            <Field
-              label="Server"
-              value={String(remoteTable.base_url ?? '')}
-              placeholder="https://api.openai.com/v1"
-              commit={(next) => write('stt.remote.base_url', next)}
-            />
-          </div>
-        </div>
-        <div class="part">
-          <span class="sub mono">model</span>
-          <div class="control">
-            <Field
-              label="Model"
-              value={String(remoteTable.model ?? '')}
-              placeholder="whisper-1"
-              commit={(next) => write('stt.remote.model', next)}
-            />
-          </div>
-        </div>
-        <!-- Write-only. The daemon says whether a key is set and never what it is. -->
-        <div class="part">
-          <span class="sub mono">key</span>
-          <div class="control" bind:this={keyBox}>
-            {#if keyPresent && !replacing}
-              <span class="held">A key is set</span>
-              <button
-                class="caps btn-underline act"
-                aria-label="Remove the key"
-                on:click={removeKey}
-              >
-                Remove
-              </button>
-              <button
-                class="caps btn-underline act"
-                aria-label="Replace the key"
-                on:click={replaceKey}
-              >
-                Replace
-              </button>
-            {:else}
-              <Field
-                label="Key"
-                masked
-                dashed={!keyPresent}
-                placeholder="Paste a key"
-                cancel={() => (replacing = false)}
-                commit={(next) => {
-                  replacing = false;
-                  return next === '' ? undefined : write('stt.remote.api_key', next);
-                }}
-              />
-            {/if}
-          </div>
-        </div>
-      {:else}
-        <div class="part">
-          <span class="sub mono">model</span>
-          <div class="control">
-            <Segmented
-              label="Model"
-              value={preset}
-              options={PRESETS}
-              change={(next) => write('stt.preset', next)}
-            />
-          </div>
-        </div>
-      {/if}
-
-      <!-- Beside the key and the server that caused it, not at the head of the
-           panel where the reader has already left the group. -->
-      {#if failureSays}
-        <p class="note failed">{failureSays}</p>
-      {/if}
-    </div>
-  </Row>
-</div>
+  <!-- Beside the key and the server that caused it, not at the head of the
+       panel where the reader has already left the group. -->
+  {#if failureSays}
+    <p class="note failed" id={DICTATION_FAILURE}>{failureSays}</p>
+  {/if}
+</ProviderGroup>
 
 <!-- Beside the preset it depends on: the English-only model rules every other
      language out, and the two read as one decision only if they sit together. -->
@@ -413,53 +336,5 @@
   .add {
     background: transparent;
     width: 110px;
-  }
-
-  /* Inside the group, so the interval is the 8px that says these parts belong
-     to the choice above them rather than the 22px between properties. */
-  .parts {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-top: 8px;
-  }
-
-  .part {
-    display: grid;
-    grid-template-columns: 56px 1fr;
-    column-gap: 12px;
-    align-items: baseline;
-  }
-
-  /* Subordinate to the one accent caps name the group carries, so the mono role
-     without the caps register, and the measured dim rather than an opacity. */
-  .sub {
-    font-size: 11px;
-    color: var(--dim);
-  }
-
-  .apart {
-    padding-top: 6px;
-  }
-
-  /* A resting rule, or an 11px word beside a field reads as part of the value. */
-  .act {
-    color: var(--ink);
-    border-bottom-color: currentcolor;
-  }
-
-  /* The field's own box, so the row's baseline and its edge stay put when the
-     line and the field swap places. */
-  .held {
-    font-variation-settings:
-      'wght' 500,
-      'wdth' 100;
-    font-size: 15px;
-    padding: 6px 0 7px;
-  }
-
-  /* Under the fields that caused it, not under the name of the group. */
-  .failed {
-    margin: 0 0 0 68px;
   }
 </style>

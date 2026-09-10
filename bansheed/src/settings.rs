@@ -6,6 +6,7 @@ use serde::Serialize;
 use toml_edit::DocumentMut;
 
 use crate::config::Config;
+use crate::credentials::RemoteKey;
 use crate::state::DaemonState;
 
 /// Dotted `section.field` keys, spelled as `config.toml` spells them.
@@ -199,18 +200,24 @@ fn refuse_unknown_language(assignments: &Assignments) -> Result<(), BansheeError
     }
 }
 
-pub const API_KEY: &str = "stt.remote.api_key";
-
-/// The key goes to the credentials file and never into the TOML, so it leaves
-/// the map before `edit` sees it.
-fn take_api_key(assignments: &mut Assignments) -> Result<Option<String>, BansheeError> {
-    match assignments.remove(API_KEY) {
-        None => Ok(None),
-        Some(serde_json::Value::String(key)) => Ok(Some(key)),
-        Some(_) => Err(BansheeError::Rejected(format!(
-            "'{API_KEY}' takes the key as a string"
-        ))),
+/// The keys go to the credentials file and never into the TOML, so they leave
+/// the map before `edit` sees it. Ordered by side, so a caller writes them in a
+/// fixed order.
+fn take_api_keys(assignments: &mut Assignments) -> Result<Vec<(RemoteKey, String)>, BansheeError> {
+    let mut taken = Vec::new();
+    for side in [RemoteKey::Stt, RemoteKey::Tts] {
+        match assignments.remove(side.setting()) {
+            None => {}
+            Some(serde_json::Value::String(key)) => taken.push((side, key)),
+            Some(_) => {
+                return Err(BansheeError::Rejected(format!(
+                    "'{}' takes the key as a string",
+                    side.setting()
+                )));
+            }
+        }
     }
+    Ok(taken)
 }
 
 /// Applying one of these without writing it would report success and change nothing.
@@ -301,7 +308,7 @@ pub fn configure(
         )));
     }
 
-    let api_key = take_api_key(&mut assignments)?;
+    let api_keys = take_api_keys(&mut assignments)?;
 
     let _writing = WRITING
         .lock()
@@ -315,8 +322,12 @@ pub fn configure(
     // Last of the checks, first of the writes: a key stored before `edit`
     // refused a value beside it would be on disk under an error the caller
     // reads as "nothing was stored"
-    if let Some(key) = &api_key {
-        crate::credentials::Credentials::set_stt_api_key(Some(key))?;
+    if !api_keys.is_empty() {
+        let keys: Vec<_> = api_keys
+            .iter()
+            .map(|(side, key)| (*side, key.as_str()))
+            .collect();
+        crate::credentials::Credentials::set_many(&keys)?;
     }
 
     // The key alone changes nothing in config.toml, so there is nothing to write
@@ -333,8 +344,8 @@ pub fn configure(
             restart_required: assignments.keys().cloned().collect(),
         },
     };
-    if api_key.is_some() {
-        outcome.restart_required.push(API_KEY.to_string());
+    for (side, _) in &api_keys {
+        outcome.restart_required.push(side.setting().to_string());
     }
 
     if let Some(state) = state {

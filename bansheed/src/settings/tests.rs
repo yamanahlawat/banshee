@@ -1,5 +1,6 @@
 use super::{Assignments, edit, startup_only};
 use crate::config::Config;
+use crate::credentials::RemoteKey;
 
 fn assignments(pairs: &[(&str, serde_json::Value)]) -> Assignments {
     pairs
@@ -607,36 +608,56 @@ fn a_value_outside_its_range_is_refused() {
 }
 
 #[test]
-fn the_api_key_is_split_off_and_never_rendered() {
+fn the_api_keys_are_split_off_and_never_rendered() {
     let mut rest = assignments(&[
-        ("stt.remote.api_key", "sk-test".into()),
+        ("stt.remote.api_key", "sk-listener".into()),
+        ("tts.remote.api_key", "sk-speaker".into()),
         ("stt.remote.model", "whisper-1".into()),
     ]);
-    let key = super::take_api_key(&mut rest).unwrap();
-    assert_eq!(key.as_deref(), Some("sk-test"));
+    let keys = super::take_api_keys(&mut rest).unwrap();
+    assert_eq!(
+        keys,
+        vec![
+            (RemoteKey::Stt, "sk-listener".to_string()),
+            (RemoteKey::Tts, "sk-speaker".to_string()),
+        ]
+    );
     assert!(!rest.contains_key("stt.remote.api_key"));
+    assert!(!rest.contains_key("tts.remote.api_key"));
 
     let (rendered, _) = edit("[stt]\nprovider = \"remote\"\n", &rest).unwrap();
     assert!(
-        !rendered.contains("sk-test"),
-        "the key must not be rendered: {rendered}"
+        !rendered.contains("sk-listener") && !rendered.contains("sk-speaker"),
+        "neither key may be rendered: {rendered}"
     );
     assert!(rendered.contains("model = \"whisper-1\""));
 }
 
-// A file hand-edited to hold the key renders back into the document `edit`
+#[test]
+fn one_side_alone_splits_off_alone() {
+    let mut only_speaker = assignments(&[("tts.remote.api_key", "sk-speaker".into())]);
+    assert_eq!(
+        super::take_api_keys(&mut only_speaker).unwrap(),
+        vec![(RemoteKey::Tts, "sk-speaker".to_string())]
+    );
+    let mut neither = assignments(&[("tts.voice", "af_sky".into())]);
+    assert!(super::take_api_keys(&mut neither).unwrap().is_empty());
+    assert!(neither.contains_key("tts.voice"));
+}
+
+// A file hand-edited to hold a key renders back into the document `edit`
 // validates
 #[test]
 fn a_key_already_in_the_file_is_refused_without_the_reply_carrying_it() {
     let error = edit(
-        "[stt.remote]\napi_key = \"sk-test\"\n",
-        &assignments(&[("stt.remote.model", "whisper-1".into())]),
+        "[tts.remote]\napi_key = \"sk-test\"\n",
+        &assignments(&[("tts.remote.model", "tts-1".into())]),
     )
     .expect_err("the key must not validate from config.toml");
     assert!(
         error
             .to_string()
-            .contains("banshee config set stt.remote.api_key"),
+            .contains("banshee config set tts.remote.api_key"),
         "{error}"
     );
     assert!(
@@ -647,15 +668,17 @@ fn a_key_already_in_the_file_is_refused_without_the_reply_carrying_it() {
 
 #[test]
 fn a_key_that_is_not_a_string_is_refused() {
-    let error = super::take_api_key(&mut assignments(&[("stt.remote.api_key", 42.into())]))
+    let error = super::take_api_keys(&mut assignments(&[("tts.remote.api_key", 42.into())]))
         .expect_err("a number is not a key");
-    assert!(error.to_string().contains("stt.remote.api_key"));
+    assert!(error.to_string().contains("tts.remote.api_key"));
 }
 
 #[test]
-fn the_api_key_needs_a_restart_like_the_other_startup_keys() {
-    assert_eq!(
-        startup_only(&assignments(&[("stt.remote.api_key", "sk".into())])),
-        Some(&"stt.remote.api_key".to_string())
-    );
+fn both_api_keys_need_a_restart_like_the_other_startup_keys() {
+    for key in ["stt.remote.api_key", "tts.remote.api_key"] {
+        assert_eq!(
+            startup_only(&assignments(&[(key, "sk".into())])),
+            Some(&key.to_string())
+        );
+    }
 }

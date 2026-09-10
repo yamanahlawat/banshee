@@ -1,7 +1,7 @@
 import { fireEvent, render } from '@testing-library/svelte';
 import { expect, it } from 'vitest';
 import Blockers from './Blockers.svelte';
-import permissions from '../fixtures/permissions.json';
+import permissions from '../mocks/permissions.json';
 import type { Blocker, BlockerKind } from '../lib/daemon';
 
 const at = (bytes: number) => ({
@@ -201,3 +201,42 @@ it('does not claim a first run when the record is off rather than empty', () => 
   });
   expect(queryByText(/types what you say/)).toBeNull();
 });
+
+// A first run is the one moment a person asks what this is, so the line names
+// every machine their words touch, and no machine it does not reach.
+const OPENING: [string | null, string | null, string][] = [
+  [
+    'api.groq.com',
+    'api.openai.com',
+    'what you say goes to api.groq.com to be heard, and what it says comes from api.openai.com.',
+  ],
+  ['api.groq.com', null, 'what you say goes to api.groq.com to be heard.'],
+  [null, 'api.openai.com', 'what it says comes from api.openai.com.'],
+  [null, null, 'nothing you say leaves this machine.'],
+];
+
+it.each(OPENING)(
+  'names the sides a first run reaches: %s and %s',
+  (remoteHost, speechHost, says) => {
+    const { getByText } = render(Blockers, {
+      blockers: [
+        {
+          kind: 'permission',
+          id: 'accessibility',
+          name: 'Accessibility',
+          consequence: 'dictation cannot type',
+          fix: 'grant it in System Settings',
+        },
+      ],
+      restart: () => {},
+      first: true,
+      remoteHost,
+      speechHost,
+    });
+    // The paragraph wraps in the markup, so the line is read as one space run.
+    const opening = getByText(/types what you say/).textContent?.replace(/\s+/g, ' ');
+    expect(opening).toBe(
+      `Banshee types what you say into whatever app you are using, and ${says} It needs one thing first.`,
+    );
+  },
+);

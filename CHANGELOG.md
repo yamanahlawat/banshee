@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A remote voice, when you want one.** `tts.provider = "remote"` sends each
+  reply's text to the OpenAI-compatible server in `[tts.remote]`. Banshee plays
+  the audio as it streams back, so the first words start before the server has
+  finished. Name the server, the model, the voice and an optional
+  `instructions` line. Set the key with `banshee config set tts.remote.api_key`
+  or in the window. It lives in the same owner-only file as the listener's, in
+  its own table. `response_format` asks the server for `wav` or `pcm`, and the
+  default `wav` states its own rate, so a server that answers at 22050 Hz plays
+  right. Banshee identifies every answer from its own bytes and refuses one it
+  cannot play by name, so an error page never plays as noise.
+  `banshee config remote` now sets up both sides in one go. The
+  tray, `banshee status` and the window say when text leaves the machine. An
+  utterance the server refuses plays the error tone, says what the server said,
+  and the system voice says it instead, so you still hear an agent's question.
+  Local stays the default.
 - **A remote listener, when you want one.** `stt.provider = "remote"` sends each
   utterance to the OpenAI-compatible server in `[stt.remote]`. Set the key with
   `banshee config set stt.remote.api_key` or in the window; it lives in an
@@ -21,11 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **The daemon names who listens and who speaks.** `stt.provider` and
-  `tts.provider` in `config.toml` name the backend. `stt.provider` takes `local`
-  or `remote`. `tts.provider` takes `local`, its only value so far. A status
-  reply carries `remote`, which says whether audio or text leaves the machine. A
-  config without the keys reads as before. The daemon reads both keys when it
-  starts, so `banshee config set` tells you to restart.
+  `tts.provider` in `config.toml` name the backend. Each takes `local` or
+  `remote`. A status reply carries `remote`, which says whether audio or text
+  leaves the machine. A config without the keys reads as before. The daemon
+  reads both keys when it starts, so `banshee config set` tells you to restart.
 
 ### Fixed
 

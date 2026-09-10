@@ -131,6 +131,7 @@ fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<Consume
         std::sync::Arc::new(Config::default()),
         None,
         crate::text_to_speech::SpeechPlayer::default(),
+        crate::text_to_speech::Speaker::Fallback,
         commands,
         crate::audio::cues::Cues::silent(),
     );
@@ -489,5 +490,87 @@ fn clearing_an_error_that_is_already_clear_wakes_nobody() {
     assert!(
         watcher.has_changed().unwrap(),
         "a new failure must wake one"
+    );
+}
+
+// One field per side, so a failed listen and a failed reply never overwrite
+// each other.
+#[test]
+fn the_two_failure_fields_are_separate() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    state.set_last_error(Some("the remote listener refused the key".to_string()));
+    state.set_last_speech_error(Some("the remote speaker refused the key".to_string()));
+    assert_eq!(
+        state.last_error().as_deref(),
+        Some("the remote listener refused the key")
+    );
+    assert_eq!(
+        state.last_speech_error().as_deref(),
+        Some("the remote speaker refused the key")
+    );
+    state.set_last_speech_error(None);
+    assert_eq!(state.last_speech_error(), None);
+    assert!(state.last_error().is_some(), "the listener's reason stands");
+}
+
+// Each move wakes the push task of every subscriber, so the same reason twice
+// sends nothing.
+#[tokio::test]
+async fn an_unchanged_speech_error_wakes_nobody() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let mut watch = state.subscribe_last_speech_error();
+    state.set_last_speech_error(Some("no such voice".to_string()));
+    watch.changed().await.unwrap();
+    state.set_last_speech_error(Some("no such voice".to_string()));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), watch.changed())
+            .await
+            .is_err(),
+        "the same reason must not push again"
+    );
+}
+
+// The backend cannot reach the cue player or the state, so a channel carries
+// both what failed and the first chunk that played.
+#[test]
+fn the_drain_sounds_the_cue_for_a_failure_and_clears_the_reason_when_one_plays() {
+    use crate::text_to_speech::{Fault, drain_faults};
+
+    let (cues, heard) = crate::audio::cues::Cues::recording();
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+    let (faults, receiver) = std::sync::mpsc::channel();
+    faults
+        .send(Fault::Failed(
+            "the remote speaker refused the key".to_string(),
+        ))
+        .unwrap();
+    drop(faults);
+    drain_faults(std::sync::Arc::clone(&state), cues.clone(), receiver);
+
+    assert!(
+        matches!(heard.try_recv(), Ok(crate::audio::cues::Cue::Error)),
+        "a failed utterance sounds the error cue"
+    );
+    assert_eq!(
+        state.last_speech_error().as_deref(),
+        Some("the remote speaker refused the key"),
+        "the reason the backend gave is the record"
+    );
+
+    let (faults, receiver) = std::sync::mpsc::channel();
+    faults.send(Fault::Played).unwrap();
+    drop(faults);
+    drain_faults(std::sync::Arc::clone(&state), cues, receiver);
+
+    assert_eq!(
+        state.last_speech_error(),
+        None,
+        "the utterance that played cleared the reason before it"
+    );
+    let sounded = heard.try_recv();
+    assert!(
+        sounded.is_err(),
+        "an utterance that played sounds no cue: {sounded:?}"
     );
 }

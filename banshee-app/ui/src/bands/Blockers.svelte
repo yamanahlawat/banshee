@@ -30,6 +30,17 @@
   export let first = false;
   /// The host a remote listener sends audio to.
   export let remoteHost: string | null = null;
+  /// The host a remote speaker sends text to, and only while one started.
+  export let speechHost: string | null = null;
+
+  // Each side names its own host, so the opening carries whichever of them
+  // reached a server and says the machine keeps everything when neither did.
+  $: clauses = [
+    ...(remoteHost ? [`what you say goes to ${remoteHost} to be heard`] : []),
+    ...(speechHost ? [`what it says comes from ${speechHost}`] : []),
+  ];
+  $: leaves =
+    clauses.length > 0 ? `${clauses.join(', and ')}.` : 'nothing you say leaves this machine.';
 
   /// A grant reaches only a process started after it lands, and the window cannot see it, so after
   /// sending someone to System Settings it offers the restart.
@@ -136,10 +147,7 @@
        screen to dismiss: the window states what is true, and this stops being
        true once the first thing is said. -->
   <p class="opening">
-    Banshee types what you say into whatever app you are using, and
-    {#if remoteHost}what you say goes to {remoteHost} to be heard.{:else}nothing you say leaves this
-      machine.{/if}
-    It needs {spell(steps)}
+    Banshee types what you say into whatever app you are using, and {leaves} It needs {spell(steps)}
     {steps === 1 ? 'thing' : 'things'} first.
   </p>
 {/if}

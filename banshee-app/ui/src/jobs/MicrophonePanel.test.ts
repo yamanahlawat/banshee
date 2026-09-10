@@ -1,13 +1,20 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
-import remote from '../fixtures/remote.json';
+import remote from '../mocks/remote.json';
 
 vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTauri());
 
-import { daemon, empty, reduceStatus, type Status } from '../lib/daemon';
+import {
+  daemon,
+  empty,
+  listeningFacts,
+  reduceStatus,
+  waitsOnARestart,
+  type Status,
+} from '../lib/daemon';
 import { listDevices, listLanguages, setSetting, status } from '../lib/tauri';
-import { announcement, forgetCopy } from '../lib/copy';
+import { announcement, forgetCopy, listeningNote, TAKES_EFFECT } from '../lib/copy';
 import MicrophonePanel from './MicrophonePanel.svelte';
 
 // The daemon's own reply under a remote listener, so each test states only what
@@ -27,7 +34,7 @@ function withStt(stt: Record<string, unknown>, flags?: Status['remote']): Status
 
 const LOCAL_IN_FORCE: Status['remote'] = {
   stt: { remote: false, host: null, key_present: true },
-  tts: { remote: false },
+  tts: { remote: false, host: null, speaker_started: true, key_present: false },
 };
 
 // A local listener with a key the daemon still holds, which is the one state
@@ -38,9 +45,6 @@ const localStatus = withStt({ provider: 'local' }, LOCAL_IN_FORCE);
 // the daemon runs the other.
 const toRemote: Status = { ...withStt({}, LOCAL_IN_FORCE), pending: ['stt.provider'] };
 const toLocal: Status = { ...withStt({ provider: 'local' }), pending: ['stt.provider'] };
-
-// The one sentence the group says about the restart it waits on.
-const TAKES_EFFECT = 'Your choice takes effect when Banshee restarts.';
 
 function keyField(): HTMLInputElement | null {
   return document.querySelector('input[type="password"]');
@@ -77,7 +81,10 @@ it('offers the preset under a local listener and hides it under a remote one', (
           provider: 'remote',
           remote: { base_url: 'https://api.groq.com/openai/v1', model: 'whisper-large-v3-turbo' },
         },
-        { stt: { remote: true, host: 'api.groq.com', key_present: false }, tts: { remote: false } },
+        {
+          stt: { remote: true, host: 'api.groq.com', key_present: false },
+          tts: { remote: false, host: null, speaker_started: true, key_present: false },
+        },
       ),
     ),
   );
@@ -121,7 +128,7 @@ it('draws the key as missing when the daemon holds none', () => {
         {},
         {
           stt: { remote: true, host: 'api.openai.com', key_present: false },
-          tts: { remote: false },
+          tts: { remote: false, host: null, speaker_started: true, key_present: false },
         },
       ),
     ),
@@ -153,6 +160,9 @@ it('swaps a field in to replace the key, and takes the line back when it commits
   await waitFor(() => expect(screen.getByText('A key is set')).toBeTruthy());
 });
 
+// `copy.test.ts` pins each sentence over the pure function. This asks the one
+// thing only a render answers: that the group is read with the note the facts
+// the panel holds produce.
 it('describes the choice by the sentence that says where audio goes', () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
   render(MicrophonePanel);
@@ -160,44 +170,27 @@ it('describes the choice by the sentence that says where audio goes', () => {
     .getByRole('radiogroup', { name: 'Listening' })
     .getAttribute('aria-describedby');
   expect(document.getElementById(described ?? '')?.textContent).toBe(
-    'Audio goes to api.openai.com.',
+    listeningNote(listeningFacts(get(daemon), get(waitsOnARestart))),
   );
 });
 
-it('says what stays saved when the listener goes back to this machine', () => {
-  daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
-  expect(
-    screen.getByText('Audio stays on this machine. The server and key you set are still saved.'),
-  ).toBeTruthy();
-});
-
-// The group held two truths from two sources and stated the restart four times.
-// One sentence now reads the daemon for what is in force and the config for
-// what was asked, so the group cannot contradict itself.
-it('states where audio goes and the restart it waits on in one sentence', () => {
+// The group says the restart in its own sentence, so the pending line every
+// other row draws would state it a second time.
+it('states the restart in the sentence, and draws no pending line for it', () => {
   daemon.set(reduceStatus(empty(), toRemote));
   render(MicrophonePanel);
-  expect(screen.getByText(`Audio still stays on this machine. ${TAKES_EFFECT}`)).toBeTruthy();
+  expect(
+    screen.getByText(listeningNote(listeningFacts(get(daemon), get(waitsOnARestart)))),
+  ).toBeTruthy();
   expect(listenerGroup().querySelectorAll('.note.pending')).toHaveLength(0);
 });
 
-it('says the audio still goes to the server while the way back waits', () => {
-  daemon.set(reduceStatus(empty(), toLocal));
+// The choice is real but idle while the daemon is down, so the note may not
+// claim audio goes anywhere.
+it('says nothing is heard while the daemon is down', () => {
+  daemon.set(reduceStatus(empty(), { ...remoteStatus, running: false }));
   render(MicrophonePanel);
-  expect(screen.getByText(`Audio still goes to api.openai.com. ${TAKES_EFFECT}`)).toBeTruthy();
-});
-
-it('names a remote listener the daemon cannot name', () => {
-  daemon.set(
-    reduceStatus(
-      empty(),
-      // An empty host is what the daemon answers when the address is no URL.
-      withStt({}, { stt: { remote: true, host: '', key_present: true }, tts: { remote: false } }),
-    ),
-  );
-  render(MicrophonePanel);
-  expect(screen.getByText('Audio goes to a remote server.')).toBeTruthy();
+  expect(screen.getByText('Nothing is heard until Banshee starts.')).toBeTruthy();
 });
 
 it('removes a stored key from the window and says the restart it needs', async () => {
@@ -257,6 +250,25 @@ it('names the last failure inside the group that caused it', () => {
   // A live region on an element that arrives with its own content is not
   // announced, so the failure is spoken instead.
   expect(failure.getAttribute('role')).toBeNull();
+});
+
+// A failure already standing when the panel opens raises no announcement, so
+// the group has to be read with it or a screen reader never meets it.
+it('reads the group with the failure standing under it', () => {
+  daemon.set(
+    reduceStatus(empty(), {
+      ...remoteStatus,
+      last_error: 'the remote listener refused the key',
+    }),
+  );
+  render(MicrophonePanel);
+  const described = screen
+    .getByRole('radiogroup', { name: 'Listening' })
+    .getAttribute('aria-describedby');
+  expect(described).toBe('listener-note dictation-failure');
+  expect(document.getElementById('dictation-failure')?.textContent).toBe(
+    'The last dictation failed: the remote listener refused the key.',
+  );
 });
 
 // The reader is most often not looking at the screen when one of these lands.

@@ -131,6 +131,20 @@ pub fn remote_stt_host(status: &Value) -> Option<&str> {
     status["remote"]["stt"]["host"].as_str()
 }
 
+/// Where a remote speaker sends the text. `None` for a local one.
+pub fn remote_tts_host(status: &Value) -> Option<&str> {
+    status["remote"]["tts"]["host"].as_str()
+}
+
+/// Whether the speaker the config names is the one running. The daemon holds
+/// a voice only for a backend that started, so this is false whenever the
+/// system voice took over: a key that is missing, a voice that is not named,
+/// a server the daemon cannot reach at startup, or a local Kokoro that failed
+/// to load. False from a daemon older than the field.
+pub fn speaker_started(status: &Value) -> bool {
+    status["remote"]["tts"]["speaker_started"].as_bool() == Some(true)
+}
+
 /// What `IOHIDCheckAccess` answered in the daemon: `granted`, `denied` or
 /// `undetermined`. `None` from a daemon older than the field.
 pub fn key_press_access(status: &Value) -> Option<&str> {
@@ -554,16 +568,51 @@ mod label_tests {
 
 #[cfg(test)]
 mod remote_tests {
-    use super::remote_stt_host;
+    use super::{remote_stt_host, remote_tts_host, speaker_started};
 
     #[test]
-    fn the_remote_host_is_read_off_the_status_reply() {
-        let local = serde_json::json!({"remote": {"stt": {"remote": false, "host": null}}});
+    fn each_side_reads_its_own_host_off_the_status_reply() {
+        let local = serde_json::json!({
+            "remote": {
+                "stt": {"remote": false, "host": null},
+                "tts": {"remote": false, "host": null, "speaker_started": true},
+            }
+        });
         assert_eq!(remote_stt_host(&local), None);
-        let remote =
-            serde_json::json!({"remote": {"stt": {"remote": true, "host": "api.groq.com"}}});
-        assert_eq!(remote_stt_host(&remote), Some("api.groq.com"));
+        assert_eq!(remote_tts_host(&local), None);
+
+        let both = serde_json::json!({
+            "remote": {
+                "stt": {"remote": true, "host": "api.groq.com"},
+                "tts": {"remote": true, "host": "api.openai.com", "speaker_started": true},
+            }
+        });
+        assert_eq!(remote_stt_host(&both), Some("api.groq.com"));
+        assert_eq!(remote_tts_host(&both), Some("api.openai.com"));
+    }
+
+    // The daemon that answers a host is not always the daemon that speaks
+    // through it: the field says which, and a reply that leaves it out says
+    // nothing started.
+    #[test]
+    fn the_speaker_reads_as_started_only_where_the_reply_says_so() {
+        let named = |started: serde_json::Value| {
+            serde_json::json!({
+                "remote": {"tts": {"host": "api.openai.com", "speaker_started": started}}
+            })
+        };
+        assert!(speaker_started(&named(true.into())));
+        assert!(!speaker_started(&named(false.into())));
+        assert!(!speaker_started(&named(serde_json::Value::Null)));
+    }
+
+    // A daemon older than the nested shape answers a boolean at `remote.tts`,
+    // and indexing a `Value::Bool` gives `Null`, so both read as local.
+    #[test]
+    fn an_older_daemon_reads_as_local_on_both_sides() {
         let older = serde_json::json!({"remote": {"stt": false, "tts": false}});
         assert_eq!(remote_stt_host(&older), None);
+        assert_eq!(remote_tts_host(&older), None);
+        assert!(!speaker_started(&older));
     }
 }

@@ -49,31 +49,41 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     for name in crate::models::required(&config) {
         healthy &= check_model(&models_dir, name);
     }
+    // Read once for the two sides below: one checklist must not report two
+    // states of the file.
+    let credentials = crate::credentials::Credentials::load();
     if config.stt.provider.is_remote() {
-        healthy &= check_remote_key();
+        healthy &= check_remote_key(crate::credentials::RemoteKey::Stt, credentials.as_ref());
     }
-    let kokoro = KokoroTTSConfig::new(&config.tts.voice);
-    let kokoro_present = models_dir.join(&kokoro.model_name).exists()
-        && models_dir.join(&kokoro.voice_name).exists();
-    match (kokoro_present, &config.tts.fallback) {
-        (true, _) => {
-            pass(&format!(
-                "kokoro tts model present (voice {})",
-                config.tts.voice
-            ));
+    // A remote speaker loads no Kokoro model and no espeak-ng table, so each
+    // local check would name a fix that changes nothing.
+    if config.tts.provider.is_remote() {
+        healthy &= check_remote_key(crate::credentials::RemoteKey::Tts, credentials.as_ref());
+        healthy &= check_remote_voice(&config.tts.remote.voice);
+    } else {
+        let kokoro = KokoroTTSConfig::new(&config.tts.voice);
+        let kokoro_present = models_dir.join(&kokoro.model_name).exists()
+            && models_dir.join(&kokoro.voice_name).exists();
+        match (kokoro_present, &config.tts.fallback) {
+            (true, _) => {
+                pass(&format!(
+                    "kokoro tts model present (voice {})",
+                    config.tts.voice
+                ));
+            }
+            (false, TTSFallback::System) => note(
+                "kokoro tts model missing, will fall back to system voice (run: banshee setup)",
+            ),
+            (false, TTSFallback::None) => {
+                healthy &= fail(
+                    "kokoro tts model missing and [tts] fallback = \"none\"",
+                    "run: banshee setup",
+                );
+            }
         }
-        (false, TTSFallback::System) => {
-            note("kokoro tts model missing, will fall back to system voice (run: banshee setup)")
-        }
-        (false, TTSFallback::None) => {
-            healthy &= fail(
-                "kokoro tts model missing and [tts] fallback = \"none\"",
-                "run: banshee setup",
-            );
-        }
-    }
 
-    check_espeak();
+        check_espeak();
+    }
 
     // Before the checks that depend on it: a dead daemon causes the microphone
     // and permission failures below, and read after them it looks like a footnote
@@ -202,16 +212,32 @@ fn check_model(models_dir: &Path, name: &str) -> bool {
     }
 }
 
-fn check_remote_key() -> bool {
-    match crate::credentials::Credentials::load() {
-        Ok(credentials) if credentials.stt_api_key.is_some() => pass("remote listener key present"),
+fn check_remote_key(
+    side: crate::credentials::RemoteKey,
+    credentials: Result<&crate::credentials::Credentials, &BansheeError>,
+) -> bool {
+    match credentials {
+        Ok(credentials) if credentials.key(side).is_some() => {
+            pass(&format!("remote {} key present", side.side()))
+        }
         Ok(_) => fail(
-            "no key for the remote listener",
-            "banshee config set stt.remote.api_key",
+            &format!("no key for the remote {}", side.side()),
+            &format!("banshee config set {}", side.setting()),
         ),
-        // Setting the key again reads the same file first, so the fix starts by
+        // Setting a key again reads the same file first, so the fix starts by
         // removing it.
         Err(error) => fail(&error.to_string(), &remove_the_credentials_file()),
+    }
+}
+
+fn check_remote_voice(voice: &str) -> bool {
+    if voice.is_empty() {
+        fail(
+            "the remote speaker has no voice",
+            "banshee config set tts.remote.voice <a voice the server names>",
+        )
+    } else {
+        pass(&format!("remote speaker voice set ({voice})"))
     }
 }
 
@@ -219,7 +245,7 @@ fn remove_the_credentials_file() -> String {
     let path = crate::credentials::Credentials::path()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "~/.banshee/credentials.toml".to_string());
-    format!("rm {path}, then: banshee config set stt.remote.api_key")
+    format!("rm {path}, then set the keys again")
 }
 
 // What the socket says about a daemon. Read once, because the microphone check
@@ -508,16 +534,16 @@ fn report_settings(config: &Config, daemon: &Daemon) {
             "terms"
         }
     ));
-    note(&format!(
-        "tts {} at {}x, history {}",
-        config.tts.voice,
-        config.tts.speed,
-        on_off(config.daemon.save_history)
-    ));
     let stt_remote = live(daemon, |status| status["remote"]["stt"]["remote"].as_bool())
         .unwrap_or(config.stt.provider.is_remote());
     let tts_remote = live(daemon, |status| status["remote"]["tts"]["remote"].as_bool())
         .unwrap_or(config.tts.provider.is_remote());
+    note(&format!(
+        "tts {} at {}x, history {}",
+        settings_voice(config, tts_remote),
+        config.tts.speed,
+        on_off(config.daemon.save_history)
+    ));
     if !stt_remote && !tts_remote {
         note("audio and text stay on this machine");
     }
@@ -528,10 +554,48 @@ fn report_settings(config: &Config, daemon: &Daemon) {
         .unwrap_or_else(|| config.stt.remote.host());
         note(&format!("audio goes to {host} for listening"));
     }
+    if tts_remote {
+        let host = live(daemon, |status| {
+            banshee_common::remote_tts_host(status).map(str::to_string)
+        })
+        .unwrap_or_else(|| config.tts.remote.host());
+        let started = live(daemon, |status| {
+            Some(banshee_common::speaker_started(status))
+        })
+        // No daemon answers, so the line reports the route the file asks for,
+        // as the host beside it does.
+        .unwrap_or(true);
+        note(&speech_line(&host, started));
+    }
     if let Some(error) = live(daemon, |status| {
         status["last_error"].as_str().map(str::to_string)
     }) {
         note(&format!("the last transcription failed: {error}"));
+    }
+    if let Some(error) = live(daemon, |status| {
+        status["last_speech_error"].as_str().map(str::to_string)
+    }) {
+        note(&format!("the last spoken reply failed: {error}"));
+    }
+}
+
+/// The voice the settings line names. Each speaker keeps its own, and nothing
+/// reads `tts.voice` while a remote speaker is in force.
+fn settings_voice(config: &Config, tts_remote: bool) -> &str {
+    if tts_remote {
+        &config.tts.remote.voice
+    } else {
+        &config.tts.voice
+    }
+}
+
+/// The key and the voice have their own checks below, so this line names
+/// neither.
+fn speech_line(host: &str, started: bool) -> String {
+    if started {
+        format!("text goes to {host} for speaking")
+    } else {
+        format!("the speaker on {host} did not start, so text stays on this machine")
     }
 }
 

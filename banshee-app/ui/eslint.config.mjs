@@ -5,6 +5,9 @@ import unusedImports from 'eslint-plugin-unused-imports';
 import globals from 'globals';
 import ts from 'typescript-eslint';
 
+const REACHES_THE_MOCKS =
+  'Only src/lib/tauri.ts may reach the mocks, with an `import()` behind import.meta.env.DEV. Any other import ships them to users.';
+
 export default ts.config(
   js.configs.recommended,
   ...ts.configs.recommended,
@@ -63,5 +66,39 @@ export default ts.config(
     languageOptions: { globals: globals.node },
   },
 
-  { ignores: ['dist/**', 'node_modules/**', 'src/fixtures/**'] },
+  {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: { globals: globals.node },
+    rules: { 'no-console': 'off' },
+  },
+
+  // The tests read the same captured replies, and vitest bundles nothing. Two
+  // rules cover one boundary, because `no-restricted-imports` reads a static
+  // specifier only.
+  {
+    files: ['src/**/*.ts', 'src/**/*.svelte'],
+    ignores: ['src/**/*.test.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        { patterns: [{ group: ['**/mocks', '**/mocks/*'], message: REACHES_THE_MOCKS }] },
+      ],
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'ImportExpression > Literal[value=/(^|\\/)mocks(\\/|$)/]',
+          message: REACHES_THE_MOCKS,
+        },
+      ],
+    },
+  },
+
+  // The bridge's own way in is an `import()`, and only that form is exempt. A
+  // static import here would ship the mocks like one anywhere else.
+  {
+    files: ['src/lib/tauri.ts'],
+    rules: { 'no-restricted-syntax': 'off' },
+  },
+
+  { ignores: ['dist/**', 'node_modules/**'] },
 );
