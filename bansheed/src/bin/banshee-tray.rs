@@ -1,35 +1,34 @@
-//! The macOS menu bar indicator.
+//! The menu bar indicator.
 //!
-//! A separate process from the daemon. AppKit must own the main thread, and the
-//! daemon's belongs to tokio. Reading the socket is all this does, so it needs
-//! no TCC grants of its own.
+//! A separate process from the daemon. AppKit owns the main thread on macOS and
+//! gtk owns it elsewhere, while the daemon's thread belongs to tokio. Reading
+//! the socket is all this does, so it needs no TCC grants of its own.
 
-#[cfg(not(target_os = "macos"))]
 fn main() {
-    eprintln!("banshee-tray runs on macOS only. Elsewhere use: banshee watch --waybar");
-    std::process::exit(1);
-}
-
-#[cfg(target_os = "macos")]
-fn main() {
-    if let Err(error) = mac::run() {
+    if let Err(error) = tray::run() {
         eprintln!("banshee-tray: {error}");
         std::process::exit(1);
     }
 }
 
-#[cfg(target_os = "macos")]
-mod mac {
+mod tray {
     use std::time::Duration;
 
     use banshee_common::{Activity, BANSHEE_HISTORY, BANSHEE_STATE_CHANGED, EVENT_STATE, utils};
     use serde_json::Value;
     use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+    #[cfg(not(target_os = "macos"))]
+    use gtk::glib;
+    #[cfg(target_os = "macos")]
     use winit::application::ApplicationHandler;
+    #[cfg(target_os = "macos")]
     use winit::event::WindowEvent;
+    #[cfg(target_os = "macos")]
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+    #[cfg(target_os = "macos")]
     use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+    #[cfg(target_os = "macos")]
     use winit::window::WindowId;
 
     const QUIT_ID: &str = "quit";
@@ -46,6 +45,12 @@ mod mac {
     // stale `Not running` after the daemon returns against how often an idle
     // machine wakes to a failing connect.
     const RETRY: Duration = Duration::from_secs(2);
+
+    // The gtk loop keeps no queue for these messages, so it reads the channel on
+    // a timer. Nothing measured this number. It trades how soon the icon answers
+    // a click against how often an idle loop wakes to an empty channel.
+    #[cfg(not(target_os = "macos"))]
+    const POLL: Duration = Duration::from_millis(100);
 
     /// What the menu bar shows. `Activity` ranks the booleans the daemon
     /// pushes; the last state is the daemon failing to answer at all.
@@ -97,7 +102,25 @@ mod mac {
         let mut pixels = vec![0; reader.output_buffer_size().ok_or("icon too large")?];
         let info = reader.next_frame(&mut pixels)?;
         pixels.truncate(info.buffer_size());
+        tint(&mut pixels);
         Ok((pixels, info.width, info.height))
+    }
+
+    // macOS paints a template image from the alpha and picks the colour itself.
+    // Every other platform draws the RGB it is given, and the assets are black,
+    // so the mark has to carry its own colour there. `#e2673d` is the accent the
+    // window uses on a dark ground.
+    #[cfg(target_os = "macos")]
+    fn tint(_pixels: &mut [u8]) {}
+
+    #[cfg(not(target_os = "macos"))]
+    fn tint(pixels: &mut [u8]) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            // The alpha is the drawing. Only the colour under it changes.
+            pixel[0] = 0xe2;
+            pixel[1] = 0x67;
+            pixel[2] = 0x3d;
+        }
     }
 
     fn icon(indicator: Indicator) -> Result<Icon, Box<dyn std::error::Error>> {
@@ -115,6 +138,34 @@ mod mac {
         Open,
         CopyLast,
         Copied(String),
+    }
+
+    /// Hands a `Message` to whoever owns the tray. winit carries one as a user
+    /// event, and the gtk loop reads one from a channel.
+    trait Postbox: Clone + Send + 'static {
+        /// False once the far end is gone, which means the process is on its way
+        /// out and this thread with it.
+        fn post(&self, message: Message) -> bool;
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Postbox for EventLoopProxy<Message> {
+        fn post(&self, message: Message) -> bool {
+            self.send_event(message).is_ok()
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    impl Postbox for std::sync::mpsc::Sender<Message> {
+        fn post(&self, message: Message) -> bool {
+            self.send(message).is_ok()
+        }
+    }
+
+    /// What `App::handle` asks the loop to do next.
+    enum Flow {
+        Stay,
+        Exit,
     }
 
     #[derive(Debug, Default, PartialEq, Eq)]
@@ -201,35 +252,26 @@ mod mac {
         _menu: Menu,
     }
 
-    struct App {
+    struct App<P: Postbox> {
         ui: Option<Ui>,
         indicator: Indicator,
         device: Device,
         history_enabled: bool,
-        proxy: EventLoopProxy<Message>,
+        postbox: P,
     }
 
-    impl App {
-        fn show(&self) {
-            let Some(ui) = &self.ui else { return };
-            ui.state_item.set_text(self.indicator.label());
-            ui.device_item
-                .set_text(device_line(self.indicator, &self.device));
-            ui.copy_item
-                .set_enabled(copy_last_enabled(self.indicator, self.history_enabled));
-            if let Err(error) = draw(&ui.tray, self.indicator) {
-                eprintln!("banshee-tray: could not draw the icon: {error}");
+    impl<P: Postbox> App<P> {
+        fn new(postbox: P) -> Self {
+            Self {
+                ui: None,
+                indicator: Indicator::NotRunning,
+                device: Device::default(),
+                history_enabled: false,
+                postbox,
             }
         }
-    }
 
-    fn draw(tray: &TrayIcon, indicator: Indicator) -> Result<(), Box<dyn std::error::Error>> {
-        tray.set_icon_with_as_template(Some(icon(indicator)?), true)?;
-        Ok(())
-    }
-
-    impl ApplicationHandler<Message> for App {
-        fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+        fn start(&mut self) {
             if self.ui.is_some() {
                 return;
             }
@@ -242,7 +284,7 @@ mod mac {
             }
         }
 
-        fn user_event(&mut self, event_loop: &ActiveEventLoop, message: Message) {
+        fn handle(&mut self, message: Message) -> Flow {
             // Redrawing costs a decode, a re-encode and a menu bar repaint, and
             // the reconnect loop repeats itself once a cycle while the daemon is
             // down, so an unchanged value must not reach show()
@@ -253,7 +295,7 @@ mod mac {
                 Message::Quit => {
                     close_the_window().unwrap_or_else(|e| eprintln!("banshee-tray: {e}"));
                     stop_the_daemon().unwrap_or_else(|e| eprintln!("banshee-tray: {e}"));
-                    return event_loop.exit();
+                    return Flow::Exit;
                 }
                 Message::State(indicator) => {
                     let moved = self.indicator != indicator;
@@ -271,17 +313,59 @@ mod mac {
                     moved
                 }
                 Message::Open => {
-                    return open_the_window()
-                        .unwrap_or_else(|error| eprintln!("banshee-tray: {error}"));
+                    open_the_window().unwrap_or_else(|error| eprintln!("banshee-tray: {error}"));
+                    return Flow::Stay;
                 }
-                Message::CopyLast => return spawn_copy_last(self.proxy.clone()),
+                Message::CopyLast => {
+                    spawn_copy_last(self.postbox.clone());
+                    return Flow::Stay;
+                }
                 Message::Copied(text) => {
-                    return copy_to_clipboard(&text)
+                    copy_to_clipboard(&text)
                         .unwrap_or_else(|error| eprintln!("banshee-tray: {error}"));
+                    return Flow::Stay;
                 }
             };
             if changed {
                 self.show();
+            }
+            Flow::Stay
+        }
+
+        fn show(&self) {
+            let Some(ui) = &self.ui else { return };
+            ui.state_item.set_text(self.indicator.label());
+            ui.device_item
+                .set_text(device_line(self.indicator, &self.device));
+            ui.copy_item
+                .set_enabled(copy_last_enabled(self.indicator, self.history_enabled));
+            if let Err(error) = draw(&ui.tray, self.indicator) {
+                eprintln!("banshee-tray: could not draw the icon: {error}");
+            }
+        }
+    }
+
+    fn draw(tray: &TrayIcon, indicator: Indicator) -> Result<(), Box<dyn std::error::Error>> {
+        // macOS tints a template image itself, so it takes the flag. Off macOS
+        // `set_icon_with_as_template` discards its arguments and answers Ok, so
+        // the icon would never change there.
+        #[cfg(target_os = "macos")]
+        tray.set_icon_with_as_template(Some(icon(indicator)?), true)?;
+        #[cfg(not(target_os = "macos"))]
+        tray.set_icon(Some(icon(indicator)?))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    impl<P: Postbox> ApplicationHandler<Message> for App<P> {
+        fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+            self.start();
+        }
+
+        fn user_event(&mut self, event_loop: &ActiveEventLoop, message: Message) {
+            match self.handle(message) {
+                Flow::Stay => {}
+                Flow::Exit => event_loop.exit(),
             }
         }
 
@@ -319,6 +403,9 @@ mod mac {
         menu.append_items(&refs)?;
 
         let tray = TrayIconBuilder::new()
+            // A bar pins an item by the id it reports. The crate's default id
+            // carries the process id, so a pin would not survive a restart.
+            .with_id("banshee")
             .with_menu(Box::new(menu.clone()))
             .with_icon(icon(Indicator::NotRunning)?)
             .with_icon_as_template(true)
@@ -336,10 +423,8 @@ mod mac {
 
     /// Any failure to read the socket is the daemon being unreachable: a state to show, not an
     /// error to report.
-    async fn watch(proxy: EventLoopProxy<Message>) {
-        // send_event fails only once the event loop is gone, which means the
-        // process is on its way out and this thread with it
-        let send = |message| proxy.send_event(message).is_ok();
+    async fn watch(postbox: impl Postbox) {
+        let send = |message| postbox.post(message);
         loop {
             if let Ok((status, mut changes)) = utils::Subscription::open(&[EVENT_STATE]).await {
                 if !send(Message::Device(Device::of(&status)))
@@ -365,7 +450,7 @@ mod mac {
         }
     }
 
-    fn spawn_copy_last(proxy: EventLoopProxy<Message>) {
+    fn spawn_copy_last(postbox: impl Postbox) {
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -386,7 +471,7 @@ mod mac {
             };
             match reply.as_ref().ok().and_then(last_history_entry) {
                 Some(text) => {
-                    let _ = proxy.send_event(Message::Copied(text.to_string()));
+                    postbox.post(Message::Copied(text.to_string()));
                 }
                 None => eprintln!("banshee-tray: no dictation to copy"),
             }
@@ -402,8 +487,38 @@ mod mac {
             .as_str()
     }
 
+    #[cfg(target_os = "macos")]
     fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
         arboard::Clipboard::new()?.set_text(text)?;
+        Ok(())
+    }
+
+    // X11 and Wayland host the clipboard inside the process that last set it,
+    // so the text goes when the handle drops. macOS hands it to the system and
+    // needs none of this. The thread below owns the text until something else
+    // takes the clipboard, or until the hold runs out.
+    #[cfg(not(target_os = "macos"))]
+    fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use arboard::SetExtLinux;
+        use std::time::Instant;
+
+        // A copy a person asked for survives a detour to another window. The
+        // number is a judgement, not a measurement.
+        const HOLD: Duration = Duration::from_secs(600);
+
+        let text = text.to_string();
+        // The caller cannot see a failure past this thread, so it reports here.
+        std::thread::spawn(move || {
+            let mut clipboard = match arboard::Clipboard::new() {
+                Ok(clipboard) => clipboard,
+                Err(error) => return eprintln!("banshee-tray: no clipboard: {error}"),
+            };
+            // A dictation paste is excluded from clipboard history. This copy
+            // is deliberate, so it belongs there.
+            if let Err(error) = clipboard.set().wait_until(Instant::now() + HOLD).text(text) {
+                eprintln!("banshee-tray: the copy did not reach the clipboard: {error}");
+            }
+        });
         Ok(())
     }
 
@@ -459,49 +574,89 @@ mod mac {
         Ok(file)
     }
 
-    pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-        // Held for the whole run: dropping it would free the lock
-        let _lock = claim_the_menu_bar()?;
+    fn menu_message(id: &str) -> Option<Message> {
+        match id {
+            QUIT_ID => Some(Message::Quit),
+            COPY_LAST_ID => Some(Message::CopyLast),
+            OPEN_ID => Some(Message::Open),
+            _ => None,
+        }
+    }
 
-        let event_loop = EventLoop::<Message>::with_user_event()
-            // No Dock icon and no menu bar of its own: this is furniture
-            .with_activation_policy(ActivationPolicy::Accessory)
-            .build()?;
-        event_loop.set_control_flow(ControlFlow::Wait);
-
-        let menu_proxy = event_loop.create_proxy();
-        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            let message = match event.id.0.as_str() {
-                QUIT_ID => Some(Message::Quit),
-                COPY_LAST_ID => Some(Message::CopyLast),
-                OPEN_ID => Some(Message::Open),
-                _ => None,
-            };
-            if let Some(message) = message {
-                let _ = menu_proxy.send_event(message);
-            }
-        }));
-
-        // The subscription needs a runtime, and this thread is AppKit's
-        let watch_proxy = event_loop.create_proxy();
+    // The subscription needs a runtime, and the loop owns this thread
+    fn spawn_watch(postbox: impl Postbox) {
         std::thread::spawn(move || {
             match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
-                Ok(runtime) => runtime.block_on(watch(watch_proxy)),
+                Ok(runtime) => runtime.block_on(watch(postbox)),
                 Err(error) => eprintln!("banshee-tray: {error}"),
             }
         });
+    }
 
-        let mut app = App {
-            ui: None,
-            indicator: Indicator::NotRunning,
-            device: Device::default(),
-            history_enabled: false,
-            proxy: event_loop.create_proxy(),
-        };
+    #[cfg(target_os = "macos")]
+    pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+        // Held for the whole run: dropping it would free the lock
+        let _lock = claim_the_menu_bar()?;
+
+        let mut builder = EventLoop::<Message>::with_user_event();
+        // No Dock icon and no menu bar of its own: this is furniture
+        let builder = builder.with_activation_policy(ActivationPolicy::Accessory);
+        let event_loop = builder.build()?;
+        event_loop.set_control_flow(ControlFlow::Wait);
+
+        let menu_proxy = event_loop.create_proxy();
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            if let Some(message) = menu_message(event.id.0.as_str()) {
+                menu_proxy.post(message);
+            }
+        }));
+
+        spawn_watch(event_loop.create_proxy());
+
+        let mut app = App::new(event_loop.create_proxy());
         event_loop.run_app(&mut app)?;
+        Ok(())
+    }
+
+    // tray-icon builds its menu out of gtk widgets, so a gtk loop must own the
+    // thread that builds the icon. winit's loop is not one.
+    #[cfg(not(target_os = "macos"))]
+    pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+        // Held for the whole run: dropping it would free the lock
+        let _lock = claim_the_menu_bar()?;
+
+        gtk::init()?;
+
+        let (sender, receiver) = std::sync::mpsc::channel::<Message>();
+
+        let menu_sender = sender.clone();
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            if let Some(message) = menu_message(event.id.0.as_str()) {
+                menu_sender.post(message);
+            }
+        }));
+
+        spawn_watch(sender.clone());
+
+        let mut app = App::new(sender);
+        app.start();
+
+        glib::timeout_add_local(POLL, move || {
+            while let Ok(message) = receiver.try_recv() {
+                match app.handle(message) {
+                    Flow::Stay => {}
+                    Flow::Exit => {
+                        gtk::main_quit();
+                        return glib::ControlFlow::Break;
+                    }
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+        gtk::main();
         Ok(())
     }
 
@@ -523,6 +678,44 @@ mod mac {
 
         fn mask(indicator: Indicator) -> (Vec<u8>, u32, u32) {
             glyph(indicator).expect("a shipped asset must decode")
+        }
+
+        // The assets are black with the drawing in the alpha, which macOS tints
+        // itself. Any other platform draws what it is given, so a black glyph on a
+        // dark bar is invisible.
+        #[cfg(not(target_os = "macos"))]
+        #[test]
+        fn the_linux_glyph_is_not_black() {
+            let (pixels, _, _) = glyph(Indicator::Idle).expect("the idle asset decodes");
+            let lit = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[3] > 40)
+                .any(|p| p[0] > 32 || p[1] > 32 || p[2] > 32);
+            assert!(lit, "every visible pixel is still black, so the bar shows nothing");
+        }
+
+        // The shape lives in the alpha channel, so a tint that touches it redraws
+        // the mark.
+        #[cfg(not(target_os = "macos"))]
+        #[test]
+        fn the_tint_leaves_the_shape_alone() {
+            let (tinted, w, h) = glyph(Indicator::Recording).expect("the asset decodes");
+            let raw = png::Decoder::new(std::io::Cursor::new(
+                &include_bytes!("../../assets/tray/mark-recording.png")[..],
+            ))
+            .read_info()
+            .and_then(|mut r| {
+                let mut buf = vec![0; r.output_buffer_size().unwrap()];
+                let info = r.next_frame(&mut buf)?;
+                buf.truncate(info.buffer_size());
+                Ok(buf)
+            })
+            .expect("the asset decodes twice");
+            assert_eq!(tinted.len(), raw.len(), "{w}x{h} must not change size");
+            let alpha_of = |v: &[u8]| v.as_chunks::<4>().0.iter().map(|p| p[3]).collect::<Vec<_>>();
+            assert_eq!(alpha_of(&tinted), alpha_of(&raw), "the alpha carries the mark");
         }
 
         fn device(open: Option<&str>, missing: Option<&str>) -> Device {
@@ -670,6 +863,9 @@ mod mac {
             assert_eq!(pixels.len(), (width * height * 4) as usize);
         }
 
+        // Off macOS, tint() paints real colour into these same pixels on purpose,
+        // so this invariant is macOS's alone.
+        #[cfg(target_os = "macos")]
         #[test]
         fn every_glyph_draws_in_alpha_only() {
             // A template image is painted by macOS, so a coloured asset renders

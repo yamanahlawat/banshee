@@ -6,8 +6,10 @@ hotkey, and the Waybar module.
 
 ## Building the desktop window
 
-The window is a Tauri app. It needs WebKitGTK, GTK 3 and Node 22. The daemon
-and the CLI need none of these.
+The window is a Tauri app. It needs WebKitGTK, GTK 3 and Node 22. The tray
+needs GTK 3. The daemon and the CLI need none of them to run. A build from
+source still needs the GTK 3 headers, because one crate holds the daemon, the
+CLI and the tray.
 
 ```bash
 # Arch
@@ -39,7 +41,7 @@ The install points `banshee-app` at `target/release`, so a `cargo clean` or a
 moved clone breaks the window's daemon control. Run `make install-window`
 again to put it back.
 
-There is no tray icon here yet. `banshee-tray` still exits on Linux.
+`banshee tray` puts the mark in any bar that hosts StatusNotifierItem.
 `banshee watch --waybar` reports the state instead.
 
 ## The hotkey on Wayland

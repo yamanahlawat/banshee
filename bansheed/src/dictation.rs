@@ -95,37 +95,75 @@ fn send_paste() -> Result<(), Box<dyn Error>> {
 #[cfg(all(unix, not(target_os = "macos")))]
 pub const WAYLAND_TYPERS: [(&str, &[&str]); 2] = [("wtype", &["--"]), ("ydotool", &["type", "--"])];
 
+// One search, so the spawn, the checklist and the blocker cannot disagree
+// about what the daemon can run.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn type_text_wayland(text: &str) -> Result<(), Box<dyn Error>> {
+pub(crate) fn resolve_wayland_typers(
+    path: &std::ffi::OsStr,
+) -> Vec<(std::path::PathBuf, &'static [&'static str])> {
+    WAYLAND_TYPERS
+        .into_iter()
+        .filter_map(|(binary, args)| crate::status::resolve(binary, path).map(|bin| (bin, args)))
+        .collect()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn resolve_wayland_typer(
+    path: &std::ffi::OsStr,
+) -> Option<(std::path::PathBuf, &'static [&'static str])> {
+    resolve_wayland_typers(path).into_iter().next()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn no_typer_error() -> Box<dyn Error> {
+    // Never Ok here: the caller plays the ready cue on Ok.
+    "could not type into the focused window on wayland (no typer on PATH); \
+     install 'wtype' (or 'ydotool'). the transcription is still in `banshee history`"
+        .into()
+}
+
+// GNOME/Mutter denies wtype the virtual-keyboard protocol it needs, so the
+// first typer resolved is not always the one that can run.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn type_with(
+    resolved: &[(std::path::PathBuf, &'static [&'static str])],
+    text: &str,
+) -> Result<(), Box<dyn Error>> {
     use std::process::Command;
 
     let mut attempts = Vec::new();
-    for (binary, args) in WAYLAND_TYPERS {
+    for (binary, args) in resolved {
         // `--` stops a leading dash being read as a flag
-        match Command::new(binary).args(args).arg(text).output() {
+        match Command::new(binary).args(*args).arg(text).output() {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 attempts.push(format!(
-                    "{binary} exited with {}: {}",
+                    "{} exited with {}: {}",
+                    binary.display(),
                     output.status,
                     stderr.trim()
                 ));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                attempts.push(format!("{binary} is not installed"));
-            }
-            Err(e) => attempts.push(format!("{binary} failed to start: {e}")),
+            Err(e) => attempts.push(format!("{} failed to start: {e}", binary.display())),
         }
     }
 
-    // Never Ok here: the caller plays the ready cue on Ok.
+    if attempts.is_empty() {
+        return Err(no_typer_error());
+    }
     Err(format!(
         "could not type into the focused window on wayland ({}); \
-         install wtype or ydotool. the transcription is still in `banshee history`",
+         install 'wtype' (or 'ydotool'). the transcription is still in `banshee history`",
         attempts.join("; ")
     )
     .into())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn type_text_wayland(text: &str) -> Result<(), Box<dyn Error>> {
+    let path = crate::connect::resolved_path();
+    type_with(&resolve_wayland_typers(&path), text)
 }
 
 // Stage the text, then restore the old clipboard. Two impls: macOS and Windows
@@ -163,6 +201,7 @@ fn stage(mut clipboard: Clipboard, text: &str, old: Option<String>) -> Result<()
 #[cfg(all(test, unix, not(target_os = "macos")))]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
 
     // Without `--`, wtype reads a leading dash as a flag and drops the text.
     #[test]
@@ -177,20 +216,92 @@ mod tests {
     }
 
     #[test]
-    fn failing_to_type_is_reported_as_an_error() {
-        // A scrubbed PATH resolves no typer, so this hits the both-missing path
-        let path = std::env::var_os("PATH");
-        // SAFETY: single-threaded test, restored before returning
-        unsafe { std::env::set_var("PATH", "") };
-        let result = type_text_wayland("hello");
-        if let Some(path) = path {
-            unsafe { std::env::set_var("PATH", path) };
-        }
-
-        let error = result.expect_err("missing typers must not report success");
-        let message = error.to_string();
+    fn no_typer_installed_is_reported_with_both_tool_names() {
+        // The resolver reads the login shell's PATH, not this process's, so
+        // scrubbing an env var here would prove nothing.
+        let message = no_typer_error().to_string();
         assert!(message.contains("wtype"), "unhelpful error: {message}");
         assert!(message.contains("ydotool"), "unhelpful error: {message}");
+    }
+
+    #[test]
+    fn resolve_wayland_typer_finds_nothing_on_an_empty_path() {
+        assert!(resolve_wayland_typer(OsStr::new("")).is_none());
+    }
+
+    #[test]
+    fn resolve_wayland_typer_returns_the_absolute_path_and_its_args() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("banshee-typer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wtype = dir.join("wtype");
+        std::fs::write(&wtype, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let found = resolve_wayland_typer(dir.as_os_str());
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (binary, args) = found.expect("a directory holding wtype must resolve it");
+        assert_eq!(binary, wtype);
+        assert_eq!(args, &["--"]);
+    }
+
+    // A fresh directory per script, so concurrent tests never share a path.
+    fn write_script(name: &str, exit_code: u8, stderr: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "banshee-typer-{}-{name}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join(name);
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho '{stderr}' >&2\nexit {exit_code}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[test]
+    fn a_typer_that_fails_at_runtime_falls_through_to_the_next() {
+        let first = write_script("first", 1, "no virtual keyboard protocol");
+        let second = write_script("second", 0, "");
+
+        let resolved = [(first.clone(), WAYLAND_TYPERS[0].1), (second.clone(), WAYLAND_TYPERS[1].1)];
+        let result = type_with(&resolved, "hello");
+
+        let _ = std::fs::remove_dir_all(first.parent().unwrap());
+        let _ = std::fs::remove_dir_all(second.parent().unwrap());
+
+        assert!(
+            result.is_ok(),
+            "a working second typer must recover from a failing first one: {result:?}"
+        );
+    }
+
+    #[test]
+    fn an_error_when_every_typer_fails_names_every_attempt() {
+        let first = write_script("alpha", 1, "boom-alpha");
+        let second = write_script("beta", 1, "boom-beta");
+
+        let resolved = [(first.clone(), WAYLAND_TYPERS[0].1), (second.clone(), WAYLAND_TYPERS[1].1)];
+        let message = type_with(&resolved, "hello")
+            .expect_err("two failing typers must not report success")
+            .to_string();
+
+        let _ = std::fs::remove_dir_all(first.parent().unwrap());
+        let _ = std::fs::remove_dir_all(second.parent().unwrap());
+
+        assert!(
+            message.contains("boom-alpha") && message.contains("boom-beta"),
+            "every attempt must be named: {message}"
+        );
     }
 }
 

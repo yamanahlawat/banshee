@@ -1,10 +1,8 @@
 // A TCC grant applies only to processes started after it lands, so the daemon
 // has to restart to pick one up. No equivalent outside macOS.
 
-use banshee_common::Blocker;
-#[cfg(target_os = "macos")]
-use banshee_common::BlockerKind;
 use banshee_common::error::BansheeError;
+use banshee_common::{Blocker, BlockerKind};
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
@@ -182,9 +180,48 @@ fn blocker(grant: &Grant) -> Blocker {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+// X11 types through enigo directly, so only a Wayland session needs a typer.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn blockers() -> Vec<Blocker> {
+    let path = crate::connect::resolved_path();
+    blockers_for(
+        crate::dictation::is_wayland(),
+        crate::dictation::resolve_wayland_typer(&path).is_some(),
+    )
+}
+
+// Neither macOS nor a Wayland-capable unix: no client of this build ever sees
+// a typer blocker.
+#[cfg(not(any(target_os = "macos", unix)))]
 pub fn blockers() -> Vec<Blocker> {
     Vec::new()
+}
+
+/// Split from the live reads, which answer only on the machine and session
+/// this runs in.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn blockers_for(wayland: bool, typer_resolved: bool) -> Vec<Blocker> {
+    if wayland && !typer_resolved {
+        vec![wayland_typer_blocker()]
+    } else {
+        Vec::new()
+    }
+}
+
+// No client reads `command` on a pipeline blocker, so the fix carries the
+// tool names in prose instead of a distribution-specific install line.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn wayland_typer_blocker() -> Blocker {
+    Blocker {
+        role: None,
+        remedy: None,
+        kind: BlockerKind::Pipeline,
+        id: "wayland_typer".to_string(),
+        name: "Typing tool".to_string(),
+        consequence: "dictation cannot type anywhere".to_string(),
+        fix: "install 'wtype' (or 'ydotool')".to_string(),
+        command: None,
+    }
 }
 
 /// States what macOS asks for and checks nothing. It cannot read the grant (see
@@ -285,5 +322,34 @@ mod tests {
             "the fix is a settings path, not a command: {}",
             blocker.fix
         );
+    }
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod wayland_typer_tests {
+    use super::*;
+
+    #[test]
+    fn wayland_with_no_typer_gets_one_pipeline_blocker() {
+        let found = blockers_for(true, false);
+        assert_eq!(found.len(), 1, "a missing typer on wayland must block");
+        assert_eq!(found[0].kind, BlockerKind::Pipeline);
+        assert_eq!(found[0].id, "wayland_typer");
+        assert_eq!(found[0].command, None);
+        assert!(
+            found[0].fix.contains("wtype") && found[0].fix.contains("ydotool"),
+            "the fix must name both tools: {}",
+            found[0].fix
+        );
+    }
+
+    #[test]
+    fn wayland_with_a_resolved_typer_has_no_blocker() {
+        assert!(blockers_for(true, true).is_empty());
+    }
+
+    #[test]
+    fn x11_never_blocks_on_a_typer() {
+        assert!(blockers_for(false, false).is_empty());
     }
 }
