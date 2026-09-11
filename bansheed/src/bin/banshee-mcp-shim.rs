@@ -76,7 +76,7 @@ async fn main() {
                             },
                             {
                                 "name": "ask_user",
-                                "description": "Ask the user a question aloud and wait for their spoken answer. Use it when you need a decision or clarification: the question is spoken, the microphone opens once it finishes playing, and the transcribed reply comes back scoped to you. Ask one focused question per call; when you have several, ask the most important first and wait for the answer before asking the next, so the user is never holding multiple questions in their head. Returns empty text if the user stayed silent.",
+                                "description": "Ask the user a question aloud and wait for their spoken answer. The user is working eyes-free and cannot see the screen, so every question goes through this tool: never write a question as text, and never put one in an on-screen prompt or menu. Use it when you need a decision or clarification: the question is spoken, the microphone opens once it finishes playing, and the transcribed reply comes back scoped to you. Ask one focused question per call; when you have several, ask the most important first and wait for the answer before asking the next, so the user is never holding multiple questions in their head. Returns empty text if the user stayed silent.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {

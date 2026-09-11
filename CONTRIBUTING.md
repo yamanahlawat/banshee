@@ -17,19 +17,50 @@ The daemon exposes a JSON-RPC 2.0 API over a Unix socket at
 
 ## Building
 
-You need stable Rust ([rustup](https://rustup.rs)) and, for now, macOS.
+You need stable Rust ([rustup](https://rustup.rs)).
+
+`banshee-app` (the desktop window) is a Tauri app that needs GTK and
+webkit2gtk. A plain `cargo build` builds the whole workspace, so it fails on a
+Linux machine without those libraries. See
+[docs/linux.md](docs/linux.md) for the package names.
+
+On macOS:
 
 ```bash
 git clone https://github.com/yamanahlawat/banshee.git
 cd banshee
-cargo build    # Metal + CoreML acceleration for Whisper enabled automatically on macOS
+cargo build    # Metal + CoreML acceleration for Whisper enabled automatically
 ```
+
+On Linux, exclude `banshee-app`:
+
+```bash
+git clone https://github.com/yamanahlawat/banshee.git
+cd banshee
+cargo build --release --workspace --exclude banshee-app
+```
+
+This produces `target/release/banshee` and `target/release/banshee-mcp-shim`.
+`banshee-tray` also builds, and `banshee tray` runs it. See
+[docs/linux.md](docs/linux.md). An `nvidia`
+feature adds CUDA acceleration: add `--features nvidia`.
+
+To also link the binaries onto your `PATH` and register the `systemd --user`
+service, use `make install` instead. It carries on when no systemd user bus
+answers. See "Installing on Linux" below.
 
 Before opening a PR, make sure both of these pass:
 
 ```bash
 cargo test
 cargo clippy --all-targets -- -D warnings
+```
+
+On Linux, exclude `banshee-app` from both, since it needs GTK and WebKitGTK:
+
+```bash
+cargo test --workspace --exclude banshee-app
+cargo clippy --workspace --all-targets --exclude banshee-app -- -D warnings
 ```
 
 ## Running your build
@@ -77,6 +108,25 @@ asks you to grant Accessibility once more. A grant only applies to a freshly
 started process, so expect to approve the prompt, run `banshee start` again,
 and repeat until the hotkey earcon plays. After that, the signature never
 changes and the grant sticks.
+
+## Installing on Linux
+
+```bash
+make install
+```
+
+Builds `banshee` and `banshee-mcp-shim` (release, `banshee-app` excluded),
+symlinks both into `~/.local/bin` (override with `BIN_DIR=...`), and runs
+`banshee start`. That registers and (re)starts a `systemd --user` unit. See
+`bansheed/src/service.rs`. A machine with no systemd user bus fails that step.
+The install still finishes, and it names `banshee serve` to start the daemon
+yourself. Re-running `make install` after a change rebuilds and restarts the
+service.
+
+`make install-window` depends on `install`, so it builds and installs the
+daemon, the CLI and the desktop window together. See
+[docs/linux.md](docs/linux.md) for what it needs. There is no signing step.
+`banshee tray` puts the mark in the bar.
 
 ## Submitting changes
 

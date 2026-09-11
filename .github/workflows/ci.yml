@@ -26,10 +26,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
-      # The VAD tests exercise the real Silero model (2 MB), same source as banshee setup
+      # The VAD tests exercise the real Silero model (2 MB), same source as banshee
+      # setup. Pinned to a commit and checked: `master` can change the test input
+      # without a change in this repository.
       - run: |
           mkdir -p ~/.banshee/models
-          curl -fsSL -o ~/.banshee/models/silero_vad.onnx https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
+          curl -fsSL -o ~/.banshee/models/silero_vad.onnx \
+            https://github.com/snakers4/silero-vad/raw/bfdc0193023f121ea5b3cc7b176dbed570a68a59/src/silero_vad/data/silero_vad.onnx
+          echo "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3  $HOME/.banshee/models/silero_vad.onnx" | shasum -a 256 -c -
       - run: cargo test
 
   # The window's suite is the only check on the Svelte half, including the
@@ -60,9 +64,39 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxtst-dev libxi-dev libxdo-dev
+      # libgtk-3-dev is for the tray, which links gtk on every platform but macOS.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxtst-dev libxi-dev libxdo-dev libgtk-3-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The window is a macOS app bundle. Building it here would need
-      # webkit2gtk and soup, which this job has no reason to install.
-      - run: cargo check --workspace --all-targets --exclude banshee-app
+      # The same pinned model the macos job checks; see the reason there.
+      - run: |
+          mkdir -p ~/.banshee/models
+          curl -fsSL -o ~/.banshee/models/silero_vad.onnx \
+            https://github.com/snakers4/silero-vad/raw/bfdc0193023f121ea5b3cc7b176dbed570a68a59/src/silero_vad/data/silero_vad.onnx
+          echo "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3  $HOME/.banshee/models/silero_vad.onnx" | sha256sum -c -
+      # The window builds in `linux-window`, which carries the WebKitGTK stack.
+      # This job runs the daemon's own suite, which no job ran on Linux before.
+      - run: cargo test --workspace --exclude banshee-app
+
+  # The window on Linux. Split from `linux` so that job stays fast: only this
+  # one pays for the WebKitGTK stack and a frontend build.
+  linux-window:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: banshee-app/ui/package-lock.json
+      # tauri-build embeds ui/dist, so the frontend builds first or the window
+      # points at the dev server.
+      - run: npm ci && npm run build
+        working-directory: banshee-app/ui
+      - run: cargo clippy -p banshee-app --all-targets -- -D warnings
+      - run: cargo test -p banshee-app

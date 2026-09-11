@@ -117,11 +117,29 @@ pub const WAYLAND_HOTKEY_HINT: &str = "the global hotkey needs X11. Bind \
      `banshee record start` on press and `banshee record stop` on release in \
      your compositor instead";
 
+/// Whether the daemon binds the global hotkey itself in this session. False on
+/// Wayland: no protocol grants a global grab there, so the compositor holds the
+/// binding. A client reads this before it names a key, because naming one the
+/// daemon never listens for is a promise it cannot keep.
+pub fn listens() -> bool {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if crate::dictation::is_wayland() {
+        return false;
+    }
+    true
+}
+
 pub fn usage_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
     #[cfg(all(unix, not(target_os = "macos")))]
     if crate::dictation::is_wayland() {
         return format!("{WAYLAND_HOTKEY_HINT}.");
     }
+    bound_key_hint(hotkey, hotkey_mode)
+}
+
+// Split from `usage_hint`, which answers from the live session. A test cannot
+// choose the session it runs under, so it reads this half instead.
+fn bound_key_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
     let press = match hotkey_mode {
         HotkeyMode::Toggle => format!("Tap {hotkey} and speak, then tap it again to stop."),
         HotkeyMode::Hold => format!("Hold {hotkey} and speak, then release to stop."),
@@ -137,8 +155,8 @@ pub fn usage_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
 // rdev needs X11's XRecord, which wayland does not serve: listen either errors
 // or attaches to Xwayland and never sees a key. Say so instead of looking broken.
 pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_mode: HotkeyMode) {
-    #[cfg(all(unix, not(target_os = "macos")))]
-    if crate::dictation::is_wayland() {
+    if !listens() {
+        #[cfg(all(unix, not(target_os = "macos")))]
         println!("Wayland session: {WAYLAND_HOTKEY_HINT}.");
         return;
     }
@@ -498,11 +516,11 @@ mod hint_tests {
 
     #[test]
     fn the_hint_matches_the_mode_in_effect() {
-        let toggle = usage_hint(Hotkey::default(), HotkeyMode::Toggle);
+        let toggle = bound_key_hint(Hotkey::default(), HotkeyMode::Toggle);
         assert!(toggle.contains("again"), "toggle must say to press twice");
         assert!(!toggle.contains("release"), "toggle must not say release");
 
-        let hold = usage_hint(Hotkey::default(), HotkeyMode::Hold);
+        let hold = bound_key_hint(Hotkey::default(), HotkeyMode::Hold);
         assert!(hold.contains("release"), "hold must say to release");
         assert!(!hold.contains("again"), "hold must not say to press twice");
     }
@@ -512,7 +530,7 @@ mod hint_tests {
     fn the_hint_names_the_key_the_listener_matches() {
         let rebound = hotkey("F6").unwrap();
         for mode in [HotkeyMode::Toggle, HotkeyMode::Hold] {
-            let hint = usage_hint(rebound, mode);
+            let hint = bound_key_hint(rebound, mode);
             assert!(hint.contains("F6"), "the bound key must be named: {hint}");
             assert!(
                 !hint.contains("RightOption"),

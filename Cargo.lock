@@ -452,6 +452,7 @@ dependencies = [
  "cpal",
  "dirs",
  "enigo",
+ "gtk",
  "hound",
  "json5",
  "misaki-rs",
