@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "banshee"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "arboard",
  "audioadapter-buffers",
@@ -452,6 +452,7 @@ dependencies = [
  "cpal",
  "dirs",
  "enigo",
+ "gtk",
  "hound",
  "json5",
  "misaki-rs",
@@ -479,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "banshee-app"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "banshee-common",
  "serde",
@@ -494,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "banshee-common"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "dirs",
  "serde",

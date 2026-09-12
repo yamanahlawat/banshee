@@ -59,6 +59,22 @@ pub fn write_atomically(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io
     std::fs::rename(&staged, path)
 }
 
+/// systemd's name for the daemon's user unit. `bansheed` writes the file and
+/// `banshee-app` starts it, so the spelling is shared.
+pub const DAEMON_UNIT: &str = "banshee.service";
+
+/// systemd's name for the tray's user unit.
+pub const TRAY_UNIT: &str = "banshee-tray.service";
+
+/// The unit that runs the job a launchd label names.
+pub fn systemd_unit(label: &str) -> Option<&'static str> {
+    match label {
+        DAEMON_AGENT => Some(DAEMON_UNIT),
+        TRAY_AGENT => Some(TRAY_UNIT),
+        _ => None,
+    }
+}
+
 /// What launchctl calls one job of the logged-in user.
 pub fn launchd_target(label: &str) -> String {
     format!("gui/{}/{label}", uid())
@@ -171,5 +187,20 @@ async fn call(
             code: error.code,
             message: error.message,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_daemon_label_names_its_own_unit() {
+        assert_eq!(systemd_unit(DAEMON_AGENT), Some(DAEMON_UNIT));
+    }
+
+    #[test]
+    fn the_tray_label_names_its_own_unit() {
+        assert_eq!(systemd_unit(TRAY_AGENT), Some("banshee-tray.service"));
     }
 }

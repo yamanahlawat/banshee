@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 arboard = "3.6.1"
 audioadapter-buffers = "3.0.0"
-banshee-common = { version = "0.12.2", path = "../banshee-common" }
+banshee-common = { version = "0.13.0", path = "../banshee-common" }
 chrono = "0.4"
 clap = { version = "4.6.1", features = ["derive"] }
 cpal = "0.17.3"
@@ -45,20 +45,40 @@ tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "i
 toml = "1.1.2"
 toml_edit = { version = "0.25", features = ["serde"] }
 whisper-rs = "0.16.0"
+# The mark is a png on every platform. winit is macOS only, below.
+png = "0.18.1"
+
+[target.'cfg(target_os = "macos")'.dependencies.tray-icon]
+version = "0.24.2"
+
+# `libxdo` is a default feature, and muda uses it only to work the predefined
+# Copy, Cut, Paste and SelectAll menu items. This menu has none of them, so the
+# feature would buy a build dependency on xdotool and nothing else.
+[target.'cfg(not(target_os = "macos"))'.dependencies.tray-icon]
+version = "0.24.2"
+default-features = false
+features = ["gtk"]
+
+# arboard talks X11 by default. A Wayland session has no X11 clipboard of its
+# own, so without this feature the text is set where nothing reads it.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies.arboard]
+version = "3.6.1"
+features = ["wayland-data-control"]
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 enigo = "0.6.1"
+# The tray builds gtk widgets, so a gtk loop must own the thread. macOS needs no
+# entry here: AppKit's own loop already serves the icon.
+gtk = "0.18.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The menu bar indicator's loop. winit runs it because tray-icon tests against
+# it and it commits to no toolkit. The gtk loop serves every other platform.
+winit = "0.30.13"
 # The options dictionary AXIsProcessTrustedWithOptions takes; see permissions.rs.
 core-foundation = "0.10"
 # Posts the paste keystroke with its modifier as a flag; see dictation.rs.
 core-graphics = "0.25"
-# The menu bar indicator. winit runs the loop because tray-icon tests against
-# it and it commits to no toolkit.
-png = "0.18.1"
-tray-icon = "0.24.2"
-winit = "0.30.13"
 # Metal + CoreML are always on for macOS (including prebuilt release binaries);
 # whisper.cpp falls back to CPU at runtime if the GPU path is unavailable.
 whisper-rs = { version = "0.16.0", features = ["metal", "coreml"] }

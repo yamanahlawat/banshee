@@ -61,7 +61,7 @@ knows about, and changes nothing itself.
 |                       | With the desktop window                                                                 | Terminal only                          |
 | --------------------- | --------------------------------------------------------------------------------------- | -------------------------------------- |
 | macOS (Apple Silicon) | [the cask](#macos-with-the-window), or [a direct download](#macos-without-homebrew)       | [the formula](#macos-terminal-only)    |
-| Linux (x86_64, arm64) | not yet                                                                                   | [the formula or the installer](#linux) |
+| Linux (x86_64, arm64) | [from source](docs/linux.md#building-the-desktop-window)                                 | [the formula or the installer](#linux) |
 | Windows               | not yet                                                                                   | not yet                                |
 
 Pick one. Needs ~1 GB of disk for the models. Intel Macs are not supported.
@@ -120,6 +120,9 @@ bar. See [docs/linux.md](docs/linux.md) for the typing tool and the service.
 ### From source
 
 Clone the repo and run `make install`; see [CONTRIBUTING.md](CONTRIBUTING.md).
+It works on macOS and Linux. On Linux it also registers and starts the
+`systemd --user` service, where systemd answers. Without it the install still
+finishes, and `banshee serve` starts the daemon.
 
 ## Set up from the terminal
 

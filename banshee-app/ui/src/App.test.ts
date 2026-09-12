@@ -1915,3 +1915,48 @@ it('says what the voice changes to, in whichever direction it waits', async () =
     ),
   );
 });
+
+// Wayland grants no global grab, so the daemon binds nothing and says so.
+// Every place the window named a key was a promise nobody could keep.
+const onWayland = { ...ready, hotkey_listens: false };
+
+it('names the compositor in the foot, not a key nobody listens for', async () => {
+  vi.mocked(status).mockResolvedValue(onWayland);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const cell = screen.getByRole('button', { name: /^Hotkey/ });
+  expect(cell.textContent).toMatch(/Compositor/);
+  expect(cell.textContent).not.toMatch(/Right Command/);
+});
+
+it('offers the compositor commands instead of a capture that writes nothing', async () => {
+  vi.mocked(status).mockResolvedValue(onWayland);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
+
+  expect(await screen.findByText(/banshee record start --dictate/)).toBeTruthy();
+  // The capture writes `audio.hotkey`, and no listener reads it in this session.
+  expect(screen.queryByRole('button', { name: /change the hotkey/ })).toBeNull();
+});
+
+it('sends the answerer to the compositor binding while an agent waits', async () => {
+  vi.mocked(status).mockResolvedValue(onWayland);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  daemon.update((s) => ({ ...s, live: { ...s.live, armed: true } }));
+
+  await waitFor(() =>
+    expect(screen.getByText(/compositor's Banshee binding to answer/)).toBeTruthy(),
+  );
+  expect(screen.queryByText(/Tap Right Command to answer/)).toBeNull();
+});
+
+// A daemon older than the field sends none, and that daemon did bind the key.
+it('still names the key when the daemon reports nothing either way', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  expect(screen.getByRole('button', { name: /^Hotkey/ }).textContent).toMatch(/Right Command/);
+});

@@ -535,7 +535,7 @@ fn a_setting_whose_file_is_still_missing_keeps_waiting() {
 #[test]
 fn a_restart_only_key_is_left_alone() {
     let running: Config =
-        toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
+        toml::from_str("[audio]\nhotkey = \"LeftControl\"\n").expect("a legal binding");
     let state = crate::test_support::daemon_state_running(running, std::sync::mpsc::channel().0);
     let next: Config =
         toml::from_str("[audio]\nhotkey = \"LeftCommand\"\n").expect("a legal binding");
@@ -565,10 +565,10 @@ fn a_key_that_needs_a_restart_becomes_pending_and_a_live_one_does_not() {
 #[test]
 fn a_restart_only_key_set_to_the_value_already_running_needs_no_restart() {
     let running: Config =
-        toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
+        toml::from_str("[audio]\nhotkey = \"LeftControl\"\n").expect("a legal binding");
     let state = crate::test_support::daemon_state_running(running, std::sync::mpsc::channel().0);
     let next: Config =
-        toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
+        toml::from_str("[audio]\nhotkey = \"LeftControl\"\n").expect("a legal binding");
 
     let keys = vec!["audio.hotkey".to_string()];
     let outcome = super::apply_each(&state, &next, keys.iter());
@@ -586,7 +586,7 @@ fn a_restart_only_key_set_to_the_value_already_running_needs_no_restart() {
 #[test]
 fn a_restart_only_key_set_to_a_different_value_still_waits() {
     let running: Config =
-        toml::from_str("[audio]\nhotkey = \"RightCommand\"\n").expect("a legal binding");
+        toml::from_str("[audio]\nhotkey = \"LeftControl\"\n").expect("a legal binding");
     let state = crate::test_support::daemon_state_running(running, std::sync::mpsc::channel().0);
     let next: Config =
         toml::from_str("[audio]\nhotkey = \"LeftCommand\"\n").expect("a legal binding");

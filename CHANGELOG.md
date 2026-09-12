@@ -40,8 +40,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `remote`. A status reply carries `remote`, which says whether audio or text
   leaves the machine. A config without the keys reads as before. The daemon
   reads both keys when it starts, so `banshee config set` tells you to restart.
+## [0.13.0] - 2026-09-12
+
+### Added
+
+- **The menu bar icon now runs on Linux.** `banshee tray` puts the mark in any
+  bar that hosts StatusNotifierItem, and the desktop window starts it for you.
+  The menu names the state and the microphone, copies your last dictation, and
+  opens the window. Right click opens it; left click waits on a fix upstream.
+
+- **The desktop window now builds and installs on Linux.** Run `make
+  install-window` from a source clone to build it; it needs GTK, WebKitGTK
+  and Node 22. The install adds a desktop entry and icons, so your launcher
+  finds Banshee.
+
+- **The window now shows a blocker when no Wayland typer is installed.** Off
+  macOS, dictation types by shelling out to `wtype` or `ydotool`. `banshee
+  status` already named a missing one, but the window's blockers band stayed
+  empty. It now lists a blocker for the missing tool, and names `wtype` and
+  `ydotool` as the fix.
 
 ### Fixed
+
+- **Dictation runs the typing tool it told you about.** The daemon looked up
+  `wtype` and `ydotool` in its own `PATH`, while `banshee status` looked in the
+  login shell's. A supervised daemon holds the smaller one, so the checklist
+  could name a tool the daemon could not run. One search now answers both, and
+  every installed tool gets a turn before dictation reports a failure.
+
+- **The window stops naming a hotkey nobody listens for.** On Wayland no
+  protocol grants a global hotkey, so Banshee binds none and the compositor
+  holds the binding. The window said `Right Option` in five places and offered
+  a key-capture control that wrote a setting nothing read. It now says the
+  compositor holds it, and the Hotkey panel gives you the two commands to bind.
+
+- **The window's Find hint names a key Linux keyboards have.** The record's
+  header said `⌘F`, the macOS Command glyph, on every platform. It now says
+  `Ctrl+F` off macOS. The shortcut itself always accepted both.
 
 - **The `ask_user` tool now says why it exists.** Its description tells the agent
   you cannot see the screen, so a question written as text or put in an on-screen
@@ -757,7 +792,9 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/yamanahlawat/banshee/compare/v0.12.2...v0.13.0
+[0.12.2]: https://github.com/yamanahlawat/banshee/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/yamanahlawat/banshee/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/yamanahlawat/banshee/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/yamanahlawat/banshee/compare/v0.11.0...v0.11.1
