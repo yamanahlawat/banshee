@@ -14,6 +14,10 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
   after showing the change. Antigravity, Claude Code, OpenCode and Pi are verified on a real
   install; Cursor and Codex wait for a report (#53, #54).
 - A microphone that disappears no longer stops dictation (#47).
+- The desktop window and the menu bar icon run on Linux. `make install-window` builds both
+  from a source clone, and the icon sits in any bar that hosts StatusNotifierItem. The
+  blockers band names a missing Wayland typer. On Wayland the compositor holds the hotkey,
+  and the window says so instead of naming a key nothing binds.
 
 ## Next, maintainer
 
@@ -40,12 +44,11 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
    3. Remote speech. The same OpenAI-compatible shape first, ElevenLabs second for its
       expressive controls. After transcription because it touches the output sink path,
       which the output-sinks item below records as fragile.
-2. The window on Linux, as an AppImage and an AUR package, built by the bundle workflow with
-   GTK and WebKit installed. The blockers band grows rows for the typers and the daemon's
-   `PATH`, and the launcher stands in for the tray. After the keys, because the CLI loop
-   already covers Linux: dictation and spoken status with Claude Code are verified on Omarchy,
-   and `banshee watch --waybar` covers the live loop. It also gives the WebDriver acceptance
-   layer its first host: `tauri-driver` runs on Linux, not on macOS.
+2. Linux packaging: an AppImage and an AUR package, built by the bundle workflow with GTK and
+   WebKit installed. The window and the tray already run there, but only from a source clone,
+   which asks a user for a Rust toolchain and Node. The daemon's `PATH` still wants a blockers
+   row. It also gives the WebDriver acceptance layer its first host: `tauri-driver` runs on
+   Linux, not on macOS.
 3. Output sinks that survive a device change (the cue and Kokoro sinks still open once).
    Measure whether spoken status dies with the earcons before designing.
 4. Notarisation with an Apple Developer ID, so the bundle opens with no dialog. Last, because
