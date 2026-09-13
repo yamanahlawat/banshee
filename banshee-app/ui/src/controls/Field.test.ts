@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { expect, it } from 'vitest';
+import { tick } from 'svelte';
 import Field from './Field.svelte';
 
 // A row still showing the refused text reads as a value the daemon took, and
@@ -10,6 +11,35 @@ it('goes back to the value the daemon holds when the write is refused', async ()
   await fireEvent.input(input, { target: { value: '' } });
   await fireEvent.blur(input);
   await waitFor(() => expect(input.value).toBe('https://api.openai.com/v1'));
+});
+
+it('keeps the newer value when an older refused write lands late', async () => {
+  let resolveFirst: (value: boolean) => void = () => {};
+  const first = new Promise<boolean>((resolve) => {
+    resolveFirst = resolve;
+  });
+  let calls = 0;
+  const commit = (_next: string) => {
+    calls += 1;
+    return calls === 1 ? first : Promise.resolve(true);
+  };
+  render(Field, { label: 'Server', value: 'a', commit });
+  const input = screen.getByRole('textbox', { name: 'Server' }) as HTMLInputElement;
+
+  await fireEvent.focus(input);
+  await fireEvent.input(input, { target: { value: 'b' } });
+  await fireEvent.blur(input);
+
+  await fireEvent.focus(input);
+  await fireEvent.input(input, { target: { value: 'c' } });
+  await fireEvent.blur(input);
+  await waitFor(() => expect(input.value).toBe('c'));
+
+  resolveFirst(false);
+  await first;
+  await tick();
+  await tick();
+  expect(input.value).toBe('c');
 });
 
 it('commits on Enter and on blur, once per change', async () => {

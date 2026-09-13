@@ -9,6 +9,7 @@ pub enum Probe {
     Answers,
     KeyRefused,
     NoModelsPath,
+    Failed(u16),
     Unreachable(String),
 }
 
@@ -41,8 +42,8 @@ fn ask(base_url: &str, api_key: &str) -> Probe {
     match response.status().as_u16() {
         401 | 403 => Probe::KeyRefused,
         404 => Probe::NoModelsPath,
-        // The server is there and the key was not refused
-        _ => Probe::Answers,
+        200..=299 => Probe::Answers,
+        code => Probe::Failed(code),
     }
 }
 
@@ -103,6 +104,13 @@ mod tests {
     fn a_server_without_a_models_path_is_a_note() {
         let (base_url, served) = serve_once("404 Not Found", "");
         assert_eq!(probe(&base_url, FAKE_KEY), Probe::NoModelsPath);
+        served.join().unwrap();
+    }
+
+    #[test]
+    fn a_server_error_is_a_failure_and_names_the_code() {
+        let (base_url, served) = serve_once("500 Internal Server Error", "");
+        assert_eq!(probe(&base_url, FAKE_KEY), Probe::Failed(500));
         served.join().unwrap();
     }
 

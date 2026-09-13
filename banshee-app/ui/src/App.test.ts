@@ -353,6 +353,15 @@ it('says the listening happens on this machine when it does', async () => {
   expect(cell.querySelector('.pending')).toBeNull();
 });
 
+it('marks the microphone cell for a pending stt.remote key', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['stt.remote.model'] });
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const cell = container.querySelector('#job-microphone') as HTMLElement;
+  await waitFor(() => expect(cell.textContent).toContain(RESTART_SAYS));
+});
+
 it('names a remote listener the daemon cannot name', async () => {
   vi.mocked(status).mockResolvedValue({
     ...remote,

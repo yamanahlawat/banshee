@@ -20,11 +20,10 @@ export function listeningLead(facts: Listening): string {
   if (!facts.live) return 'Banshee is not running, so no microphone is open.';
   if (facts.remote) {
     const host = facts.host ?? A_SERVER;
-    if (facts.pending) return `Banshee sends what you say to ${host} until it restarts.`;
     if (facts.stoppedBy === 'keyfile') return `Banshee cannot read the key file for ${host}.`;
-    return facts.stoppedBy !== null
-      ? `Banshee cannot reach ${host} to hear you.`
-      : `Banshee sends what you say to ${host} to be heard.`;
+    if (facts.stoppedBy !== null) return `Banshee cannot reach ${host} to hear you.`;
+    if (facts.pending) return `Banshee sends what you say to ${host} until it restarts.`;
+    return `Banshee sends what you say to ${host} to be heard.`;
   }
   if (facts.pending) {
     return `Banshee will send what you say to ${facts.willUse ?? A_SERVER} when it restarts.`;
@@ -39,19 +38,15 @@ export function listeningNote(facts: Listening): string {
   if (!facts.live) return 'Nothing is heard until Banshee starts.';
   const host = facts.host ?? A_SERVER;
   const waits = facts.pending ? ` ${TAKES_EFFECT}` : '';
-  if (facts.pending) {
-    return facts.remote
-      ? `Audio still goes to ${host}.${waits}`
-      : `Audio still stays on this machine.${waits}`;
-  }
   if (facts.remote) {
     if (facts.stoppedBy === 'keyfile') {
       return `Nothing goes to ${host} until the key file is removed and the key is set again.`;
     }
-    return facts.stoppedBy !== null
-      ? `Nothing goes to ${host} until the listener starts.`
-      : `Audio goes to ${host}.`;
+    if (facts.stoppedBy !== null) return `Nothing goes to ${host} until the listener starts.`;
+    if (facts.pending) return `Audio still goes to ${host}.${waits}`;
+    return `Audio goes to ${host}.`;
   }
+  if (facts.pending) return `Audio still stays on this machine.${waits}`;
   return facts.keyPresent
     ? 'Audio stays on this machine. The server and key you set are still saved.'
     : 'Audio stays on this machine.';

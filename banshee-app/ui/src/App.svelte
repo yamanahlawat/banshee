@@ -272,7 +272,7 @@
             ? listening.remote
               ? 'changing to this machine when Banshee restarts'
               : `changing to ${listening.willUse ?? A_SERVER} when Banshee restarts`
-            : undefined,
+            : waitsUnder('stt.remote.'),
       },
       {
         id: 'job-hotkey',

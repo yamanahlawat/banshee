@@ -287,6 +287,10 @@ fn check_remote_answer(
             ));
             true
         }
+        crate::remote_probe::Probe::Failed(code) => fail(
+            &format!("the remote {} answered HTTP {code}", side.side()),
+            &format!("check the server at {host}"),
+        ),
         crate::remote_probe::Probe::Unreachable(reason) => fail(
             &reason,
             &format!("check {} and the network", side.base_url_setting()),

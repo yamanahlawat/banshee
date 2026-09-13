@@ -123,6 +123,11 @@ const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
     { stoppedBy: 'keyfile' },
     'Banshee cannot read the key file for api.openai.com.',
   ],
+  [
+    'a listener down while a switch to local waits sends nothing yet',
+    { pending: true, stoppedBy: 'provider' },
+    'Banshee cannot reach api.openai.com to hear you.',
+  ],
 ];
 
 it.each(LISTENING_LEADS)('the microphone lead, when %s', (_, over, says) => {
@@ -168,6 +173,11 @@ const LISTENING_NOTES: [string, Partial<Listening>, string][] = [
     'a remote listener whose key file cannot be read',
     { stoppedBy: 'keyfile' },
     'Nothing goes to api.openai.com until the key file is removed and the key is set again.',
+  ],
+  [
+    'a listener down while a switch to local waits sends nothing yet',
+    { pending: true, stoppedBy: 'provider' },
+    'Nothing goes to api.openai.com until the listener starts.',
   ],
 ];
 

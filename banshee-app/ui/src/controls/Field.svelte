@@ -19,6 +19,8 @@
   let draft = value;
   $: draft = value;
   let release: (() => void) | null = null;
+  // A write refused after a newer one landed skips its rollback.
+  let generation = 0;
 
   // Typing owns the keyboard: otherwise Escape closes the panel and Cmd+F opens
   // Find mid-word.
@@ -37,11 +39,12 @@
   async function settle() {
     letGo();
     if (draft === value) return;
+    const mine = ++generation;
     const sent = draft;
     const stored = value;
     draft = masked ? '' : sent;
     value = draft;
-    if ((await commit(sent)) === false) {
+    if ((await commit(sent)) === false && mine === generation) {
       value = stored;
       draft = value;
     }
