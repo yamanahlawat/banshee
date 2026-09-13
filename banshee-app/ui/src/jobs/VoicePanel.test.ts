@@ -196,6 +196,14 @@ it('says the voice waits on a restart, beside the voices', () => {
   );
 });
 
+it('says the remote server waits on a restart', () => {
+  daemon.set(reduceStatus(empty(), { ...remoteStatus, pending: ['tts.remote.base_url'] }));
+  const { container } = render(VoicePanel, { voices: VOICES });
+  const pending = container.querySelectorAll('.note.pending');
+  expect(pending).toHaveLength(1);
+  expect(pending[0].textContent).toBe(PENDING_SAYS);
+});
+
 // The group says the restart in its own sentence, so the pending line every
 // other row draws would state it a second time.
 it('states the restart in the sentence, and draws no pending line for it', () => {

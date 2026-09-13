@@ -220,7 +220,7 @@
   change={(next) => write('stt.provider', next)}
 >
   {#if provider === 'remote'}
-    <SubRow name="server">
+    <SubRow name="server" pending={$waitsOnARestart.has('stt.remote.base_url')}>
       <Field
         label="Server"
         value={String(remoteTable.base_url ?? '')}

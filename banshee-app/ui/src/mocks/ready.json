@@ -60,5 +60,9 @@
       "level": "info"
     }
   },
-  "pending": []
+  "pending": [],
+  "remote": {
+    "stt": { "remote": false, "host": null, "key_present": false },
+    "tts": { "remote": false, "host": null, "speaker_started": true, "key_present": false }
+  }
 }

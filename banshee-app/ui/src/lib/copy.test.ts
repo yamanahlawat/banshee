@@ -231,6 +231,11 @@ const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
   ['a local speaker names its voice', { remote: false }, 'Banshee speaks as marin.'],
   ['a local speaker has no voice', { remote: false, voiceName: '' }, 'Banshee has no voice yet.'],
   [
+    'the local voice failed to load',
+    { remote: false, started: false, voiceName: 'Bella' },
+    'Banshee speaks with the system voice. Bella did not load.',
+  ],
+  [
     'a flip to a remote speaker names the server the config asks for',
     { remote: false, pending: true },
     'Banshee will speak through api.groq.com when it restarts.',

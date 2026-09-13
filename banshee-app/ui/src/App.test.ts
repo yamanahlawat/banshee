@@ -1818,6 +1818,29 @@ it('names no speaker host on a first run when the speaker did not start', async 
   expect(opening.textContent).not.toContain('api.openai.com');
 });
 
+// The Microphone lead already says Banshee cannot reach the remote listener
+// once a recording_pipeline blocker stops it, so the opening must not repeat
+// a promise the daemon just broke.
+it('names no listening host on a first run when the pipeline blocker stops the listener', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  vi.mocked(status).mockResolvedValue({
+    ...remote,
+    blockers: [
+      {
+        kind: 'provider',
+        id: 'recording_pipeline',
+        name: 'Remote transcription',
+        remedy: 'restart',
+        consequence: 'dictation cannot reach the remote server',
+        fix: 'check the remote server',
+      },
+    ] as Blocker[],
+  });
+  render(App);
+  const opening = await waitFor(() => screen.getByText(/types what you say/));
+  expect(opening.textContent).not.toContain('goes to');
+});
+
 // The voice is not missing when the daemon is down, so the heading says which
 // of the two is wrong.
 it('blames the stopped daemon rather than the voice', async () => {

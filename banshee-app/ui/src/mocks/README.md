@@ -9,10 +9,11 @@ Real daemon replies, captured on macOS 25.6.0: Banshee 0.11.1 on 2026-08-27,
 `permissions.json` again on 2026-09-01, `remote.json` from Banshee 0.12.2 on
 2026-09-09, and `remote-speech.json` on 2026-09-10. Nothing here is hand-typed
 except `not-running.json`, which the
-daemon cannot produce because a stopped daemon answers nothing, and two objects
+daemon cannot produce because a stopped daemon answers nothing, two objects
 in `remote.json` that the capture predates: `remote.tts` and
-`config.tts.remote`. `remote-speech.json` holds both of those from a real
-reply, so it is the one to read for the speaker's shape.
+`config.tts.remote`, and `ready.json`'s `remote` block, which that capture
+predates too. `remote-speech.json` holds both of the `remote.json` objects
+from a real reply, so it is the one to read for the speaker's shape.
 
 | File | What it is | How it was captured |
 | --- | --- | --- |

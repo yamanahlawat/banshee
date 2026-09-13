@@ -222,7 +222,7 @@ fn select_local_backend(tts_config: &TTSConfig) -> Result<Selection, BansheeErro
                 Ok(Selection {
                     backend: Box::new(SayBackend),
                     speaker: Speaker::Fallback,
-                    fault: None,
+                    fault: Some(e.to_string()),
                 })
             }
             TTSFallback::None => Err(e),
@@ -517,5 +517,29 @@ mod tests {
         .unwrap();
         let reason = refusal_of(selected.backend.as_ref());
         assert!(reason.contains("tts.remote.voice"), "{reason}");
+    }
+
+    #[test]
+    fn a_kokoro_start_failure_falls_back_and_says_why() {
+        let tts = crate::config::TTSConfig {
+            voice: "banshee-test-nonexistent-voice".to_string(),
+            fallback: crate::config::TTSFallback::System,
+            ..Default::default()
+        };
+        let kokoro_config = KokoroTTSConfig::new(&tts.voice);
+        let expected = KokoroEngine::new(&kokoro_config, tts.speed)
+            .err()
+            .expect("a nonexistent voice must not load")
+            .to_string();
+
+        let selected = select_local_backend(&tts).unwrap();
+        assert!(
+            !selected.speaker.started(),
+            "the system voice is not the speaker the config names"
+        );
+        let reason = selected
+            .fault
+            .expect("the Kokoro start failure must be reported");
+        assert_eq!(reason, expected);
     }
 }

@@ -78,7 +78,7 @@
   change={(next) => write('tts.provider', next)}
 >
   {#if provider === 'remote'}
-    <SubRow name="server">
+    <SubRow name="server" pending={$waitsOnARestart.has('tts.remote.base_url')}>
       <Field
         label="Server"
         value={String(remoteTable.base_url ?? '')}
@@ -86,7 +86,7 @@
         commit={(next) => write('tts.remote.base_url', next)}
       />
     </SubRow>
-    <SubRow name="model">
+    <SubRow name="model" pending={$waitsOnARestart.has('tts.remote.model')}>
       <Field
         label="Model"
         value={String(remoteTable.model ?? '')}
@@ -94,7 +94,7 @@
         commit={(next) => write('tts.remote.model', next)}
       />
     </SubRow>
-    <SubRow name="voice">
+    <SubRow name="voice" pending={$waitsOnARestart.has('tts.remote.voice')}>
       <Field
         label="Voice"
         value={String(remoteTable.voice ?? '')}
@@ -103,7 +103,7 @@
         commit={(next) => write('tts.remote.voice', next)}
       />
     </SubRow>
-    <SubRow name="tone">
+    <SubRow name="tone" pending={$waitsOnARestart.has('tts.remote.instructions')}>
       <Field
         label="Tone"
         value={String(remoteTable.instructions ?? '')}

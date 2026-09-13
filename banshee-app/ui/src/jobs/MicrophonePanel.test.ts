@@ -106,6 +106,14 @@ it('says the local model waits on a restart', () => {
   expect(pending[0].textContent).toBe(PENDING_SAYS);
 });
 
+it('says the remote server waits on a restart', () => {
+  daemon.set(reduceStatus(empty(), { ...remoteStatus, pending: ['stt.remote.base_url'] }));
+  const { container } = render(MicrophonePanel);
+  const pending = container.querySelectorAll('.note.pending');
+  expect(pending).toHaveLength(1);
+  expect(pending[0].textContent).toBe(PENDING_SAYS);
+});
+
 it('holds the server, the model and the key inside the listener group', () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
   render(MicrophonePanel);

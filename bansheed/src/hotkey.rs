@@ -207,6 +207,7 @@ impl Pipeline {
             Ok(data) => data,
             Err(e) => {
                 eprintln!("Error: {e}");
+                self.state.set_last_error(Some(reason(&e)));
                 self.cues.send(Cue::Error);
                 return;
             }

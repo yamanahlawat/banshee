@@ -437,7 +437,7 @@
           preset={String(config.stt?.preset ?? 'balanced')}
           megabytes={Number($daemon.status?.download_megabytes ?? 0)}
           first={savingHistory && nothingYet}
-          remoteHost={listening.host}
+          remoteHost={listening.stoppedBy === null ? listening.host : null}
           speechHost={textLeavesTo}
         />
       {/if}
