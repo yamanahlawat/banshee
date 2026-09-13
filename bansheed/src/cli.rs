@@ -363,7 +363,7 @@ async fn write_settings(assignments: settings::Assignments) -> Result<bool, Bans
     }
 }
 
-/// What to write, or `None` for nothing typed. The key is taken as typed,
+/// What to write, or `None` for nothing typed. The key is not coerced as TOML,
 /// because a coercion mangles a quoted token and refuses an all-digit one. An
 /// empty argument removes the key, and the prompt has no way to ask for that.
 fn key_change(
@@ -428,9 +428,8 @@ pub async fn config(key: String, value: Option<String>) -> Result<(), BansheeErr
     Ok(())
 }
 
-/// A speaker with no voice leaves `tts.provider` where it is: the speech
-/// endpoint has no default voice, so switching the speaker on without one
-/// refuses it at every startup.
+/// The speech endpoint has no default voice, so an empty voice cannot send
+/// text out.
 fn speaker_sends_text_out(voice: &str) -> bool {
     !voice.is_empty()
 }
@@ -472,9 +471,12 @@ pub async fn config_remote() -> Result<(), BansheeError> {
         ("tts.remote.model".to_string(), tts_model.clone().into()),
         ("tts.remote.voice".to_string(), tts_voice.clone().into()),
     ]);
-    if speaker_sends_text_out(&tts_voice) {
-        assignments.insert("tts.provider".to_string(), "remote".into());
-    }
+    let tts_provider = if speaker_sends_text_out(&tts_voice) {
+        "remote"
+    } else {
+        "local"
+    };
+    assignments.insert("tts.provider".to_string(), tts_provider.into());
     if let Some(key) = stt_key {
         assignments.insert(RemoteKey::Stt.setting().to_string(), key.into());
     }

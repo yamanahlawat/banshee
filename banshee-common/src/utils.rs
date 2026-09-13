@@ -55,15 +55,14 @@ pub fn write_atomically(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io
     if let Some(mode) = mode {
         options.mode(mode);
     }
-    if let Err(err) = options.open(&staged)?.write_all(bytes) {
+    let written = options
+        .open(&staged)?
+        .write_all(bytes)
+        .and_then(|()| std::fs::rename(&staged, path));
+    if written.is_err() {
         let _ = std::fs::remove_file(&staged);
-        return Err(err);
     }
-    if let Err(err) = std::fs::rename(&staged, path) {
-        let _ = std::fs::remove_file(&staged);
-        return Err(err);
-    }
-    Ok(())
+    written
 }
 
 /// systemd's name for the daemon's user unit. `bansheed` writes the file and
@@ -211,7 +210,6 @@ mod tests {
         assert_eq!(systemd_unit(TRAY_AGENT), Some("banshee-tray.service"));
     }
 
-    /// Removes its directory on drop, so a test that fails leaves nothing behind.
     struct TempDir(PathBuf);
     impl Drop for TempDir {
         fn drop(&mut self) {

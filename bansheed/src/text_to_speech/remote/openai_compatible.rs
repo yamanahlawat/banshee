@@ -7,15 +7,16 @@ use reqwest::blocking::Client;
 
 use crate::config::{RemoteTtsConfig, SpeechFormat, TTSConfig};
 use crate::credentials;
+use crate::text_to_speech::local::say::VOICE_NEEDS_KOKORO;
 use crate::text_to_speech::output::Output;
 use crate::text_to_speech::remote::arrival::{Arrival, declared};
 use crate::text_to_speech::{ActiveUtterance, Fault, TtsBackend, lock};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-// Between bytes and not in total: an utterance may run for minutes, and a
-// server that has stopped sending is the only failure a bound can catch. The
-// test bound is short, because a fifteen-second test is a test nobody runs, and
-// the fixture divides it for the pause it leaves between two chunks.
+// The bound applies to the wait for headers and to each read, since the
+// blocking client keeps one timeout. The test bound is short, because a
+// fifteen-second test is a test nobody runs, and the fixture divides it for
+// the pause it leaves between two chunks.
 const READ_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(1)
 } else {
@@ -174,11 +175,11 @@ impl RemoteSpeechBackend {
         })
     }
 
-    fn body(&self, text: &str, voice: Option<&str>) -> serde_json::Value {
+    fn body(&self, text: &str) -> serde_json::Value {
         let mut body = serde_json::json!({
             "model": self.model,
             "input": text,
-            "voice": voice.unwrap_or(&self.voice),
+            "voice": self.voice,
             "response_format": self.response_format,
             "speed": *self.speed.read().unwrap_or_else(|poison| poison.into_inner()),
         });
@@ -195,12 +196,12 @@ impl RemoteSpeechBackend {
 
     /// Sends the request and hands back the body to read, or the reason it
     /// failed before a single byte of audio.
-    fn open(&self, text: &str, voice: Option<&str>) -> Result<reqwest::blocking::Response, String> {
+    fn open(&self, text: &str) -> Result<reqwest::blocking::Response, String> {
         let response = self
             .client
             .post(format!("{}/audio/speech", self.base_url))
             .bearer_auth(&self.api_key)
-            .json(&self.body(text, voice))
+            .json(&self.body(text))
             .send()
             .map_err(|error| credentials::describe_send_error(&self.host, &error))?;
         let status = response.status();
@@ -230,6 +231,11 @@ impl RemoteSpeechBackend {
     }
 }
 
+enum Report {
+    Line(String),
+    Fault(Fault),
+}
+
 /// The response being read, and what its bytes have said so far.
 struct Reading {
     body: reqwest::blocking::Response,
@@ -249,19 +255,21 @@ impl TtsBackend for RemoteSpeechBackend {
     }
 
     fn start(&self, text: &str, voice: Option<&str>) -> std::io::Result<Box<dyn ActiveUtterance>> {
-        Ok(Box::new(self.speak(text, voice)))
+        if voice.is_some() {
+            return Err(std::io::Error::other(VOICE_NEEDS_KOKORO));
+        }
+        Ok(Box::new(self.speak(text)))
     }
 }
 
 impl RemoteSpeechBackend {
     /// The utterance unboxed: `start` boxes it for the trait.
-    fn speak(&self, text: &str, voice: Option<&str>) -> RemoteUtterance {
+    fn speak(&self, text: &str) -> RemoteUtterance {
         let handover: Arc<Mutex<Handover>> = Arc::default();
         let worker_handover = Arc::clone(&handover);
         let fallback = self.fallback.clone();
         let faults = self.faults.clone();
         let text = text.to_string();
-        let voice = voice.map(str::to_string);
         // Cloned rather than borrowed: the chunk iterator outlives this call
         let opener = self.clone_for_worker();
 
@@ -272,6 +280,19 @@ impl RemoteSpeechBackend {
         // and how long the whole reply took.
         let started = std::time::Instant::now();
         let chunks = std::iter::from_fn(move || {
+            // The worker outlives a stop, and its line names a sentence nobody
+            // hears.
+            let report = |handover: &Handover, said: Report| {
+                if handover.stopped {
+                    return;
+                }
+                match said {
+                    Report::Line(line) => println!("{line}"),
+                    Report::Fault(fault) => {
+                        let _ = faults.send(fault);
+                    }
+                }
+            };
             // Every failure before the first sample: say why, and let the
             // fallback speak the sentence nobody has heard yet.
             let unheard = |reason: String| {
@@ -281,17 +302,25 @@ impl RemoteSpeechBackend {
                 if handover.stopped {
                     return;
                 }
-                let _ = faults.send(Fault::Failed(reason));
-                if let Some(fallback) = &fallback
-                    && let Ok(utterance) = fallback.start(&text, None)
+                let reason = match fallback
+                    .as_ref()
+                    .map(|fallback| fallback.start(&text, None))
                 {
-                    handover.speaking = Some(utterance);
-                }
+                    Some(Ok(utterance)) => {
+                        handover.speaking = Some(utterance);
+                        reason
+                    }
+                    Some(Err(error)) => {
+                        format!("{reason}, and the fallback voice did not start: {error}")
+                    }
+                    None => reason,
+                };
+                report(&handover, Report::Fault(Fault::Failed(reason)));
             };
             loop {
                 let source = match &mut reading {
                     Some(source) => source,
-                    None => match opener.open(&text, voice.as_deref()) {
+                    None => match opener.open(&text) {
                         Ok(body) => reading.insert(Reading {
                             body,
                             arrival: Arrival::new(opener.response_format, opener.sample_rate),
@@ -310,15 +339,14 @@ impl RemoteSpeechBackend {
                             Ok(()) if !played => {
                                 unheard(format!("{} sent no audio", opener.host));
                             }
-                            Ok(()) => {
-                                if !lock(&worker_handover).stopped {
-                                    println!(
-                                        "Spoke through {} in {:.2}s",
-                                        opener.host,
-                                        started.elapsed().as_secs_f32()
-                                    );
-                                }
-                            }
+                            Ok(()) => report(
+                                &lock(&worker_handover),
+                                Report::Line(format!(
+                                    "Spoke through {} in {:.2}s",
+                                    opener.host,
+                                    started.elapsed().as_secs_f32()
+                                )),
+                            ),
                             Err(reason) => unheard(reason),
                         }
                         return None;
@@ -329,9 +357,10 @@ impl RemoteSpeechBackend {
                         // Words already heard are not spoken again in another
                         // voice, so only a silent failure reaches the fallback
                         if played {
-                            if !lock(&worker_handover).stopped {
-                                let _ = faults.send(Fault::Failed(reason));
-                            }
+                            report(
+                                &lock(&worker_handover),
+                                Report::Fault(Fault::Failed(reason)),
+                            );
                         } else {
                             unheard(reason);
                         }
@@ -350,15 +379,16 @@ impl RemoteSpeechBackend {
                 };
                 if !played {
                     played = true;
-                    // A stop is already in force, so this chunk reaches nobody.
-                    if !lock(&worker_handover).stopped {
-                        println!(
+                    let handover = lock(&worker_handover);
+                    report(
+                        &handover,
+                        Report::Line(format!(
                             "First audio from {} in {:.2}s",
                             opener.host,
                             started.elapsed().as_secs_f32()
-                        );
-                        let _ = faults.send(Fault::Played);
-                    }
+                        )),
+                    );
+                    report(&handover, Report::Fault(Fault::Played));
                 }
                 return Some(chunk);
             }
@@ -571,6 +601,18 @@ mod tests {
         }
     }
 
+    struct Refusing;
+
+    impl TtsBackend for Refusing {
+        fn start(
+            &self,
+            _text: &str,
+            _voice: Option<&str>,
+        ) -> std::io::Result<Box<dyn ActiveUtterance>> {
+            Err(std::io::Error::other("no voice here"))
+        }
+    }
+
     /// A fallback whose sentence ends when the test says so, and what it was
     /// asked to say. `Spoken` finishes at once, which states no ordering.
     #[derive(Default)]
@@ -682,7 +724,6 @@ mod tests {
         loop {
             match faults.recv_timeout(Duration::from_millis(100)) {
                 Ok(Fault::Failed(reason)) => return reason,
-                Ok(Fault::Unstarted(_)) => panic!("this utterance must not have failed to start"),
                 Ok(Fault::Played) => panic!("this utterance must not have played"),
                 Err(_) => assert!(
                     std::time::Instant::now() < deadline,
@@ -696,7 +737,7 @@ mod tests {
     fn an_utterance_posts_the_whole_text_the_model_the_voice_the_rate_and_the_instructions() {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[0, 1, 2, 3, 4, 5])], false);
         let built = built(base_url, "Calm and even", false);
-        let utterance = built.backend.speak("One sentence. And a second.", None);
+        let utterance = built.backend.speak("One sentence. And a second.");
         wait_until("the reply is read", || utterance.spoken());
 
         let request = served.join().unwrap();
@@ -720,17 +761,25 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_instruction_is_left_out_and_a_named_voice_wins() {
+    fn an_empty_instruction_is_left_out() {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[0, 1, 2, 3, 4, 5])], false);
         let built = built(base_url, "", false);
-        let utterance = built.backend.speak("Hello.", Some("cedar"));
+        let utterance = built.backend.speak("Hello.");
         wait_until("the reply is read", || utterance.spoken());
 
         let request = served.join().unwrap();
         let body = request.split("\r\n\r\n").nth(1).expect("a JSON body");
         let sent: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
         assert!(sent.get("instructions").is_none(), "{sent}");
-        assert_eq!(sent["voice"], "cedar");
+    }
+
+    #[test]
+    fn a_voice_this_backend_cannot_apply_is_refused() {
+        let built = built("http://unused.invalid/v1".to_string(), "", false);
+        let Err(error) = built.backend.start("Hello.", Some("cedar")) else {
+            panic!("the remote speaker cannot honour a per-request voice, so it must refuse");
+        };
+        assert!(error.to_string().contains("Kokoro"), "{error}");
     }
 
     #[test]
@@ -739,7 +788,7 @@ mod tests {
             serve_speech("200 OK", vec![pcm(&[1; 480]), pcm(&[2; 480])], false);
         let built = built(base_url, "", false);
         let started = std::time::Instant::now();
-        let utterance = built.backend.speak("Two chunks.", None);
+        let utterance = built.backend.speak("Two chunks.");
         wait_until("the first chunk is queued", || utterance.queued() >= 1);
         let first_at = started.elapsed();
         assert!(
@@ -758,7 +807,7 @@ mod tests {
             false,
         );
         let built = built(base_url, "", false);
-        let mut utterance = built.backend.speak("Three chunks.", None);
+        let mut utterance = built.backend.speak("Three chunks.");
         wait_until("the first chunk is queued", || utterance.queued() >= 1);
         utterance.stop();
         wait_until("the utterance ends", || utterance.spoken());
@@ -785,7 +834,7 @@ mod tests {
         });
 
         let built = built(base_url, "", true);
-        let mut utterance = built.backend.speak("Cancel this.", None);
+        let mut utterance = built.backend.speak("Cancel this.");
         request_read
             .recv_timeout(Duration::from_secs(5))
             .expect("the request reached the server");
@@ -804,7 +853,7 @@ mod tests {
         served.join().unwrap();
     }
 
-    // That report clears a fault the next sentence sets.
+    // A played report clears a fault the next sentence sets.
     #[test]
     fn a_stop_before_the_first_byte_sends_no_played_when_the_byte_then_arrives() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -816,7 +865,6 @@ mod tests {
             let _ = read_request(&mut stream);
             asked.send(()).unwrap();
             let _ = held.recv();
-            // The server writes nothing before the stop. The client reads this byte first.
             let head =
                 "HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nTransfer-Encoding: chunked\r\n\r\n";
             stream.write_all(head.as_bytes()).unwrap();
@@ -827,7 +875,7 @@ mod tests {
         });
 
         let built = built(base_url, "", false);
-        let mut utterance = built.backend.speak("Cancel before the byte.", None);
+        let mut utterance = built.backend.speak("Cancel before the byte.");
         request_read
             .recv_timeout(Duration::from_secs(5))
             .expect("the request reached the server");
@@ -843,7 +891,6 @@ mod tests {
                 Ok(Fault::Failed(reason)) => {
                     panic!("a stopped sentence must not report a failure: {reason}")
                 }
-                Ok(Fault::Unstarted(_)) => panic!("this utterance must not have failed to start"),
                 Err(_) if utterance.spoken() => break,
                 Err(_) => assert!(
                     std::time::Instant::now() < deadline,
@@ -868,6 +915,26 @@ mod tests {
             ["Say this anyway.".to_string()]
         );
         wait_until("the utterance ends", || utterance.is_finished());
+        let _ = served.join();
+    }
+
+    #[test]
+    fn a_fallback_that_does_not_start_is_named_in_the_reason() {
+        let (base_url, served) = serve_speech("401 Unauthorized", vec![], false);
+        let fallback: Option<Arc<dyn TtsBackend>> = Some(Arc::new(Refusing));
+        let (backend, faults) =
+            assembled(&table(base_url, ""), "sk-test", fallback, Output::silent());
+        let mut utterance = backend.start("Say this anyway.", None).unwrap();
+
+        assert_eq!(
+            failure(&faults),
+            "the remote speaker refused the key, and the fallback voice did not start: no voice here"
+        );
+        wait_until("the utterance ends", || utterance.is_finished());
+        assert!(
+            faults.recv_timeout(GAP).is_err(),
+            "no second fault follows the first"
+        );
         let _ = served.join();
     }
 
@@ -902,7 +969,7 @@ mod tests {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[1; SAMPLES])], false);
         let (output, mut mixed) = Output::readable();
         let (backend, _faults) = assembled(&table(base_url, ""), "sk-test", None, output);
-        let mut utterance = backend.speak("Every word of this.", None);
+        let mut utterance = backend.speak("Every word of this.");
 
         wait_until("the samples reach the player", || utterance.queued() > 0);
         assert!(
@@ -933,7 +1000,7 @@ mod tests {
             // device does with it
             Output::silent(),
         );
-        let mut utterance = backend.speak("Say this anyway.", None);
+        let mut utterance = backend.speak("Say this anyway.");
 
         assert_eq!(failure(&faults), "the remote speaker refused the key");
         wait_until("the fallback takes the sentence", || {
@@ -1010,7 +1077,7 @@ mod tests {
     fn no_fallback_takes_over_after_the_first_chunk() {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[1; 480])], true);
         let built = built(base_url, "", true);
-        let utterance = built.backend.speak("Half of this.", None);
+        let utterance = built.backend.speak("Half of this.");
         wait_until("the first chunk is queued", || utterance.queued() >= 1);
         let played = built.faults.recv_timeout(Duration::from_secs(5));
         assert!(
@@ -1031,7 +1098,7 @@ mod tests {
     fn an_utterance_that_plays_reports_that_it_played() {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[1; 480])], false);
         let built = built(base_url, "", false);
-        let utterance = built.backend.speak("Hello.", None);
+        let utterance = built.backend.speak("Hello.");
         wait_until("the reply is read", || utterance.spoken());
         let played = built.faults.try_recv();
         assert!(
@@ -1052,7 +1119,7 @@ mod tests {
         };
         assert_eq!(built.backend.reconfigure(&tts).as_deref(), Some("marin"));
 
-        let utterance = built.backend.speak("Hello.", None);
+        let utterance = built.backend.speak("Hello.");
         wait_until("the reply is read", || utterance.spoken());
         let request = served.join().unwrap();
         let body = request.split("\r\n\r\n").nth(1).expect("a JSON body");
@@ -1089,7 +1156,7 @@ mod tests {
         let mut remote = table(base_url, "");
         remote.response_format = SpeechFormat::Wav;
         let built = build(remote, false);
-        let utterance = built.backend.speak("Hello.", None);
+        let utterance = built.backend.speak("Hello.");
         wait_until("the reply is read", || utterance.spoken());
 
         let sent = sent_body(&served.join().unwrap());
@@ -1103,7 +1170,7 @@ mod tests {
         let mut remote = table(base_url, "");
         remote.sample_rate = std::num::NonZero::new(22_050);
         let built = build(remote, false);
-        let utterance = built.backend.speak("Hello.", None);
+        let utterance = built.backend.speak("Hello.");
         wait_until("the reply is read", || utterance.spoken());
 
         let sent = sent_body(&served.join().unwrap());
@@ -1131,7 +1198,7 @@ mod tests {
     }
 
     fn spoken_by(built: Built) -> Vec<crate::text_to_speech::output::Chunk> {
-        let utterance = built.backend.speak("The same sentence.", None);
+        let utterance = built.backend.speak("The same sentence.");
         wait_until("the reply is read", || utterance.spoken());
         utterance.heard()
     }

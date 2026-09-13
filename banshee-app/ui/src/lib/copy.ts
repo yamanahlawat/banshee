@@ -20,15 +20,17 @@ export function listeningLead(facts: Listening): string {
   if (!facts.live) return 'Banshee is not running, so no microphone is open.';
   if (facts.remote) {
     const host = facts.host ?? A_SERVER;
-    return facts.pending
-      ? `Banshee sends what you say to ${host} until it restarts.`
+    if (facts.pending) return `Banshee sends what you say to ${host} until it restarts.`;
+    if (facts.stoppedBy === 'keyfile') return `Banshee cannot read the key file for ${host}.`;
+    return facts.stoppedBy !== null
+      ? `Banshee cannot reach ${host} to hear you.`
       : `Banshee sends what you say to ${host} to be heard.`;
   }
   if (facts.pending) {
     return `Banshee will send what you say to ${facts.willUse ?? A_SERVER} when it restarts.`;
   }
   if (facts.device) return `Banshee is listening through the ${facts.device}.`;
-  return facts.pipelineBroken
+  return facts.stoppedBy !== null
     ? 'Banshee cannot open a microphone.'
     : 'Banshee is not listening yet.';
 }
@@ -42,7 +44,14 @@ export function listeningNote(facts: Listening): string {
       ? `Audio still goes to ${host}.${waits}`
       : `Audio still stays on this machine.${waits}`;
   }
-  if (facts.remote) return `Audio goes to ${host}.`;
+  if (facts.remote) {
+    if (facts.stoppedBy === 'keyfile') {
+      return `Nothing goes to ${host} until the key file is removed and the key is set again.`;
+    }
+    return facts.stoppedBy !== null
+      ? `Nothing goes to ${host} until the listener starts.`
+      : `Audio goes to ${host}.`;
+  }
   return facts.keyPresent
     ? 'Audio stays on this machine. The server and key you set are still saved.'
     : 'Audio stays on this machine.';

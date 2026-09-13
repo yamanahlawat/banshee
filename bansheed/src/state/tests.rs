@@ -109,6 +109,20 @@ fn a_recording_error_names_the_same_command_its_sentence_does() {
     }
 }
 
+#[test]
+fn an_unreadable_key_file_names_the_file_to_remove_and_no_command() {
+    let error = RecordingError::KeyFile("it does not parse".to_string());
+    assert_eq!(
+        error.to_string(),
+        "the remote listener's key file is unreadable: it does not parse"
+    );
+    let fix = error.fix();
+    assert!(fix.starts_with("rm "), "{fix}");
+    assert!(fix.contains("credentials.toml"), "{fix}");
+    assert!(!fix.contains("banshee config set"), "{fix}");
+    assert_eq!(error.command(), None);
+}
+
 // A watchdog rescans after a fault, but `start_recording` returning Err
 // spawns none, so that one microphone fault needs a restart.
 #[test]

@@ -16,7 +16,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::api::{dispatch, live_state};
-use crate::config::{Config, SttProvider};
+use crate::config::Config;
 use crate::speech_to_text::vad::VADEngine;
 use crate::state::{ConsumerCommand, DaemonState, RecordingError};
 use crate::{audio, history, hotkey, models, permissions, text_to_speech};
@@ -51,15 +51,6 @@ struct Recording {
     missing: Option<String>,
 }
 
-/// Which fault a transcriber that would not start is. The client routes on the
-/// kind, and a key or a server that will not answer is no model fault.
-fn transcriber_failure(provider: SttProvider, error: &BansheeError) -> RecordingError {
-    match provider {
-        SttProvider::Remote => RecordingError::Provider(error.to_string()),
-        SttProvider::Local => RecordingError::Model(error.to_string()),
-    }
-}
-
 /// Capture, the models, and the thread that turns audio into text. All of it or
 /// none: with any piece missing the daemon cannot transcribe, so they share one
 /// error path and one reason for `banshee status` to report.
@@ -84,10 +75,10 @@ fn start_recording(
         ),
         None => println!("Capture opened {}", selection.open),
     }
-    let speech_to_text = crate::speech_to_text::select_transcriber(&config.stt).map_err(|e| {
-        drop_device_name(daemon_state);
-        transcriber_failure(config.stt.provider, &e)
-    })?;
+    let speech_to_text =
+        crate::speech_to_text::select_transcriber(&config.stt).inspect_err(|_| {
+            drop_device_name(daemon_state);
+        })?;
     let vad = VADEngine::new(SileroVADConfig::new(models::VAD_MODEL)).map_err(|e| {
         drop_device_name(daemon_state);
         RecordingError::Model(e.to_string())
@@ -131,20 +122,23 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
     // Created before the backend, because the backend holds the sender and the
     // drain holds the state the backend must not see
     let (faults, fault_reports) = std::sync::mpsc::channel();
-    let (speech_backend, speaker) = text_to_speech::select_backend(&config.tts, faults)?;
+    let speech = text_to_speech::select_backend(&config.tts, faults)?;
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let cues = audio::cues::start_cue_player(config.audio.cues.enabled);
     let daemon_state = Arc::new(DaemonState::new(
         Arc::clone(&config),
         db_connection,
-        text_to_speech::SpeechPlayer::new(speech_backend),
-        speaker,
+        text_to_speech::SpeechPlayer::new(speech.backend),
+        speech.speaker,
         commands,
         cues.clone(),
     ));
 
-    // After the state, which the drain writes, and after the backend, which
-    // may already have sent a startup fault into the channel's buffer
+    if let Some(reason) = speech.fault {
+        daemon_state.set_last_speech_error(Some(reason));
+    }
+
+    // After the state, which the drain writes
     let draining_state = Arc::clone(&daemon_state);
     let draining_cues = cues.clone();
     std::thread::spawn(move || {

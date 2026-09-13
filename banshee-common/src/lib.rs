@@ -234,6 +234,9 @@ pub enum BlockerKind {
     Pipeline,
     /// The server that hears the audio, as against the machine that captures it.
     Provider,
+    /// The file that holds the remote keys, as against the server they open.
+    #[serde(rename = "keyfile")]
+    KeyFile,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -384,6 +387,14 @@ mod wire_tests {
         Activity, BANSHEE_STATE_CHANGED, Blocker, BlockerKind, DownloadProgress, DownloadState,
         InputDevice, JsonRpcNotification,
     };
+
+    /// The window's `BlockerKind` union spells this one `keyfile`, so the wire
+    /// name is a contract between the two.
+    #[test]
+    fn an_unreadable_key_file_goes_on_the_wire_as_keyfile() {
+        let wire = serde_json::to_value(BlockerKind::KeyFile).unwrap();
+        assert_eq!(wire, "keyfile");
+    }
 
     #[test]
     fn a_blocker_that_names_a_command_puts_it_on_the_wire() {

@@ -37,20 +37,22 @@ fn assemble(
                 RecordingError::Model(_) => BlockerKind::Model,
                 RecordingError::Microphone(_) => BlockerKind::Pipeline,
                 RecordingError::Provider(_) => BlockerKind::Provider,
+                RecordingError::KeyFile(_) => BlockerKind::KeyFile,
             },
             role: None,
             remedy: Some(banshee_common::Remedy::Restart),
             id: "recording_pipeline".to_string(),
-            // All three carry the id above, so the name is what parts them for
+            // Each carries the id above, so the name is what parts them for
             // a reader.
             name: match error {
                 RecordingError::Model(_) => "Banshee needs a restart",
                 RecordingError::Microphone(_) => "The microphone is not working",
                 RecordingError::Provider(_) => "The remote listener is not reachable",
+                RecordingError::KeyFile(_) => "The remote listener's key file is unreadable",
             }
             .to_string(),
             consequence: error.consequence(),
-            fix: error.fix().to_string(),
+            fix: error.fix(),
             command: error.command().map(str::to_string),
         });
     }
@@ -205,6 +207,31 @@ mod tests {
                 .fix
                 .contains("banshee config set stt.remote.api_key"),
             "the fix must name the key command: {}",
+            blocker.fix
+        );
+        assert!(!blocker.consequence.ends_with('.'));
+    }
+
+    #[test]
+    fn an_unreadable_key_file_reports_as_a_key_file_fault_with_the_file_to_remove() {
+        let error = RecordingError::KeyFile(
+            "credentials.toml does not parse; fix it or delete it and set the keys again"
+                .to_string(),
+        );
+        let blockers = assemble(vec![], vec![], Some(&error));
+        let [blocker] = &blockers[..] else {
+            panic!("expected exactly one blocker, got {blockers:?}");
+        };
+        assert_eq!(blocker.kind, BlockerKind::KeyFile);
+        assert_eq!(blocker.name, "The remote listener's key file is unreadable");
+        assert!(
+            blocker.fix.contains("credentials.toml"),
+            "the fix must name the file to remove: {}",
+            blocker.fix
+        );
+        assert!(
+            !blocker.fix.contains("config set"),
+            "a key written again reads the same file: {}",
             blocker.fix
         );
         assert!(!blocker.consequence.ends_with('.'));

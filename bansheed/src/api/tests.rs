@@ -234,6 +234,10 @@ async fn recording_rpcs_report_the_cause_not_a_busy_mic() {
     for (cause, expected) in [
         (RecordingError::Microphone("no device".to_string()), -32000),
         (RecordingError::Model("missing file".to_string()), -32002),
+        (
+            RecordingError::KeyFile("it does not parse".to_string()),
+            -32008,
+        ),
     ] {
         let state = test_state(std::sync::mpsc::channel().0);
         state.set_recording_error(cause);

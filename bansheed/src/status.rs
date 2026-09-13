@@ -52,13 +52,24 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     // Read once for the two sides below: one checklist must not report two
     // states of the file.
     let credentials = crate::credentials::Credentials::load();
+    let (stt_answer, tts_answer) = probe_remote_sides(&config, credentials.as_ref().ok());
     if config.stt.provider.is_remote() {
-        healthy &= check_remote_key(crate::credentials::RemoteKey::Stt, credentials.as_ref());
+        healthy &= check_remote_side(
+            crate::credentials::RemoteKey::Stt,
+            &config.stt.remote.base_url,
+            credentials.as_ref(),
+            stt_answer,
+        );
     }
     // A remote speaker loads no Kokoro model and no espeak-ng table, so each
     // local check would name a fix that changes nothing.
     if config.tts.provider.is_remote() {
-        healthy &= check_remote_key(crate::credentials::RemoteKey::Tts, credentials.as_ref());
+        healthy &= check_remote_side(
+            crate::credentials::RemoteKey::Tts,
+            &config.tts.remote.base_url,
+            credentials.as_ref(),
+            tts_answer,
+        );
         healthy &= check_remote_voice(&config.tts.remote.voice);
     } else {
         let kokoro = KokoroTTSConfig::new(&config.tts.voice);
@@ -151,38 +162,9 @@ fn check_espeak() {
     } else {
         note(&format!(
             "espeak-ng not installed; unknown words are spelled out. install: {}",
-            espeak_install_hint()
+            crate::text_to_speech::local::oov::espeak_install_hint()
         ));
     }
-}
-
-fn espeak_install_hint() -> String {
-    package_install_hint("espeak-ng")
-}
-
-pub(crate) fn package_install_hint(package: &str) -> String {
-    if cfg!(target_os = "macos") {
-        return format!("brew install {package}");
-    }
-    for (mgr, verb) in [
-        ("apt", "install"),
-        ("dnf", "install"),
-        ("pacman", "-S"),
-        ("zypper", "install"),
-        ("apk", "add"),
-    ] {
-        if runs(mgr) {
-            return format!("sudo {mgr} {verb} {package}");
-        }
-    }
-    format!("your package manager's {package} package")
-}
-
-fn runs(bin: &str) -> bool {
-    std::process::Command::new(bin)
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
 }
 
 // Walks the given PATH directly: `which` is its own package on minimal systems.
@@ -227,9 +209,88 @@ fn check_remote_key(
             &format!("no key for the remote {}", side.side()),
             &format!("banshee config set {}", side.setting()),
         ),
-        // Setting a key again reads the same file first, so the fix starts by
-        // removing it.
-        Err(error) => fail(&error.to_string(), &remove_the_credentials_file()),
+        Err(error) => fail(
+            &error.to_string(),
+            &crate::credentials::Credentials::remove_command(),
+        ),
+    }
+}
+
+/// Asks both remote sides at once, each bounded by the probe's own timeout. A
+/// side with no key is not asked: the key check names that fault on its own.
+fn probe_remote_sides(
+    config: &Config,
+    credentials: Option<&crate::credentials::Credentials>,
+) -> (
+    Option<crate::remote_probe::Probe>,
+    Option<crate::remote_probe::Probe>,
+) {
+    let key_of = |side, remote: bool| {
+        remote
+            .then(|| credentials.and_then(|held| held.key(side)))
+            .flatten()
+    };
+    let stt_key = key_of(
+        crate::credentials::RemoteKey::Stt,
+        config.stt.provider.is_remote(),
+    );
+    let tts_key = key_of(
+        crate::credentials::RemoteKey::Tts,
+        config.tts.provider.is_remote(),
+    );
+    std::thread::scope(|scope| {
+        let stt = stt_key.map(|key| {
+            scope.spawn(|| crate::remote_probe::probe(&config.stt.remote.base_url, key))
+        });
+        let tts = tts_key.map(|key| {
+            scope.spawn(|| crate::remote_probe::probe(&config.tts.remote.base_url, key))
+        });
+        let joined = |handle: Option<std::thread::ScopedJoinHandle<'_, _>>| {
+            handle.map(|handle| handle.join().unwrap())
+        };
+        (joined(stt), joined(tts))
+    })
+}
+
+/// One side's two checklist lines.
+fn check_remote_side(
+    side: crate::credentials::RemoteKey,
+    base_url: &str,
+    credentials: Result<&crate::credentials::Credentials, &BansheeError>,
+    answer: Option<crate::remote_probe::Probe>,
+) -> bool {
+    let mut healthy = check_remote_key(side, credentials);
+    if let Some(answer) = answer {
+        healthy &= check_remote_answer(side, base_url, answer);
+    }
+    healthy
+}
+
+fn check_remote_answer(
+    side: crate::credentials::RemoteKey,
+    base_url: &str,
+    answer: crate::remote_probe::Probe,
+) -> bool {
+    let host = crate::config::host_of(base_url);
+    match answer {
+        crate::remote_probe::Probe::Answers => {
+            pass(&format!("remote {} answers ({host})", side.side()))
+        }
+        crate::remote_probe::Probe::KeyRefused => fail(
+            &format!("the remote {} refused the key", side.side()),
+            &format!("banshee config set {}", side.setting()),
+        ),
+        crate::remote_probe::Probe::NoModelsPath => {
+            note(&format!(
+                "the remote {} at {host} has no /models path, so the key is unchecked",
+                side.side()
+            ));
+            true
+        }
+        crate::remote_probe::Probe::Unreachable(reason) => fail(
+            &reason,
+            &format!("check {} and the network", side.base_url_setting()),
+        ),
     }
 }
 
@@ -242,13 +303,6 @@ fn check_remote_voice(voice: &str) -> bool {
     } else {
         pass(&format!("remote speaker voice set ({voice})"))
     }
-}
-
-fn remove_the_credentials_file() -> String {
-    let path = crate::credentials::Credentials::path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "~/.banshee/credentials.toml".to_string());
-    format!("rm {path}, then set the keys again")
 }
 
 // What the socket says about a daemon. Read once, because the microphone check
@@ -446,12 +500,15 @@ fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
 // device. A substitute records correctly, so it stays a pass.
 fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     match daemon {
-        // A listener that will not answer takes capture down with it, so both
-        // kinds leave the daemon unable to record and both name their own fix.
-        Daemon::Running { status, blockers } => match blockers
-            .iter()
-            .find(|blocker| matches!(blocker.kind, BlockerKind::Pipeline | BlockerKind::Provider))
-        {
+        // A listener that will not answer takes capture down with it, so every
+        // kind here leaves the daemon unable to record and each names its own
+        // fix.
+        Daemon::Running { status, blockers } => match blockers.iter().find(|blocker| {
+            matches!(
+                blocker.kind,
+                BlockerKind::Pipeline | BlockerKind::Provider | BlockerKind::KeyFile
+            )
+        }) {
             None => report_open(status, blockers),
             Some(blocker) => fail(
                 &format!("the daemon cannot record: {}", blocker.consequence),

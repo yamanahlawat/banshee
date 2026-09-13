@@ -13,6 +13,7 @@ mod hotkey;
 mod models;
 mod permissions;
 mod readiness;
+mod remote_probe;
 mod service;
 mod settings;
 mod speech_to_text;

@@ -135,6 +135,27 @@ it('names the remote listener when the fault is the server, not the microphone',
   expect(getByRole('button', { name: 'Restart' })).toBeTruthy();
 });
 
+// Writing the key reads the same file first, so the headline sends the reader
+// to the file.
+it('names the key file when the fault is the file, not the server', () => {
+  const { getByRole, queryByRole } = render(Blockers, {
+    blockers: [
+      {
+        kind: 'keyfile',
+        id: 'recording_pipeline',
+        name: "The remote listener's key file is unreadable",
+        remedy: 'restart',
+        consequence: 'dictation and ask_user do not work until the key file is fixed',
+        fix: 'rm /Users/someone/.banshee/credentials.toml, then set the keys again',
+      } satisfies Blocker,
+    ],
+    restart: () => {},
+  });
+  expect(getByRole('heading', { name: /key file is unreadable/i })).toBeTruthy();
+  expect(queryByRole('heading', { name: /not reachable/i })).toBeNull();
+  expect(getByRole('button', { name: 'Restart anyway' })).toBeTruthy();
+});
+
 // First run is the one moment a person asks what Banshee is, and it is
 // derived rather than stored: nothing dictated yet.
 it('says what Banshee is on a first run, and not afterwards', () => {

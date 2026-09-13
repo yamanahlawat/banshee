@@ -26,6 +26,7 @@ import {
   listeningFacts,
   speechFacts,
   type Blocker,
+  type BlockerKind,
   type Status,
 } from './daemon';
 
@@ -355,29 +356,35 @@ describe('the facts each side reports', () => {
     expect(speechFacts(state, NO_KEYS, KOKORO).live).toBe(false);
   });
 
-  // A blocker of any other kind is not a broken pipeline: the lead says the
-  // microphone will not open, and a permission the reader has yet to grant is a
-  // different sentence with a different fix.
-  it('reads a broken pipeline, and no other blocker as one', () => {
-    const broken = reduceStatus(empty(), {
-      ...(remote as unknown as Status),
-      blockers: [
-        {
-          kind: 'pipeline',
-          id: 'audio',
-          name: 'The microphone is not working',
-          consequence: 'nothing is heard',
-          fix: 'restart it',
-        },
-      ],
-    });
-    expect(listeningFacts(broken, NO_KEYS).pipelineBroken).toBe(true);
+  // A pipeline blocker with another id, such as the Linux typer, stops the
+  // typing and not the listener.
+  it('names the kind of the recording blocker, and reads no other blocker as one', () => {
+    const stoppedBy = (kind: BlockerKind, id = 'recording_pipeline') =>
+      listeningFacts(
+        reduceStatus(empty(), {
+          ...(remote as unknown as Status),
+          blockers: [
+            {
+              kind,
+              id,
+              name: 'The listener never started',
+              consequence: 'nothing is heard',
+              fix: 'restart it',
+            },
+          ],
+        }),
+        NO_KEYS,
+      ).stoppedBy;
+    expect(stoppedBy('pipeline')).toBe('pipeline');
+    expect(stoppedBy('provider')).toBe('provider');
+    expect(stoppedBy('keyfile')).toBe('keyfile');
+    expect(stoppedBy('pipeline', 'wayland_typer')).toBe(null);
 
     const ungranted = reduceStatus(empty(), {
       ...permissions,
       blockers: permissions.blockers as Blocker[],
     });
     expect(ungranted.status?.blockers).toHaveLength(1);
-    expect(listeningFacts(ungranted, NO_KEYS).pipelineBroken).toBe(false);
+    expect(listeningFacts(ungranted, NO_KEYS).stoppedBy).toBeNull();
   });
 });

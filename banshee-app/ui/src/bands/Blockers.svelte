@@ -72,6 +72,7 @@
   const RESTART_LABELS: Partial<Record<BlockerKind, string>> = {
     pipeline: 'Restart anyway',
     provider: 'Restart',
+    keyfile: 'Restart anyway',
   };
 
   function decide(group: Blocker[]) {

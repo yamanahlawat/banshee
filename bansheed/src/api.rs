@@ -164,6 +164,7 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
         RecordingError::Microphone(_) => -32000,
         RecordingError::Model(_) => -32002,
         RecordingError::Provider(_) => -32006,
+        RecordingError::KeyFile(_) => -32008,
     };
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
 }

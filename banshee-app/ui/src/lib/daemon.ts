@@ -5,7 +5,7 @@ import { derived, writable } from 'svelte/store';
 /// daemon older than them.
 export type Remedy = 'download' | 'restart' | 'grant';
 export type FileRole = 'speech' | 'detector' | 'engine' | 'voice';
-export type BlockerKind = 'permission' | 'model' | 'pipeline' | 'provider';
+export type BlockerKind = 'permission' | 'model' | 'pipeline' | 'provider' | 'keyfile';
 export type Blocker = {
   kind: BlockerKind;
   id: string;
@@ -254,7 +254,12 @@ type Side = {
   willUse: string | null;
 };
 
-export type Listening = Side & { device: string | null; pipelineBroken: boolean };
+export type Listening = Side & {
+  device: string | null;
+  /// The kind of the first blocker that stops the listener, or null when none
+  /// stops it.
+  stoppedBy: BlockerKind | null;
+};
 
 export type Speech = Side & { started: boolean; voiceName: string };
 
@@ -286,7 +291,8 @@ export function listeningFacts(state: Daemon, waits: Set<string>): Listening {
     host: inForce(state.status?.remote?.stt?.host),
     willUse: hostOf(String(table(stt).base_url ?? '')),
     device: state.live.audio_device,
-    pipelineBroken: (state.status?.blockers ?? []).some((one) => one.kind === 'pipeline'),
+    stoppedBy:
+      (state.status?.blockers ?? []).find((one) => one.id === 'recording_pipeline')?.kind ?? null,
   };
 }
 

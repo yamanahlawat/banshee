@@ -44,6 +44,22 @@ fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
 }
 
 #[test]
+fn an_unreadable_key_file_is_a_recording_fault_the_checklist_names() {
+    let (commands, _drain) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    state.set_recording_error(crate::state::RecordingError::KeyFile(
+        "credentials.toml does not parse".to_string(),
+    ));
+
+    let daemon = super::Daemon::Running {
+        status: serde_json::json!({ "audio_device": "MacBook Pro Microphone" }),
+        blockers: crate::readiness::blockers(&state),
+    };
+
+    assert!(!super::check_recording(&daemon, ""));
+}
+
+#[test]
 fn a_daemon_that_names_its_device_passes() {
     assert!(super::report_open(
         &serde_json::json!({ "audio_device": "MacBook Pro Microphone" }),

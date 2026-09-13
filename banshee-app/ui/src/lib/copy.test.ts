@@ -48,7 +48,7 @@ const HEARD: Listening = {
   host: 'api.openai.com',
   willUse: 'api.groq.com',
   device: 'MacBook Pro Microphone',
-  pipelineBroken: false,
+  stoppedBy: null,
 };
 
 const SPOKEN: Speech = {
@@ -65,7 +65,7 @@ const SPOKEN: Speech = {
 const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
   [
     'a stopped daemon has no microphone open',
-    { live: false, remote: false, pending: true, device: null, pipelineBroken: true },
+    { live: false, remote: false, pending: true, device: null, stoppedBy: 'pipeline' },
     'Banshee is not running, so no microphone is open.',
   ],
   [
@@ -100,18 +100,28 @@ const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
   ],
   [
     'a device that opened outranks a broken pipeline',
-    { remote: false, pipelineBroken: true },
+    { remote: false, stoppedBy: 'pipeline' },
     'Banshee is listening through the MacBook Pro Microphone.',
   ],
   [
     'a broken pipeline with no device',
-    { remote: false, device: null, pipelineBroken: true },
+    { remote: false, device: null, stoppedBy: 'pipeline' },
     'Banshee cannot open a microphone.',
   ],
   [
     'no device and nothing broken',
     { remote: false, device: null },
     'Banshee is not listening yet.',
+  ],
+  [
+    'a remote listener that never started',
+    { stoppedBy: 'provider' },
+    'Banshee cannot reach api.openai.com to hear you.',
+  ],
+  [
+    'a remote listener whose key file cannot be read',
+    { stoppedBy: 'keyfile' },
+    'Banshee cannot read the key file for api.openai.com.',
   ],
 ];
 
@@ -148,10 +158,16 @@ const LISTENING_NOTES: [string, Partial<Listening>, string][] = [
     { remote: false, keyPresent: false },
     'Audio stays on this machine.',
   ],
+  ['the note reads no device of its own', { device: null }, 'Audio goes to api.openai.com.'],
   [
-    'the note reads no device of its own',
-    { device: null, pipelineBroken: true },
-    'Audio goes to api.openai.com.',
+    'a remote listener that never started',
+    { stoppedBy: 'provider', host: 'api.openai.com' },
+    'Nothing goes to api.openai.com until the listener starts.',
+  ],
+  [
+    'a remote listener whose key file cannot be read',
+    { stoppedBy: 'keyfile' },
+    'Nothing goes to api.openai.com until the key file is removed and the key is set again.',
   ],
 ];
 

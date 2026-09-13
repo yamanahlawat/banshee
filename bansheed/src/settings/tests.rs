@@ -667,6 +667,37 @@ fn a_key_already_in_the_file_is_refused_without_the_reply_carrying_it() {
 }
 
 #[test]
+fn a_base_url_without_a_scheme_is_refused_and_the_message_names_the_key() {
+    for key in ["stt.remote.base_url", "tts.remote.base_url"] {
+        let error = edit("", &assignments(&[(key, "localhost:8080/v1".into())]))
+            .expect_err("a base_url with no scheme must not parse");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("{key} needs an http or https URL with a host")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn a_base_url_with_a_scheme_and_a_host_is_accepted() {
+    for key in ["stt.remote.base_url", "tts.remote.base_url"] {
+        let (_, config) = edit(
+            "",
+            &assignments(&[(key, "http://localhost:8080/v1".into())]),
+        )
+        .unwrap_or_else(|error| panic!("a legal base_url must parse: {error}"));
+        let base_url = if key.starts_with("stt") {
+            &config.stt.remote.base_url
+        } else {
+            &config.tts.remote.base_url
+        };
+        assert_eq!(base_url, "http://localhost:8080/v1");
+    }
+}
+
+#[test]
 fn a_key_that_is_not_a_string_is_refused() {
     let error = super::take_api_keys(&mut assignments(&[("tts.remote.api_key", 42.into())]))
         .expect_err("a number is not a key");

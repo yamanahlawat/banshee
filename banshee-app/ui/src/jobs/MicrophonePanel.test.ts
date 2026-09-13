@@ -14,7 +14,7 @@ import {
   type Status,
 } from '../lib/daemon';
 import { listDevices, listLanguages, setSetting, status } from '../lib/tauri';
-import { announcement, forgetCopy, listeningNote, TAKES_EFFECT } from '../lib/copy';
+import { announcement, forgetCopy, listeningNote, PENDING_SAYS, TAKES_EFFECT } from '../lib/copy';
 import MicrophonePanel from './MicrophonePanel.svelte';
 
 // The daemon's own reply under a remote listener, so each test states only what
@@ -96,6 +96,14 @@ it('offers the preset under a local listener and hides it under a remote one', (
   expect((screen.getByRole('textbox', { name: 'Model' }) as HTMLInputElement).value).toBe(
     'whisper-large-v3-turbo',
   );
+});
+
+it('says the local model waits on a restart', () => {
+  daemon.set(reduceStatus(empty(), { ...localStatus, pending: ['stt.preset'] }));
+  const { container } = render(MicrophonePanel);
+  const pending = container.querySelectorAll('.note.pending');
+  expect(pending).toHaveLength(1);
+  expect(pending[0].textContent).toBe(PENDING_SAYS);
 });
 
 it('holds the server, the model and the key inside the listener group', () => {

@@ -282,25 +282,3 @@ async fn live_socket_refuses_second_instance() {
     assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
     let _ = fs::remove_file(&path);
 }
-
-/// Called a model fault, a rejected key reaches the client's models step, whose
-/// fix is a download that changes nothing here.
-#[test]
-fn a_remote_listener_that_will_not_start_is_a_provider_fault() {
-    let error = BansheeError::Other("401 Unauthorized".to_string());
-    let failure = transcriber_failure(SttProvider::Remote, &error);
-    assert!(
-        matches!(&failure, RecordingError::Provider(reason) if reason.contains("401")),
-        "{failure}"
-    );
-}
-
-#[test]
-fn a_local_listener_that_will_not_start_is_a_model_fault() {
-    let error = BansheeError::Other("no such file".to_string());
-    let failure = transcriber_failure(SttProvider::Local, &error);
-    assert!(
-        matches!(&failure, RecordingError::Model(reason) if reason.contains("no such file")),
-        "{failure}"
-    );
-}

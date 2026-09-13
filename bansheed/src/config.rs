@@ -173,8 +173,24 @@ fn non_empty<'de, D: Deserializer<'de>>(deserializer: D, key: &str) -> Result<St
     Ok(value)
 }
 
+// The tray, `banshee status` and the send-error sentence print `host_of`'s
+// result, so a base_url must carry a real host.
+fn remote_url<'de, D: Deserializer<'de>>(deserializer: D, key: &str) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    let has_host = reqwest::Url::parse(&value)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .is_some_and(|url| url.host_str().is_some());
+    if !has_host {
+        return Err(serde::de::Error::custom(format!(
+            "{key} needs an http or https URL with a host, like https://api.openai.com/v1"
+        )));
+    }
+    Ok(value)
+}
+
 fn remote_base_url<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    non_empty(deserializer, "stt.remote.base_url")
+    remote_url(deserializer, "stt.remote.base_url")
 }
 
 fn remote_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
@@ -182,7 +198,7 @@ fn remote_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D:
 }
 
 fn remote_tts_base_url<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    non_empty(deserializer, "tts.remote.base_url")
+    remote_url(deserializer, "tts.remote.base_url")
 }
 
 fn remote_tts_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
@@ -619,7 +635,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("stt.remote.base_url needs a value"),
+                .contains("stt.remote.base_url needs an http or https URL with a host"),
             "{error}"
         );
     }
@@ -707,7 +723,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("tts.remote.base_url needs a value"),
+                .contains("tts.remote.base_url needs an http or https URL with a host"),
             "{error}"
         );
     }

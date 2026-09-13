@@ -95,14 +95,15 @@ struct TranscriptionRing {
     entries: VecDeque<TranscriptionEntry>,
 }
 
-/// Why the recording pipeline did not start. A missing mic, a missing model and
-/// a remote listener that will not answer need different fixes, so they stay
-/// distinct out to the RPC error code.
+/// Why the recording pipeline did not start. A missing mic, a missing model, an
+/// unreadable key file and a remote listener that will not answer need different
+/// fixes, so they stay distinct out to the RPC error code.
 #[derive(Clone)]
 pub enum RecordingError {
     Microphone(String),
     Model(String),
     Provider(String),
+    KeyFile(String),
 }
 
 impl std::fmt::Display for RecordingError {
@@ -111,6 +112,9 @@ impl std::fmt::Display for RecordingError {
             RecordingError::Microphone(e) => write!(f, "the microphone would not open: {e}"),
             RecordingError::Model(e) => write!(f, "a model would not load: {e}"),
             RecordingError::Provider(e) => write!(f, "the remote listener is not reachable: {e}"),
+            RecordingError::KeyFile(e) => {
+                write!(f, "the remote listener's key file is unreadable: {e}")
+            }
         }
     }
 }
@@ -125,19 +129,24 @@ impl RecordingError {
             RecordingError::Provider(_) => {
                 "dictation and ask_user do not work until the key or server is fixed".to_string()
             }
+            RecordingError::KeyFile(_) => {
+                "dictation and ask_user do not work until the key file is fixed".to_string()
+            }
             RecordingError::Microphone(_) => self.to_string().trim_end_matches('.').to_string(),
         }
     }
 
+    /// `None` where no one command clears the fault.
     pub fn command(&self) -> Option<&'static str> {
         match self {
             RecordingError::Microphone(_)
             | RecordingError::Model(_)
             | RecordingError::Provider(_) => Some("banshee start"),
+            RecordingError::KeyFile(_) => None,
         }
     }
 
-    pub fn fix(&self) -> &'static str {
+    pub fn fix(&self) -> String {
         match self {
             // The watchdog rescans after a fault, so most microphones recover
             // on their own. A capture that failed at startup has no watchdog.
@@ -145,12 +154,15 @@ impl RecordingError {
                 "connect the microphone, grant it in Privacy & Security, or fix \
                  [audio] input_device. If recording does not recover on its own, \
                  restart: banshee start"
+                    .to_string()
             }
-            RecordingError::Model(_) => "restart it: banshee start",
-            RecordingError::Provider(_) => {
-                "set the key: banshee config set stt.remote.api_key, or fix \
-                 [stt.remote] base_url, then restart: banshee start"
-            }
+            RecordingError::Model(_) => "restart it: banshee start".to_string(),
+            RecordingError::Provider(_) => "set the key: banshee config set stt.remote.api_key, \
+                 or fix [stt.remote] base_url, then restart: banshee start"
+                .to_string(),
+            // A key written again reads the same file first, so the fix starts
+            // by removing it.
+            RecordingError::KeyFile(_) => crate::credentials::Credentials::remove_command(),
         }
     }
 }

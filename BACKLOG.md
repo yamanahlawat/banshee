@@ -43,17 +43,25 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   utterance, so every reply goes to the same one.
 - An utterance that fails after its first chunk ends where it stopped. The samples already
   played are words the listener has heard, so no fallback starts the reply again.
+- The remote speaker's 15 s bound covers the wait for headers as well as each read, since the
+  blocking client keeps one timeout. A server that renders a whole reply before its first byte
+  costs the full 15 s.
+- A stop does not drop the in-flight request. The worker ends at the next byte or the bound,
+  whichever comes first.
+- `speed` goes out on every speech request, since it is part of the original OpenAI schema. A
+  server that refuses the field refuses every utterance, not only the ones where speed changed.
 - Both remote keys live in `~/.banshee/credentials.toml`, which only the owner can read. The
   macOS Keychain holds neither, so a key stays a file on disk.
 - The status reply says what the config asked for, not what `select_backend` built. A speaker
   that refuses to start still reports its host on every surface, so each surface guards the
   cases it knows. A reply that named the built backend would remove those guards.
-- `banshee config remote` cannot decline the speaker and offers no way back to a local one.
-  `speaker_provider` reads the voice, and Enter keeps the value on file, so a second run flips
-  `tts.provider` to remote whenever a voice is on file.
 - `banshee setup` downloads the Kokoro model whatever `tts.provider` says, while
   `banshee status` skips the Kokoro check under a remote speaker. The two disagree about what
   a remote-speaker machine needs.
+- A remote `base_url` is parsed twice: the config deserializer proves it has a host, and
+  `host_of` parses it again with an empty-host path the config can no longer reach. One
+  `RemoteUrl` newtype with an infallible `host()` would remove the second parse and the dead
+  path; it touches config, both remote backends, status and the CLI.
 
 ## The window
 
@@ -86,6 +94,10 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   together.
 - `banshee status` has no test harness for the checklist. Each check prints to stdout and
   `run` probes a live daemon, so the speaker's voice check and the espeak gate carry no test.
+- Three loopback HTTP fixtures live in three test modules: the listener's reads a body by
+  `Content-Length`, the speaker's writes chunked pieces with gaps, and the probe's answers a
+  bare `GET`. The bind, accept and read-until-blank-line steps are the same in all three, so
+  a shared fixture would hold them once.
 - A `resolve.alias` in `vite.config.ts` that points at `src/mocks` passes both mock guards.
   The lint rules read the specifier a module writes, and the bundle check reads the literals
   a mock holds, so an aliased import of `not-running.json` ships unseen. Every other mock

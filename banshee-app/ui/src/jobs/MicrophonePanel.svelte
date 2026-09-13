@@ -228,7 +228,7 @@
         commit={(next) => write('stt.remote.base_url', next)}
       />
     </SubRow>
-    <SubRow name="model">
+    <SubRow name="model" pending={$waitsOnARestart.has('stt.remote.model')}>
       <Field
         label="Model"
         value={String(remoteTable.model ?? '')}
@@ -238,7 +238,7 @@
     </SubRow>
     <KeyRow setting="stt.remote.api_key" present={listening.keyPresent} />
   {:else}
-    <SubRow name="model">
+    <SubRow name="model" pending={$waitsOnARestart.has('stt.preset')}>
       <Segmented
         label="Model"
         value={preset}

@@ -24,7 +24,7 @@ model = "whisper-1"                    # the model that server names
 provider = "local"     # local | remote; see "A remote voice" below
 voice = "af_sky"       # any voice from the Kokoro voices directory
 speed = 1.2            # playback speed multiplier
-fallback = "system"    # system = use `say` when the voice is unavailable | none
+fallback = "system"    # system = use the OS voice (say, or espeak-ng on Linux) | none
 
 [tts.remote]                           # read when provider = "remote"
 base_url = "https://api.openai.com/v1" # an OpenAI-compatible server's /v1 root
@@ -153,7 +153,9 @@ lists every voice Banshee can name and fetches the one you pick.
 `provider = "remote"` under `[stt]` sends each utterance to the server in
 `[stt.remote]` and types the text it answers. Any OpenAI-compatible
 transcription server works: OpenAI, Groq, or a Whisper server you run. The
-`preset` is not read; the server's `model` is. Set both sides up in one go:
+`preset` is not read; the server's `model` is. The `vocabulary` list goes out with
+each request as the server's prompt, so those words leave the machine too. Set
+both sides up in one go:
 
 ```
 banshee config remote
@@ -169,6 +171,12 @@ remove the key, pass an empty one: `banshee config set stt.remote.api_key ""`.
 The key is never written to `config.toml` and never appears in a status reply. When
 a transcription fails, the error tone plays, and `banshee status` and the window
 say why. Banshee never falls back to the local model on its own.
+
+Once a side has a key on file, `banshee status` asks that server for `/models`
+with it. It passes on an answer, reports a refused key with the `banshee
+config set` command that fixes it, and reports an unreachable server by name.
+A server with no `/models` path earns a note instead of a failure. This runs
+for the listener and the speaker alike.
 
 ### A remote voice
 
@@ -198,8 +206,7 @@ samples are the one answer no byte can prove, so Banshee reads unrecognised
 bytes as samples only under `response_format = "pcm"`.
 
 `banshee config remote` sets both sides up. After the listener it asks for the
-speaker's server, model, voice and key. Banshee switches the speaker on only
-once it has a voice. Each setting also stands alone:
+speaker's server, model, voice and key. Each setting also stands alone:
 `banshee config set tts.remote.api_key` asks for the key by itself, and
 `banshee config set tts.remote.voice marin` names the voice. The key lives in
 `~/.banshee/credentials.toml` beside the listener's, in its own table, and never
@@ -208,7 +215,10 @@ in `config.toml` or a status reply. The daemon reads `tts.provider` and the
 restart.
 
 With `fallback = "system"`, an utterance the server refuses plays the error
-tone, and the system voice says it instead. You still hear an agent's question.
+tone, and the system voice says it instead. You still hear an agent's
+question. That voice is `say` on macOS and `espeak-ng` on Linux; without
+`espeak-ng` installed, the fallback does not start, and the reason names the
+install command.
 With `fallback = "none"` the tone plays and Banshee says nothing. A question
 asked through `ask_user` still opens the microphone after it, so you hear the
 tone and then silence while Banshee waits for your answer. Either way three
@@ -216,7 +226,8 @@ places say why: `banshee status`, the status reply's `last_speech_error` and
 the window's Voice panel. A reply that fails after its first words ends
 where it stopped. A restart in the system voice mid-sentence is worse than a
 stop. A speaker that will not start never stops the daemon, so dictation goes
-on. `tts.provider` stays what you set, and Banshee never rewrites it.
+on. `banshee config remote` writes `tts.provider = "local"` when the voice is
+left empty and `"remote"` otherwise.
 
 ## The hotkey
 

@@ -9,7 +9,7 @@ use crate::speech_to_text::{SAMPLE_RATE, Speech, Transcriber};
 
 use super::wav::pcm16_wav;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One OpenAI-compatible transcription server. Blocking, because the listener
@@ -138,9 +138,13 @@ impl Transcriber for RemoteTranscriber {
             return Err(BansheeError::Transcription(describe_status(status)));
         }
         let reply: Reply = response.json().map_err(|error| {
-            BansheeError::Transcription(format!(
-                "the remote listener answered something that was not a transcription: {error}"
-            ))
+            eprintln!(
+                "banshee: {} answered something that was not a transcription: {error}",
+                self.host()
+            );
+            BansheeError::Transcription(
+                "the remote listener answered something that was not a transcription".to_string(),
+            )
         })?;
         Ok(reply.text.trim().to_string())
     }
@@ -330,6 +334,23 @@ mod tests {
         assert!(!line.chars().any(char::is_control), "{line}");
         assert_eq!(line.matches("banshee:").count(), 2, "{line}");
         assert!(line.lines().count() == 1, "{line}");
+    }
+
+    #[test]
+    fn a_malformed_success_body_names_no_raw_error() {
+        let (base_url, served) = serve_once("200 OK", "not json");
+        let error = transcriber(base_url, false)
+            .transcribe(&[0.0; 160])
+            .unwrap_err();
+        served.join().unwrap();
+        assert!(
+            error
+                .to_string()
+                .ends_with("the remote listener answered something that was not a transcription"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("http"), "{error}");
+        assert!(!error.to_string().contains("sk-test"), "{error}");
     }
 
     #[test]

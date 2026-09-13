@@ -5,6 +5,7 @@ pub mod vad;
 use banshee_common::error::BansheeError;
 
 use crate::config::{STTConfig, STTPreset, SttProvider};
+use crate::state::RecordingError;
 use local::whisper::WhisperEngine;
 use remote::openai_compatible::RemoteTranscriber;
 
@@ -54,28 +55,68 @@ pub trait Transcriber: Send {
     }
 }
 
-pub fn select_transcriber(stt: &STTConfig) -> Result<Box<dyn Transcriber>, BansheeError> {
+pub fn select_transcriber(stt: &STTConfig) -> Result<Box<dyn Transcriber>, RecordingError> {
     match stt.provider {
         SttProvider::Local => {
-            let engine = WhisperEngine::new(stt.preset.model_name(), &stt.vocabulary, stt.into())?;
+            let engine = WhisperEngine::new(stt.preset.model_name(), &stt.vocabulary, stt.into())
+                .map_err(|e| RecordingError::Model(e.to_string()))?;
             Ok(Box::new(engine))
         }
-        SttProvider::Remote => {
-            let side = crate::credentials::RemoteKey::Stt;
-            let key = crate::credentials::Credentials::load()?
-                .key(side)
-                .ok_or_else(|| BansheeError::Other(side.no_key()))?
-                .to_string();
-            println!("Listening through {}", stt.remote.host());
-            let engine = RemoteTranscriber::new(&stt.remote, key, &stt.vocabulary, stt.into())?;
-            Ok(Box::new(engine))
-        }
+        SttProvider::Remote => select_remote(stt, crate::credentials::Credentials::load()),
     }
+}
+
+fn select_remote(
+    stt: &STTConfig,
+    credentials: Result<crate::credentials::Credentials, BansheeError>,
+) -> Result<Box<dyn Transcriber>, RecordingError> {
+    let side = crate::credentials::RemoteKey::Stt;
+    let key = credentials
+        .map_err(|e| RecordingError::KeyFile(e.to_string()))?
+        .key(side)
+        .ok_or_else(|| RecordingError::Provider(side.no_key()))?
+        .to_string();
+    println!("Listening through {}", stt.remote.host());
+    let engine = RemoteTranscriber::new(&stt.remote, key, &stt.vocabulary, stt.into())
+        .map_err(|e| RecordingError::Provider(e.to_string()))?;
+    Ok(Box::new(engine))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Speech, english_only};
+    use super::{RecordingError, Speech, english_only, select_remote};
+
+    #[test]
+    fn a_key_file_that_does_not_parse_is_a_key_file_fault() {
+        let path = std::env::temp_dir().join(format!(
+            "banshee-select-transcriber-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "[stt.remote]\napi_key = sk-live-SECRET123\n").unwrap();
+        let credentials = crate::credentials::Credentials::read(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let stt = crate::config::STTConfig::default();
+        let fault = select_remote(&stt, credentials)
+            .err()
+            .expect("a file that does not parse holds no key");
+        assert!(
+            matches!(&fault, RecordingError::KeyFile(reason) if reason.contains("does not parse")),
+            "{fault}"
+        );
+    }
+
+    #[test]
+    fn a_key_nobody_set_is_a_provider_fault() {
+        let stt = crate::config::STTConfig::default();
+        let fault = select_remote(&stt, Ok(crate::credentials::Credentials::default()))
+            .err()
+            .expect("a remote listener without a key cannot start");
+        assert!(
+            matches!(&fault, RecordingError::Provider(reason) if reason.contains("stt.remote.api_key")),
+            "{fault}"
+        );
+    }
 
     /// `auto` is the config's word for detect it and `None` is the engine's.
     #[test]

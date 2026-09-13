@@ -47,6 +47,13 @@ impl RemoteKey {
             .find(|side| side.setting() == key)
     }
 
+    pub fn base_url_setting(self) -> &'static str {
+        match self {
+            RemoteKey::Stt => "stt.remote.base_url",
+            RemoteKey::Tts => "tts.remote.base_url",
+        }
+    }
+
     /// The word each surface uses for this side, so a prompt, a checklist line
     /// and a fix all name it alike.
     pub fn side(self) -> &'static str {
@@ -113,7 +120,15 @@ impl Credentials {
         Self::load().is_ok_and(|credentials| credentials.key(side).is_some())
     }
 
-    fn read(path: &Path) -> Result<Self, BansheeError> {
+    /// The command that clears a key file the parser cannot read.
+    pub fn remove_command() -> String {
+        let path = Self::path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "~/.banshee/credentials.toml".to_string());
+        format!("rm {path}, then set the keys again")
+    }
+
+    pub(crate) fn read(path: &Path) -> Result<Self, BansheeError> {
         let file = Self::read_file(path)?;
         let held = |key: Option<String>| key.filter(|key| !key.is_empty());
         Ok(Self {
@@ -147,7 +162,7 @@ impl Credentials {
     fn write_many(path: &Path, keys: &[(RemoteKey, &str)]) -> Result<(), BansheeError> {
         let mut file = Self::read_file(path)?;
         for (side, value) in keys {
-            let stored = Some(*value)
+            let stored = Some(value.trim())
                 .filter(|key| !key.is_empty())
                 .map(str::to_string);
             match side {
@@ -342,6 +357,17 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // A key typed at a prompt carries the newline the terminal adds, and a
+    // pasted one often carries a leading or trailing space.
+    #[test]
+    fn a_key_written_with_a_trailing_space_and_newline_reads_back_without_them() {
+        let path = scratch("padded");
+        Credentials::write_many(&path, &[(RemoteKey::Stt, "sk-listener \n")]).unwrap();
+        let held = Credentials::read(&path).unwrap();
+        assert_eq!(held.key(RemoteKey::Stt), Some("sk-listener"));
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn the_debug_rendering_says_which_keys_are_there_and_not_what_they_are() {
         let set = Credentials {
@@ -529,5 +555,11 @@ mod tests {
             Some(RemoteKey::Stt)
         );
         assert_eq!(RemoteKey::of_setting("tts.voice"), None);
+    }
+
+    #[test]
+    fn each_side_names_its_own_base_url_setting() {
+        assert_eq!(RemoteKey::Stt.base_url_setting(), "stt.remote.base_url");
+        assert_eq!(RemoteKey::Tts.base_url_setting(), "tts.remote.base_url");
     }
 }
