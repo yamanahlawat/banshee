@@ -26,6 +26,8 @@ const MAX_QUEUED_UTTERANCES: usize = 8;
 #[derive(Debug)]
 pub enum Fault {
     Failed(String),
+    /// The speaker does not start. No utterance is in flight to fail.
+    Unstarted(String),
     Played,
 }
 
@@ -41,6 +43,10 @@ pub fn drain_faults(
             Fault::Failed(reason) => {
                 eprintln!("banshee: the reply was not spoken: {reason}");
                 cues.send(crate::audio::cues::Cue::Error);
+                state.set_last_speech_error(Some(reason));
+            }
+            Fault::Unstarted(reason) => {
+                eprintln!("banshee: the reply was not spoken: {reason}");
                 state.set_last_speech_error(Some(reason));
             }
             Fault::Played => state.set_last_speech_error(None),
@@ -147,7 +153,7 @@ fn select_remote_backend(
         Err(error) => {
             let reason = error.to_string();
             eprintln!("The remote speaker will not start: {reason}");
-            let _ = faults.send(Fault::Failed(reason.clone()));
+            let _ = faults.send(Fault::Unstarted(reason.clone()));
             match tts_config.fallback {
                 TTSFallback::System => Ok((Box::new(SayBackend), Speaker::Fallback)),
                 TTSFallback::None => Ok((Box::new(Silent { reason }), Speaker::Fallback)),
@@ -426,7 +432,7 @@ mod tests {
             "the system voice is not the speaker the config names"
         );
         match reasons.try_recv() {
-            Ok(Fault::Failed(reason)) => assert!(
+            Ok(Fault::Unstarted(reason)) => assert!(
                 reason.contains("banshee config set tts.remote.api_key"),
                 "{reason}"
             ),
@@ -458,7 +464,7 @@ mod tests {
             "the system voice is not the speaker the config names"
         );
         match reasons.try_recv() {
-            Ok(Fault::Failed(reason)) => {
+            Ok(Fault::Unstarted(reason)) => {
                 assert!(reason.contains("does not parse"), "{reason}")
             }
             other => panic!("the parse fault must be reported: {other:?}"),
@@ -503,5 +509,28 @@ mod tests {
             .unwrap();
         let reason = refusal_of(backend.as_ref());
         assert!(reason.contains("tts.remote.voice"), "{reason}");
+    }
+
+    #[test]
+    fn a_speaker_that_does_not_start_reports_unstarted_and_not_a_failed_utterance() {
+        let (cues, heard) = crate::audio::cues::Cues::recording();
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        let (faults, receiver) = std::sync::mpsc::channel();
+        faults
+            .send(Fault::Unstarted("no key set".to_string()))
+            .unwrap();
+        drop(faults);
+
+        drain_faults(std::sync::Arc::clone(&state), cues, receiver);
+
+        assert!(
+            heard.try_recv().is_err(),
+            "a speaker that never started must sound no error tone"
+        );
+        assert_eq!(
+            state.last_speech_error().as_deref(),
+            Some("no key set"),
+            "a startup reason is still the record"
+        );
     }
 }

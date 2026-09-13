@@ -310,11 +310,15 @@ impl RemoteSpeechBackend {
                             Ok(()) if !played => {
                                 unheard(format!("{} sent no audio", opener.host));
                             }
-                            Ok(()) => println!(
-                                "Spoke through {} in {:.2}s",
-                                opener.host,
-                                started.elapsed().as_secs_f32()
-                            ),
+                            Ok(()) => {
+                                if !lock(&worker_handover).stopped {
+                                    println!(
+                                        "Spoke through {} in {:.2}s",
+                                        opener.host,
+                                        started.elapsed().as_secs_f32()
+                                    );
+                                }
+                            }
                             Err(reason) => unheard(reason),
                         }
                         return None;
@@ -346,12 +350,15 @@ impl RemoteSpeechBackend {
                 };
                 if !played {
                     played = true;
-                    println!(
-                        "First audio from {} in {:.2}s",
-                        opener.host,
-                        started.elapsed().as_secs_f32()
-                    );
-                    let _ = faults.send(Fault::Played);
+                    // A stop is already in force, so this chunk reaches nobody.
+                    if !lock(&worker_handover).stopped {
+                        println!(
+                            "First audio from {} in {:.2}s",
+                            opener.host,
+                            started.elapsed().as_secs_f32()
+                        );
+                        let _ = faults.send(Fault::Played);
+                    }
                 }
                 return Some(chunk);
             }
@@ -675,6 +682,7 @@ mod tests {
         loop {
             match faults.recv_timeout(Duration::from_millis(100)) {
                 Ok(Fault::Failed(reason)) => return reason,
+                Ok(Fault::Unstarted(_)) => panic!("this utterance must not have failed to start"),
                 Ok(Fault::Played) => panic!("this utterance must not have played"),
                 Err(_) => assert!(
                     std::time::Instant::now() < deadline,
@@ -793,6 +801,56 @@ mod tests {
             built.faults.recv_timeout(GAP).is_err(),
             "a stopped sentence reports nothing"
         );
+        served.join().unwrap();
+    }
+
+    // That report clears a fault the next sentence sets.
+    #[test]
+    fn a_stop_before_the_first_byte_sends_no_played_when_the_byte_then_arrives() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (asked, request_read) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request(&mut stream);
+            asked.send(()).unwrap();
+            let _ = held.recv();
+            // The server writes nothing before the stop. The client reads this byte first.
+            let head =
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nTransfer-Encoding: chunked\r\n\r\n";
+            stream.write_all(head.as_bytes()).unwrap();
+            let piece = pcm(&[1; 480]);
+            let chunk = [format!("{:x}\r\n", piece.len()).as_bytes(), &piece, b"\r\n"].concat();
+            stream.write_all(&chunk).unwrap();
+            stream.write_all(b"0\r\n\r\n").unwrap();
+        });
+
+        let built = built(base_url, "", false);
+        let mut utterance = built.backend.speak("Cancel before the byte.", None);
+        request_read
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the request reached the server");
+        utterance.stop();
+        release.send(()).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match built.faults.recv_timeout(Duration::from_millis(50)) {
+                Ok(Fault::Played) => {
+                    panic!("a stopped sentence must not report a played utterance")
+                }
+                Ok(Fault::Failed(reason)) => {
+                    panic!("a stopped sentence must not report a failure: {reason}")
+                }
+                Ok(Fault::Unstarted(_)) => panic!("this utterance must not have failed to start"),
+                Err(_) if utterance.spoken() => break,
+                Err(_) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "the worker did not end within 5s"
+                ),
+            }
+        }
         served.join().unwrap();
     }
 

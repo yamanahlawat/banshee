@@ -55,8 +55,15 @@ pub fn write_atomically(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io
     if let Some(mode) = mode {
         options.mode(mode);
     }
-    options.open(&staged)?.write_all(bytes)?;
-    std::fs::rename(&staged, path)
+    if let Err(err) = options.open(&staged)?.write_all(bytes) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&staged, path) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// systemd's name for the daemon's user unit. `bansheed` writes the file and
@@ -202,5 +209,40 @@ mod tests {
     #[test]
     fn the_tray_label_names_its_own_unit() {
         assert_eq!(systemd_unit(TRAY_AGENT), Some("banshee-tray.service"));
+    }
+
+    /// Removes its directory on drop, so a test that fails leaves nothing behind.
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_staging_file_so_the_next_write_succeeds() {
+        let dir = TempDir(std::env::temp_dir().join(format!(
+            "banshee-common-test-{}-{}",
+            std::process::id(),
+            "a_failed_write_leaves_no_staging_file_so_the_next_write_succeeds"
+        )));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let target = dir.0.join("config.toml");
+
+        // A rename onto a non-empty directory fails on macOS and Linux.
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("inner"), b"x").unwrap();
+
+        assert!(write_atomically(&target, b"first", Some(0o600)).is_err());
+
+        std::fs::remove_dir_all(&target).unwrap();
+
+        let result = write_atomically(&target, b"second", Some(0o600));
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"second");
+
+        let extension = target.extension().unwrap_or_default().to_string_lossy();
+        let staged = target.with_extension(format!("{extension}.{}", std::process::id()));
+        assert!(!staged.exists());
     }
 }
