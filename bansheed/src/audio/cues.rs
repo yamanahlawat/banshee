@@ -66,6 +66,19 @@ impl Cues {
             enabled: Arc::new(AtomicBool::new(false)),
         }
     }
+
+    /// A live receiver, for a test that asks which cue a path sounds.
+    #[cfg(test)]
+    pub fn recording() -> (Self, mpsc::Receiver<Cue>) {
+        let (sender, receiver) = mpsc::channel();
+        (
+            Cues {
+                sender,
+                enabled: Arc::new(AtomicBool::new(true)),
+            },
+            receiver,
+        )
+    }
 }
 
 fn next_playable(receiver: &mpsc::Receiver<Cue>, enabled: &AtomicBool) -> Option<Cue> {

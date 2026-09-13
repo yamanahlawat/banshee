@@ -4,16 +4,27 @@
     daemon,
     downloadLine,
     endsTheRun,
+    isDown,
     lampForm,
-    microphoneInUse,
+    listeningFacts,
     reduceLive,
     reduceStatus,
+    speechFacts,
     waitsOnARestart,
     stateWord,
     type Live,
     type Status,
   } from './lib/daemon';
-  import { announcement, problem, report, spell } from './lib/copy';
+  import {
+    announcement,
+    listeningLead,
+    problem,
+    report,
+    speechLead,
+    A_SERVER,
+    RESTART_SAYS,
+    spell,
+  } from './lib/copy';
   import { followSaveHistory, readAll, readLatest, readNewest, table } from './lib/history';
   import { agents, refresh as readAgents } from './lib/agents';
   import {
@@ -114,7 +125,7 @@
   $: word = stateWord($daemon);
   $: form = lampForm(word);
   $: config = ($daemon.status?.config ?? {}) as Record<string, Record<string, unknown>>;
-  $: live = word !== 'Not running';
+  $: live = !isDown($daemon);
   $: connected = $agents.filter((a) => a.presence === 'connected').length;
   // Wayland grants no global grab, so the daemon binds nothing and says so.
   // A daemon older than the field sends nothing, and it did bind the key.
@@ -126,23 +137,26 @@
   // Said on the home screen only while it is true, so it needs no dismissal to
   // remember: connecting one is what clears it.
   $: noAgentYet = live && agentsRead && connected === 0;
-  $: pipelineBroken = blockers.some((blocker) => blocker.kind === 'pipeline');
+
+  // The daemon says which listener and which speaker are in force; the config
+  // says only which ones were asked for. The heading, the panel's note and the
+  // foot cell all read one record of each side, so no two of them can state a
+  // different truth.
+  $: listening = listeningFacts($daemon, $waitsOnARestart);
+  $: speech = speechFacts($daemon, $waitsOnARestart, voices.voices);
+  // The opening line names a host only while text reaches it.
+  $: textLeavesTo = speech.started ? speech.host : null;
 
   // Spelled, because a sentence should not open on a digit. Six agents are
   // detectable today, so the list needs no more than this.
   // Name and lead are declared together. "Record" would collide with the RECORDING state word, so
   // the panel is named for what is kept. Every lead reads live state, never the config: the config
-  // says only what was asked for.
+  // says only what was asked for. The one exception is the sentence about a listener that waits on
+  // a restart, and that sentence says in its own words that it is not in force yet.
   $: panels = {
     Microphone: {
       name: 'Microphone',
-      lead: !live
-        ? 'Banshee is not running, so no microphone is open.'
-        : $daemon.live.audio_device
-          ? `Banshee is listening through the ${$daemon.live.audio_device}.`
-          : pipelineBroken
-            ? 'Banshee cannot open a microphone.'
-            : 'Banshee is not listening yet.',
+      lead: listeningLead(listening),
     },
     Hotkey: {
       name: 'Hotkey',
@@ -156,7 +170,7 @@
     },
     Voice: {
       name: 'Voice',
-      lead: voiceName ? `Banshee speaks as ${voiceName}.` : 'Banshee has no voice yet.',
+      lead: speechLead(speech),
     },
     Agents: {
       name: 'Agents',
@@ -229,19 +243,36 @@
   // Empty when the daemon is stopped. The hotkey is never applied live and the daemon reports no
   // bound key. Pending is the only way the foot stops naming a key nobody listens for.
   // audio.input_device always applies.
-  $: voiceName = ((): string => {
-    const id = String(config.tts?.voice ?? '');
-    return voices.voices.find((v) => v.id === id)?.name ?? id;
-  })();
-
-  $: footValues = ((): { id: string; label: Job; value: string; pending?: boolean }[] => {
+  $: footValues = ((): {
+    id: string;
+    label: Job;
+    title?: string;
+    value: string;
+    pending?: string;
+  }[] => {
     const said = (value: string) => (live ? value : '');
-    const waits = (...keys: string[]) => live && keys.some((key) => $waitsOnARestart.has(key));
+    const waits = (...keys: string[]) =>
+      live && keys.some((key) => $waitsOnARestart.has(key)) ? RESTART_SAYS : undefined;
+    // The prefix form, so a `[tts.remote]` key added later cannot be left off a
+    // hand-written list and lose its mark.
+    const waitsUnder = (prefix: string) =>
+      live && [...$waitsOnARestart].some((key) => key.startsWith(prefix))
+        ? RESTART_SAYS
+        : undefined;
     return [
       {
+        // Where the words are heard, not the device they are picked up on: the
+        // cell reports the one fact the panel's whole group is about.
         id: 'job-microphone',
         label: 'Microphone',
-        value: said(microphoneInUse($daemon.live.audio_device)),
+        title: 'Listening',
+        value: said(listening.remote ? (listening.host ?? 'A remote server') : 'On this machine'),
+        pending:
+          live && listening.pending
+            ? listening.remote
+              ? 'changing to this machine when Banshee restarts'
+              : `changing to ${listening.willUse ?? A_SERVER} when Banshee restarts`
+            : waitsUnder('stt.remote.'),
       },
       {
         id: 'job-hotkey',
@@ -252,8 +283,15 @@
       {
         id: 'job-voice',
         label: 'Voice',
-        value: said(voiceName),
-        pending: waits('tts.voice', 'tts.speed'),
+        value: said(speech.voiceName),
+        // The voice shown is the one being replaced, so a flip names what it
+        // changes to rather than marking the value as taken.
+        pending:
+          live && speech.pending
+            ? speech.remote
+              ? 'changing to this machine when Banshee restarts'
+              : `changing to ${speech.willUse ?? A_SERVER} when Banshee restarts`
+            : (waits('tts.voice', 'tts.speed') ?? waitsUnder('tts.remote.')),
       },
       {
         id: 'job-agents',
@@ -399,6 +437,8 @@
           preset={String(config.stt?.preset ?? 'balanced')}
           megabytes={Number($daemon.status?.download_megabytes ?? 0)}
           first={savingHistory && nothingYet}
+          remoteHost={listening.stoppedBy === null ? listening.host : null}
+          speechHost={textLeavesTo}
         />
       {/if}
 

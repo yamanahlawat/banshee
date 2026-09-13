@@ -124,6 +124,27 @@ pub fn missing_device(status: &Value) -> Option<&str> {
     status.get("missing_device").and_then(Value::as_str)
 }
 
+/// Where a remote listener sends the audio. `None` for a local one.
+pub fn remote_stt_host(status: &Value) -> Option<&str> {
+    // A daemon older than the nested shape answers a boolean at `remote.stt`,
+    // and indexing a `Value::Bool` gives `Null`, so it reads as local.
+    status["remote"]["stt"]["host"].as_str()
+}
+
+/// Where a remote speaker sends the text. `None` for a local one.
+pub fn remote_tts_host(status: &Value) -> Option<&str> {
+    status["remote"]["tts"]["host"].as_str()
+}
+
+/// Whether the speaker the config names is the one running. The daemon holds
+/// a voice only for a backend that started, so this is false whenever the
+/// system voice took over: a key that is missing, a voice that is not named,
+/// a server the daemon cannot reach at startup, or a local Kokoro that failed
+/// to load. False from a daemon older than the field.
+pub fn speaker_started(status: &Value) -> bool {
+    status["remote"]["tts"]["speaker_started"].as_bool() == Some(true)
+}
+
 /// What `IOHIDCheckAccess` answered in the daemon: `granted`, `denied` or
 /// `undetermined`. `None` from a daemon older than the field.
 pub fn key_press_access(status: &Value) -> Option<&str> {
@@ -211,6 +232,11 @@ pub enum BlockerKind {
     Permission,
     Model,
     Pipeline,
+    /// The server that hears the audio, as against the machine that captures it.
+    Provider,
+    /// The file that holds the remote keys, as against the server they open.
+    #[serde(rename = "keyfile")]
+    KeyFile,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -361,6 +387,14 @@ mod wire_tests {
         Activity, BANSHEE_STATE_CHANGED, Blocker, BlockerKind, DownloadProgress, DownloadState,
         InputDevice, JsonRpcNotification,
     };
+
+    /// The window's `BlockerKind` union spells this one `keyfile`, so the wire
+    /// name is a contract between the two.
+    #[test]
+    fn an_unreadable_key_file_goes_on_the_wire_as_keyfile() {
+        let wire = serde_json::to_value(BlockerKind::KeyFile).unwrap();
+        assert_eq!(wire, "keyfile");
+    }
 
     #[test]
     fn a_blocker_that_names_a_command_puts_it_on_the_wire() {
@@ -540,5 +574,56 @@ mod label_tests {
         ] {
             assert_eq!(microphone_label(open, missing), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::{remote_stt_host, remote_tts_host, speaker_started};
+
+    #[test]
+    fn each_side_reads_its_own_host_off_the_status_reply() {
+        let local = serde_json::json!({
+            "remote": {
+                "stt": {"remote": false, "host": null},
+                "tts": {"remote": false, "host": null, "speaker_started": true},
+            }
+        });
+        assert_eq!(remote_stt_host(&local), None);
+        assert_eq!(remote_tts_host(&local), None);
+
+        let both = serde_json::json!({
+            "remote": {
+                "stt": {"remote": true, "host": "api.groq.com"},
+                "tts": {"remote": true, "host": "api.openai.com", "speaker_started": true},
+            }
+        });
+        assert_eq!(remote_stt_host(&both), Some("api.groq.com"));
+        assert_eq!(remote_tts_host(&both), Some("api.openai.com"));
+    }
+
+    // The daemon that answers a host is not always the daemon that speaks
+    // through it: the field says which, and a reply that leaves it out says
+    // nothing started.
+    #[test]
+    fn the_speaker_reads_as_started_only_where_the_reply_says_so() {
+        let named = |started: serde_json::Value| {
+            serde_json::json!({
+                "remote": {"tts": {"host": "api.openai.com", "speaker_started": started}}
+            })
+        };
+        assert!(speaker_started(&named(true.into())));
+        assert!(!speaker_started(&named(false.into())));
+        assert!(!speaker_started(&named(serde_json::Value::Null)));
+    }
+
+    // A daemon older than the nested shape answers a boolean at `remote.tts`,
+    // and indexing a `Value::Bool` gives `Null`, so both read as local.
+    #[test]
+    fn an_older_daemon_reads_as_local_on_both_sides() {
+        let older = serde_json::json!({"remote": {"stt": false, "tts": false}});
+        assert_eq!(remote_stt_host(&older), None);
+        assert_eq!(remote_tts_host(&older), None);
+        assert!(!speaker_started(&older));
     }
 }

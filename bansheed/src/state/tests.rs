@@ -30,10 +30,12 @@ fn a_preset_change_hands_the_listener_the_model_to_load() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
 
-    assert!(state.load_stt_model("ggml-large-v3-q5_0.bin"));
+    assert!(state.load_stt_model(crate::config::STTPreset::Quality));
 
     match taken.try_recv() {
-        Ok(ConsumerCommand::Reload(model)) => assert_eq!(model, "ggml-large-v3-q5_0.bin"),
+        Ok(ConsumerCommand::Reload(preset)) => {
+            assert_eq!(preset.model_name(), "ggml-large-v3-q5_0.bin")
+        }
         _ => panic!("the listener was handed no model"),
     }
 }
@@ -46,17 +48,28 @@ fn a_preset_change_with_no_listener_is_not_reported_as_taken() {
     let state = crate::test_support::daemon_state(commands);
     drop(gone);
 
-    assert!(!state.load_stt_model("ggml-large-v3-q5_0.bin"));
+    assert!(!state.load_stt_model(Config::default().stt.preset));
 }
 
 #[test]
 fn the_model_reported_is_the_one_the_listener_loaded() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    assert_eq!(state.stt_model(), Config::default().stt.preset.model_name());
+    assert_eq!(
+        state.stt_model(),
+        Some(Config::default().stt.preset.model_name())
+    );
 
-    state.set_stt_model("ggml-large-v3-q5_0.bin");
+    state.set_stt_model(Some("ggml-large-v3-q5_0.bin"));
 
-    assert_eq!(state.stt_model(), "ggml-large-v3-q5_0.bin");
+    assert_eq!(state.stt_model(), Some("ggml-large-v3-q5_0.bin"));
+}
+
+#[test]
+fn a_remote_listener_reports_no_loaded_model() {
+    let mut config = Config::default();
+    config.stt.provider = crate::config::SttProvider::Remote;
+    let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
+    assert_eq!(state.stt_model(), None);
 }
 
 // The off direction alone would pass a `set_history` that always stores
@@ -85,14 +98,29 @@ fn a_recording_error_names_the_same_command_its_sentence_does() {
     for error in [
         RecordingError::Microphone(String::new()),
         RecordingError::Model(String::new()),
+        RecordingError::Provider(String::new()),
     ] {
-        let command = error.command().expect("both faults name a command");
+        let command = error.command().expect("every fault names a command");
         assert!(
             error.fix().ends_with(command),
             "`{}` does not end with `{command}`",
             error.fix()
         );
     }
+}
+
+#[test]
+fn an_unreadable_key_file_names_the_file_to_remove_and_no_command() {
+    let error = RecordingError::KeyFile("it does not parse".to_string());
+    assert_eq!(
+        error.to_string(),
+        "the remote listener's key file is unreadable: it does not parse"
+    );
+    let fix = error.fix();
+    assert!(fix.starts_with("rm "), "{fix}");
+    assert!(fix.contains("credentials.toml"), "{fix}");
+    assert!(!fix.contains("banshee config set"), "{fix}");
+    assert_eq!(error.command(), None);
 }
 
 // A watchdog rescans after a fault, but `start_recording` returning Err
@@ -117,6 +145,7 @@ fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<Consume
         std::sync::Arc::new(Config::default()),
         None,
         crate::text_to_speech::SpeechPlayer::default(),
+        crate::text_to_speech::Speaker::Fallback,
         commands,
         crate::audio::cues::Cues::silent(),
     );
@@ -457,5 +486,105 @@ fn the_silence_limit_clears_every_measured_callback_rate() {
         CAPTURE_SILENCE_LIMIT >= slowest_gap * 20,
         "the limit must keep well clear of a healthy gap, or a busy \
              machine trips it"
+    );
+}
+
+// Every transcription that succeeds clears this, so a clear that changes
+// nothing is the common case
+#[test]
+fn clearing_an_error_that_is_already_clear_wakes_nobody() {
+    let state = test_state();
+    let watcher = state.subscribe_last_error();
+    state.set_last_error(None);
+    assert!(
+        !watcher.has_changed().unwrap(),
+        "a clear that changes nothing must not wake a subscriber"
+    );
+    state.set_last_error(Some("the microphone would not open".to_string()));
+    assert!(
+        watcher.has_changed().unwrap(),
+        "a new failure must wake one"
+    );
+}
+
+// One field per side, so a failed listen and a failed reply never overwrite
+// each other.
+#[test]
+fn the_two_failure_fields_are_separate() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    state.set_last_error(Some("the remote listener refused the key".to_string()));
+    state.set_last_speech_error(Some("the remote speaker refused the key".to_string()));
+    assert_eq!(
+        state.last_error().as_deref(),
+        Some("the remote listener refused the key")
+    );
+    assert_eq!(
+        state.last_speech_error().as_deref(),
+        Some("the remote speaker refused the key")
+    );
+    state.set_last_speech_error(None);
+    assert_eq!(state.last_speech_error(), None);
+    assert!(state.last_error().is_some(), "the listener's reason stands");
+}
+
+// Each move wakes the push task of every subscriber, so the same reason twice
+// sends nothing.
+#[tokio::test]
+async fn an_unchanged_speech_error_wakes_nobody() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let mut watch = state.subscribe_last_speech_error();
+    state.set_last_speech_error(Some("no such voice".to_string()));
+    watch.changed().await.unwrap();
+    state.set_last_speech_error(Some("no such voice".to_string()));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), watch.changed())
+            .await
+            .is_err(),
+        "the same reason must not push again"
+    );
+}
+
+// The backend cannot reach the cue player or the state, so a channel carries
+// both what failed and the first chunk that played.
+#[test]
+fn the_drain_sounds_the_cue_for_a_failure_and_clears_the_reason_when_one_plays() {
+    use crate::text_to_speech::{Fault, drain_faults};
+
+    let (cues, heard) = crate::audio::cues::Cues::recording();
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+    let (faults, receiver) = std::sync::mpsc::channel();
+    faults
+        .send(Fault::Failed(
+            "the remote speaker refused the key".to_string(),
+        ))
+        .unwrap();
+    drop(faults);
+    drain_faults(std::sync::Arc::clone(&state), cues.clone(), receiver);
+
+    assert!(
+        matches!(heard.try_recv(), Ok(crate::audio::cues::Cue::Error)),
+        "a failed utterance sounds the error cue"
+    );
+    assert_eq!(
+        state.last_speech_error().as_deref(),
+        Some("the remote speaker refused the key"),
+        "the reason the backend gave is the record"
+    );
+
+    let (faults, receiver) = std::sync::mpsc::channel();
+    faults.send(Fault::Played).unwrap();
+    drop(faults);
+    drain_faults(std::sync::Arc::clone(&state), cues, receiver);
+
+    assert_eq!(
+        state.last_speech_error(),
+        None,
+        "the utterance that played cleared the reason before it"
+    );
+    let sounded = heard.try_recv();
+    assert!(
+        sounded.is_err(),
+        "an utterance that played sounds no cue: {sounded:?}"
     );
 }

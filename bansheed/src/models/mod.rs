@@ -2,14 +2,22 @@ pub mod download;
 
 use banshee_common::{Blocker, BlockerKind};
 
-use crate::config::Config;
+use crate::config::{Config, SttProvider};
 
 pub const VAD_MODEL: &str = "silero_vad.onnx";
 
+/// The Whisper file the listener loads, or none: a remote listener loads no file.
+pub fn stt_file(config: &Config) -> Option<&'static str> {
+    match config.stt.provider {
+        SttProvider::Local => Some(config.stt.preset.model_name()),
+        SttProvider::Remote => None,
+    }
+}
+
 /// The models the recording pipeline loads at startup, named in one place so a
 /// preflight and the daemon cannot disagree about what has to be on disk.
-pub fn required(config: &Config) -> [&'static str; 2] {
-    [config.stt.preset.model_name(), VAD_MODEL]
+pub fn required(config: &Config) -> Vec<&'static str> {
+    stt_file(config).into_iter().chain([VAD_MODEL]).collect()
 }
 
 pub fn missing(names: &[&str]) -> Vec<String> {
@@ -66,6 +74,30 @@ pub fn blockers(names: &[&str]) -> Vec<Blocker> {
             command: Some("banshee setup".to_string()),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod required_tests {
+    use super::{VAD_MODEL, required, stt_file};
+    use crate::config::{Config, SttProvider};
+
+    #[test]
+    fn a_local_listener_needs_its_whisper_file_and_the_detector() {
+        let config = Config::default();
+        assert_eq!(stt_file(&config), Some(config.stt.preset.model_name()));
+        assert_eq!(
+            required(&config),
+            vec![config.stt.preset.model_name(), VAD_MODEL]
+        );
+    }
+
+    #[test]
+    fn a_remote_listener_needs_the_detector_alone() {
+        let mut config = Config::default();
+        config.stt.provider = SttProvider::Remote;
+        assert_eq!(stt_file(&config), None);
+        assert_eq!(required(&config), vec![VAD_MODEL]);
+    }
 }
 
 #[cfg(test)]

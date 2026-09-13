@@ -1,7 +1,15 @@
 <script lang="ts">
-  import { RESTART_SAYS } from '../lib/copy';
   import { arrowStep } from '../lib/keys';
-  export let values: { id: string; label: string; value: string; pending?: boolean }[];
+  /// `label` routes and `title` is read: the cell that opens the Microphone job
+  /// says what it reports, which is where listening happens. `pending` is the
+  /// sentence a screen reader hears when the value is not the one coming.
+  export let values: {
+    id: string;
+    label: string;
+    title?: string;
+    value: string;
+    pending?: string;
+  }[];
   export let open: (label: string, id: string) => void;
   export let active: string | null = null;
 
@@ -34,10 +42,13 @@
   // For the eye alone: a screen reader reads the whole value, so a tooltip only on a clipped one.
   function clipped(node: HTMLElement, value: string) {
     let text = value;
-    const mark = () => {
-      if (node.scrollWidth > node.clientWidth) node.title = text;
-      else node.removeAttribute('title');
-    };
+    // Measured after the frame that paints the value, or the width read is the
+    // one the previous value had.
+    const mark = () =>
+      requestAnimationFrame(() => {
+        if (node.scrollWidth > node.clientWidth) node.title = text;
+        else node.removeAttribute('title');
+      });
     mark();
     // Until Archivo lands the widths are the fallback's, so a value that fits
     // at first paint may not once the real face is measured.
@@ -66,11 +77,11 @@
           open(row.label, row.id);
         }}
       >
-        <span class="caps">{row.label}</span>
+        <span class="caps">{row.title ?? row.label}</span>
         <span class="mono value" class:pending={row.pending} use:clipped={row.value}>
           {row.value || '—'}
         </span>
-        {#if row.pending}<span class="sr">{RESTART_SAYS}</span>{/if}
+        {#if row.pending}<span class="sr">{row.pending}</span>{/if}
       </button>
     {/each}
   </div>

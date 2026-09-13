@@ -12,12 +12,11 @@ use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
 use crate::config::HotkeyMode;
 use crate::dictation::type_text;
 use crate::speech_to_text::vad::VADEngine;
-use crate::speech_to_text::whisper::WhisperEngine;
+use crate::speech_to_text::{SAMPLE_RATE, Transcriber};
 use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode, TranscribeTarget};
 
-const TARGET_SAMPLE_RATE: u32 = 16000;
 const VAD_CHUNK: usize = 512;
-const CHUNK_MS: u64 = (VAD_CHUNK * 1000) as u64 / TARGET_SAMPLE_RATE as u64;
+const CHUNK_MS: u64 = (VAD_CHUNK * 1000) as u64 / SAMPLE_RATE as u64;
 const ONSET_CHUNKS: usize = 12; // ~384 ms of consecutive speech confirms onset
 const PREROLL_CHUNKS: usize = 8; // keep ~256 ms before onset for Whisper
 const ARMED_POLL: Duration = Duration::from_millis(30);
@@ -27,6 +26,15 @@ const CUE_SETTLE: Duration = Duration::from_millis(250);
 const MAX_ANSWER: Duration = Duration::from_secs(60);
 // Past this ratio of wall time to audio length, the model is too heavy
 const SLOW_TRANSCRIBE_FACTOR: f32 = 2.0;
+
+/// The sentence a person reads. `Transcription` already says "Transcription
+/// failed", so its reason stands alone.
+fn reason(error: &banshee_common::error::BansheeError) -> String {
+    match error {
+        banshee_common::error::BansheeError::Transcription(reason) => reason.clone(),
+        other => other.to_string(),
+    }
+}
 
 /// They change together on a rebind, so they travel together.
 pub struct CaptureSource {
@@ -47,7 +55,7 @@ impl CaptureSource {
 // Everything the audio consumer thread owns
 pub struct Pipeline {
     pub source: CaptureSource,
-    pub speech_to_text: WhisperEngine,
+    pub speech_to_text: Box<dyn Transcriber>,
     pub vad: VADEngine,
     pub state: Arc<DaemonState>,
     pub cues: Cues,
@@ -94,17 +102,12 @@ pub fn hotkey_listener(
                 ConsumerCommand::Speak(speech) => pipeline.speech_to_text.set_speech(speech),
                 // The load takes seconds and holds this thread. Nothing is lost:
                 // a press queues behind it and the ring still holds the audio.
-                ConsumerCommand::Reload(model) => {
-                    match pipeline
-                        .speech_to_text
-                        .reload(banshee_common::WhisperConfig::new(model))
-                    {
-                        Ok(()) => pipeline.state.set_stt_model(model),
-                        Err(error) => {
-                            eprintln!("banshee: the transcription model did not load: {error}")
-                        }
+                ConsumerCommand::Reload(preset) => match pipeline.speech_to_text.reload(preset) {
+                    Ok(loaded) => pipeline.state.set_stt_model(loaded),
+                    Err(error) => {
+                        eprintln!("banshee: the transcription model did not load: {error}")
                     }
-                }
+                },
                 ConsumerCommand::Shutdown => break,
             }
         }
@@ -196,19 +199,19 @@ impl Pipeline {
         let audio_data = self.source.drain();
 
         println!(
-            "Downsampling audio from {} Hz to {TARGET_SAMPLE_RATE} Hz...",
+            "Downsampling audio from {} Hz to {SAMPLE_RATE} Hz...",
             self.source.sample_rate
         );
 
-        let final_data =
-            match resample_audio(&audio_data, self.source.sample_rate, TARGET_SAMPLE_RATE) {
-                Ok(data) => data,
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    self.cues.send(Cue::Error);
-                    return;
-                }
-            };
+        let final_data = match resample_audio(&audio_data, self.source.sample_rate, SAMPLE_RATE) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                self.state.set_last_error(Some(reason(&e)));
+                self.cues.send(Cue::Error);
+                return;
+            }
+        };
 
         let (min_amplitude, max_amplitude) = final_data
             .iter()
@@ -229,7 +232,7 @@ impl Pipeline {
             if chunk.len() < VAD_CHUNK {
                 continue;
             }
-            match self.vad.check_speech(chunk, TARGET_SAMPLE_RATE) {
+            match self.vad.check_speech(chunk, SAMPLE_RATE) {
                 Ok(probability) => {
                     if probability > vad_threshold {
                         speech_chunks += 1;
@@ -276,16 +279,18 @@ impl Pipeline {
         self.state.set_transcribing(false);
         match transcribed {
             Ok(transcription) => {
-                let audio_secs = final_data.len() as f32 / TARGET_SAMPLE_RATE as f32;
+                self.state.set_last_error(None);
+                let audio_secs = final_data.len() as f32 / SAMPLE_RATE as f32;
                 let elapsed = transcribe_started.elapsed().as_secs_f32();
                 println!("Transcribed {audio_secs:.1}s of audio in {elapsed:.2}s");
                 // A slow CPU reads as a dead microphone rather than a slow one
                 let slowdown = elapsed / audio_secs.max(0.001);
-                if slowdown > SLOW_TRANSCRIBE_FACTOR {
+                if slowdown > SLOW_TRANSCRIBE_FACTOR
+                    && let Some(advice) = self.speech_to_text.slow_advice()
+                {
                     println!(
                         "Transcription ran {slowdown:.0}x slower than realtime on this \
-                         machine. Set [stt] preset = \"fast\" in config.toml, then run \
-                         banshee setup."
+                         machine. {advice}"
                     );
                 }
                 println!("Transcription: {transcription}");
@@ -322,6 +327,7 @@ impl Pipeline {
             }
             Err(error) => {
                 eprintln!("Transcription failed: {error}");
+                self.state.set_last_error(Some(reason(&error)));
                 self.cues.send(Cue::Error);
             }
         }
@@ -336,48 +342,59 @@ impl Pipeline {
         thread::sleep(CUE_SETTLE);
         self.source.discard();
 
-        let answer_audio = self.listen_for_answer(ask.timeout);
+        let listened = self.listen_for_answer(ask.timeout);
 
         // Close the mic before the slow transcription; every exit disarms
         self.state.set_recording_mode(RecordingMode::Idle);
         self.cues.send(Cue::Disarm);
 
-        let text = match answer_audio {
-            Some(audio) => {
+        let text = match listened {
+            Ok(Some(audio)) => {
                 self.state.set_transcribing(true);
                 let transcribed = self.speech_to_text.transcribe(&audio);
                 store(&self.state, transcribed.as_deref().ok());
                 self.state.set_transcribing(false);
                 match transcribed {
                     Ok(text) => {
+                        self.state.set_last_error(None);
                         println!("Answer: {text}");
-                        text
+                        Ok(text)
                     }
                     Err(e) => {
                         eprintln!("Transcription failed: {e}");
+                        let why = reason(&e);
+                        self.state.set_last_error(Some(why.clone()));
                         self.cues.send(Cue::Error);
-                        String::new()
+                        Err(why)
                     }
                 }
             }
-            None => {
+            Ok(None) => {
+                // last_error is left alone: silence is not a transcription, so
+                // it neither clears the last failure nor is one
                 self.cues.send(Cue::Error);
-                String::new()
+                Ok(String::new())
+            }
+            Err(why) => {
+                self.state.set_last_error(Some(why.clone()));
+                self.cues.send(Cue::Error);
+                Err(why)
             }
         };
         let _ = ask.reply.send(text);
     }
 
-    // Confirms onset, then ends on trailing silence; the audio comes back at 16 kHz
-    fn listen_for_answer(&mut self, timeout: Duration) -> Option<Vec<f32>> {
-        let mut resampler =
-            match StreamingResampler::new(self.source.sample_rate, TARGET_SAMPLE_RATE) {
-                Ok(resampler) => resampler,
-                Err(e) => {
-                    eprintln!("Failed to create resampler: {e}");
-                    return None;
-                }
-            };
+    // Confirms onset, then ends on trailing silence; the audio comes back at
+    // 16 kHz. `Ok(None)` is an answer that never came: silence, or a session
+    // closed from outside. `Err` is a listen that broke.
+    fn listen_for_answer(&mut self, timeout: Duration) -> Result<Option<Vec<f32>>, String> {
+        let mut resampler = match StreamingResampler::new(self.source.sample_rate, SAMPLE_RATE) {
+            Ok(resampler) => resampler,
+            Err(e) => {
+                eprintln!("Failed to create resampler: {e}");
+                return Err(reason(&e));
+            }
+        };
         self.vad.reset_state();
         let vad_threshold = self.state.vad_threshold();
         let endpoint_chunks = (self.endpoint_silence_ms / CHUNK_MS).max(1) as usize;
@@ -405,11 +422,11 @@ impl Pipeline {
                     if let Phase::Manual { start } = phase {
                         // The hotkey release ends the manual answer
                         audio.drain(..start);
-                        return Some(audio);
+                        return Ok(Some(audio));
                     }
                 }
                 // The session was closed from outside
-                _ => return None,
+                _ => return Ok(None),
             }
 
             // Checked before suppression so stuck speech cannot hang the session
@@ -417,9 +434,9 @@ impl Pipeline {
                 return match phase {
                     Phase::InSpeech { start, .. } | Phase::Manual { start } => {
                         audio.drain(..start);
-                        Some(audio)
+                        Ok(Some(audio))
                     }
-                    Phase::Waiting { .. } => None,
+                    Phase::Waiting { .. } => Ok(None),
                 };
             }
 
@@ -445,14 +462,14 @@ impl Pipeline {
             batch.extend(self.source.consumer.pop_iter());
             if let Err(e) = resampler.push(&batch, &mut audio) {
                 eprintln!("Resampling failed: {e}");
-                return None;
+                return Err(reason(&e));
             }
 
             // Manual capture needs no VAD; the release is the endpoint
             while !matches!(phase, Phase::Manual { .. }) && audio.len() - processed >= VAD_CHUNK {
                 let chunk = &audio[processed..processed + VAD_CHUNK];
                 processed += VAD_CHUNK;
-                let is_speech = match self.vad.check_speech(chunk, TARGET_SAMPLE_RATE) {
+                let is_speech = match self.vad.check_speech(chunk, SAMPLE_RATE) {
                     Ok(probability) => probability > vad_threshold,
                     Err(e) => {
                         eprintln!("VAD error: {e}");
@@ -482,10 +499,10 @@ impl Pipeline {
                 && silence_run >= endpoint_chunks
             {
                 audio.drain(..start);
-                return Some(audio);
+                return Ok(Some(audio));
             }
             if matches!(phase, Phase::Waiting { .. }) && Instant::now() >= deadline {
-                return None;
+                return Ok(None);
             }
         }
     }

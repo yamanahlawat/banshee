@@ -57,6 +57,7 @@ jobs:
       - run: npm run format:check
       - run: npm run check
       - run: npm test
+      - run: npm run check:bundle
 
   linux:
     runs-on: ubuntu-latest

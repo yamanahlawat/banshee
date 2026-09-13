@@ -56,16 +56,18 @@ fn speech_megabytes(file: &str) -> u64 {
 }
 
 pub fn wanted(config: &Config) -> Vec<Download> {
-    let [speech, voice_activity] = crate::models::required(config);
-    let whisper = WhisperConfig::new(speech);
-    let vad = SileroVADConfig::new(voice_activity);
+    let vad = SileroVADConfig::new(crate::models::VAD_MODEL);
     let kokoro = KokoroTTSConfig::new(&config.tts.voice);
-    vec![
-        Download {
+    let mut downloads = Vec::with_capacity(4);
+    if let Some(speech) = crate::models::stt_file(config) {
+        let whisper = WhisperConfig::new(speech);
+        downloads.push(Download {
             megabytes: speech_megabytes(&whisper.model_name),
             name: whisper.model_name,
             url: whisper.download_url,
-        },
+        });
+    }
+    downloads.extend([
         Download {
             megabytes: DETECTOR_MEGABYTES,
             name: vad.model_name,
@@ -81,7 +83,8 @@ pub fn wanted(config: &Config) -> Vec<Download> {
             name: kokoro.voice_name,
             url: kokoro.voice_url,
         },
-    ]
+    ]);
+    downloads
 }
 
 /// Zero once every file is here, which is what a client shows after setup.
@@ -286,7 +289,7 @@ pub async fn download_all(
 #[cfg(test)]
 mod size_tests {
     use super::{pending_megabytes, wanted};
-    use crate::config::{Config, STTPreset};
+    use crate::config::{Config, STTPreset, SttProvider};
 
     /// The window shows this instead of summing a file list it does not hold,
     /// so it has to follow the preset rather than a fixed total.
@@ -301,6 +304,18 @@ mod size_tests {
         let quality = pending_megabytes(&wanted(&config), dir);
 
         assert!(quality > fast * 2, "fast {fast}, quality {quality}");
+    }
+
+    #[test]
+    fn a_remote_listener_downloads_no_whisper_file() {
+        let mut config = Config::default();
+        config.stt.provider = SttProvider::Remote;
+        let names: Vec<String> = wanted(&config).into_iter().map(|d| d.name).collect();
+        assert!(
+            !names.iter().any(|name| name.starts_with("ggml-")),
+            "{names:?}"
+        );
+        assert!(names.contains(&crate::models::VAD_MODEL.to_string()));
     }
 
     /// Nothing left to fetch costs nothing, which is what a client shows once

@@ -1,7 +1,7 @@
 {
   "running": true,
-  "version": "0.11.1",
-  "stt_model": "ggml-large-v3-turbo-q5_0.bin",
+  "version": "0.12.2",
+  "stt_model": null,
   "vad_model": "silero_vad.onnx",
   "audio_device": "MacBook Pro Microphone",
   "missing_device": null,
@@ -9,9 +9,11 @@
   "armed": false,
   "transcribing": false,
   "speaking": false,
-  "uptime_seconds": 13584,
+  "uptime_seconds": 5,
   "vad_threshold": 0.5,
   "history_enabled": true,
+  "download_megabytes": 0,
+  "english_only": false,
   "ready": true,
   "blockers": [],
   "config": {
@@ -33,6 +35,11 @@
       }
     },
     "stt": {
+      "provider": "remote",
+      "remote": {
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-transcribe"
+      },
       "preset": "balanced",
       "language": "en",
       "translate": false,
@@ -47,18 +54,42 @@
         "omarchy",
         "claude",
         "claude code",
-        "pi"
+        "pi",
+        "cuda",
+        "banshee"
       ],
       "endpoint_silence_ms": 2500
     },
     "tts": {
+      "provider": "local",
+      "remote": {
+        "base_url": "https://api.openai.com/v1",
+        "model": "tts-1",
+        "voice": "",
+        "instructions": "",
+        "response_format": "wav",
+        "sample_rate": null
+      },
       "voice": "af_sky",
       "speed": 1.2000000476837158,
       "fallback": "system"
-    },
-    "logging": {
-      "level": "info"
     }
   },
-  "pending": []
+  "pending": [],
+  "last_error": null,
+  "last_speech_error": null,
+  "remote": {
+    "stt": {
+      "remote": true,
+      "host": "api.openai.com",
+      "key_present": true
+    },
+    "tts": {
+      "remote": false,
+      "host": null,
+      "speaker_started": true,
+      "key_present": false
+    }
+  },
+  "key_press_access": "granted"
 }
