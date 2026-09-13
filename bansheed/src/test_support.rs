@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::history::TranscriptionHistory;
 use crate::state::{ConsumerCommand, DaemonState};
-use crate::text_to_speech::{ActiveUtterance, SpeechPlayer, TtsBackend};
+use crate::text_to_speech::{ActiveUtterance, Speaker, SpeechPlayer, TtsBackend};
 
 // Silent backend, so no test spawns a real `say` process
 struct NullBackend;
@@ -105,19 +105,27 @@ fn state(
     speech: SpeechPlayer,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
 ) -> Arc<DaemonState> {
-    state_running(Config::default(), history, speech, commands)
+    state_running(
+        Config::default(),
+        history,
+        speech,
+        Speaker::Fallback,
+        commands,
+    )
 }
 
 fn state_running(
     config: Config,
     history: Option<rusqlite::Connection>,
     speech: SpeechPlayer,
+    speaker: Speaker,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
 ) -> Arc<DaemonState> {
     Arc::new(DaemonState::new(
         Arc::new(config),
         history,
         speech,
+        speaker,
         commands,
         crate::audio::cues::Cues::silent(),
     ))
@@ -128,10 +136,21 @@ pub fn daemon_state_running(
     config: Config,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
 ) -> Arc<DaemonState> {
+    daemon_state_speaking(config, Speaker::Fallback, commands)
+}
+
+/// A daemon state whose `[tts]` built `speaker`, for the reply that says which
+/// one started.
+pub fn daemon_state_speaking(
+    config: Config,
+    speaker: Speaker,
+    commands: std::sync::mpsc::Sender<ConsumerCommand>,
+) -> Arc<DaemonState> {
     state_running(
         config,
         None,
         SpeechPlayer::new(Box::new(NullBackend)),
+        speaker,
         commands,
     )
 }

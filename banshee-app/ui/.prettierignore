@@ -1,4 +1,7 @@
 dist/
 node_modules/
 package-lock.json
-src/fixtures/
+# Captured replies, kept verbatim, and a table whose columns Prettier pads to
+# the width of its widest cell.
+src/mocks/*.json
+src/mocks/README.md

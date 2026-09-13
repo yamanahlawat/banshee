@@ -586,17 +586,8 @@ pub fn apply(change: &Change, path: &OsStr) -> Result<(), BansheeError> {
             executable,
             ..
         } => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            // A partial write would truncate a file another tool owns
-            let staged = path.with_extension(format!("banshee.{}", std::process::id()));
-            std::fs::write(&staged, after)?;
-            if *executable {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
-            }
-            std::fs::rename(&staged, path)?;
+            let mode = executable.then_some(0o755);
+            banshee_common::utils::write_atomically(path, after.as_bytes(), mode)?;
             Ok(())
         }
     }

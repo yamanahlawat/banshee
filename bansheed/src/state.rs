@@ -35,7 +35,7 @@ pub enum TranscribeTarget {
 }
 
 pub struct AskCommand {
-    pub reply: tokio::sync::oneshot::Sender<String>,
+    pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     pub timeout: Duration,
 }
 
@@ -50,8 +50,8 @@ pub enum ConsumerCommand {
     // so either can land while the microphone is open. The ring holds the audio,
     // so the dictation that follows is whole.
     Retune(Vec<String>),
-    Speak(crate::speech_to_text::whisper::Speech),
-    Reload(&'static str),
+    Speak(crate::speech_to_text::Speech),
+    Reload(crate::config::STTPreset),
     // A new stream opened, so the old ring is dead. The rate comes with it:
     // devices do not share one.
     Rebind {
@@ -95,12 +95,15 @@ struct TranscriptionRing {
     entries: VecDeque<TranscriptionEntry>,
 }
 
-/// Why the recording pipeline did not start. A missing mic and a missing model
-/// need different fixes, so they stay distinct out to the RPC error code.
+/// Why the recording pipeline did not start. A missing mic, a missing model, an
+/// unreadable key file and a remote listener that will not answer need different
+/// fixes, so they stay distinct out to the RPC error code.
 #[derive(Clone)]
 pub enum RecordingError {
     Microphone(String),
     Model(String),
+    Provider(String),
+    KeyFile(String),
 }
 
 impl std::fmt::Display for RecordingError {
@@ -108,6 +111,10 @@ impl std::fmt::Display for RecordingError {
         match self {
             RecordingError::Microphone(e) => write!(f, "the microphone would not open: {e}"),
             RecordingError::Model(e) => write!(f, "a model would not load: {e}"),
+            RecordingError::Provider(e) => write!(f, "the remote listener is not reachable: {e}"),
+            RecordingError::KeyFile(e) => {
+                write!(f, "the remote listener's key file is unreadable: {e}")
+            }
         }
     }
 }
@@ -119,17 +126,27 @@ impl RecordingError {
     pub fn consequence(&self) -> String {
         match self {
             RecordingError::Model(_) => "a model would not load".to_string(),
+            RecordingError::Provider(_) => {
+                "dictation and ask_user do not work until the key or server is fixed".to_string()
+            }
+            RecordingError::KeyFile(_) => {
+                "dictation and ask_user do not work until the key file is fixed".to_string()
+            }
             RecordingError::Microphone(_) => self.to_string().trim_end_matches('.').to_string(),
         }
     }
 
+    /// `None` where no one command clears the fault.
     pub fn command(&self) -> Option<&'static str> {
         match self {
-            RecordingError::Microphone(_) | RecordingError::Model(_) => Some("banshee start"),
+            RecordingError::Microphone(_)
+            | RecordingError::Model(_)
+            | RecordingError::Provider(_) => Some("banshee start"),
+            RecordingError::KeyFile(_) => None,
         }
     }
 
-    pub fn fix(&self) -> &'static str {
+    pub fn fix(&self) -> String {
         match self {
             // The watchdog rescans after a fault, so most microphones recover
             // on their own. A capture that failed at startup has no watchdog.
@@ -137,8 +154,15 @@ impl RecordingError {
                 "connect the microphone, grant it in Privacy & Security, or fix \
                  [audio] input_device. If recording does not recover on its own, \
                  restart: banshee start"
+                    .to_string()
             }
-            RecordingError::Model(_) => "restart it: banshee start",
+            RecordingError::Model(_) => "restart it: banshee start".to_string(),
+            RecordingError::Provider(_) => "set the key: banshee config set stt.remote.api_key, \
+                 or fix [stt.remote] base_url, then restart: banshee start"
+                .to_string(),
+            // A key written again reads the same file first, so the fix starts
+            // by removing it.
+            RecordingError::KeyFile(_) => crate::credentials::Credentials::remove_command(),
         }
     }
 }
@@ -168,12 +192,24 @@ fn replace_if_new(field: &RwLock<Option<String>>, name: Option<String>) -> bool 
     true
 }
 
+/// Each move wakes the push task of every subscriber, so a value that has not
+/// changed sends nothing.
+fn send_if_new(channel: &watch::Sender<Option<String>>, value: Option<String>) {
+    channel.send_if_modified(|current| {
+        if *current == value {
+            return false;
+        }
+        *current = value;
+        true
+    });
+}
+
 pub struct DaemonState {
     version: &'static str,
     // The model the listener has loaded, not the one the file names. The
     // window reads the blockers built from this, so a preset that was asked
     // for and never loaded must not clear them.
-    stt_model: RwLock<&'static str>,
+    stt_model: RwLock<Option<&'static str>>,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: RwLock<Option<String>>,
@@ -185,6 +221,10 @@ pub struct DaemonState {
     wanted_device: Mutex<String>,
     // Follows a live `tts.voice`, so the voice reported is the one now loaded
     tts_voice: RwLock<Option<String>>,
+    // Said once by the branch that built the speaker. A live `[tts]` write moves
+    // the voice above and not this: a backend that takes a voice name is still
+    // the fallback.
+    speaker_started: bool,
     wanted_downloads: RwLock<Vec<crate::models::download::Download>>,
     // The file as last parsed. `vad_threshold`, `wanted_device` and `barge_in`
     // beside it are live values the file may no longer agree with.
@@ -206,6 +246,10 @@ pub struct DaemonState {
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
+    // Why the last transcription failed, cleared by the next one that succeeds.
+    last_error: watch::Sender<Option<String>>,
+    // Why the last spoken reply failed, cleared by the next one that plays.
+    last_speech_error: watch::Sender<Option<String>>,
     // One counter for the whole device picture. It moves only when a setter
     // writes a value that differs, because the watchdog rewrites the same one
     // every rescan and each move wakes the push task of every subscriber.
@@ -236,19 +280,21 @@ impl DaemonState {
         config: Arc<Config>,
         db_connection: Option<rusqlite::Connection>,
         speech: SpeechPlayer,
+        speaker: crate::text_to_speech::Speaker,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
         cues: Cues,
     ) -> Self {
         let wanted_downloads = crate::models::download::wanted(&config);
         Self {
             version: env!("CARGO_PKG_VERSION"),
-            stt_model: RwLock::new(config.stt.preset.model_name()),
+            stt_model: RwLock::new(crate::models::stt_file(&config)),
             vad_model: crate::models::VAD_MODEL,
             vad_threshold: AtomicU32::new(config.stt.vad_threshold.to_bits()),
             audio_device: RwLock::new(None),
             missing_device: RwLock::new(None),
             wanted_device: Mutex::new(config.audio.input_device.clone()),
-            tts_voice: RwLock::new(None),
+            speaker_started: speaker.started(),
+            tts_voice: RwLock::new(speaker.voice()),
             wanted_downloads: RwLock::new(wanted_downloads),
             barge_in: Mutex::new(config.audio.barge_in),
             running_config: Arc::clone(&config),
@@ -265,6 +311,8 @@ impl DaemonState {
             latest_transcription_id: watch::channel(0).0,
             recording_active: watch::channel(false).0,
             transcribing: watch::channel(false).0,
+            last_error: watch::channel(None).0,
+            last_speech_error: watch::channel(None).0,
             device_changes: watch::channel(0).0,
             downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
             downloading: AtomicBool::new(false),
@@ -486,6 +534,32 @@ impl DaemonState {
         self.transcribing.subscribe()
     }
 
+    pub fn set_last_error(&self, error: Option<String>) {
+        send_if_new(&self.last_error, error);
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.borrow().clone()
+    }
+
+    pub fn subscribe_last_error(&self) -> watch::Receiver<Option<String>> {
+        self.last_error.subscribe()
+    }
+
+    /// The speaking half of the pair. One field per side, so a failed listen
+    /// and a failed reply never overwrite each other.
+    pub fn set_last_speech_error(&self, error: Option<String>) {
+        send_if_new(&self.last_speech_error, error);
+    }
+
+    pub fn last_speech_error(&self) -> Option<String> {
+        self.last_speech_error.borrow().clone()
+    }
+
+    pub fn subscribe_last_speech_error(&self) -> watch::Receiver<Option<String>> {
+        self.last_speech_error.subscribe()
+    }
+
     pub fn subscribe_downloads(&self) -> broadcast::Receiver<DownloadProgress> {
         self.downloads.subscribe()
     }
@@ -530,15 +604,15 @@ impl DaemonState {
         self.version
     }
 
-    pub fn stt_model(&self) -> &'static str {
+    pub fn stt_model(&self) -> Option<&'static str> {
         *self
             .stt_model
             .read()
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    /// The listener records what it loaded, as the speech backend does.
-    pub fn set_stt_model(&self, model: &'static str) {
+    /// `None` for a listener that loads no file.
+    pub fn set_stt_model(&self, model: Option<&'static str>) {
         *self
             .stt_model
             .write()
@@ -628,6 +702,12 @@ impl DaemonState {
             .read()
             .unwrap_or_else(|poison| poison.into_inner())
             .clone()
+    }
+
+    /// Whether the speaker `[tts]` names is the one running. False under the OS
+    /// voice, which sends no text out whatever the config asks for.
+    pub fn speaker_started(&self) -> bool {
+        self.speaker_started
     }
 
     /// True when the backend took the change. The voice the window marks as
@@ -733,13 +813,13 @@ impl DaemonState {
     }
 
     /// What language the next utterance is read as, and whether it answers in
-    /// English. Whisper reads both per utterance, so no model moves.
-    pub fn set_speech(&self, speech: crate::speech_to_text::whisper::Speech) -> bool {
+    /// English. The engine reads both per utterance, so no model moves.
+    pub fn set_speech(&self, speech: crate::speech_to_text::Speech) -> bool {
         self.commands.send(ConsumerCommand::Speak(speech)).is_ok()
     }
 
-    pub fn load_stt_model(&self, model: &'static str) -> bool {
-        self.commands.send(ConsumerCommand::Reload(model)).is_ok()
+    pub fn load_stt_model(&self, preset: crate::config::STTPreset) -> bool {
+        self.commands.send(ConsumerCommand::Reload(preset)).is_ok()
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {

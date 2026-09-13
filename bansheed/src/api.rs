@@ -163,12 +163,18 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
     let code = match error {
         RecordingError::Microphone(_) => -32000,
         RecordingError::Model(_) => -32002,
+        RecordingError::Provider(_) => -32006,
+        RecordingError::KeyFile(_) => -32008,
     };
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
 }
 
 pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     let blockers = readiness::blockers(daemon_state);
+    let running = daemon_state.running_config();
+    // Read once for the two sides below, so one reply cannot answer from two
+    // states of the file. A file that will not parse holds no key either way.
+    let credentials = crate::credentials::Credentials::load().ok();
     let payload = serde_json::json!({
         "running": true,
         "version": daemon_state.version(),
@@ -191,11 +197,11 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             })
             .unwrap_or(0),
         // The English-only build reads English whatever `stt.language` says.
-        // Stated here rather than worked out from the preset name by every
-        // client that has to know.
-        "english_only": crate::speech_to_text::whisper::english_only(
-            daemon_state.config().stt.preset.model_name(),
-        ),
+        // Read off the model the listener loaded, not the configured preset:
+        // a preset applied without persist moves one and not the other.
+        "english_only": daemon_state
+            .stt_model()
+            .is_some_and(crate::speech_to_text::english_only),
         // False where the compositor holds the binding, so the window does not
         // name a key the daemon never listens for.
         "hotkey_listens": crate::hotkey::listens(),
@@ -204,8 +210,43 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "blockers": blockers,
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
+        "last_error": daemon_state.last_error(),
+        "last_speech_error": daemon_state.last_speech_error(),
+        // The providers are read at startup, so the running config answers,
+        // not the file a `persist` write has already replaced. The key file is
+        // read each time: a key set after startup is "present" before the restart.
+        "remote": remote_report(
+            &running,
+            |side| credentials.as_ref().is_some_and(|held| held.key(side).is_some()),
+            daemon_state.speaker_started(),
+        ),
     });
     with_key_press_access(payload)
+}
+
+/// Where each side sends what it handles, and whether its key is set. The key
+/// read is a parameter so a test can answer for one side without a key file.
+/// `speaker_started` says whether the speaker the config names is the one
+/// running. It is false under a local provider whose Kokoro failed to load,
+/// because the system voice speaks then too.
+fn remote_report(
+    config: &crate::config::Config,
+    key_present: impl Fn(crate::credentials::RemoteKey) -> bool,
+    speaker_started: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "stt": {
+            "remote": config.stt.provider.is_remote(),
+            "host": config.stt.provider.is_remote().then(|| config.stt.remote.host()),
+            "key_present": key_present(crate::credentials::RemoteKey::Stt),
+        },
+        "tts": {
+            "remote": config.tts.provider.is_remote(),
+            "host": config.tts.provider.is_remote().then(|| config.tts.remote.host()),
+            "speaker_started": speaker_started,
+            "key_present": key_present(crate::credentials::RemoteKey::Tts),
+        },
+    })
 }
 
 /// Only the daemon can answer this, so only its reply carries it.
@@ -232,6 +273,8 @@ pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
         "speaking": daemon_state.speech().is_speaking(),
         "audio_device": daemon_state.audio_device(),
         "missing_device": daemon_state.missing_device(),
+        "last_error": daemon_state.last_error(),
+        "last_speech_error": daemon_state.last_speech_error(),
     })
 }
 
@@ -376,7 +419,11 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     }
 
     match answer.await {
-        Ok(text) => JsonRpcResponse::success(params.id(), serde_json::json!({ "text": text })),
+        Ok(Ok(text)) => JsonRpcResponse::success(params.id(), serde_json::json!({ "text": text })),
+        // Distinct from silence, which answers empty text
+        Ok(Err(reason)) => {
+            JsonRpcResponse::error(params.id(), -32007, format!("Listening failed: {reason}"))
+        }
         Err(_) => {
             daemon_state.set_recording_mode(RecordingMode::Idle);
             JsonRpcResponse::error(params.id(), -32603, "Listening session ended unexpectedly.")
@@ -443,7 +490,7 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
         Err(response) => return *response,
     };
 
-    match settings::configure(Some(daemon_state), &assignments, persist) {
+    match settings::configure(Some(daemon_state), assignments, persist) {
         Ok(outcome) => JsonRpcResponse::success(
             params.id(),
             serde_json::json!({
@@ -505,7 +552,7 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
 // cannot filters to the installed ones itself.
 fn list_voices(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     let installed = crate::models::installed_voices();
-    let mut ids: Vec<String> = crate::text_to_speech::voices::catalogue()
+    let mut ids: Vec<String> = crate::text_to_speech::local::voices::catalogue()
         .map(str::to_string)
         .collect();
     for id in &installed {
@@ -515,7 +562,7 @@ fn list_voices(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRe
     }
     let voices: Vec<_> = ids
         .iter()
-        .map(|id| crate::text_to_speech::voices::describe(id, installed.contains(id)))
+        .map(|id| crate::text_to_speech::local::voices::describe(id, installed.contains(id)))
         .collect();
     JsonRpcResponse::success(
         params.id(),
@@ -528,7 +575,7 @@ fn list_voices(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRe
 fn list_languages(params: Params<'_>) -> JsonRpcResponse {
     JsonRpcResponse::success(
         params.id(),
-        serde_json::json!({ "languages": crate::speech_to_text::languages::all() }),
+        serde_json::json!({ "languages": crate::speech_to_text::local::languages::all() }),
     )
 }
 

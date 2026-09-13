@@ -49,28 +49,52 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     for name in crate::models::required(&config) {
         healthy &= check_model(&models_dir, name);
     }
-    let kokoro = KokoroTTSConfig::new(&config.tts.voice);
-    let kokoro_present = models_dir.join(&kokoro.model_name).exists()
-        && models_dir.join(&kokoro.voice_name).exists();
-    match (kokoro_present, &config.tts.fallback) {
-        (true, _) => {
-            pass(&format!(
-                "kokoro tts model present (voice {})",
-                config.tts.voice
-            ));
-        }
-        (false, TTSFallback::System) => {
-            note("kokoro tts model missing, will fall back to system voice (run: banshee setup)")
-        }
-        (false, TTSFallback::None) => {
-            healthy &= fail(
-                "kokoro tts model missing and [tts] fallback = \"none\"",
-                "run: banshee setup",
-            );
-        }
+    // Read once for the two sides below: one checklist must not report two
+    // states of the file.
+    let credentials = crate::credentials::Credentials::load();
+    let (stt_answer, tts_answer) = probe_remote_sides(&config, credentials.as_ref().ok());
+    if config.stt.provider.is_remote() {
+        healthy &= check_remote_side(
+            crate::credentials::RemoteKey::Stt,
+            &config.stt.remote.base_url,
+            credentials.as_ref(),
+            stt_answer,
+        );
     }
+    // A remote speaker loads no Kokoro model and no espeak-ng table, so each
+    // local check would name a fix that changes nothing.
+    if config.tts.provider.is_remote() {
+        healthy &= check_remote_side(
+            crate::credentials::RemoteKey::Tts,
+            &config.tts.remote.base_url,
+            credentials.as_ref(),
+            tts_answer,
+        );
+        healthy &= check_remote_voice(&config.tts.remote.voice);
+    } else {
+        let kokoro = KokoroTTSConfig::new(&config.tts.voice);
+        let kokoro_present = models_dir.join(&kokoro.model_name).exists()
+            && models_dir.join(&kokoro.voice_name).exists();
+        match (kokoro_present, &config.tts.fallback) {
+            (true, _) => {
+                pass(&format!(
+                    "kokoro tts model present (voice {})",
+                    config.tts.voice
+                ));
+            }
+            (false, TTSFallback::System) => note(
+                "kokoro tts model missing, will fall back to system voice (run: banshee setup)",
+            ),
+            (false, TTSFallback::None) => {
+                healthy &= fail(
+                    "kokoro tts model missing and [tts] fallback = \"none\"",
+                    "run: banshee setup",
+                );
+            }
+        }
 
-    check_espeak();
+        check_espeak();
+    }
 
     // Before the checks that depend on it: a dead daemon causes the microphone
     // and permission failures below, and read after them it looks like a footnote
@@ -133,43 +157,14 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 
 // Optional dependency, so it reports but never fails the health check.
 fn check_espeak() {
-    if crate::text_to_speech::oov::OovFallback::available() {
+    if crate::text_to_speech::local::oov::OovFallback::available() {
         pass("espeak-ng present (pronounces unknown words)");
     } else {
         note(&format!(
             "espeak-ng not installed; unknown words are spelled out. install: {}",
-            espeak_install_hint()
+            crate::text_to_speech::local::oov::espeak_install_hint()
         ));
     }
-}
-
-fn espeak_install_hint() -> String {
-    package_install_hint("espeak-ng")
-}
-
-pub(crate) fn package_install_hint(package: &str) -> String {
-    if cfg!(target_os = "macos") {
-        return format!("brew install {package}");
-    }
-    for (mgr, verb) in [
-        ("apt", "install"),
-        ("dnf", "install"),
-        ("pacman", "-S"),
-        ("zypper", "install"),
-        ("apk", "add"),
-    ] {
-        if runs(mgr) {
-            return format!("sudo {mgr} {verb} {package}");
-        }
-    }
-    format!("your package manager's {package} package")
-}
-
-fn runs(bin: &str) -> bool {
-    std::process::Command::new(bin)
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
 }
 
 // Walks the given PATH directly: `which` is its own package on minimal systems.
@@ -199,6 +194,118 @@ fn check_model(models_dir: &Path, name: &str) -> bool {
         pass(&format!("model present: {name}"))
     } else {
         fail(&format!("model missing: {name}"), "run: banshee setup")
+    }
+}
+
+fn check_remote_key(
+    side: crate::credentials::RemoteKey,
+    credentials: Result<&crate::credentials::Credentials, &BansheeError>,
+) -> bool {
+    match credentials {
+        Ok(credentials) if credentials.key(side).is_some() => {
+            pass(&format!("remote {} key present", side.side()))
+        }
+        Ok(_) => fail(
+            &format!("no key for the remote {}", side.side()),
+            &format!("banshee config set {}", side.setting()),
+        ),
+        Err(error) => fail(
+            &error.to_string(),
+            &crate::credentials::Credentials::remove_command(),
+        ),
+    }
+}
+
+/// Asks both remote sides at once, each bounded by the probe's own timeout. A
+/// side with no key is not asked: the key check names that fault on its own.
+fn probe_remote_sides(
+    config: &Config,
+    credentials: Option<&crate::credentials::Credentials>,
+) -> (
+    Option<crate::remote_probe::Probe>,
+    Option<crate::remote_probe::Probe>,
+) {
+    let key_of = |side, remote: bool| {
+        remote
+            .then(|| credentials.and_then(|held| held.key(side)))
+            .flatten()
+    };
+    let stt_key = key_of(
+        crate::credentials::RemoteKey::Stt,
+        config.stt.provider.is_remote(),
+    );
+    let tts_key = key_of(
+        crate::credentials::RemoteKey::Tts,
+        config.tts.provider.is_remote(),
+    );
+    std::thread::scope(|scope| {
+        let stt = stt_key.map(|key| {
+            scope.spawn(|| crate::remote_probe::probe(&config.stt.remote.base_url, key))
+        });
+        let tts = tts_key.map(|key| {
+            scope.spawn(|| crate::remote_probe::probe(&config.tts.remote.base_url, key))
+        });
+        let joined = |handle: Option<std::thread::ScopedJoinHandle<'_, _>>| {
+            handle.map(|handle| handle.join().unwrap())
+        };
+        (joined(stt), joined(tts))
+    })
+}
+
+/// One side's two checklist lines.
+fn check_remote_side(
+    side: crate::credentials::RemoteKey,
+    base_url: &str,
+    credentials: Result<&crate::credentials::Credentials, &BansheeError>,
+    answer: Option<crate::remote_probe::Probe>,
+) -> bool {
+    let mut healthy = check_remote_key(side, credentials);
+    if let Some(answer) = answer {
+        healthy &= check_remote_answer(side, base_url, answer);
+    }
+    healthy
+}
+
+fn check_remote_answer(
+    side: crate::credentials::RemoteKey,
+    base_url: &str,
+    answer: crate::remote_probe::Probe,
+) -> bool {
+    let host = crate::config::host_of(base_url);
+    match answer {
+        crate::remote_probe::Probe::Answers => {
+            pass(&format!("remote {} answers ({host})", side.side()))
+        }
+        crate::remote_probe::Probe::KeyRefused => fail(
+            &format!("the remote {} refused the key", side.side()),
+            &format!("banshee config set {}", side.setting()),
+        ),
+        crate::remote_probe::Probe::NoModelsPath => {
+            note(&format!(
+                "the remote {} at {host} has no /models path, so the key is unchecked",
+                side.side()
+            ));
+            true
+        }
+        crate::remote_probe::Probe::Failed(code) => fail(
+            &format!("the remote {} answered HTTP {code}", side.side()),
+            &format!("check the server at {host}"),
+        ),
+        crate::remote_probe::Probe::Unreachable(reason) => fail(
+            &reason,
+            &format!("check {} and the network", side.base_url_setting()),
+        ),
+    }
+}
+
+fn check_remote_voice(voice: &str) -> bool {
+    if voice.is_empty() {
+        fail(
+            "the remote speaker has no voice",
+            "banshee config set tts.remote.voice <a voice the server names>",
+        )
+    } else {
+        pass(&format!("remote speaker voice set ({voice})"))
     }
 }
 
@@ -397,10 +504,15 @@ fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
 // device. A substitute records correctly, so it stays a pass.
 fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     match daemon {
-        Daemon::Running { status, blockers } => match blockers
-            .iter()
-            .find(|blocker| blocker.kind == BlockerKind::Pipeline)
-        {
+        // A listener that will not answer takes capture down with it, so every
+        // kind here leaves the daemon unable to record and each names its own
+        // fix.
+        Daemon::Running { status, blockers } => match blockers.iter().find(|blocker| {
+            matches!(
+                blocker.kind,
+                BlockerKind::Pipeline | BlockerKind::Provider | BlockerKind::KeyFile
+            )
+        }) {
             None => report_open(status, blockers),
             Some(blocker) => fail(
                 &format!("the daemon cannot record: {}", blocker.consequence),
@@ -470,12 +582,9 @@ fn report_settings(config: &Config, daemon: &Daemon) {
         config.audio.hotkey,
         on_off(config.audio.cues.enabled)
     ));
-    let vad_threshold = match daemon {
-        Daemon::Running { status, .. } | Daemon::Legacy(status) => {
-            status.get("vad_threshold").and_then(|v| v.as_f64())
-        }
-        _ => None,
-    }
+    let vad_threshold = live(daemon, |status| {
+        status.get("vad_threshold").and_then(|v| v.as_f64())
+    })
     .map_or(config.stt.vad_threshold, |live| live as f32);
 
     note(&format!(
@@ -489,12 +598,78 @@ fn report_settings(config: &Config, daemon: &Daemon) {
             "terms"
         }
     ));
+    let stt_remote = live(daemon, |status| status["remote"]["stt"]["remote"].as_bool())
+        .unwrap_or(config.stt.provider.is_remote());
+    let tts_remote = live(daemon, |status| status["remote"]["tts"]["remote"].as_bool())
+        .unwrap_or(config.tts.provider.is_remote());
     note(&format!(
         "tts {} at {}x, history {}",
-        config.tts.voice,
+        settings_voice(config, tts_remote),
         config.tts.speed,
         on_off(config.daemon.save_history)
     ));
+    if !stt_remote && !tts_remote {
+        note("audio and text stay on this machine");
+    }
+    if stt_remote {
+        let host = live(daemon, |status| {
+            banshee_common::remote_stt_host(status).map(str::to_string)
+        })
+        .unwrap_or_else(|| config.stt.remote.host());
+        note(&format!("audio goes to {host} for listening"));
+    }
+    if tts_remote {
+        let host = live(daemon, |status| {
+            banshee_common::remote_tts_host(status).map(str::to_string)
+        })
+        .unwrap_or_else(|| config.tts.remote.host());
+        let started = live(daemon, |status| {
+            Some(banshee_common::speaker_started(status))
+        })
+        // No daemon answers, so the line reports the route the file asks for,
+        // as the host beside it does.
+        .unwrap_or(true);
+        note(&speech_line(&host, started));
+    }
+    if let Some(error) = live(daemon, |status| {
+        status["last_error"].as_str().map(str::to_string)
+    }) {
+        note(&format!("the last transcription failed: {error}"));
+    }
+    if let Some(error) = live(daemon, |status| {
+        status["last_speech_error"].as_str().map(str::to_string)
+    }) {
+        note(&format!("the last spoken reply failed: {error}"));
+    }
+}
+
+/// The voice the settings line names. Each speaker keeps its own, and nothing
+/// reads `tts.voice` while a remote speaker is in force.
+fn settings_voice(config: &Config, tts_remote: bool) -> &str {
+    if tts_remote {
+        &config.tts.remote.voice
+    } else {
+        &config.tts.voice
+    }
+}
+
+/// The key and the voice have their own checks below, so this line names
+/// neither.
+fn speech_line(host: &str, started: bool) -> String {
+    if started {
+        format!("text goes to {host} for speaking")
+    } else {
+        format!("the speaker on {host} did not start, so text stays on this machine")
+    }
+}
+
+/// A value read off the running daemon's status reply; `None` when no daemon
+/// answers, so the caller falls back to the file.
+fn live<T>(daemon: &Daemon, read: impl Fn(&serde_json::Value) -> Option<T>) -> Option<T> {
+    match daemon {
+        Daemon::Running { status, .. } | Daemon::Legacy(status) => read(status),
+        _ => None,
+    }
 }
 
 // Two install shapes exist on macOS, so status names the one that answered.

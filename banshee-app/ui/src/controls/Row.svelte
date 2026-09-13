@@ -1,22 +1,31 @@
 <script lang="ts">
+  import { PENDING_SAYS } from '../lib/copy';
+
   export let name: string;
   export let note = '';
+  // Passed when a control has to point at the note with `aria-describedby`.
+  export let noteId: string | undefined = undefined;
   export let pending = false;
-  /// A control that cannot sit on one line takes the width and drops beneath its label.
+  // A control that cannot sit on one line takes the width and drops beneath its label.
   export let block = false;
+  // For a control with no baseline of its own, such as a range input, which
+  // would otherwise drop its label to the bottom of the row.
+  export let centred = false;
 </script>
 
-<div class="row" class:block>
+<div class="row" class:block class:centred>
   <span class="name caps">{name}</span>
   <div class="value">
-    <!-- A row, because a control and its readout sit beside each other: the
-         slider and its number are one reading, not two. -->
     <div class="control"><slot /></div>
-    {#if pending}
-      <p class="note pending">Set. It takes effect when Banshee restarts.</p>
-    {:else if note}
-      <p class="note">{note}</p>
+    <!-- Both, and the note first: a pending line that replaces the note drops
+         what the control means at the moment the reader changed it. -->
+    {#if note}
+      <p class="note" id={noteId}>{note}</p>
     {/if}
+    {#if pending}
+      <p class="note pending">{PENDING_SAYS}</p>
+    {/if}
+    <slot name="under" />
   </div>
 </div>
 
@@ -35,6 +44,10 @@
     row-gap: 8px;
   }
 
+  .centred {
+    align-items: center;
+  }
+
   .name {
     color: var(--accent);
   }
@@ -43,27 +56,7 @@
     min-width: 0;
   }
 
-  /* Centred, not stretched: Segmented sizes itself to its options, and a
-     container that stretches it grows the last cell into space no option
-     fills. */
-  .control {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-  }
-
   .note {
-    max-width: 520px;
     margin: 8px 0 0;
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
-    font-size: 13px;
-    line-height: 1.45;
-  }
-
-  .pending {
-    color: var(--accent);
   }
 </style>

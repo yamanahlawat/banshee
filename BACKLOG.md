@@ -8,9 +8,6 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
 - The hotkey fires a dictation while the window captures a new one. The daemon binds the key
   at OS level, so window focus does not stop it, and no protocol method suspends it. A fix
   needs a suspend with a timeout, so a window that dies does not leave the hotkey dead.
-- `english_only` reports the configured preset, not the model the daemon loaded. The window
-  reads that field to enable its Language picker, so it can offer a language the running
-  model cannot transcribe, and nothing says the two differ.
 - Reading the status starts the daemon as a side effect. The restart poll asks twelve times,
   so a daemon slow to load can be kickstarted more than once.
 - No protocol method cancels a download. A person on a metered connection can start 862 MB
@@ -35,6 +32,36 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   bundle workflow's `release: published` trigger never fired for 0.12.0, and the bundle came
   from a hand dispatch. #84 chains the bundle after announce; until it merges, a release needs
   the dispatch by hand.
+- The remote speaker takes one shape only: an OpenAI-compatible `/audio/speech` endpoint.
+  ElevenLabs and any other API shape need a backend of their own.
+- The remote speaker's voice is a plain field the person fills in. The endpoint has no call
+  that lists voices, so nothing can offer the names the server accepts. A fetched list stays
+  out on purpose: `/v1/audio/voices` exists on two servers and neither OpenAI nor Groq, and a
+  server that refuses a voice names the ones it accepts, which the failure reason already
+  shows. Type a wrong voice once and read the answer.
+- The daemon chooses the speaker once, when it starts. No call picks a speaker for one
+  utterance, so every reply goes to the same one.
+- An utterance that fails after its first chunk ends where it stopped. The samples already
+  played are words the listener has heard, so no fallback starts the reply again.
+- The remote speaker's 15 s bound covers the wait for headers as well as each read, since the
+  blocking client keeps one timeout. A server that renders a whole reply before its first byte
+  costs the full 15 s.
+- A stop does not drop the in-flight request. The worker ends at the next byte or the bound,
+  whichever comes first.
+- `speed` goes out on every speech request, since it is part of the original OpenAI schema. A
+  server that refuses the field refuses every utterance, not only the ones where speed changed.
+- Both remote keys live in `~/.banshee/credentials.toml`, which only the owner can read. The
+  macOS Keychain holds neither, so a key stays a file on disk.
+- The status reply says what the config asked for, not what `select_backend` built. A speaker
+  that refuses to start still reports its host on every surface, so each surface guards the
+  cases it knows. A reply that named the built backend would remove those guards.
+- `banshee setup` downloads the Kokoro model whatever `tts.provider` says, while
+  `banshee status` skips the Kokoro check under a remote speaker. The two disagree about what
+  a remote-speaker machine needs.
+- A remote `base_url` is parsed twice: the config deserializer proves it has a host, and
+  `host_of` parses it again with an empty-host path the config can no longer reach. One
+  `RemoteUrl` newtype with an infallible `host()` would remove the second parse and the dead
+  path; it touches config, both remote backends, status and the CLI.
 
 ## The window
 
@@ -55,8 +82,24 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   one name.
 - No control on the home screen has a resting affordance, so what can be pressed is learned
   rather than seen.
+- Speech has no panel of its own. The Voice panel holds the local voice and the remote
+  speaker, so both sets of controls grow inside one screen.
+- The remote key row is duplicated whole between the Microphone panel and the Voice panel:
+  about 40 lines of script and markup, plus the `.held` style rule, in each of them. Only the
+  setting name differs.
 
 ## Testing
 
 - No WebDriver acceptance layer, so nothing exercises the Rust socket and the Svelte face
   together.
+- `banshee status` has no test harness for the checklist. Each check prints to stdout and
+  `run` probes a live daemon, so the speaker's voice check and the espeak gate carry no test.
+- Three loopback HTTP fixtures live in three test modules: the listener's reads a body by
+  `Content-Length`, the speaker's writes chunked pieces with gaps, and the probe's answers a
+  bare `GET`. The bind, accept and read-until-blank-line steps are the same in all three, so
+  a shared fixture would hold them once.
+- A `resolve.alias` in `vite.config.ts` that points at `src/mocks` passes both mock guards.
+  The lint rules read the specifier a module writes, and the bundle check reads the literals
+  a mock holds, so an aliased import of `not-running.json` ships unseen. Every other mock
+  file holds a guarded literal, and `{"running": false}` is harmless, so the route needs a
+  visible config change to be worth anything. Left open on purpose.

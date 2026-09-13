@@ -1,13 +1,32 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { daemon, deviceLabel, shownFloat, waitsOnARestart, SYSTEM_DEVICE } from '../lib/daemon';
+  import {
+    daemon,
+    deviceLabel,
+    listeningFacts,
+    shownFloat,
+    waitsOnARestart,
+    SYSTEM_DEVICE,
+  } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { PRESETS } from '../lib/presets';
   import { listDevices, listLanguages, type Devices, type Languages } from '../lib/tauri';
   import Row from '../controls/Row.svelte';
+  import Field from '../controls/Field.svelte';
+  import KeyRow from '../controls/KeyRow.svelte';
   import Picker from '../controls/Picker.svelte';
   import Segmented from '../controls/Segmented.svelte';
+  import ProviderGroup from '../controls/ProviderGroup.svelte';
+  import SubRow from '../controls/SubRow.svelte';
   import { claimKeys } from '../lib/keys';
+  import { announcer, listeningNote } from '../lib/copy';
+
+  // The choice and its consequence are one reading, so the group names the
+  // sentence its radiogroup is described by.
+  const LISTENER_NOTE = 'listener-note';
+  // The group is read with a standing failure as well as with its note: a
+  // failure that arrived before the panel opened announces nothing.
+  const DICTATION_FAILURE = 'dictation-failure';
 
   // Three words are all the window reads back. The midpoints are derived from the band edges, not
   // measured against a room.
@@ -22,6 +41,10 @@
   const ANSWER = [
     { value: 'spoken', label: 'What I said' },
     { value: 'english', label: 'English' },
+  ];
+  const LISTENING = [
+    { value: 'local', label: 'On this machine' },
+    { value: 'remote', label: 'A remote server' },
   ];
   let devices: Devices = { devices: [], current: null };
   let spoken: Languages = { languages: [] };
@@ -83,6 +106,36 @@
   // Svelte's `each_key_duplicate` and renders no panel.
   $: vocabulary = [...new Set((stt.vocabulary ?? []) as string[])];
   $: preset = String(stt.preset ?? 'balanced');
+  $: provider = String(stt.provider ?? 'local');
+  $: remoteTable = (stt.remote ?? {}) as Record<string, unknown>;
+  // The daemon says which listener is in force; `provider` above says only
+  // which one was asked for. One sentence reads both, so the group cannot say
+  // two things at once.
+  $: listening = listeningFacts($daemon, $waitsOnARestart);
+  $: listenerNote = listeningNote(listening);
+  // The daemon sends the vocabulary as the remote request's prompt, so under a
+  // remote listener these words leave the machine too.
+  $: vocabularyNote = listening.remote
+    ? 'Words Banshee should expect to hear. They go to the server with your audio.'
+    : 'Words Banshee should expect to hear.';
+  $: lastError = $daemon.live.last_error;
+  $: failureSays = lastError ? `The last dictation failed: ${lastError}.` : '';
+
+  // A failure arrives on a push, with no control moving and no reader
+  // necessarily looking.
+  const sawFailure = announcer<string | null>();
+  $: sawFailure(lastError, failureSays);
+
+  // Three fields appear or leave with no event of their own, and where the
+  // audio goes changes with them, so a reader who is not looking hears the
+  // consequence before the layout.
+  const sawProvider = announcer<string>();
+  $: if ($daemon.status) {
+    sawProvider(
+      provider,
+      `${listenerNote} ${provider === 'remote' ? 'Server, model and key are below.' : 'Model is below.'}`,
+    );
+  }
   $: language = String(stt.language ?? 'en');
   $: translate = stt.translate === true;
   // The daemon's own word, so the preset name is not a second rule for one fact.
@@ -103,6 +156,10 @@
   // `endpoint_silence_ms` is a plain u64 in the daemon, so a hand-edited config
   // can hold a value none of these offer.
   $: offered = QUIET.includes(silence) ? QUIET : [silence, ...QUIET];
+
+  function quietFor(ms: number): string {
+    return `After ${ms / 1000} second${ms === 1000 ? '' : 's'} of quiet`;
+  }
   // The config is what a write changes, so it leads.
   $: current = String(
     ($daemon.status?.config?.audio?.input_device as string) ??
@@ -147,19 +204,56 @@
     change={(next) => write('stt.endpoint_silence_ms', Number(next))}
   >
     {#each offered as ms (ms)}
-      <option value={String(ms)}>After {ms / 1000} seconds of quiet</option>
+      <option value={String(ms)}>{quietFor(ms)}</option>
     {/each}
   </Picker>
 </Row>
 
-<Row name="Transcription" pending={$waitsOnARestart.has('stt.preset')}>
-  <Segmented
-    label="Transcription"
-    value={preset}
-    options={PRESETS}
-    change={(next) => write('stt.preset', next)}
-  />
-</Row>
+<ProviderGroup
+  name="Listening"
+  label="Listening"
+  value={provider}
+  options={LISTENING}
+  note={listenerNote}
+  noteId={LISTENER_NOTE}
+  alsoId={failureSays ? DICTATION_FAILURE : undefined}
+  change={(next) => write('stt.provider', next)}
+>
+  {#if provider === 'remote'}
+    <SubRow name="server">
+      <Field
+        label="Server"
+        value={String(remoteTable.base_url ?? '')}
+        placeholder="https://api.openai.com/v1"
+        commit={(next) => write('stt.remote.base_url', next)}
+      />
+    </SubRow>
+    <SubRow name="model" pending={$waitsOnARestart.has('stt.remote.model')}>
+      <Field
+        label="Model"
+        value={String(remoteTable.model ?? '')}
+        placeholder="whisper-1"
+        commit={(next) => write('stt.remote.model', next)}
+      />
+    </SubRow>
+    <KeyRow setting="stt.remote.api_key" present={listening.keyPresent} />
+  {:else}
+    <SubRow name="model" pending={$waitsOnARestart.has('stt.preset')}>
+      <Segmented
+        label="Model"
+        value={preset}
+        options={PRESETS}
+        change={(next) => write('stt.preset', next)}
+      />
+    </SubRow>
+  {/if}
+
+  <!-- Beside the key and the server that caused it, not at the head of the
+       panel where the reader has already left the group. -->
+  {#if failureSays}
+    <p class="note failed" id={DICTATION_FAILURE}>{failureSays}</p>
+  {/if}
+</ProviderGroup>
 
 <!-- Beside the preset it depends on: the English-only model rules every other
      language out, and the two read as one decision only if they sit together. -->
@@ -191,12 +285,7 @@
   </Row>
 {/if}
 
-<Row
-  name="Vocabulary"
-  block
-  note="Words Banshee should expect to hear."
-  pending={$daemon.pending.has('stt.vocabulary')}
->
+<Row name="Vocabulary" block note={vocabularyNote} pending={$daemon.pending.has('stt.vocabulary')}>
   <div class="chips">
     {#each vocabulary as word (word)}
       <span class="chip">

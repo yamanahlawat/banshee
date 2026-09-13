@@ -113,8 +113,63 @@ body {
 .turn .text,
 .absence .label,
 .absence .detail,
-.row .note {
+.note {
   overflow-wrap: anywhere;
+}
+
+/* The margin around a note belongs to whatever it sits under, so each surface
+   states its own. */
+.note {
+  max-width: 520px;
+  font-variation-settings:
+    'wght' var(--cut-agent-weight),
+    'wdth' var(--cut-agent-width);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* Both panels stand this at their group's own left edge, so it reads as the
+   group's failure and not as a note on whichever sub-row it follows. The
+   group's own 8px flex gap adds to the margin. A pending line shares its
+   colour and its size, so the weight is what tells a problem from a receipt. */
+.note.failed {
+  margin: 8px 0 0;
+  color: var(--accent);
+  font-variation-settings:
+    'wght' 600,
+    'wdth' var(--cut-agent-width);
+}
+
+/* A value the daemon has not taken yet. A row says it beneath its control and a
+   sub-row beneath its own, so the colour is stated once for both. */
+.note.pending {
+  color: var(--accent);
+}
+
+/* A control and its readout, or a control and the button that acts on it, sit
+   beside each other: the slider and its number are one reading, not two. It is
+   also what makes `.field` grow, since that flex needs a flex parent. */
+.control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* Every text input starts here, so a surface states only the line it draws and
+   the type it sets. */
+.field {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+}
+
+/* The measured token, never the ink at the browser's own opacity. */
+.field::placeholder {
+  color: var(--dim);
 }
 
 body {

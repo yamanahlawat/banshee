@@ -36,6 +36,35 @@ pub fn sibling_command(name: &str) -> Result<std::process::Command, BansheeError
 pub const DAEMON_AGENT: &str = "com.banshee.daemon";
 pub const TRAY_AGENT: &str = "com.banshee.tray";
 
+/// Writes `bytes` to `path` through a staged file and a rename, so a partial
+/// write never truncates a file the user hand-edits. `mode` applies from the
+/// first byte on disk, and the rename carries it with the inode.
+pub fn write_atomically(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let extension = path.extension().unwrap_or_default().to_string_lossy();
+    // A staging name shared between processes lets two of them interleave their
+    // bytes.
+    let staged = path.with_extension(format!("{extension}.{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    if let Some(mode) = mode {
+        options.mode(mode);
+    }
+    let written = options
+        .open(&staged)?
+        .write_all(bytes)
+        .and_then(|()| std::fs::rename(&staged, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    written
+}
+
 /// systemd's name for the daemon's user unit. `bansheed` writes the file and
 /// `banshee-app` starts it, so the spelling is shared.
 pub const DAEMON_UNIT: &str = "banshee.service";
@@ -77,6 +106,11 @@ pub fn get_models_path() -> Option<PathBuf> {
 pub fn get_config_path() -> Option<PathBuf> {
     let base_path = dirs::home_dir()?;
     Some(base_path.join(".banshee").join("config.toml"))
+}
+
+pub fn get_credentials_path() -> Option<PathBuf> {
+    let base_path = dirs::home_dir()?;
+    Some(base_path.join(".banshee").join("credentials.toml"))
 }
 
 pub fn get_db_path() -> Option<PathBuf> {
@@ -174,5 +208,39 @@ mod tests {
     #[test]
     fn the_tray_label_names_its_own_unit() {
         assert_eq!(systemd_unit(TRAY_AGENT), Some("banshee-tray.service"));
+    }
+
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_staging_file_so_the_next_write_succeeds() {
+        let dir = TempDir(std::env::temp_dir().join(format!(
+            "banshee-common-test-{}-{}",
+            std::process::id(),
+            "a_failed_write_leaves_no_staging_file_so_the_next_write_succeeds"
+        )));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let target = dir.0.join("config.toml");
+
+        // A rename onto a non-empty directory fails on macOS and Linux.
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("inner"), b"x").unwrap();
+
+        assert!(write_atomically(&target, b"first", Some(0o600)).is_err());
+
+        std::fs::remove_dir_all(&target).unwrap();
+
+        let result = write_atomically(&target, b"second", Some(0o600));
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"second");
+
+        let extension = target.extension().unwrap_or_default().to_string_lossy();
+        let staged = target.with_extension(format!("{extension}.{}", std::process::id()));
+        assert!(!staged.exists());
     }
 }

@@ -1,7 +1,7 @@
 use banshee_common::utils::get_socket_path;
 use banshee_common::{
     BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_STATE_CHANGED, BANSHEE_SUBSCRIBE, DownloadProgress,
-    JsonRpcNotification, JsonRpcRequest, SileroVADConfig, WhisperConfig, error::BansheeError,
+    JsonRpcNotification, JsonRpcRequest, SileroVADConfig, error::BansheeError,
 };
 use std::fs;
 use std::io;
@@ -17,7 +17,7 @@ use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::api::{dispatch, live_state};
 use crate::config::Config;
-use crate::speech_to_text::{vad::VADEngine, whisper::WhisperEngine};
+use crate::speech_to_text::vad::VADEngine;
 use crate::state::{ConsumerCommand, DaemonState, RecordingError};
 use crate::{audio, history, hotkey, models, permissions, text_to_speech};
 
@@ -36,12 +36,10 @@ pub fn claim() -> Result<(std::path::PathBuf, UnixListener), io::Error> {
     Ok((socket_path, listener))
 }
 
-/// Turns a model failure into the reported error, and drops the device name
-/// with the stream this error takes down. `open_capture` writes that name once
-/// `play()` succeeds, and every subscriber is told it.
-pub(crate) fn model_failure(daemon_state: &DaemonState, reason: String) -> RecordingError {
+/// `open_capture` writes the device name once `play()` succeeds, so a name left
+/// behind after a failure shows a microphone nothing holds.
+pub(crate) fn drop_device_name(daemon_state: &DaemonState) {
     daemon_state.set_audio_device(None);
-    RecordingError::Model(reason)
 }
 
 /// What startup built and resolved. `open` and `missing` seed the watchdog, so
@@ -77,15 +75,14 @@ fn start_recording(
         ),
         None => println!("Capture opened {}", selection.open),
     }
-    println!("Loading Whisper AI...");
-    let speech_to_text = WhisperEngine::new(
-        WhisperConfig::new(config.stt.preset.model_name()),
-        &config.stt.vocabulary,
-        (&config.stt).into(),
-    )
-    .map_err(|e| model_failure(daemon_state, e.to_string()))?;
-    let vad = VADEngine::new(SileroVADConfig::new(models::VAD_MODEL))
-        .map_err(|e| model_failure(daemon_state, e.to_string()))?;
+    let speech_to_text =
+        crate::speech_to_text::select_transcriber(&config.stt).inspect_err(|_| {
+            drop_device_name(daemon_state);
+        })?;
+    let vad = VADEngine::new(SileroVADConfig::new(models::VAD_MODEL)).map_err(|e| {
+        drop_device_name(daemon_state);
+        RecordingError::Model(e.to_string())
+    })?;
     let thread = hotkey::hotkey_listener(
         hotkey::Pipeline {
             source: hotkey::CaptureSource {
@@ -122,20 +119,31 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         None
     };
 
-    let (speech_backend, live_voice) = text_to_speech::select_backend(&config.tts)?;
+    // Created before the backend, because the backend holds the sender and the
+    // drain holds the state the backend must not see
+    let (faults, fault_reports) = std::sync::mpsc::channel();
+    let speech = text_to_speech::select_backend(&config.tts, faults)?;
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let cues = audio::cues::start_cue_player(config.audio.cues.enabled);
     let daemon_state = Arc::new(DaemonState::new(
         Arc::clone(&config),
         db_connection,
-        text_to_speech::SpeechPlayer::new(speech_backend),
+        text_to_speech::SpeechPlayer::new(speech.backend),
+        speech.speaker,
         commands,
         cues.clone(),
     ));
 
-    if let Some(voice) = live_voice {
-        daemon_state.set_tts_voice(voice);
+    if let Some(reason) = speech.fault {
+        daemon_state.set_last_speech_error(Some(reason));
     }
+
+    // After the state, which the drain writes
+    let draining_state = Arc::clone(&daemon_state);
+    let draining_cues = cues.clone();
+    std::thread::spawn(move || {
+        text_to_speech::drain_faults(draining_state, draining_cues, fault_reports)
+    });
 
     // The watchdog owns the stream past daemon::run: stopping it stops
     // capture, and the thread is the only thing left to join
@@ -281,25 +289,34 @@ async fn push_downloads(
     }
 }
 
+/// Everything a state subscription waits on.
+struct StateWatches {
+    recording: watch::Receiver<bool>,
+    speaking: watch::Receiver<bool>,
+    transcribing: watch::Receiver<bool>,
+    devices: watch::Receiver<u64>,
+    last_error: watch::Receiver<Option<String>>,
+    last_speech_error: watch::Receiver<Option<String>>,
+}
+
 /// Sends one connection its state changes, until the daemon stops or the client
 /// does. `told` is the state that client already has, which a push is judged
 /// against: an unchanged one is not worth a line.
 async fn push_changes(
     state: Arc<DaemonState>,
     writer: Arc<Mutex<OwnedWriteHalf>>,
-    mut recording: watch::Receiver<bool>,
-    mut speaking: watch::Receiver<bool>,
-    mut transcribing: watch::Receiver<bool>,
-    mut devices: watch::Receiver<u64>,
+    mut watches: StateWatches,
     mut told: serde_json::Value,
 ) {
     loop {
         // Every arm only wakes the task; the state is read fresh below
         let woken = tokio::select! {
-            woken = recording.changed() => woken,
-            woken = speaking.changed() => woken,
-            woken = transcribing.changed() => woken,
-            woken = devices.changed() => woken,
+            woken = watches.recording.changed() => woken,
+            woken = watches.speaking.changed() => woken,
+            woken = watches.transcribing.changed() => woken,
+            woken = watches.devices.changed() => woken,
+            woken = watches.last_error.changed() => woken,
+            woken = watches.last_speech_error.changed() => woken,
         };
         if woken.is_err() {
             break;
@@ -347,10 +364,14 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         };
         let opening_state = (asked.state && pushing_state.is_none()).then(|| {
             (
-                state.subscribe_recording(),
-                state.speech().subscribe_speaking(),
-                state.subscribe_transcribing(),
-                state.device_changes(),
+                StateWatches {
+                    recording: state.subscribe_recording(),
+                    speaking: state.speech().subscribe_speaking(),
+                    transcribing: state.subscribe_transcribing(),
+                    devices: state.device_changes(),
+                    last_error: state.subscribe_last_error(),
+                    last_speech_error: state.subscribe_last_speech_error(),
+                },
                 live_state(&state),
             )
         });
@@ -365,14 +386,11 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             break;
         }
 
-        if let Some((recording, speaking, transcribing, devices, told)) = opening_state {
+        if let Some((watches, told)) = opening_state {
             pushing_state = Some(tokio::spawn(push_changes(
                 Arc::clone(&state),
                 Arc::clone(&writer),
-                recording,
-                speaking,
-                transcribing,
-                devices,
+                watches,
                 told,
             )));
         }

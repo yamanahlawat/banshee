@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A remote voice, when you want one.** `tts.provider = "remote"` sends each
+  reply's text to the OpenAI-compatible server in `[tts.remote]`. Banshee plays
+  the audio as it streams back, so the first words start before the server has
+  finished. Name the server, the model, the voice and an optional
+  `instructions` line. Set the key with `banshee config set tts.remote.api_key`
+  or in the window. It lives in the same owner-only file as the listener's, in
+  its own table. `response_format` asks the server for `wav` or `pcm`, and the
+  default `wav` states its own rate, so a server that answers at 22050 Hz plays
+  right. Banshee identifies every answer from its own bytes and refuses one it
+  cannot play by name, so an error page never plays as noise.
+  `banshee config remote` now sets up both sides in one go. The
+  tray, `banshee status` and the window say when text leaves the machine. An
+  utterance the server refuses plays the error tone, says what the server said,
+  and the system voice says it instead, so you still hear an agent's question.
+  Local stays the default.
+- **A remote listener, when you want one.** `stt.provider = "remote"` sends each
+  utterance to the OpenAI-compatible server in `[stt.remote]`. Set the key with
+  `banshee config set stt.remote.api_key` or in the window; it lives in an
+  owner-only file and never in `config.toml`. The tray, `banshee status` and the
+  window say when audio leaves the machine, and a failed transcription is
+  reported rather than swallowed. Local stays the default. The daemon reads the
+  provider and its keys when it starts, so `banshee config set` tells you to
+  restart.
+
+### Changed
+
+- **The daemon names who listens and who speaks.** `stt.provider` and
+  `tts.provider` in `config.toml` name the backend. Each takes `local` or
+  `remote`. A status reply carries `remote`, which says whether audio or text
+  leaves the machine. A config without the keys reads as before. The daemon
+  reads both keys when it starts, so `banshee config set` tells you to restart.
+
+### Fixed
+
+- **The system fallback voice speaks on Linux too, and names itself when it
+  cannot start.** `tts.fallback = "system"` uses `say` on macOS and
+  `espeak-ng` on Linux. When the fallback itself fails to start, the reason
+  names it: "…, and the fallback voice did not start: …".
+- **`banshee status` asks each remote server whether the key works.** After
+  the key check passes, it sends the key to the server's `/models` path. It
+  passes on an answer, fails a refused key with the `banshee config set`
+  command that fixes it, and fails an unreachable server with "check
+  `<side>.remote.base_url` and the network". A server with no `/models` path
+  earns a note instead of a failure.
+- **`stt.remote.base_url` and `tts.remote.base_url` must be a real URL.** Each
+  needs an `http` or `https` scheme and a host. A value that is neither is
+  refused by name, with `https://api.openai.com/v1` shown as the shape to
+  follow.
+- **The Microphone panel says when the remote listener never started.** It
+  reads "Banshee cannot reach `<host>` to hear you." in place of the sentence
+  for a working listener. The model row shows the restart mark when a local or
+  remote model change waits on one.
+- **A credentials file that will not parse gets its own blocker.** "The
+  remote listener's key file is unreadable" names the fault on its own, and
+  its fix is to remove the file. `banshee status` and the window both show it.
+- **`banshee config remote` writes `tts.provider = "local"` when the voice is
+  left empty.** Earlier the wizard left the field alone, so a `remote` config
+  from a previous run stayed in place with no voice to send text with, and a
+  restart never fixed it.
+- **The remote speaker refuses a voice named for one request.** It answers
+  only with the voice `[tts.remote]` names, and does not use its own in its
+  place, so a caller cannot steer a reply past the configured voice.
+- **A malformed answer from the remote listener names no raw client error.**
+  It is reported as "the remote listener answered something that was not a
+  transcription", and the raw error goes to the log instead, so a status
+  reply never carries the server's URL or key.
+- **A key typed with a leading or trailing space, or a trailing newline, is
+  trimmed before it is written.** A key typed at a prompt carries the newline
+  the terminal adds, and a pasted one often carries a leading or trailing
+  space.
+
 ## [0.13.0] - 2026-09-12
 
 ### Added
@@ -49,6 +122,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   you cannot see the screen, so a question written as text or put in an on-screen
   menu never reaches you. An agent reads this once, when its session starts, so
   restart the agent to pick it up.
+- **`english_only` in the status reply follows the model the daemon loaded.**
+  A preset applied without `persist` moved the model and left the flag on the
+  configured preset, so the window could offer a language the running model
+  cannot read.
 
 ## [0.12.2] - 2026-09-04
 

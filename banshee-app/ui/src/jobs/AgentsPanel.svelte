@@ -101,7 +101,7 @@
   </div>
 {:else}
   {#if listNote}
-    <div class="note" class:failed={listNote.failed} role="status">
+    <div class="caveat" class:failed={listNote.failed} role="status">
       <p>{listNote.text}</p>
       <button class="btn" on:click={look}>Look again</button>
     </div>
@@ -149,11 +149,11 @@
 
   /* A caveat and a fault read the same shape; only the colour separates them,
      and the words carry the difference for anyone who cannot see it. */
-  .note {
+  .caveat {
     margin: 0 0 16px;
   }
 
-  .note p {
+  .caveat p {
     max-width: 520px;
     margin: 0 0 10px;
     font-size: 13px;
@@ -161,7 +161,7 @@
     color: var(--dim);
   }
 
-  .note.failed p {
+  .caveat.failed p {
     color: var(--accent);
   }
 

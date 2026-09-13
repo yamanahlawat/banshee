@@ -1,5 +1,8 @@
-use banshee_common::{WhisperConfig, error::BansheeError, utils::get_models_path};
+use banshee_common::{error::BansheeError, utils::get_models_path};
 use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
+
+use crate::config::STTPreset;
+use crate::speech_to_text::{Speech, Transcriber, english_only};
 
 const NO_SPEECH_PROB_GATE: f32 = 0.6;
 const AVG_LOGPROB_GATE: f32 = -1.0;
@@ -14,33 +17,6 @@ fn build_initial_prompt(vocabulary: &[String]) -> Option<String> {
         return None;
     }
     Some(vocabulary.join(", "))
-}
-
-/// What language the next transcription reads the audio as, and whether it
-/// answers in English whatever was said. Whisper translates in one direction
-/// only: any language in, English out.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Speech {
-    /// `None` asks Whisper to detect it.
-    pub language: Option<String>,
-    pub translate: bool,
-}
-
-impl From<&crate::config::STTConfig> for Speech {
-    /// `auto` is the config's word for detect it, and `None` is Whisper's.
-    fn from(stt: &crate::config::STTConfig) -> Self {
-        Self {
-            language: (stt.language != "auto").then(|| stt.language.clone()),
-            translate: stt.translate,
-        }
-    }
-}
-
-/// An English-only build carries `.en` in its name and holds no other language,
-/// so asking it for one produces an English-shaped guess at the sounds rather
-/// than an error.
-pub fn english_only(model_name: &str) -> bool {
-    model_name.contains(".en")
 }
 
 /// What the model can actually do, given what the config asked for.
@@ -70,43 +46,27 @@ pub struct WhisperEngine {
 
 impl WhisperEngine {
     pub fn new(
-        whisper_config: WhisperConfig,
+        model: &'static str,
         vocabulary: &[String],
         speech: Speech,
     ) -> Result<Self, BansheeError> {
-        let english_only = english_only(&whisper_config.model_name);
+        println!("Loading Whisper AI...");
         Ok(Self {
-            context: Self::open(whisper_config)?,
+            context: Self::open(model)?,
             initial_prompt: build_initial_prompt(vocabulary),
-            english_only,
+            english_only: english_only(model),
             speech,
         })
     }
 
-    /// Puts a different model behind the engine, keeping the words it leans on.
-    /// The new context is built before the old one is dropped, so a load that
-    /// fails leaves the engine transcribing with what it already had.
-    pub fn reload(&mut self, whisper_config: WhisperConfig) -> Result<(), BansheeError> {
-        let english_only = english_only(&whisper_config.model_name);
-        self.context = Self::open(whisper_config)?;
-        self.english_only = english_only;
-        Ok(())
-    }
-
-    /// The language the next transcription reads, and whether it answers in
-    /// English. Both are read per utterance, so neither moves the model.
-    pub fn set_speech(&mut self, speech: Speech) {
-        self.speech = speech;
-    }
-
-    fn open(whisper_config: WhisperConfig) -> Result<WhisperContext, BansheeError> {
+    fn open(model: &str) -> Result<WhisperContext, BansheeError> {
         let models_path = get_models_path().ok_or_else(|| {
             BansheeError::Other(
                 "Could not find home directory. Cannot initialize Whisper engine.".to_string(),
             )
         })?;
 
-        let whisper_model_path = models_path.join(&whisper_config.model_name);
+        let whisper_model_path = models_path.join(model);
 
         if !whisper_model_path.exists() {
             return Err(BansheeError::Other(format!(
@@ -129,14 +89,10 @@ impl WhisperEngine {
             BansheeError::Other(format!("Failed to initialize Whisper context: {:?}", e))
         })
     }
+}
 
-    /// The words the next transcription leans on. The model behind them does
-    /// not move, so this costs nothing.
-    pub fn set_vocabulary(&mut self, words: &[String]) {
-        self.initial_prompt = build_initial_prompt(words);
-    }
-
-    pub fn transcribe(&self, audio_data: &[f32]) -> Result<String, BansheeError> {
+impl Transcriber for WhisperEngine {
+    fn transcribe(&self, audio: &[f32]) -> Result<String, BansheeError> {
         let mut state = self
             .context
             .create_state()
@@ -157,7 +113,7 @@ impl WhisperEngine {
         }
 
         state
-            .full(params, audio_data)
+            .full(params, audio)
             .map_err(|e| BansheeError::Transcription(e.to_string()))?;
 
         let mut transcription = String::new();
@@ -202,11 +158,39 @@ impl WhisperEngine {
 
         Ok(transcription.trim().to_string())
     }
+
+    /// The words the next transcription leans on. The model behind them does
+    /// not move, so this costs nothing.
+    fn set_vocabulary(&mut self, words: &[String]) {
+        self.initial_prompt = build_initial_prompt(words);
+    }
+
+    /// The language and the translate flag are read per utterance, so neither
+    /// moves the model.
+    fn set_speech(&mut self, speech: Speech) {
+        self.speech = speech;
+    }
+
+    /// Puts a different model behind the engine, keeping the words it leans on.
+    /// The new context is built before the old one is dropped, so a load that
+    /// fails leaves the engine transcribing with what it already had.
+    fn reload(&mut self, preset: STTPreset) -> Result<Option<&'static str>, BansheeError> {
+        let model = preset.model_name();
+        self.context = Self::open(model)?;
+        self.english_only = english_only(model);
+        Ok(Some(model))
+    }
+
+    /// The model runs on this machine, so a smaller one is the whole fix.
+    fn slow_advice(&self) -> Option<&'static str> {
+        Some("Set [stt] preset = \"fast\" in config.toml, then run banshee setup.")
+    }
 }
 
 #[cfg(test)]
 mod speech_tests {
-    use super::{Speech, english_only, spoken};
+    use super::spoken;
+    use crate::speech_to_text::{Speech, english_only};
 
     fn wants(language: &str, translate: bool) -> Speech {
         Speech {
@@ -239,18 +223,6 @@ mod speech_tests {
         );
     }
 
-    /// `auto` is the config's word for detect it and `None` is Whisper's.
-    #[test]
-    fn auto_becomes_the_absence_whisper_reads_as_detect_it() {
-        let mut stt = crate::config::STTConfig {
-            language: "auto".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(Speech::from(&stt).language, None);
-        stt.language = "de".to_string();
-        assert_eq!(Speech::from(&stt).language, Some("de".to_string()));
-    }
-
     /// Whisper translates into English, so translating English is asking for
     /// nothing, and the task changes what it writes: with a comma-separated
     /// vocabulary prompt every dictation comes back with a leading comma.
@@ -266,17 +238,6 @@ mod speech_tests {
     fn translating_another_language_into_english_is() {
         let got = spoken(false, &wants("hi", true));
         assert!(got.translate);
-    }
-
-    /// The window decides the same thing from the preset name, so the mapping
-    /// the two rules meet at is pinned here: change it and this fails rather
-    /// than the language control quietly going dead.
-    #[test]
-    fn only_the_fast_preset_is_english_only() {
-        use crate::config::STTPreset;
-        assert!(english_only(STTPreset::Fast.model_name()));
-        assert!(!english_only(STTPreset::Balanced.model_name()));
-        assert!(!english_only(STTPreset::Quality.model_name()));
     }
 
     /// `None` is Whisper's own word for detect it, and a multilingual model

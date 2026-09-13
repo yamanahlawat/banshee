@@ -7,6 +7,9 @@
   export let value: string;
   export let options: { value: string; label: string }[];
   export let change: (next: string) => void;
+  /// The id of the sentence that says what the choice does, so the group is
+  /// read with its consequence rather than as three bare words.
+  export let describedBy: string | undefined = undefined;
 
   let group: HTMLDivElement;
 
@@ -36,7 +39,13 @@
   }
 </script>
 
-<div class="seg" role="radiogroup" aria-label={label} bind:this={group}>
+<div
+  class="seg"
+  role="radiogroup"
+  aria-label={label}
+  aria-describedby={describedBy}
+  bind:this={group}
+>
   {#each options as option, i (option.value)}
     <button
       class="caps"

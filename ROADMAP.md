@@ -6,6 +6,9 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
 
 ## Landed
 
+- Bring your own keys. A remote listener behind `stt.provider = "remote"` and a remote voice
+  behind `tts.provider = "remote"`, each with its own key in an owner-only file. Every surface
+  says when audio or text leaves the machine.
 - The desktop window. `Open Banshee` in the menu bar opens it: the last dictation with a
   copy button, the day's history with search, and the microphone, hotkey, voice and agent
   settings, each printing the CLI command it stands for. It ships inside the same
@@ -21,37 +24,14 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
 
 ## Next, maintainer
 
-1. Bring your own keys, in three steps, each its own release. First because it serves two
-   people at once: the CPU-only machine that Whisper leaves waiting, and the agent user who
-   wants a voice with feeling. Local stays the default throughout. A key is set with
-   `banshee config set` or in the window and lives in an owner-only file beside
-   `config.toml`, never in `config.toml` itself: that file is world-readable and rides inside
-   every status reply.
-   1. The provider seam. `stt.provider` and `tts.provider` with `local` as the only value, a
-      transcriber trait beside the speech backend trait that exists, and the local engines
-      moved under their own module so a remote one arrives as a sibling. The status reply
-      gains a `remote` object and `banshee status` says that audio and text stay on this
-      machine. Nothing leaves the machine, so the README stays as it is.
-   2. Remote transcription. The recorded utterance goes out, text comes back where Whisper's
-      text lands today. A failure fails that utterance aloud; Banshee never changes provider
-      on its own. First because it is what blocks a CPU-only machine: Kokoro already runs on
-      the CPU on every platform, and the `balanced` model can take minutes on an older CPU.
-      The OpenAI-compatible transcription shape comes first, because one provider covers
-      OpenAI, Groq and a self-hosted Whisper server. Lands with the key file, the tray and
-      the window saying when audio leaves the machine, and the honest edit to the README's
-      "No API keys, no audio leaving your laptop". Deepgram waits for that shape to prove
-      itself on a real machine.
-   3. Remote speech. The same OpenAI-compatible shape first, ElevenLabs second for its
-      expressive controls. After transcription because it touches the output sink path,
-      which the output-sinks item below records as fragile.
-2. Linux packaging: an AppImage and an AUR package, built by the bundle workflow with GTK and
+1. Linux packaging: an AppImage and an AUR package, built by the bundle workflow with GTK and
    WebKit installed. The window and the tray already run there, but only from a source clone,
    which asks a user for a Rust toolchain and Node. The daemon's `PATH` still wants a blockers
    row. It also gives the WebDriver acceptance layer its first host: `tauri-driver` runs on
    Linux, not on macOS.
-3. Output sinks that survive a device change (the cue and Kokoro sinks still open once).
+2. Output sinks that survive a device change (the cue and Kokoro sinks still open once).
    Measure whether spoken status dies with the earcons before designing.
-4. Notarisation with an Apple Developer ID, so the bundle opens with no dialog. Last, because
+3. Notarisation with an Apple Developer ID, so the bundle opens with no dialog. Last, because
    the Homebrew cask ships with 0.12.1 and the README shows the one-time Gatekeeper step, so
    this removes a dialog rather than a gate.
 

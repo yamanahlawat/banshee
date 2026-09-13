@@ -44,6 +44,22 @@ fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
 }
 
 #[test]
+fn an_unreadable_key_file_is_a_recording_fault_the_checklist_names() {
+    let (commands, _drain) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    state.set_recording_error(crate::state::RecordingError::KeyFile(
+        "credentials.toml does not parse".to_string(),
+    ));
+
+    let daemon = super::Daemon::Running {
+        status: serde_json::json!({ "audio_device": "MacBook Pro Microphone" }),
+        blockers: crate::readiness::blockers(&state),
+    };
+
+    assert!(!super::check_recording(&daemon, ""));
+}
+
+#[test]
 fn a_daemon_that_names_its_device_passes() {
     assert!(super::report_open(
         &serde_json::json!({ "audio_device": "MacBook Pro Microphone" }),
@@ -66,6 +82,36 @@ fn a_microphone_that_will_not_open_fails_the_checklist() {
     assert!(!report_probe(Err(
         "no input device is available".to_string()
     )));
+}
+
+// The checklist names the host either way, because that is the server the
+// config asks for. Only the daemon says whether text reaches it.
+#[test]
+fn the_speech_note_says_text_stays_here_until_the_speaker_starts() {
+    assert_eq!(
+        super::speech_line("api.openai.com", true),
+        "text goes to api.openai.com for speaking"
+    );
+    assert_eq!(
+        super::speech_line("api.openai.com", false),
+        "the speaker on api.openai.com did not start, so text stays on this machine"
+    );
+}
+
+// Each speaker keeps its voice in its own table, and the settings line has
+// room for one. `tts.voice` is Kokoro's, and a remote server has never heard
+// of it.
+#[test]
+fn the_settings_line_names_the_voice_of_the_speaker_in_force() {
+    let mut config = crate::config::Config::default();
+    config.tts.voice = "af_sky".to_string();
+    config.tts.remote.voice = "marin".to_string();
+
+    assert_eq!(
+        super::settings_voice(&config, true),
+        config.tts.remote.voice
+    );
+    assert_eq!(super::settings_voice(&config, false), config.tts.voice);
 }
 
 #[cfg(target_os = "macos")]

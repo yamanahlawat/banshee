@@ -138,7 +138,7 @@ async fn ask_user_lets_speech_from_the_same_turn_finish() {
             return;
         };
         session_state.set_recording_mode(RecordingMode::Idle);
-        let _ = ask.reply.send("say it is idle".to_string());
+        let _ = ask.reply.send(Ok("say it is idle".to_string()));
     });
 
     let request = request(
@@ -170,7 +170,7 @@ async fn ask_user_returns_the_scoped_answer() {
         };
         assert_eq!(session_state.recording_mode(), RecordingMode::Armed);
         session_state.set_recording_mode(RecordingMode::Idle);
-        let _ = ask.reply.send("yes, ship it".to_string());
+        let _ = ask.reply.send(Ok("yes, ship it".to_string()));
     });
 
     let request = request(
@@ -234,6 +234,10 @@ async fn recording_rpcs_report_the_cause_not_a_busy_mic() {
     for (cause, expected) in [
         (RecordingError::Microphone("no device".to_string()), -32000),
         (RecordingError::Model("missing file".to_string()), -32002),
+        (
+            RecordingError::KeyFile("it does not parse".to_string()),
+            -32008,
+        ),
     ] {
         let state = test_state(std::sync::mpsc::channel().0);
         state.set_recording_error(cause);
@@ -383,6 +387,128 @@ fn status_carries_the_config_the_daemon_parsed() {
 fn status_reports_nothing_pending_on_a_fresh_daemon() {
     let state = test_state(std::sync::mpsc::channel().0);
     assert_eq!(status_payload(&state)["pending"], serde_json::json!([]));
+}
+
+/// A preset applied without `persist` reloads the model and leaves the file
+/// config where it was, so the flag has to follow the model.
+#[test]
+fn english_only_follows_the_model_the_listener_loaded() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    assert_eq!(status_payload(&state)["english_only"], false);
+
+    state.set_stt_model(Some("ggml-base.en.bin"));
+    assert_eq!(status_payload(&state)["english_only"], true);
+}
+
+#[test]
+fn a_remote_listener_reports_no_model_and_is_not_english_only() {
+    let mut config = crate::config::Config::default();
+    config.stt.provider = crate::config::SttProvider::Remote;
+    let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
+    let status = status_payload(&state);
+    assert_eq!(status["stt_model"], serde_json::Value::Null);
+    assert_eq!(status["english_only"], false);
+}
+
+#[test]
+fn status_says_nothing_leaves_the_machine_while_every_provider_is_local() {
+    let remote = remote_report(&crate::config::Config::default(), |_| false, true);
+    for side in ["stt", "tts"] {
+        assert_eq!(remote[side]["remote"], false);
+        assert_eq!(remote[side]["host"], serde_json::Value::Null);
+        assert!(remote[side]["key_present"].is_boolean());
+    }
+}
+
+// A copy of the listener's key read into the speaker's object would answer the
+// same bool for both sides, so each side is read through a closure that answers
+// for one side only. No test touches the real credentials file.
+#[test]
+fn each_side_reports_its_own_key() {
+    for held in [
+        crate::credentials::RemoteKey::Stt,
+        crate::credentials::RemoteKey::Tts,
+    ] {
+        let report = remote_report(&crate::config::Config::default(), |side| side == held, true);
+        assert_eq!(
+            report["stt"]["key_present"],
+            held == crate::credentials::RemoteKey::Stt,
+            "a key for {held:?} only: {report}"
+        );
+        assert_eq!(
+            report["tts"]["key_present"],
+            held == crate::credentials::RemoteKey::Tts,
+            "a key for {held:?} only: {report}"
+        );
+    }
+}
+
+/// A config whose speaker is the server, with `voice` named in its table.
+fn remote_speaker(voice: &str) -> crate::config::Config {
+    let mut config = crate::config::Config::default();
+    config.tts.provider = crate::config::TtsProvider::Remote;
+    config.tts.remote.base_url = "https://api.openai.com/v1".to_string();
+    config.tts.remote.voice = voice.to_string();
+    config
+}
+
+// The speaker the daemon built says this, and a voice name says nothing about
+// it: a missing key leaves the config naming a voice and the system voice
+// speaking every reply, and a live `[tts]` write leaves the voice held either
+// way.
+#[test]
+fn the_reply_says_which_speaker_started_and_not_which_voice_is_held() {
+    for speaker in [
+        crate::text_to_speech::Speaker::Fallback,
+        crate::text_to_speech::Speaker::Configured("marin".to_string()),
+    ] {
+        let started = speaker.started();
+        let state = crate::test_support::daemon_state_speaking(
+            remote_speaker("marin"),
+            speaker,
+            std::sync::mpsc::channel().0,
+        );
+        state.set_tts_voice("marin".to_string());
+        let remote = &status_payload(&state)["remote"];
+        assert_eq!(remote["tts"]["speaker_started"], started, "{remote}");
+        assert_eq!(remote["tts"]["remote"], true);
+        assert_eq!(remote["tts"]["host"], "api.openai.com");
+        assert_eq!(remote["stt"]["remote"], false);
+    }
+}
+
+// The window marks the voice the backend loaded, so a remote speaker's voice
+// has to be the one reported. Kokoro's catalogue is still the list.
+#[tokio::test]
+async fn the_voice_reported_under_a_remote_speaker_is_the_one_the_server_names() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_tts_voice("marin".to_string());
+
+    let JsonRpcResponse::Success { result, .. } =
+        dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
+    else {
+        panic!("expected success response");
+    };
+    assert_eq!(result["current"], "marin");
+    assert!(
+        result["voices"]
+            .as_array()
+            .expect("a voices array")
+            .iter()
+            .any(|voice| voice["id"] == "af_sky"),
+        "the local catalogue stays the list: {result}"
+    );
+}
+
+#[test]
+fn status_names_the_host_a_remote_listener_sends_audio_to() {
+    let mut config = crate::config::Config::default();
+    config.stt.provider = crate::config::SttProvider::Remote;
+    config.stt.remote.base_url = "https://api.groq.com/openai/v1".to_string();
+    let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
+    let remote = &status_payload(&state)["remote"];
+    assert_eq!(remote["stt"]["remote"], true);
+    assert_eq!(remote["stt"]["host"], "api.groq.com");
 }
 
 #[test]
@@ -652,6 +778,7 @@ async fn speak_passes_the_voice_parameter_to_the_backend() {
         Arc::new(crate::config::Config::default()),
         None,
         speech,
+        crate::text_to_speech::Speaker::Fallback,
         std::sync::mpsc::channel().0,
         crate::audio::cues::Cues::silent(),
     ));
@@ -667,4 +794,180 @@ async fn speak_passes_the_voice_parameter_to_the_backend() {
 
     assert!(matches!(response, JsonRpcResponse::Success { .. }));
     assert_eq!(*captured.lock().unwrap(), vec![Some("am_adam".to_string())]);
+}
+
+#[tokio::test]
+async fn ask_user_names_the_provider_fault_with_its_own_code() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_recording_error(crate::state::RecordingError::Provider(
+        "the remote listener refused the key".to_string(),
+    ));
+
+    let request = request(
+        BANSHEE_ASK_USER,
+        Some(serde_json::json!({"question": "Ready?"})),
+    );
+    let response = dispatch(request, &state).await;
+
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected error response");
+    };
+    assert_eq!(error.code, -32006);
+    assert!(
+        error.message.contains("remote listener"),
+        "{}",
+        error.message
+    );
+}
+
+/// Silence answers `{"text": ""}`; a listener that failed answers an error, so
+/// the agent never mistakes one for the other.
+#[tokio::test]
+async fn ask_user_answers_an_error_when_the_listen_failed() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+
+    let session_state = Arc::clone(&state);
+    std::thread::spawn(move || {
+        let Ok(ConsumerCommand::Ask(ask)) = command_receiver.recv() else {
+            return;
+        };
+        session_state.set_recording_mode(RecordingMode::Idle);
+        let _ = ask
+            .reply
+            .send(Err("the remote listener refused the key".to_string()));
+    });
+
+    let request = request(
+        BANSHEE_ASK_USER,
+        Some(serde_json::json!({"question": "Ready to ship?"})),
+    );
+    let response = dispatch(request, &state).await;
+
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected error response");
+    };
+    assert_eq!(error.code, -32007);
+    assert!(
+        error.message.contains("refused the key"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn the_last_error_rides_in_status_and_in_the_pushed_state() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    assert_eq!(
+        status_payload(&state)["last_error"],
+        serde_json::Value::Null
+    );
+    assert_eq!(live_state(&state)["last_error"], serde_json::Value::Null);
+
+    state.set_last_error(Some("the remote listener refused the key".to_string()));
+    assert_eq!(
+        status_payload(&state)["last_error"],
+        "the remote listener refused the key"
+    );
+    assert_eq!(
+        live_state(&state)["last_error"],
+        "the remote listener refused the key"
+    );
+
+    state.set_last_error(None);
+    assert_eq!(live_state(&state)["last_error"], serde_json::Value::Null);
+}
+
+// A reader that only polls status must see the reason too, not only a
+// subscriber.
+#[test]
+fn a_failed_reply_is_reported_in_status_and_in_the_pushed_state() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    assert_eq!(
+        status_payload(&state)["last_speech_error"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        crate::api::live_state(&state)["last_speech_error"],
+        serde_json::Value::Null
+    );
+
+    state.set_last_speech_error(Some("the remote speaker refused the key".to_string()));
+    assert_eq!(
+        status_payload(&state)["last_speech_error"],
+        "the remote speaker refused the key"
+    );
+    assert_eq!(
+        crate::api::live_state(&state)["last_speech_error"],
+        "the remote speaker refused the key"
+    );
+    // The listener's field is untouched, so a client can tell the two apart
+    assert_eq!(
+        status_payload(&state)["last_error"],
+        serde_json::Value::Null
+    );
+}
+
+/// Every key a value holds, as a path list, so a comparison states which key
+/// is missing rather than that two blobs differ.
+fn key_paths(value: &serde_json::Value, at: &str, into: &mut Vec<String>) {
+    if let serde_json::Value::Object(fields) = value {
+        for (name, field) in fields {
+            let path = format!("{at}.{name}");
+            into.push(path.clone());
+            key_paths(field, &path, into);
+        }
+    }
+}
+
+fn paths_of(value: &serde_json::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    key_paths(value, "config", &mut paths);
+    paths.sort();
+    paths
+}
+
+// A window mock stands in for a real reply in every test that reads it, so a
+// mock missing a key the daemon writes lets a branch that reads that key pass
+// on a shape no daemon sends. `remote.json` predates `[tts.remote]`, which
+// is why the table was filled in by hand.
+#[test]
+fn the_window_mocks_carry_every_config_key_the_reply_writes() {
+    for (name, body) in [
+        (
+            "remote.json",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../banshee-app/ui/src/mocks/remote.json"
+            )),
+        ),
+        (
+            "remote-speech.json",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../banshee-app/ui/src/mocks/remote-speech.json"
+            )),
+        ),
+    ] {
+        one_mock_carries_every_config_key(name, body);
+    }
+}
+
+fn one_mock_carries_every_config_key(name: &str, body: &str) {
+    let mock: serde_json::Value = serde_json::from_str(body).expect("the mock parses");
+    let answered = paths_of(&serde_json::to_value(crate::config::Config::default()).unwrap());
+    let carried = paths_of(&mock["config"]);
+
+    let missing: Vec<&String> = answered
+        .iter()
+        .filter(|key| !carried.contains(key))
+        .collect();
+    let invented: Vec<&String> = carried
+        .iter()
+        .filter(|key| !answered.contains(key))
+        .collect();
+    assert!(
+        missing.is_empty() && invented.is_empty(),
+        "{name} is missing {missing:?} and carries {invented:?}, which no reply does"
+    );
 }

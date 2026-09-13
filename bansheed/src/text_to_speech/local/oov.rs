@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 // Optional espeak-ng subprocess that pronounces words misaki would otherwise
 // spell out letter by letter.
@@ -34,9 +34,21 @@ impl OovFallback {
     }
 }
 
+// Held for the life of the process once found: every utterance asks, and the
+// search below costs a fork. A miss is not held, so an install lands at once.
+static ESPEAK: OnceLock<PathBuf> = OnceLock::new();
+
+pub(in crate::text_to_speech::local) fn resolve_espeak() -> Option<PathBuf> {
+    if let Some(found) = ESPEAK.get() {
+        return Some(found.clone());
+    }
+    let found = find_espeak()?;
+    Some(ESPEAK.get_or_init(|| found).clone())
+}
+
 // launchd gives the daemon a minimal PATH, so fall back to the login shell,
 // which knows about Homebrew/MacPorts/Nix prefixes.
-fn resolve_espeak() -> Option<PathBuf> {
+fn find_espeak() -> Option<PathBuf> {
     if runs(Path::new("espeak-ng")) {
         return Some(PathBuf::from("espeak-ng"));
     }
@@ -54,6 +66,24 @@ fn runs(bin: &Path) -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+pub(crate) fn espeak_install_hint() -> String {
+    if cfg!(target_os = "macos") {
+        return "brew install espeak-ng".to_string();
+    }
+    for (mgr, verb) in [
+        ("apt", "install"),
+        ("dnf", "install"),
+        ("pacman", "-S"),
+        ("zypper", "install"),
+        ("apk", "add"),
+    ] {
+        if runs(Path::new(mgr)) {
+            return format!("sudo {mgr} {verb} espeak-ng");
+        }
+    }
+    "your package manager's espeak-ng package".to_string()
 }
 
 fn run_espeak(bin: &Path, word: &str) -> Option<String> {

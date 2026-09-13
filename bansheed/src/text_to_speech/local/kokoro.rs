@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
-use std::thread;
 
 use banshee_common::{
     KokoroTTSConfig,
@@ -11,15 +10,10 @@ use banshee_common::{
 use misaki_rs::lexicon::{Lexicon, PhonemeEntry};
 use misaki_rs::{G2P, Language, MToken};
 use ort::session::{Session, builder::GraphOptimizationLevel};
-use rodio::buffer::SamplesBuffer;
-use rodio::mixer::Mixer;
-use rodio::{DeviceSinkBuilder, Player};
 
 use super::oov::OovFallback;
-use super::{ActiveUtterance, TtsBackend, lock};
-
-const SAMPLE_RATE: std::num::NonZero<u32> = std::num::NonZero::new(24_000).unwrap();
-const CHANNELS: std::num::NonZero<u16> = std::num::NonZero::new(1).unwrap();
+use crate::text_to_speech::output::{CHANNELS, Chunk, Output, SAMPLE_RATE};
+use crate::text_to_speech::{ActiveUtterance, TtsBackend, lock};
 
 // Voice files hold one style row per input token count: 510 rows x 256 floats
 const STYLE_DIM: usize = 256;
@@ -238,7 +232,7 @@ impl KokoroEngine {
         let voice = read_voice_file(&voice_path)?;
 
         let mut g2p = G2P::new(Language::EnglishUS);
-        super::pronunciation::install_dictionary(&mut g2p);
+        crate::text_to_speech::pronunciation::install_dictionary(&mut g2p);
 
         let oov = OovFallback::detect();
         if oov.is_none() {
@@ -421,62 +415,20 @@ fn voice_for(requested: Option<&str>, configured: &str) -> String {
 
 pub struct KokoroBackend {
     engine: Arc<Mutex<KokoroEngine>>,
-    mixer: Mixer,
+    output: Arc<Output>,
     // What an utterance that names no voice speaks in. A live `tts.voice`
     // moves it, so it cannot be fixed at construction.
     configured_voice: RwLock<String>,
 }
 
 impl KokoroBackend {
-    pub fn new(engine: KokoroEngine) -> Result<Self, BansheeError> {
+    pub fn new(engine: KokoroEngine, output: Arc<Output>) -> Self {
         let configured_voice = engine.loaded_voice().to_string();
-        let sink = DeviceSinkBuilder::open_default_sink()
-            .map_err(|e| BansheeError::Other(format!("No audio output device: {e}")))?;
-        let mixer = sink.mixer().clone();
-        // The !Send sink only has to stay alive, never move; leaking it
-        // keeps the output stream open for the daemon's lifetime
-        std::mem::forget(sink);
-
-        Ok(Self {
+        Self {
             engine: Arc::new(Mutex::new(engine)),
-            mixer,
+            output,
             configured_voice: RwLock::new(configured_voice),
-        })
-    }
-}
-
-struct KokoroUtterance {
-    cancelled: Arc<Mutex<bool>>,
-    // is_finished after a panic too, unlike a hand-rolled done flag
-    synth: thread::JoinHandle<()>,
-    player: Arc<Player>,
-}
-
-// One player per utterance: rodio's `append` sleeps until a stopped player
-// drains, and a player whose device is gone never drains
-fn play(mixer: &Mixer, chunks: impl Iterator<Item = Vec<f32>> + Send + 'static) -> KokoroUtterance {
-    let player = Arc::new(Player::connect_new(mixer));
-    let cancelled = Arc::new(Mutex::new(false));
-    let thread_player = Arc::clone(&player);
-    let thread_cancelled = Arc::clone(&cancelled);
-    let synth = thread::spawn(move || {
-        for samples in chunks {
-            if samples.is_empty() {
-                continue;
-            }
-            // Append under the lock so stop() can never race a chunk into a
-            // stopped player, where append would sleep
-            let guard = lock(&thread_cancelled);
-            if *guard {
-                break;
-            }
-            thread_player.append(SamplesBuffer::new(CHANNELS, SAMPLE_RATE, samples));
         }
-    });
-    KokoroUtterance {
-        cancelled,
-        synth,
-        player,
     }
 }
 
@@ -511,28 +463,18 @@ impl TtsBackend for KokoroBackend {
                 return None;
             }
             match engine.synthesize(&sentence) {
-                Ok(samples) => Some(samples),
+                Ok(samples) => Some(Chunk {
+                    samples,
+                    rate: SAMPLE_RATE,
+                    channels: CHANNELS,
+                }),
                 Err(e) => {
                     eprintln!("Kokoro synthesis failed: {e}");
                     None
                 }
             }
         });
-        Ok(Box::new(play(&self.mixer, chunks)))
-    }
-}
-
-impl ActiveUtterance for KokoroUtterance {
-    fn is_finished(&mut self) -> bool {
-        // empty() only drops when the device pulls samples; a dead device keeps
-        // an utterance unfinished until stop()
-        self.synth.is_finished() && self.player.empty()
-    }
-
-    fn stop(&mut self) {
-        let mut guard = lock(&self.cancelled);
-        *guard = true;
-        self.player.stop();
+        Ok(Box::new(self.output.play(chunks)))
     }
 }
 
