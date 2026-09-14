@@ -271,12 +271,35 @@ fn registered_stop_hook(claude_config_dir: &Path) -> Result<Option<String>, Bans
     Ok(None)
 }
 
+/// The command's words, with a quoted one kept whole and its quotes dropped.
+fn command_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    for character in command.chars() {
+        match (quote, character) {
+            (Some(open), _) if character == open => quote = None,
+            (Some(_), _) => word.push(character),
+            (None, '\'' | '"') => quote = Some(character),
+            (None, _) if character.is_whitespace() => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            (None, _) => word.push(character),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
 fn hook_script_path(command: &str) -> Option<PathBuf> {
-    command
-        .split_whitespace()
-        .map(|word| Path::new(word.trim_matches(|c| c == '\'' || c == '"')))
+    command_words(command)
+        .into_iter()
+        .map(PathBuf::from)
         .find(|path| path.file_name() == Some(OsStr::new(HOOK_SCRIPT_NAME)))
-        .map(Path::to_path_buf)
 }
 
 pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {

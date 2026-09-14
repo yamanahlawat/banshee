@@ -590,6 +590,14 @@ fn the_hook_script_path_is_the_word_named_exactly_like_the_script() {
         ),
         ("bash /x/banshee-speak-check.sh.bak", None),
         ("bash '/x/my-banshee-speak-check.sh'", None),
+        (
+            "bash '/x/my hooks/banshee-speak-check.sh'",
+            Some("/x/my hooks/banshee-speak-check.sh"),
+        ),
+        (
+            "bash \"/x/my hooks/banshee-speak-check.sh\"",
+            Some("/x/my hooks/banshee-speak-check.sh"),
+        ),
     ];
     for (command, want) in cases {
         assert_eq!(

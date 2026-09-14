@@ -82,7 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file name.** A hook that runs a script such as `my-banshee-speak-check.sh`
   or `banshee-speak-check.sh.bak` no longer counts as Banshee's, so connect
   adds Banshee's hook beside it. A hook that runs `banshee-speak-check.sh`
-  from a path of your own is still left alone.
+  from a path of your own is still left alone. A quoted path that holds a
+  space is read whole, so connect names the file you registered.
 - **The system fallback voice speaks on Linux too, and names itself when it
   cannot start.** `tts.fallback = "system"` uses `say` on macOS and
   `espeak-ng` on Linux. When the fallback itself fails to start, the reason
