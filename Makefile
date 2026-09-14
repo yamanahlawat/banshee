@@ -10,8 +10,8 @@
 #
 # Linux: `install` builds and installs the daemon and the CLI. No signing, no
 # bundle: build, symlink onto PATH, and register+start the systemd --user
-# service. `install-window` adds the desktop window. It needs GTK, WebKitGTK
-# and Node.
+# service. It then adds the desktop window when GTK, WebKitGTK, npm and the
+# Tauri CLI are present.
 UNAME_S := $(shell uname -s)
 
 IDENTITY ?= banshee-dev
@@ -47,6 +47,12 @@ BIN_DIR ?= $(HOME)/.local/bin
 DESKTOP_DIR ?= $(HOME)/.local/share/applications
 ICON_DIR ?= $(HOME)/.local/share/icons/hicolor
 
+WINDOW_MISSING := $(strip \
+	$(if $(shell pkg-config --exists webkit2gtk-4.1 && echo y),,webkit2gtk-4.1) \
+	$(if $(shell pkg-config --exists gtk+-3.0 && echo y),,gtk+-3.0) \
+	$(if $(shell command -v npm),,npm) \
+	$(if $(shell cargo tauri --version 2>/dev/null),,tauri-cli))
+
 install:
 	cargo build --release --workspace --exclude banshee-app
 	mkdir -p "$(BIN_DIR)"
@@ -56,21 +62,22 @@ install:
 	# abort here, since the symlinks above already point at a working build.
 	"$(BIN_DIR)/banshee" start || echo "could not register the systemd --user service; start it yourself with: $(BIN_DIR)/banshee serve"
 	@echo "installed to $(BIN_DIR); make sure it's on your PATH"
-
-.PHONY: install-window
-
-# Depends on `install`, so the daemon exists in target/release before the
-# window is installed. It needs GTK, WebKitGTK and Node, which `install` does
-# not, so a headless machine keeps its one-command install.
-install-window: install
+# A missing window dependency skips the window instead of failing, so a
+# headless machine keeps its one-command install.
+ifeq ($(WINDOW_MISSING),)
 	cd banshee-app/ui && npm ci
+	# Last, and never followed by a plain `cargo build`: that rebuilds the app
+	# without the frontend and leaves it pointing at the dev server.
 	cd banshee-app && cargo tauri build --no-bundle
-	mkdir -p "$(BIN_DIR)" "$(DESKTOP_DIR)" "$(ICON_DIR)/512x512/apps"
+	mkdir -p "$(DESKTOP_DIR)" "$(ICON_DIR)/512x512/apps"
 	# Canonicalised at run time, so the window finds `banshee` in target/release.
 	ln -sf "$(CURDIR)/target/release/banshee-app" "$(BIN_DIR)/banshee-app"
 	cp assets/banshee-icon.png "$(ICON_DIR)/512x512/apps/banshee.png"
 	sed -e 's|@BIN_DIR@|$(BIN_DIR)|' packaging/banshee.desktop > "$(DESKTOP_DIR)/banshee.desktop"
 	update-desktop-database "$(DESKTOP_DIR)" 2>/dev/null || true
 	@echo "installed the window; open Banshee from your launcher"
+else
+	@echo "skipped the desktop window: missing $(WINDOW_MISSING); see docs/linux.md"
+endif
 
 endif

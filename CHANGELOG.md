@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`make install` on Linux builds the desktop window too.** It builds the
+  window when WebKitGTK, GTK 3, npm and the Tauri CLI are present. Without
+  them it installs the daemon and the CLI, and names what is missing. It
+  replaces `make install-window`, which is gone.
 - **The README leads with the Linux quickstart.** It gives macOS the same
   weight second, and moves every other install route to `docs/install.md`.
 - **The daemon names who listens and who speaks.** `stt.provider` and

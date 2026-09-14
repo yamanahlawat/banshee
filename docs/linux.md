@@ -114,17 +114,19 @@ Then:
 
 ```bash
 cargo install tauri-cli --version "^2" --locked
-make install-window
+make install
 ```
 
-- **`make install`** builds and installs the daemon and the CLI.
-- **A machine with no GTK** still runs them.
-- **`make install-window`** depends on `install`, so it installs the daemon, the
-  CLI and the window together.
-- **It needs** GTK, WebKitGTK and Node 22.
+- **`make install`** builds and installs the daemon, the CLI and the window.
+- **It builds the window** only when `webkit2gtk-4.1`, `gtk+-3.0`, `npm` and the
+  Tauri CLI are present. The window needs Node 22.
+- **Without them** it installs the daemon and the CLI, and names what is missing.
+  A machine with no GTK still runs them.
+- **A plain `cargo build` of `banshee-app`** leaves out the UI. The window then
+  loads `localhost:5173` and shows "connection refused".
 - **It puts** `banshee-app` in `~/.local/bin`, a desktop entry in
   `~/.local/share/applications`, and icons in `~/.local/share/icons/hicolor`.
 - **The launcher** opens the window with WM class `banshee-app`.
 - **The install points** `banshee-app` at `target/release`.
 - **A `cargo clean` or a moved clone** breaks the window's daemon control.
-- **Run `make install-window` again** to put it back.
+- **Run `make install` again** to put it back.
