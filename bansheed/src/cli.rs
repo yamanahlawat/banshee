@@ -45,6 +45,7 @@ async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(),
         return Ok(());
     }
 
+    let mut failed = Vec::new();
     while pending > 0 {
         let Some(params) = progress
             .next_of(banshee_common::BANSHEE_DOWNLOAD_PROGRESS)
@@ -55,13 +56,36 @@ async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(),
             ));
         };
         let reported: banshee_common::DownloadProgress = serde_json::from_value(params)?;
-        let done = reported.state != banshee_common::DownloadState::Downloading;
+        note_progress(&reported, &mut pending, &mut failed);
         show_progress(reported);
-        if done {
-            pending -= 1;
+    }
+    downloads_settled(&failed)
+}
+
+fn note_progress(
+    reported: &banshee_common::DownloadProgress,
+    pending: &mut usize,
+    failed: &mut Vec<String>,
+) {
+    match reported.state {
+        banshee_common::DownloadState::Downloading => {}
+        banshee_common::DownloadState::Done => *pending -= 1,
+        banshee_common::DownloadState::Failed => {
+            *pending -= 1;
+            failed.push(reported.model.clone());
         }
     }
-    Ok(())
+}
+
+fn downloads_settled(failed: &[String]) -> Result<(), BansheeError> {
+    if failed.is_empty() {
+        return Ok(());
+    }
+    // `fail` prefixes Other as an unreachable daemon, and this daemon answered.
+    Err(BansheeError::Rejected(format!(
+        "{} failed to download; run: banshee setup",
+        failed.join(", ")
+    )))
 }
 
 fn progress_line(progress: &banshee_common::DownloadProgress) -> String {

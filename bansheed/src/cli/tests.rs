@@ -232,3 +232,46 @@ fn the_speaker_is_only_switched_on_once_it_has_a_voice() {
     assert!(super::speaker_sends_text_out("marin"));
     assert!(!super::speaker_sends_text_out(""));
 }
+
+#[test]
+fn a_failed_download_ends_the_wait_and_is_named_in_the_error() {
+    use banshee_common::{DownloadProgress, DownloadState};
+    let report = |model: &str, state: DownloadState| DownloadProgress {
+        model: model.to_string(),
+        label: model.to_string(),
+        index: 1,
+        count: 2,
+        bytes: 0,
+        total: None,
+        state,
+    };
+    let mut pending = 2;
+    let mut failed = Vec::new();
+
+    super::note_progress(
+        &report("a.bin", DownloadState::Downloading),
+        &mut pending,
+        &mut failed,
+    );
+    assert_eq!((pending, failed.len()), (2, 0));
+    super::note_progress(
+        &report("a.bin", DownloadState::Done),
+        &mut pending,
+        &mut failed,
+    );
+    assert_eq!((pending, failed.len()), (1, 0));
+    super::note_progress(
+        &report("b.onnx", DownloadState::Failed),
+        &mut pending,
+        &mut failed,
+    );
+    assert_eq!(
+        (pending, failed.as_slice()),
+        (0, &["b.onnx".to_string()][..])
+    );
+
+    let error = super::downloads_settled(&failed).expect_err("a failed model is an error");
+    assert!(error.to_string().contains("b.onnx"), "{error}");
+    assert!(error.to_string().contains("banshee setup"), "{error}");
+    assert!(super::downloads_settled(&[]).is_ok());
+}

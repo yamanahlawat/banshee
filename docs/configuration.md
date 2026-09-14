@@ -226,7 +226,7 @@ The `preset` picks which Whisper model Banshee uses:
   `wav`, because every OpenAI-compatible server offers it.
 - **A WAV file states its own rate and channel count,** so Banshee plays it at
   the rate the server chose.
-- **`pcm` saves the 44-byte header,** and OpenAI and Kokoro-FastAPI both answer
+- **`pcm` omits the 44-byte header,** and OpenAI and Kokoro-FastAPI both answer
   it.
 - **Bare samples describe nothing,** so Banshee reads them as 16-bit mono at
   24000 Hz.
