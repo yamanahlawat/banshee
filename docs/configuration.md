@@ -257,6 +257,9 @@ The `preset` picks which Whisper model Banshee uses:
 ## The hotkey
 
 - **Hold the key to record.** Let go to stop.
+- **On Wayland** the daemon binds no key and reads neither `hotkey` nor
+  `hotkey_mode`. `banshee bind hyprland` asks for both, binds them in
+  Hyprland, and saves them here.
 - **With `hotkey_mode = "toggle"`** a tap starts the recording, and the next tap
   stops it.
 - **The watchdog ends a recording after 120 seconds.** It returns the microphone

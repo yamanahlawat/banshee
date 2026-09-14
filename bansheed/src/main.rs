@@ -60,7 +60,7 @@ async fn main() -> Result<(), BansheeError> {
         CommandType::Start => cli::start(config_result).await,
         CommandType::Tray { uninstall } => cli::tray(uninstall),
         CommandType::Connect { agent, yes } => cli::connect(agent, yes),
-        CommandType::Bind { compositor, yes } => cli::bind(compositor, yes),
+        CommandType::Bind { compositor, yes } => cli::bind(compositor, yes, config_result).await,
         CommandType::Service { action } => cli::service(action),
     }
 }

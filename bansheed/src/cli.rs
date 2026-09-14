@@ -344,7 +344,7 @@ pub async fn watch(waybar: bool) -> Result<(), BansheeError> {
 }
 
 /// One line from stdin, `None` when it is empty.
-fn ask_line(prompt: &str) -> Result<Option<String>, BansheeError> {
+pub(crate) fn ask_line(prompt: &str) -> Result<Option<String>, BansheeError> {
     eprint!("{prompt}");
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
@@ -771,11 +771,45 @@ pub fn connect(agent: Option<args::AgentName>, yes: bool) -> Result<(), BansheeE
     Ok(())
 }
 
-pub fn bind(compositor: Option<args::CompositorName>, yes: bool) -> Result<(), BansheeError> {
-    if let Err(error) = crate::compositor::run(compositor, yes) {
-        eprintln!("{error}");
+pub async fn bind(
+    compositor: Option<args::CompositorName>,
+    yes: bool,
+    config_result: Result<Config, BansheeError>,
+) -> Result<(), BansheeError> {
+    let audio = match config_result {
+        Ok(config) => config.audio,
+        // Printing the block, or the macOS answer, saves nothing
+        Err(_) if compositor.is_none() || cfg!(target_os = "macos") => {
+            crate::config::AudioConfig::default()
+        }
+        // main has printed the load error
+        Err(_) => std::process::exit(1),
+    };
+    let (hotkey, mode) = crate::compositor::run(compositor, yes, audio.hotkey, audio.hotkey_mode)
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1)
+        });
+    let mut assignments = settings::Assignments::new();
+    if hotkey != audio.hotkey {
+        assignments.insert("audio.hotkey".to_string(), serde_json::json!(hotkey));
+    }
+    if mode != audio.hotkey_mode {
+        assignments.insert("audio.hotkey_mode".to_string(), serde_json::json!(mode));
+    }
+    if assignments.is_empty() {
+        return Ok(());
+    }
+    let names = assignments
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" and ");
+    if let Err(error) = write_settings(assignments).await {
+        eprintln!("Hyprland is bound, but {names} could not be saved to config.toml: {error}");
         std::process::exit(1);
     }
+    println!("Set {names} in config.toml.");
     Ok(())
 }
 

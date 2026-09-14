@@ -569,6 +569,38 @@ fn a_hook_already_present_at_any_path_means_no_change() {
 }
 
 #[test]
+fn a_hook_whose_script_only_contains_banshees_name_is_not_banshees() {
+    let before = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash '/x/my-banshee-speak-check.sh'"}]}]}}"#;
+    let after = with_stop_hook(Some(before), "bash '/x/banshee-speak-check.sh'")
+        .unwrap()
+        .expect("a script of the user's own is not Banshee's hook, so Banshee's must be added");
+    let value: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(
+        value["hooks"]["Stop"][1]["hooks"][0]["command"],
+        "bash '/x/banshee-speak-check.sh'"
+    );
+}
+
+#[test]
+fn the_hook_script_path_is_the_word_named_exactly_like_the_script() {
+    let cases = [
+        (
+            "bash '/x/banshee-speak-check.sh'",
+            Some("/x/banshee-speak-check.sh"),
+        ),
+        ("bash /x/banshee-speak-check.sh.bak", None),
+        ("bash '/x/my-banshee-speak-check.sh'", None),
+    ];
+    for (command, want) in cases {
+        assert_eq!(
+            hook_script_path(command),
+            want.map(std::path::PathBuf::from),
+            "{command}"
+        );
+    }
+}
+
+#[test]
 fn a_missing_settings_file_gets_only_the_hook() {
     let after = with_stop_hook(None, "bash '/x/banshee-speak-check.sh'")
         .unwrap()
