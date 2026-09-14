@@ -158,8 +158,8 @@ make install
 - Re-running `make install` after a change rebuilds and restarts the
   service.
 
-- `make install-window` adds the desktop window. See
-  [docs/linux.md](docs/linux.md).
+- It then builds and installs the desktop window, when GTK, WebKitGTK, npm
+  and the Tauri CLI are present. See [docs/linux.md](docs/linux.md).
 - There is no signing step.
 - `banshee tray` puts the mark in the bar.
 
