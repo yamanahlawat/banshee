@@ -4,28 +4,44 @@
 
 # Banshee
 
-Banshee gives your AI coding agent a voice. It speaks its decisions and
-questions out loud, and you answer by talking, hands-free, while it works.
-Everything runs on your machine by default: local Whisper for listening, a
-local neural voice for speaking. No account. Your words leave your laptop only
-if you set a remote listener or a remote voice yourself. The tray and
-`banshee status` then say so.
-
-It is a dictation tool too: hold a hotkey, speak, and the text lands in
-whatever app you are focused on.
+- Gives your AI coding agent a voice.
+- Speaks its decisions and questions out loud.
+- You answer by talking, hands-free.
+- Local Whisper and a local neural voice by default. No account.
+- Words leave your laptop only with a remote listener or voice you set. The tray and `banshee status` say so.
+- Also a dictation tool: hold a hotkey, speak. The text lands in the app you are focused on.
 
 ## Demo
 
 <https://github.com/user-attachments/assets/912c94af-baac-4385-b135-07a4eeb11b0e>
 
-Claude Code finds a first-run bug in Banshee's own code, says out loud what it
-would change, and asks how far to take the fix. The answer is spoken back.
-Nothing was typed.
+Claude Code finds a first-run bug in Banshee's own code, says out loud what it would change, and asks how far to take the fix. The answer is spoken back. Nothing was typed.
 
-## Quickstart
+## Quickstart on Linux
 
-macOS on Apple Silicon, with the window. Every other platform and install
-method is under [Other ways to install](#other-ways-to-install).
+Hyprland, and Omarchy on it. Four commands:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/yamanahlawat/banshee/releases/latest/download/banshee-installer.sh | sh
+banshee start
+banshee bind hyprland
+banshee connect claude
+```
+
+- The installer says how to put `banshee` on your PATH. Open a new shell if the next command is not found.
+- `banshee start` downloads the models (~860 MB) the first time.
+- `banshee bind hyprland` shows the block before it writes. Omarchy ships `wtype`, so nothing more is installed.
+- `banshee connect claude` shows the change before it writes.
+- The Claude Code hook needs `jq`. Restart Claude Code.
+- **Hold `F9`** and speak. The text is typed into the app you are focused on.
+- **Hold `Shift` and `F9`** to keep the text instead. `banshee listen` prints it.
+- Omarchy's own dictation tool also uses `F9`. Unbind one if both are there.
+- `banshee status` names the fix, and changes nothing itself.
+- [Another compositor, or a status bar](docs/linux.md)
+
+## Quickstart on macOS
+
+Apple Silicon, with the window.
 
 ```bash
 brew install --cask yamanahlawat/banshee/banshee
@@ -33,157 +49,39 @@ xattr -dr com.apple.quarantine /Applications/Banshee.app
 open /Applications/Banshee.app
 ```
 
-No Homebrew? [Install without it](#macos-without-homebrew) instead: the
-download carries no quarantine flag, so it needs no `xattr` line.
+- The `xattr` line is needed until Banshee is notarised. [A direct download](docs/install.md#macos-without-homebrew) needs none.
+- Banshee downloads the models (~860 MB) and starts.
+- Approve the **Microphone** and **Accessibility** grants. Without them Banshee cannot record or type.
+- **Hold `Right Option`**, speak, let go. The text is typed into the app you are focused on.
+- `banshee status` names the fix, and changes nothing itself.
 
-Banshee downloads the models (~860 MB), asks for the **Microphone** and
-**Accessibility** grants, and starts. Approve both: without them it cannot
-record or type. It restarts itself to pick each grant up.
-
-**1. Say something.** Hold **Right Option**, speak, let go. The text is typed
-into whatever app you are focused on.
-
-**2. Give your coding agent a voice.**
+Then give your coding agent a voice:
 
 ```bash
 banshee connect claude
 ```
 
-Restart the agent. It now speaks what it decided and asks you questions out
-loud, and you answer by talking. Other agents are in
-[Connect your coding agent](#connect-your-coding-agent).
-
-**3. If anything is off**, `banshee status` names the fix for everything it
-knows about, and changes nothing itself.
-
-## Other ways to install
-
-|                       | With the desktop window                                                                 | Terminal only                          |
-| --------------------- | --------------------------------------------------------------------------------------- | -------------------------------------- |
-| macOS (Apple Silicon) | [the cask](#macos-with-the-window), or [a direct download](#macos-without-homebrew)       | [the formula](#macos-terminal-only)    |
-| Linux (x86_64, arm64) | [from source](docs/linux.md#building-the-desktop-window)                                 | [the formula or the installer](#linux) |
-| Windows               | not yet                                                                                   | not yet                                |
-
-Pick one. Needs ~1 GB of disk for the models. Intel Macs are not supported.
-
-### macOS, with the window
-
-```bash
-brew install --cask yamanahlawat/banshee/banshee
-xattr -dr com.apple.quarantine /Applications/Banshee.app
-```
-
-The `xattr` line is needed until Banshee is notarised. Homebrew marks the
-download as quarantined; a quarantined Banshee will not open, and its `banshee`
-command dies with no message. The `banshee` command is on your `PATH` as well
-as in the app.
-
-### macOS, without Homebrew
-
-Download and unpack the app, which sets no quarantine flag, so it needs no
-`xattr` line.
-
-```bash
-curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Banshee.app.tar.gz \
-  | tar -xzf - -C /Applications
-```
-
-The `banshee` command is then `/Applications/Banshee.app/Contents/MacOS/banshee`;
-link it onto your `PATH` if you want it short. No admin account? Unpack into
-`~/Applications` and read that path instead.
-
-### macOS, terminal only
-
-```bash
-brew install --formula yamanahlawat/banshee/banshee
-```
-
-The daemon, the `banshee` command and the menu bar icon. To add the window
-later, remove the formula first ([Uninstall](#uninstall)), then install the cask.
-
-### Linux
-
-```bash
-brew install --formula yamanahlawat/banshee/banshee
-```
-
-Or without Homebrew:
-
-```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/yamanahlawat/banshee/releases/latest/download/banshee-installer.sh | sh
-```
-
-The daemon and the `banshee` command. `banshee watch --waybar` feeds a status
-bar. See [docs/linux.md](docs/linux.md) for the typing tool and the service.
-
-### From source
-
-Clone the repo and run `make install`; see [CONTRIBUTING.md](CONTRIBUTING.md).
-It works on macOS and Linux. On Linux it also registers and starts the
-`systemd --user` service, where systemd answers. Without it the install still
-finishes, and `banshee serve` starts the daemon.
-
-## Set up from the terminal
-
-The window does all of this for you. These are the same steps without it.
-
-**1. Download the models** (~860 MB: Whisper, Silero VAD, Kokoro):
-
-```bash
-banshee setup
-```
-
-An interrupted download resumes, and a re-run fetches only what is missing.
-
-**2. Grant the macOS permissions.** Banshee needs two, or it quietly fails to
-record or type: **Microphone** to capture, and **Accessibility** for the global
-hotkey and for typing. macOS asks for each the first time Banshee needs it.
-Approve, and the daemon restarts itself to pick the grant up.
-
-**3. Start it, then check it:**
-
-```bash
-banshee start
-banshee status
-```
-
-`banshee start` runs the daemon now and at every login. `banshee status`
-reports the models, the microphone, the permissions and the daemon, and prints
-a fix for anything that is off. It changes nothing itself.
+- Restart the agent. It speaks its decisions and asks you questions out loud.
+- [Every other agent](#connect-your-coding-agent)
 
 ## Use it
 
-- **Hold the hotkey** (Right Option by default) and speak. On release the text
-  is typed into the app you are focused on.
-- **Hold `Shift` and the hotkey** to keep the text instead: `banshee listen`
-  prints it.
-- **Talk over it.** Holding the hotkey stops whatever Banshee is saying, so a
-  long answer never traps you. Set `barge_in = "none"` to let it finish.
-- **The window.** Choose `Open Banshee` from the menu bar for the last
-  dictation with a copy button, the day's history, and every setting. It sets
-  Banshee up on its own, models and all. Quit it and dictation carries on.
+- **Hold the hotkey** and speak: `F9` on Linux, `Right Option` on macOS. On release the text is typed.
+- **Add `Shift`** to keep the text instead of typing it. `banshee listen` prints it.
+- **Talk over it.** The hotkey stops whatever Banshee says. `barge_in = "none"` lets it finish.
+- **The window.** `Open Banshee` in the menu bar: the last dictation with a copy button, the day's history, every setting. Quit it and dictation carries on.
 
-<p align="center">
-  <img src="assets/window.png" width="360"
-       alt="The Banshee window: the last dictation in large type with a copy button, the day's earlier dictations beneath it, and a footer naming the microphone, hotkey, voice and connected agents.">
-</p>
+<p align="center"><img src="assets/window.png" width="360" alt="The Banshee window: the last dictation in large type with a copy button, the day's earlier dictations beneath it, and a footer naming the microphone, hotkey, voice and connected agents."></p>
 
-To tap once to start and once to stop instead of holding, set
-`hotkey_mode = "toggle"`. The key is rebindable, and both live in
-[docs/configuration.md](docs/configuration.md).
-
-The menu bar icon answers one question: can I speak right now.
+- [Toggle instead of hold, and rebind the key](docs/configuration.md#the-hotkey)
+- The menu bar icon answers one question: can I speak right now.
 
 | Idle | Recording | Speaking | Waiting for you | Not running |
 |:----:|:---------:|:--------:|:---------------:|:-----------:|
 | <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/listening.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
 
-Waiting for you means an agent has asked a question and is holding for your
-answer.
-
-The states differ by shape, never by colour alone, and the icon is a template
-image, so macOS tints it to match the menu bar in light and dark.
+- Waiting for you means an agent asked a question and holds for your answer.
+- The states differ by shape, never by colour alone, and macOS tints the template image.
 
 ## Connect your coding agent
 
@@ -197,25 +95,16 @@ banshee connect opencode    # OpenCode: the MCP server
 banshee connect pi          # Pi: the native extension
 ```
 
-Each command shows the exact change to that tool's config and asks before it
-writes, then you restart the tool. The Claude Code hook needs `jq` on your
-PATH. Antigravity, Claude Code, OpenCode and Pi are verified on a real install;
-Codex and Cursor follow their published formats and wait for a report.
+- Each command shows the exact change, and asks before it writes. Restart the tool after.
+- The Claude Code hook needs `jq` on your PATH.
+- Antigravity, Claude Code, OpenCode and Pi are verified on a real install. Codex and Cursor follow their published formats, and wait for a report.
+- Pi has its own extension API, so it gets a [native extension](integrations/pi) instead.
+- The window's Agents panel does the same work.
 
-Pi has its own extension API instead of MCP, so `banshee connect pi` installs a
-native extension that talks to the daemon directly; see
-[integrations/pi](integrations/pi).
+<p align="center"><img src="assets/agents.png" width="360" alt="The Agents panel, listing Antigravity, Claude Code, OpenCode and Pi as connected, and noting that Banshee also works with Codex and Cursor."></p>
 
-The window's Agents panel does the same work: it lists what is installed, shows
-the change before it writes, and says which agents are connected.
-
-<p align="center">
-  <img src="assets/agents.png" width="360"
-       alt="The Agents panel, listing Antigravity, Claude Code, OpenCode and Pi as connected, and noting that Banshee also works with Codex and Cursor.">
-</p>
-
-`banshee-mcp-shim` is the MCP stdio server behind this. Any other MCP host takes
-the same shape, with the shim's full path if the bare name does not resolve:
+- `banshee-mcp-shim` is the MCP stdio server behind this.
+- Any other MCP host takes the same shape. Use the shim's full path if the bare name does not resolve:
 
 ```json
 {
@@ -235,25 +124,24 @@ It exposes three tools:
 | `ask_user`          | Ask a question aloud, then wait for and return your spoken answer |
 | `listen_for_prompt` | Pick up anything you've said since it last checked                |
 
-## Uninstall
+## Other ways to install
 
-- The cask: `brew uninstall --zap --cask banshee`. `--zap` also removes
-  `~/.banshee`, which holds the models, the history and `config.toml`.
-- The formula or the installer: `banshee tray --uninstall`, then
-  `banshee service uninstall`, then `brew uninstall --formula banshee` or delete
-  the binaries. Delete `~/.banshee` if you want the models and history gone too.
-- The app from `curl`: the two `banshee` commands above, then delete
-  `/Applications/Banshee.app`, and `~/.banshee` if you want.
+|                       | With the desktop window                                                                                           | Terminal only                                                           |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Linux (x86_64, arm64) | [from source](docs/linux.md#building-the-desktop-window)                                                          | the installer above, or [Homebrew](docs/install.md#linux-with-homebrew) |
+| macOS (Apple Silicon) | [the cask](docs/install.md#macos-with-the-window), or [a direct download](docs/install.md#macos-without-homebrew) | [the formula](docs/install.md#macos-terminal-only)                      |
+| Windows               | not yet                                                                                                           | not yet                                                                 |
+
+- [Build from source](docs/install.md#from-source), [set up from the terminal](docs/install.md#set-up-from-the-terminal), or [remove any install](docs/install.md#uninstall)
 
 ## More
 
 - [docs/why.md](docs/why.md) - what Banshee does that a dictation tool does not
-- [docs/configuration.md](docs/configuration.md) - every setting, the speech
-  presets, the voices, and the hotkey
+- [docs/configuration.md](docs/configuration.md) - every setting, the voices, the hotkey
 - [docs/cli.md](docs/cli.md) - every command
-- [docs/linux.md](docs/linux.md) - Wayland hotkeys, typing, and a Waybar module
+- [docs/linux.md](docs/linux.md) - other compositors, typing, the tray, a Waybar module
 - [docs/troubleshooting.md](docs/troubleshooting.md) - what breaks, and the fix
-- [CONTRIBUTING.md](CONTRIBUTING.md) - building from source, and the window
+- [CONTRIBUTING.md](CONTRIBUTING.md) - a build from source, and the window
 
 ## License
 

@@ -774,22 +774,38 @@ pub fn run(agent: Option<Agent>, yes: bool) -> Result<(), BansheeError> {
         println!("{} is already connected.", agent.name());
         return Ok(());
     }
-    for change in &changes {
+    apply_plan(
+        &changes,
+        &env.path,
+        yes,
+        &format!(
+            "{} is connected. Restart it to pick up the change.",
+            agent.name()
+        ),
+    )
+}
+
+/// Shows every change, asks unless `yes`, applies them in order, then prints
+/// `done`. A declined confirmation writes nothing and returns `Rejected`.
+pub fn apply_plan(
+    changes: &[Change],
+    path: &OsStr,
+    yes: bool,
+    done: &str,
+) -> Result<(), BansheeError> {
+    for change in changes {
         print!("{}", render(change));
         println!();
     }
     if !yes && !confirm("Apply? [y/N] ")? {
         return Err(BansheeError::Rejected("Nothing written.".into()));
     }
-    apply_all(&changes, &env.path, |change| {
+    apply_all(changes, path, |change| {
         if let Change::WriteFile { path, .. } = change {
             println!("wrote {}", path.display());
         }
     })?;
-    println!(
-        "{} is connected. Restart it to pick up the change.",
-        agent.name()
-    );
+    println!("{done}");
     Ok(())
 }
 

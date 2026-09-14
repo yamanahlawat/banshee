@@ -93,6 +93,7 @@ pub const BANSHEE_ASK_USER: &str = "banshee.ask_user";
 pub const BANSHEE_STOP: &str = "banshee.stop";
 pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
+pub const BANSHEE_RECORD_TOGGLE: &str = "banshee.record_toggle";
 pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
 pub const BANSHEE_LIST_VOICES: &str = "banshee.list_voices";
 pub const BANSHEE_LIST_LANGUAGES: &str = "banshee.list_languages";

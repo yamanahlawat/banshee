@@ -16,7 +16,6 @@
   "blockers": [],
   "config": {
     "daemon": {
-      "always_on": true,
       "save_history": true
     },
     "audio": {
@@ -25,11 +24,7 @@
       "hotkey_mode": "toggle",
       "barge_in": "stop",
       "cues": {
-        "enabled": true,
-        "start": null,
-        "stop": null,
-        "ready": null,
-        "error": null
+        "enabled": true
       }
     },
     "stt": {

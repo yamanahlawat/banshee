@@ -9,16 +9,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
-    pub always_on: bool,
     pub save_history: bool,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
-        Self {
-            always_on: true,
-            save_history: true,
-        }
+        Self { save_history: true }
     }
 }
 
@@ -33,7 +29,6 @@ pub enum HotkeyMode {
 #[serde(rename_all = "lowercase")]
 pub enum BargeInMode {
     Stop,
-    Duck,
     None,
 }
 
@@ -41,21 +36,11 @@ pub enum BargeInMode {
 #[serde(default, deny_unknown_fields)]
 pub struct AudioCuesConfig {
     pub enabled: bool,
-    pub start: Option<PathBuf>,
-    pub stop: Option<PathBuf>,
-    pub ready: Option<PathBuf>,
-    pub error: Option<PathBuf>,
 }
 
 impl Default for AudioCuesConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            start: None,
-            stop: None,
-            ready: None,
-            error: None,
-        }
+        Self { enabled: true }
     }
 }
 
@@ -510,6 +495,42 @@ mod tests {
         let placed = "[audio]\nhotkey_mode = \"toggle\"\n\n[tts]\nvoice = \"af_sky\"\n";
         let config: Config = toml::from_str(placed).expect("the same key parses under [audio]");
         assert!(matches!(config.audio.hotkey_mode, HotkeyMode::Toggle));
+    }
+
+    // `state.rs` acts only on `Stop`, so `duck` behaves as `none`. A config that
+    // names it must be refused rather than accepted and ignored.
+    #[test]
+    fn a_barge_in_of_duck_is_refused() {
+        let error = toml::from_str::<Config>("[audio]\nbarge_in = \"duck\"\n")
+            .expect_err("duck must not parse");
+        assert!(
+            error.to_string().contains("duck"),
+            "the error must name the offending value: {error}"
+        );
+    }
+
+    // Nothing reads `daemon.always_on`, so a config that names it must be
+    // refused rather than accepted and ignored.
+    #[test]
+    fn daemon_always_on_is_refused() {
+        let error = toml::from_str::<Config>("[daemon]\nalways_on = true\n")
+            .expect_err("always_on must not parse");
+        assert!(
+            error.to_string().contains("always_on"),
+            "the error must name the offending key: {error}"
+        );
+    }
+
+    // Nothing reads the audio cue file paths, so a config that names one must
+    // be refused rather than accepted and ignored.
+    #[test]
+    fn an_audio_cue_file_path_is_refused() {
+        let error = toml::from_str::<Config>("[audio.cues]\nstart = \"x.wav\"\n")
+            .expect_err("start must not parse");
+        assert!(
+            error.to_string().contains("start"),
+            "the error must name the offending key: {error}"
+        );
     }
 
     // The listener matches what this field parses, so an unmatchable binding

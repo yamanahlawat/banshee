@@ -1,15 +1,105 @@
 # Linux
 
-The daemon, the CLI and the agent voice work the same as on macOS. The
-sections below cover what is different: the desktop window, the Wayland
-hotkey, and the Waybar module.
+- **The daemon, the CLI and the agent voice** work the same as on macOS.
+- **This page** holds what differs: the key, typing, the state in a bar, and the
+  window.
+
+## The key on Wayland
+
+- **The global hotkey needs X11.**
+- **On a Wayland session** (Hyprland, Sway, GNOME), bind the record commands in
+  your compositor instead.
+- **`banshee bind hyprland`** does this for Hyprland.
+- **Sway and GNOME** have no connector. Bind the same commands by hand, in their
+  own syntax.
+- **On Omarchy** the block goes to `~/.config/hypr/bindings.lua`.
+- **Elsewhere** it goes to `~/.config/hypr/hyprland.conf`.
+- **`hyprctl reload`** runs after the write.
+- **`banshee bind` alone** prints the block for you to paste, and names the
+  file it would write.
+
+```lua
+-- Banshee
+o.bind("F9", "Banshee: hold to dictate", "banshee record start --dictate")
+o.bind("F9", nil, "banshee record stop", { release = true })
+o.bind("SHIFT + F9", "Banshee: hold to record", "banshee record start")
+o.bind("SHIFT + F9", nil, "banshee record stop", { release = true })
+```
+
+```conf
+# Banshee
+bind  = , F9, exec, banshee record start --dictate
+bindr = , F9, exec, banshee record stop
+bind  = SHIFT, F9, exec, banshee record start
+bindr = SHIFT, F9, exec, banshee record stop
+```
+
+- **Both release binds** are there on purpose, in either config style.
+- **Hyprland** matches modifiers exactly, and `Shift` may be released before
+  `F9`.
+- **Bind an ordinary key,** not a modifier.
+- **A bare modifier's press action** waits, because the press might still become
+  the start of a different chord.
+- **Hyprland knows** only when the key is released. It then fires the press and
+  release binds together, whatever the hold time.
+- **A `Right Alt`-only bind** plays both earcons back to back, and captures no
+  audio.
+- **`F9` is not a modifier,** so it has no such ambiguity, and it dispatches its
+  press bind at once.
+- **`banshee record toggle --dictate`** is one key that starts and stops, for a
+  compositor with no release bind.
+
+## Typing into the focused app
+
+- **`wtype`** types into the focused app on wlroots compositors.
+- **`ydotool`** works anywhere, with its own daemon and uinput access.
+- **Without one,** dictation reports an error, and the transcription stays in
+  `banshee history`.
+- **`banshee status`** tells you which one it found.
+
+## Showing the state in a bar
+
+- **`banshee tray`** puts the mark in any bar that hosts StatusNotifierItem.
+- **`banshee watch --waybar`** feeds a Waybar module.
+- **It emits** one custom-module object per line:
+
+```json
+{"text":"recording","alt":"recording","class":"recording","tooltip":"Banshee is recording. Microphone: Blue Yeti"}
+```
+
+- **`text`** shows.
+- **`alt`** picks a `format-icons` entry.
+- **`class`** is the CSS hook.
+- **Put this** in your Waybar config:
+
+```jsonc
+"custom/banshee": {
+    "exec": "banshee watch --waybar",
+    "return-type": "json",
+    "restart-interval": 5,
+    "format": "{icon}",
+    "format-icons": { "idle": "mic", "recording": "REC", "speaking": "spk" }
+}
+```
+
+- **Style it** in your own CSS:
+
+```css
+#custom-banshee.recording { color: #e06c75; }
+#custom-banshee.speaking  { color: #61afef; }
+```
+
+- **`restart-interval` matters:** the command exits when the daemon stops.
+- **That exit** is how the module reconnects once the daemon comes back.
+- **The same channel** is open to any client over `banshee.subscribe`.
 
 ## Building the desktop window
 
-The window is a Tauri app. It needs WebKitGTK, GTK 3 and Node 22. The tray
-needs GTK 3. The daemon and the CLI need none of them to run. A build from
-source still needs the GTK 3 headers, because one crate holds the daemon, the
-CLI and the tray.
+- **The window** is a Tauri app. It needs WebKitGTK, GTK 3 and Node 22.
+- **The tray** needs GTK 3.
+- **The daemon and the CLI** need none of them to run.
+- **A build from source** still needs the GTK 3 headers, because one crate holds
+  the daemon, the CLI and the tray.
 
 ```bash
 # Arch
@@ -27,94 +117,14 @@ cargo install tauri-cli --version "^2" --locked
 make install-window
 ```
 
-`make install` builds and installs the daemon and the CLI. A machine with no
-GTK still runs it.
-
-`make install-window` depends on `install`, so it installs the daemon, the
-CLI and the window together. It needs GTK, WebKitGTK and Node 22. It puts
-`banshee-app` in `~/.local/bin`, a desktop entry in
-`~/.local/share/applications`, and icons in
-`~/.local/share/icons/hicolor`. The launcher then opens the window with WM
-class `banshee-app`.
-
-The install points `banshee-app` at `target/release`, so a `cargo clean` or a
-moved clone breaks the window's daemon control. Run `make install-window`
-again to put it back.
-
-`banshee tray` puts the mark in any bar that hosts StatusNotifierItem.
-`banshee watch --waybar` reports the state instead.
-
-## The hotkey on Wayland
-
-The global hotkey needs X11, so on a Wayland session (Hyprland, Sway, GNOME)
-bind the record commands in your compositor instead. For push-to-talk on
-`F5`:
-
-**Hyprland**, in `~/.config/hypr/hyprland.conf` or `bindings.conf`, then run
-`hyprctl reload`:
-
-```conf
-bind  = , F5, exec, banshee record start --dictate
-bindr = , F5, exec, banshee record stop
-bind  = SHIFT, F5, exec, banshee record start
-bindr = SHIFT, F5, exec, banshee record stop
-```
-
-**Omarchy** configures Hyprland through Lua, not `hyprland.conf`. There is
-no `bindings.conf`. Put these in `~/.config/hypr/bindings.lua` instead, then
-run `hyprctl reload`:
-
-```lua
-o.bind("F5", "Banshee: start dictation", "banshee record start --dictate")
-o.bind("F5", nil, "banshee record stop", { release = true })
-o.bind("SHIFT + F5", "Banshee: start recording", "banshee record start")
-o.bind("SHIFT + F5", nil, "banshee record stop", { release = true })
-```
-
-Both release binds are there on purpose, in either config style: Hyprland
-matches modifiers exactly, and `Shift` may be released before `F5`.
-
-Bind an ordinary key, not a modifier. Hyprland cannot dispatch a bare
-modifier's press action immediately, because the press might still become
-the start of a different chord. It only knows once the key is released, so
-it fires the press and release binds together at that point, regardless of
-how long the key was actually held. A `Right Alt`-only bind plays both
-earcons back to back and never captures audio. `F5` is not a modifier, so it
-has no such ambiguity and dispatches its press bind immediately.
-
-Typing into the focused app needs **`wtype`** (wlroots compositors) or
-**`ydotool`** (anywhere, with its own daemon and uinput access). Without one,
-dictation reports an error and the transcription is kept in `banshee history`.
-`banshee status` tells you which one it found.
-
-## Showing the state in a Waybar module
-
-`banshee watch --waybar` emits one Waybar custom-module object per line:
-
-```json
-{"text":"recording","alt":"recording","class":"recording","tooltip":"Banshee is recording. Microphone: Blue Yeti"}
-```
-
-`text` shows, `alt` picks a `format-icons` entry, and `class` is the CSS hook.
-Put this in your Waybar config:
-
-```jsonc
-"custom/banshee": {
-    "exec": "banshee watch --waybar",
-    "return-type": "json",
-    "restart-interval": 5,
-    "format": "{icon}",
-    "format-icons": { "idle": "mic", "recording": "REC", "speaking": "spk" }
-}
-```
-
-and style it in your own CSS:
-
-```css
-#custom-banshee.recording { color: #e06c75; }
-#custom-banshee.speaking  { color: #61afef; }
-```
-
-`restart-interval` matters: the command exits when the daemon stops, and that
-is how the module reconnects once it comes back. The same channel is open to
-any client over `banshee.subscribe`.
+- **`make install`** builds and installs the daemon and the CLI.
+- **A machine with no GTK** still runs them.
+- **`make install-window`** depends on `install`, so it installs the daemon, the
+  CLI and the window together.
+- **It needs** GTK, WebKitGTK and Node 22.
+- **It puts** `banshee-app` in `~/.local/bin`, a desktop entry in
+  `~/.local/share/applications`, and icons in `~/.local/share/icons/hicolor`.
+- **The launcher** opens the window with WM class `banshee-app`.
+- **The install points** `banshee-app` at `target/release`.
+- **A `cargo clean` or a moved clone** breaks the window's daemon control.
+- **Run `make install-window` again** to put it back.

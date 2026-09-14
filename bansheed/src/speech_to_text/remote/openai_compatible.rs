@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::time::Duration;
 
 use banshee_common::error::BansheeError;
@@ -120,11 +121,19 @@ impl Transcriber for RemoteTranscriber {
             form = form.text("prompt", prompt.clone());
         }
 
+        // One buffer, not the form's reader: the blocking client reports a
+        // streamed body's channel closing ahead of a refused connection.
+        let content_type = format!("multipart/form-data; boundary={}", form.boundary());
+        let mut body = Vec::new();
+        form.into_reader()
+            .read_to_end(&mut body)
+            .map_err(|error| BansheeError::Other(error.to_string()))?;
         let response = self
             .client
             .post(self.endpoint())
             .bearer_auth(&self.api_key)
-            .multipart(form)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body)
             .send()
             .map_err(|error| {
                 BansheeError::Transcription(credentials::describe_send_error(&self.host(), &error))

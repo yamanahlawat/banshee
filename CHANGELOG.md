@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`banshee bind hyprland` binds the key in your Hyprland config.** It
+  appends the block to `~/.config/hypr/bindings.lua` on Omarchy, or to
+  `~/.config/hypr/hyprland.conf` elsewhere, shows the change first, and runs
+  `hyprctl reload`. A second run finds the block and reports it bound.
+  `banshee bind` alone prints the block for you to paste, and names the file
+  it would write to. On macOS it says the daemon binds the key itself and
+  names `banshee config set audio.hotkey`.
+- **`banshee record toggle` is one key that starts a recording and stops
+  it.** `banshee record toggle --dictate` types what it hears. `banshee
+  record toggle` records without typing. It suits a compositor with no
+  release bind.
+- **`banshee start` downloads the models it is missing.** It says so, then
+  runs the download after it starts the daemon, the way `banshee setup`
+  does. The hotkey hint prints after the download. Ctrl-C leaves the daemon
+  running and the download resumable. `banshee setup` stays as the
+  standalone command and as the re-run that fetches only what is missing.
 - **A remote voice, when you want one.** `tts.provider = "remote"` sends each
   reply's text to the OpenAI-compatible server in `[tts.remote]`. Banshee plays
   the audio as it streams back, so the first words start before the server has
@@ -35,11 +51,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The README leads with the Linux quickstart.** It gives macOS the same
+  weight second, and moves every other install route to `docs/install.md`.
 - **The daemon names who listens and who speaks.** `stt.provider` and
   `tts.provider` in `config.toml` name the backend. Each takes `local` or
   `remote`. A status reply carries `remote`, which says whether audio or text
   leaves the machine. A config without the keys reads as before. The daemon
   reads both keys when it starts, so `banshee config set` tells you to restart.
+
+### Removed
+
+- **`barge_in = "duck"`, `daemon.always_on` and the four `audio.cues` file
+  paths are refused.** Nothing reads `duck`, `always_on`, or `cues.start`,
+  `cues.stop`, `cues.ready`, `cues.error`. A `config.toml` that names one
+  fails to load, with the key in the message. `banshee config set` cannot
+  write any of them.
 
 ### Fixed
 

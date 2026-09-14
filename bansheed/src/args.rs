@@ -44,7 +44,7 @@ pub enum CommandType {
     },
     /// Gets latest transcription
     Listen,
-    /// Start or stop push-to-talk recording (for compositor keybinds and scripts)
+    /// Start, stop or toggle push-to-talk recording (for compositor keybinds and scripts)
     Record {
         #[clap(subcommand)]
         action: RecordAction,
@@ -70,6 +70,14 @@ pub enum CommandType {
         #[clap(long)]
         yes: bool,
     },
+    /// Bind the push-to-talk key in the compositor's config: Hyprland
+    Bind {
+        /// Which compositor; omit to print the snippet for the one found
+        compositor: Option<CompositorName>,
+        /// Apply without asking
+        #[clap(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -80,6 +88,11 @@ pub enum AgentName {
     Cursor,
     Opencode,
     Pi,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum CompositorName {
+    Hyprland,
 }
 
 #[derive(Debug, Subcommand)]
@@ -111,4 +124,10 @@ pub enum RecordAction {
     },
     /// Stop recording and transcribe (like releasing the hotkey)
     Stop,
+    /// Start when idle, stop when recording (one key for compositors with no release bind)
+    Toggle {
+        /// Type the transcription into the focused app instead of saving it
+        #[clap(long)]
+        dictate: bool,
+    },
 }

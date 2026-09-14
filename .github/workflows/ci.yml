@@ -77,6 +77,7 @@ jobs:
           echo "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3  $HOME/.banshee/models/silero_vad.onnx" | sha256sum -c -
       # The window builds in `linux-window`, which carries the WebKitGTK stack.
       # This job runs the daemon's own suite, which no job ran on Linux before.
+      - run: cargo clippy --workspace --all-targets --exclude banshee-app -- -D warnings
       - run: cargo test --workspace --exclude banshee-app
 
   # The window on Linux. Split from `linux` so that job stays fast: only this
