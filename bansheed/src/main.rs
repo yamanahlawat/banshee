@@ -3,6 +3,7 @@ mod args;
 mod audio;
 mod binding;
 mod cli;
+mod compositor;
 mod config;
 mod connect;
 mod credentials;
@@ -56,9 +57,10 @@ async fn main() -> Result<(), BansheeError> {
         CommandType::History => cli::history().await,
         CommandType::ClearHistory => cli::clear_history().await,
         CommandType::Record { action } => cli::record(action).await,
-        CommandType::Start => cli::start(config_result),
+        CommandType::Start => cli::start(config_result).await,
         CommandType::Tray { uninstall } => cli::tray(uninstall),
         CommandType::Connect { agent, yes } => cli::connect(agent, yes),
+        CommandType::Bind { compositor, yes } => cli::bind(compositor, yes),
         CommandType::Service { action } => cli::service(action),
     }
 }

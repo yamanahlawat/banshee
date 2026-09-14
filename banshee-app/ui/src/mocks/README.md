@@ -14,6 +14,9 @@ in `remote.json` that the capture predates: `remote.tts` and
 `config.tts.remote`, and `ready.json`'s `remote` block, which that capture
 predates too. `remote-speech.json` holds both of the `remote.json` objects
 from a real reply, so it is the one to read for the speaker's shape.
+`daemon.always_on` and `cues.start`, `cues.stop`, `cues.ready`, `cues.error`
+were removed from every mock by hand, because the daemon stopped sending
+them.
 
 | File | What it is | How it was captured |
 | --- | --- | --- |

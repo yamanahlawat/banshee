@@ -124,7 +124,6 @@ banshee record stop</pre>
     value={bargeIn}
     options={[
       { value: 'stop', label: 'Stop' },
-      { value: 'duck', label: 'Quieten' },
       { value: 'none', label: 'Carry on' },
     ]}
     change={(next) => write('audio.barge_in', next)}

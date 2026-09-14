@@ -2,10 +2,7 @@ use super::*;
 use std::path::PathBuf;
 
 pub(super) fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("banshee-connect-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    crate::test_support::scratch(&format!("connect-{name}"))
 }
 
 pub(super) fn env_at(home: &std::path::Path) -> Env {
