@@ -1,32 +1,33 @@
 //! The compositor key binding: which Hyprland config a machine reads, and the
-//! block `banshee bind` appends to it.
+//! block `banshee bind` writes to it.
 use std::path::{Path, PathBuf};
 
 use banshee_common::error::BansheeError;
 
-use crate::connect::{Change, Env, apply_plan};
+use crate::binding::{Hotkey, key_name};
+use crate::cli::ask_line;
+use crate::config::HotkeyMode;
+use crate::connect::{Change, Env, apply, apply_plan, split_between};
 
-const LUA_BLOCK: &str = r#"
--- Banshee
-o.bind("F9", "Banshee: hold to dictate", "banshee record start --dictate")
-o.bind("F9", nil, "banshee record stop", { release = true })
-o.bind("SHIFT + F9", "Banshee: hold to record", "banshee record start")
-o.bind("SHIFT + F9", nil, "banshee record stop", { release = true })
-"#;
+const FALLBACK_KEY: Hotkey = Hotkey::Key {
+    ctrl: false,
+    alt: false,
+    cmd: false,
+    key: rdev::Key::F9,
+};
 
-const CONF_BLOCK: &str = r#"
-# Banshee
-bind  = , F9, exec, banshee record start --dictate
-bindr = , F9, exec, banshee record stop
-bind  = SHIFT, F9, exec, banshee record start
-bindr = SHIFT, F9, exec, banshee record stop
-"#;
+const BLOCK_START: &str = "BEGIN BANSHEE MANAGED BLOCK";
+const BLOCK_END: &str = "END BANSHEE MANAGED BLOCK";
 
-/// The file Hyprland reads on this machine, and the syntax it takes.
+#[derive(Clone, Copy)]
+enum Syntax {
+    Lua,
+    Conf,
+}
+
 struct Layout {
     path: PathBuf,
-    block: &'static str,
-    marker: &'static str,
+    syntax: Syntax,
 }
 
 impl Layout {
@@ -36,16 +37,14 @@ impl Layout {
             // Omarchy
             return Ok(Layout {
                 path: lua,
-                block: LUA_BLOCK,
-                marker: "-- Banshee\n",
+                syntax: Syntax::Lua,
             });
         }
         let conf = hypr_dir.join("hyprland.conf");
         if conf.is_file() {
             return Ok(Layout {
                 path: conf,
-                block: CONF_BLOCK,
-                marker: "# Banshee\n",
+                syntax: Syntax::Conf,
             });
         }
         Err(BansheeError::Rejected(format!(
@@ -53,69 +52,283 @@ impl Layout {
             hypr_dir.display()
         )))
     }
+
+    fn comment(&self) -> &'static str {
+        match self.syntax {
+            Syntax::Lua => "--",
+            Syntax::Conf => "#",
+        }
+    }
+
+    fn start(&self) -> String {
+        format!("{} {BLOCK_START}", self.comment())
+    }
+
+    fn end(&self) -> String {
+        format!("{} {BLOCK_END}", self.comment())
+    }
+
+    fn block(&self, hotkey: Hotkey, mode: HotkeyMode) -> String {
+        format!(
+            "{}\n{}{}\n",
+            self.start(),
+            self.binds(hotkey, mode),
+            self.end()
+        )
+    }
+
+    fn binds(&self, hotkey: Hotkey, mode: HotkeyMode) -> String {
+        let Hotkey::Key {
+            ctrl,
+            alt,
+            cmd,
+            key,
+        } = hotkey
+        else {
+            unreachable!("bindable keeps a lone modifier out of a Hyprland block")
+        };
+        let name = key_name(key);
+        let key = name.as_str();
+        let mods: Vec<&str> = [(ctrl, "CTRL"), (alt, "ALT"), (cmd, "SUPER")]
+            .into_iter()
+            .filter_map(|(held, modifier)| held.then_some(modifier))
+            .collect();
+        let shifted: Vec<&str> = std::iter::once("SHIFT")
+            .chain(mods.iter().copied())
+            .collect();
+        match self.syntax {
+            Syntax::Lua => {
+                let plain = [mods.as_slice(), &[key]].concat().join(" + ");
+                let shift = [shifted.as_slice(), &[key]].concat().join(" + ");
+                match mode {
+                    HotkeyMode::Hold => format!(
+                        r#"o.bind("{plain}", "Banshee: hold to dictate", "banshee record start --dictate")
+o.bind("{plain}", nil, "banshee record stop", {{ release = true }})
+o.bind("{shift}", "Banshee: hold to record", "banshee record start")
+o.bind("{shift}", nil, "banshee record stop", {{ release = true }})
+"#
+                    ),
+                    HotkeyMode::Toggle => format!(
+                        r#"o.bind("{plain}", "Banshee: tap to dictate", "banshee record toggle --dictate")
+o.bind("{shift}", "Banshee: tap to record", "banshee record toggle")
+"#
+                    ),
+                }
+            }
+            Syntax::Conf => {
+                let plain = mods.join(" ");
+                let shift = shifted.join(" ");
+                match mode {
+                    HotkeyMode::Hold => format!(
+                        "bind  = {plain}, {key}, exec, banshee record start --dictate
+bindr = {plain}, {key}, exec, banshee record stop
+bind  = {shift}, {key}, exec, banshee record start
+bindr = {shift}, {key}, exec, banshee record stop
+"
+                    ),
+                    HotkeyMode::Toggle => format!(
+                        "bind = {plain}, {key}, exec, banshee record toggle --dictate
+bind = {shift}, {key}, exec, banshee record toggle
+"
+                    ),
+                }
+            }
+        }
+    }
 }
 
-/// The edits that bind the key: the appended block, then a reload. Empty when
-/// the block is already there.
-pub fn plan(hypr_dir: &Path) -> Result<Vec<Change>, BansheeError> {
+pub struct Rebind {
+    pub path: PathBuf,
+    /// Empty when the file already reads that way.
+    pub changes: Vec<Change>,
+    /// Lines, counted in the file as written, that run `banshee record` outside the markers.
+    pub strays: Vec<usize>,
+}
+
+pub fn plan(hypr_dir: &Path, hotkey: Hotkey, mode: HotkeyMode) -> Result<Rebind, BansheeError> {
     let layout = Layout::detect(hypr_dir)?;
     let before = std::fs::read_to_string(&layout.path)?;
-    if before.contains(layout.marker) {
-        return Ok(Vec::new());
-    }
-    let mut after = before.clone();
-    if !after.is_empty() && !after.ends_with('\n') {
-        after.push('\n');
-    }
-    after.push_str(layout.block);
-    Ok(vec![
-        Change::WriteFile {
-            path: layout.path,
+    let (start, end) = (layout.start(), layout.end());
+    let after = match split_between(&before, &start, &end) {
+        Some((head, _, tail)) => {
+            format!("{head}{start}\n{}{end}{tail}", layout.binds(hotkey, mode))
+        }
+        None if before.contains(BLOCK_START) => {
+            return Err(BansheeError::Rejected(format!(
+                "{} has {start} with no {end} after it; remove that block, then run: \
+                 banshee bind hyprland",
+                layout.path.display()
+            )));
+        }
+        None => appended(&before, &layout.block(hotkey, mode)),
+    };
+    let strays = strays(&after, &start, &end);
+    let changes = if after == before {
+        Vec::new()
+    } else {
+        vec![Change::WriteFile {
+            path: layout.path.clone(),
             before: Some(before),
             after,
             executable: false,
-        },
-        Change::Run {
-            argv: vec!["hyprctl".to_string(), "reload".to_string()],
-        },
-    ])
+        }]
+    };
+    Ok(Rebind {
+        path: layout.path,
+        changes,
+        strays,
+    })
+}
+
+fn appended(before: &str, block: &str) -> String {
+    let separator = if before.is_empty() || before.ends_with("\n\n") {
+        ""
+    } else if before.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    format!("{before}{separator}{block}")
+}
+
+fn strays(text: &str, start: &str, end: &str) -> Vec<usize> {
+    let mut inside = false;
+    let mut lines = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim() == start {
+            inside = true;
+        } else if line.trim() == end {
+            inside = false;
+        } else if !inside && line.contains("banshee record") {
+            lines.push(index + 1);
+        }
+    }
+    lines
+}
+
+fn bindable(hotkey: Hotkey) -> Option<Hotkey> {
+    match hotkey {
+        Hotkey::Modifier(_) => None,
+        key => Some(key),
+    }
+}
+
+fn default_key(saved: Hotkey) -> Hotkey {
+    bindable(saved).unwrap_or(FALLBACK_KEY)
+}
+
+fn key_from_answer(answer: &str) -> Result<Hotkey, BansheeError> {
+    let hotkey = Hotkey::try_from(answer.to_string()).map_err(BansheeError::Rejected)?;
+    bindable(hotkey).ok_or_else(|| {
+        BansheeError::Rejected(format!(
+            "Hyprland fires both binds of {answer} together when you release it, so it records \
+             nothing; use an F-key or a chord such as Ctrl+Alt+D"
+        ))
+    })
+}
+
+fn press_word(mode: HotkeyMode) -> &'static str {
+    match mode {
+        HotkeyMode::Hold => "hold",
+        HotkeyMode::Toggle => "tap",
+    }
+}
+
+fn mode_from_answer(answer: &str) -> Result<HotkeyMode, BansheeError> {
+    [HotkeyMode::Hold, HotkeyMode::Toggle]
+        .into_iter()
+        .find(|mode| answer.eq_ignore_ascii_case(press_word(*mode)))
+        .ok_or_else(|| {
+            BansheeError::Rejected(format!(
+                "answer {} or {}, not '{answer}'",
+                press_word(HotkeyMode::Hold),
+                press_word(HotkeyMode::Toggle)
+            ))
+        })
 }
 
 fn hypr_dir(home: &Path) -> PathBuf {
     home.join(".config/hypr")
 }
 
-pub fn run(name: Option<crate::args::CompositorName>, yes: bool) -> Result<(), BansheeError> {
+/// Binds the key and answers the key and mode it bound, which the caller saves.
+pub fn run(
+    name: Option<crate::args::CompositorName>,
+    yes: bool,
+    saved_key: Hotkey,
+    saved_mode: HotkeyMode,
+) -> Result<(Hotkey, HotkeyMode), BansheeError> {
     if cfg!(target_os = "macos") {
         return Err(BansheeError::Rejected(
             "on macOS the daemon binds the key itself; change it with: banshee config set audio.hotkey <key>"
                 .to_string(),
         ));
     }
+    let default = default_key(saved_key);
     if name.is_none() {
         let home = crate::service::home_dir()?;
         let dir = hypr_dir(&home);
         let layout = Layout::detect(&dir)?;
-        println!("{}", layout.block.trim_start_matches('\n'));
+        println!("{}", layout.block(default, saved_mode));
         println!(
             "Add it to {}, or run: banshee bind hyprland",
             layout.path.display()
         );
-        return Ok(());
+        return Ok((saved_key, saved_mode));
     }
+    let (hotkey, mode) = if yes {
+        (default, saved_mode)
+    } else {
+        let hotkey = match ask_line(&format!("Which key? [{default}] "))? {
+            Some(answer) => key_from_answer(&answer)?,
+            None => default,
+        };
+        let prompt = format!(
+            "Hold {hotkey} while you speak, or tap it to start and stop? hold/tap [{}] ",
+            press_word(saved_mode)
+        );
+        let mode = match ask_line(&prompt)? {
+            Some(answer) => mode_from_answer(&answer)?,
+            None => saved_mode,
+        };
+        (hotkey, mode)
+    };
     let env = Env::from_machine()?;
     let dir = hypr_dir(&env.home);
-    let changes = plan(&dir)?;
-    if changes.is_empty() {
-        println!("Hyprland is already bound: F9 dictates, Shift+F9 records.");
-        return Ok(());
+    let rebind = plan(&dir, hotkey, mode)?;
+    for line in &rebind.strays {
+        eprintln!(
+            "{}:{line} runs banshee record outside the Banshee block; remove it if the block \
+             replaces it",
+            rebind.path.display()
+        );
     }
-    apply_plan(
-        &changes,
-        &env.path,
-        yes,
-        "Hyprland is bound: hold F9 and speak.",
-    )
+    if rebind.changes.is_empty() {
+        println!(
+            "Hyprland is already bound: {} {hotkey} to dictate, Shift+{hotkey} to record.",
+            press_word(mode)
+        );
+        return Ok((hotkey, mode));
+    }
+    let done = match mode {
+        HotkeyMode::Hold => format!("Hyprland is bound: hold {hotkey} and speak."),
+        HotkeyMode::Toggle => {
+            format!("Hyprland is bound: tap {hotkey}, speak, and tap it again to stop.")
+        }
+    };
+    apply_plan(&rebind.changes, &env.path, yes, &done)?;
+    let reload = Change::Run {
+        argv: vec!["hyprctl".to_string(), "reload".to_string()],
+    };
+    // The file is written, so a failed reload must not stop the key and mode being saved
+    if let Err(error) = apply(&reload, &env.path) {
+        eprintln!(
+            "{} is written, but hyprctl reload failed: {error}; run hyprctl reload in your \
+             Hyprland session",
+            rebind.path.display()
+        );
+    }
+    Ok((hotkey, mode))
 }
 
 #[cfg(test)]
