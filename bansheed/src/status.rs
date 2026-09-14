@@ -567,7 +567,6 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     };
     let barge_in = match config.audio.barge_in {
         BargeInMode::Stop => "stop",
-        BargeInMode::Duck => "duck",
         BargeInMode::None => "none",
     };
     let preset = match config.stt.preset {

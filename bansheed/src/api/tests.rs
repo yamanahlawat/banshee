@@ -297,6 +297,47 @@ async fn record_start_and_stop_drive_push_to_talk() {
 }
 
 #[tokio::test]
+async fn record_toggle_starts_then_stops_and_says_which() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+
+    let first = request(
+        BANSHEE_RECORD_TOGGLE,
+        Some(serde_json::json!({"dictate": true})),
+    );
+    let JsonRpcResponse::Success { result, .. } = dispatch(first, &state).await else {
+        panic!("expected success response");
+    };
+    assert_eq!(result["recording"], serde_json::Value::Bool(true));
+    assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+
+    let second = request(BANSHEE_RECORD_TOGGLE, None);
+    let JsonRpcResponse::Success { result, .. } = dispatch(second, &state).await else {
+        panic!("expected success response");
+    };
+    assert_eq!(result["recording"], serde_json::Value::Bool(false));
+    assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    // The stop carries no flag, so the dictate choice comes from the first toggle
+    let Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate)) = command_receiver.try_recv()
+    else {
+        panic!("expected a dictate transcribe command");
+    };
+}
+
+#[tokio::test]
+async fn record_toggle_is_refused_while_recording_is_unavailable() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_recording_error(RecordingError::Microphone("no device".to_string()));
+
+    let toggle = request(BANSHEE_RECORD_TOGGLE, None);
+    let JsonRpcResponse::Error { error, .. } = dispatch(toggle, &state).await else {
+        panic!("expected error response");
+    };
+    assert_eq!(error.code, -32000);
+    assert_eq!(state.recording_mode(), RecordingMode::Idle);
+}
+
+#[tokio::test]
 async fn record_stop_while_idle_is_a_no_op() {
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let state = test_state(commands);

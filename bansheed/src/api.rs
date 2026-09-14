@@ -7,7 +7,8 @@ use banshee_common::{
     BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS,
     BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_LANGUAGES,
     BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP,
-    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
+    BANSHEE_RECORD_TOGGLE, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
+    BANSHEE_SUBSCRIBE,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse};
 
@@ -317,15 +318,18 @@ fn stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse 
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
 }
 
-fn record_start(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let dictate = match params.flag("dictate") {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let action = if dictate {
+fn dictate_target(params: &Params<'_>) -> Result<TranscribeTarget, Box<JsonRpcResponse>> {
+    Ok(if params.flag("dictate")? {
         TranscribeTarget::Dictate
     } else {
         TranscribeTarget::Mailbox
+    })
+}
+
+fn record_start(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+    let action = match dictate_target(&params) {
+        Ok(value) => value,
+        Err(response) => return *response,
     };
     // Checked before the transition, so -32004 keeps meaning "busy"
     if let Some(reason) = daemon_state.recording_error() {
@@ -345,6 +349,18 @@ fn record_start(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcR
 fn record_stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     daemon_state.record_stop();
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
+}
+
+fn record_toggle(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+    let action = match dictate_target(&params) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    if let Some(reason) = daemon_state.recording_error() {
+        return unavailable(params.id(), &reason);
+    }
+    let recording = daemon_state.record_toggle(action);
+    JsonRpcResponse::success(params.id(), serde_json::json!({"recording": recording}))
 }
 
 async fn silence_within(daemon_state: &DaemonState, budget: Duration) -> bool {
@@ -684,6 +700,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_STOP => stop(params, daemon_state),
         BANSHEE_RECORD_START => record_start(params, daemon_state),
         BANSHEE_RECORD_STOP => record_stop(params, daemon_state),
+        BANSHEE_RECORD_TOGGLE => record_toggle(params, daemon_state),
         BANSHEE_ASK_USER => ask_user(params, daemon_state).await,
         BANSHEE_GET_TRANSCRIPTION => get_transcription(params, daemon_state).await,
         BANSHEE_CONFIGURE => configure(params, daemon_state),

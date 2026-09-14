@@ -523,6 +523,12 @@ fn report_key(side: crate::credentials::RemoteKey) {
 }
 
 pub async fn setup(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
+    download_missing(config_result.as_ref().ok()).await
+}
+
+/// Fetches the models that are not on disk, through the daemon when one runs.
+/// The config is required only when no daemon runs.
+pub async fn download_missing(config: Option<&Config>) -> Result<(), BansheeError> {
     // Subscribed before the download is asked for, so the first
     // notifications are not lost in the gap
     let watching = utils::Subscription::open(&[banshee_common::EVENT_DOWNLOADS]).await;
@@ -533,10 +539,15 @@ pub async fn setup(config_result: Result<Config, BansheeError>) -> Result<(), Ba
             }
         }
         Err(error) if daemon_is_down(&error) => {
-            // No daemon, so this process is the only writer there can be
-            let config = config_result?;
+            // No daemon answers, and the daemon never downloads unasked, so this process is the only writer.
+            let config = config.ok_or_else(|| {
+                BansheeError::Rejected(
+                    "the config did not load, so the models to fetch are unknown; fix config.toml and run: banshee setup"
+                        .to_string(),
+                )
+            })?;
             let dir = models::download::models_dir()?;
-            let missing = models::download::still_missing(&models::download::wanted(&config), &dir);
+            let missing = models::download::still_missing(&models::download::wanted(config), &dir);
             if missing.is_empty() {
                 println!("Everything is already downloaded.");
                 return Ok(());
@@ -646,6 +657,10 @@ pub async fn record(action: args::RecordAction) -> Result<(), BansheeError> {
             serde_json::json!({ "dictate": dictate }),
         ),
         args::RecordAction::Stop => (banshee_common::BANSHEE_RECORD_STOP, serde_json::json!({})),
+        args::RecordAction::Toggle { dictate } => (
+            banshee_common::BANSHEE_RECORD_TOGGLE,
+            serde_json::json!({ "dictate": dictate }),
+        ),
     };
     if let Err(error) = utils::call_daemon(method, params).await {
         eprintln!("Failed to send record command: {error}");
@@ -653,7 +668,7 @@ pub async fn record(action: args::RecordAction) -> Result<(), BansheeError> {
     Ok(())
 }
 
-pub fn start(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
+pub async fn start(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
     let log = service::install(service::Agent::Daemon)?;
     println!("Banshee is running, and starts again at login.");
 
@@ -663,10 +678,16 @@ pub fn start(config_result: Result<Config, BansheeError>) -> Result<(), BansheeE
         Ok(config) => {
             let missing = models::missing(&models::required(config));
             if !missing.is_empty() {
-                blocked = true;
                 println!();
-                println!("Models not downloaded yet: {}.", missing.join(", "));
-                println!("It runs without them, but cannot record. Run: banshee setup");
+                println!(
+                    "Downloading the models it needs (~860 MB): {}.",
+                    missing.join(", ")
+                );
+                println!("Ctrl-C leaves the daemon running; banshee setup resumes the download.");
+                download_missing(Some(config)).await?;
+                println!("Restarting the daemon so it loads the models.");
+                // The daemon builds its pipeline once at start, so the models it lacked need a restart to load.
+                service::install(service::Agent::Daemon)?;
             }
             // A remote listener downloads nothing, so the models say nothing
             // about whether it can hear.
@@ -720,6 +741,14 @@ pub fn tray(uninstall: bool) -> Result<(), BansheeError> {
 
 pub fn connect(agent: Option<args::AgentName>, yes: bool) -> Result<(), BansheeError> {
     if let Err(error) = connect::run(agent.map(Into::into), yes) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+pub fn bind(compositor: Option<args::CompositorName>, yes: bool) -> Result<(), BansheeError> {
+    if let Err(error) = crate::compositor::run(compositor, yes) {
         eprintln!("{error}");
         std::process::exit(1);
     }

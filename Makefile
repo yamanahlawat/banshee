@@ -3,7 +3,7 @@
 # macOS: a signed app bundle, so macOS draws its icon and TCC grants survive
 # rebuilds. One-time setup: Keychain Access > Certificate Assistant > Create
 # a Certificate, name "banshee-dev", type "Code Signing", self-signed. Needs:
-# a Rust toolchain, `cargo install tauri-cli`, and Node 22. The Tauri build
+# a Rust toolchain, `cargo install tauri-cli --version "^2" --locked`, and Node 22. The Tauri build
 # runs `npm run build` in banshee-app/ui, so run `npm ci` there first.
 # /Applications needs an admin account; set APP_DIR=$HOME/Applications
 # without one.

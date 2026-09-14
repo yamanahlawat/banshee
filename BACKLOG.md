@@ -17,9 +17,6 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   the checklist can name a typer the daemon cannot run. `connect` resolves an agent CLI and
   hands the child the `PATH` it searched; dictation does neither. Not reproduced: this
   machine is macOS.
-- `daemon.always_on` is parsed from `config.toml` and read nowhere, so the key does nothing and
-  the configuration page does not list it. Either a consumer or a removal, with the parse kept
-  so an old file still loads.
 - `daemon.log` carries no timestamps, so no interval in it can be measured.
 - Past eight queued utterances the oldest is dropped silently, and `speak` still answers with
   an id for it.
@@ -62,6 +59,10 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   `host_of` parses it again with an empty-host path the config can no longer reach. One
   `RemoteUrl` newtype with an infallible `host()` would remove the second parse and the dead
   path; it touches config, both remote backends, status and the CLI.
+- `compositor` imports `Change`, `render`, `apply_all` and `confirm` from `connect`, so a key
+  binding depends on the agent connector. The plan-show-apply machinery deserves a module of
+  its own with `connect` and `compositor` as two users; the move touches `api.rs`, the connect
+  tests and the app crate's imports.
 
 ## The window
 

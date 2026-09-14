@@ -1,9 +1,18 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::Config;
 use crate::history::TranscriptionHistory;
 use crate::state::{ConsumerCommand, DaemonState};
 use crate::text_to_speech::{ActiveUtterance, Speaker, SpeechPlayer, TtsBackend};
+
+/// Makes a fresh temp directory. Deletes a leftover from a killed run first.
+pub fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("banshee-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
 
 // Silent backend, so no test spawns a real `say` process
 struct NullBackend;
