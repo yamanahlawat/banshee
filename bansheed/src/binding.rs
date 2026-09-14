@@ -274,6 +274,16 @@ fn parse_hotkey(value: &str) -> Result<Hotkey, String> {
     }
 }
 
+pub fn key_name(key: Key) -> String {
+    if let Some(position) = F_KEYS.iter().position(|k| *k == key) {
+        return format!("F{}", position + 1);
+    }
+    if let Some((c, _)) = TYPED_KEYS.iter().find(|(_, k)| *k == key) {
+        return c.to_string();
+    }
+    format!("{key:?}")
+}
+
 impl From<Hotkey> for String {
     fn from(hotkey: Hotkey) -> String {
         hotkey.to_string()
@@ -298,13 +308,7 @@ impl std::fmt::Display for Hotkey {
                 if *cmd {
                     write!(f, "Cmd+")?;
                 }
-                if let Some(position) = F_KEYS.iter().position(|k| k == key) {
-                    return write!(f, "F{}", position + 1);
-                }
-                if let Some((c, _)) = TYPED_KEYS.iter().find(|(_, k)| k == key) {
-                    return write!(f, "{c}");
-                }
-                write!(f, "{key:?}")
+                write!(f, "{}", key_name(*key))
             }
             Hotkey::Modifier(key) => {
                 let name = MODIFIERS

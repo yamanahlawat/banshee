@@ -271,11 +271,35 @@ fn registered_stop_hook(claude_config_dir: &Path) -> Result<Option<String>, Bans
     Ok(None)
 }
 
+/// The command's words, with a quoted one kept whole and its quotes dropped.
+fn command_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    for character in command.chars() {
+        match (quote, character) {
+            (Some(open), _) if character == open => quote = None,
+            (Some(_), _) => word.push(character),
+            (None, '\'' | '"') => quote = Some(character),
+            (None, _) if character.is_whitespace() => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            (None, _) => word.push(character),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
 fn hook_script_path(command: &str) -> Option<PathBuf> {
-    command
-        .split_whitespace()
-        .find(|word| word.contains(HOOK_SCRIPT_NAME))
-        .map(|word| PathBuf::from(word.trim_matches(|c| c == '\'' || c == '"')))
+    command_words(command)
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.file_name() == Some(OsStr::new(HOOK_SCRIPT_NAME)))
 }
 
 pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
@@ -484,7 +508,7 @@ fn stop_hook_command(root: &serde_json::Value) -> Option<String> {
         .iter()
         .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
         .filter_map(|hook| hook["command"].as_str())
-        .find(|command| command.contains(HOOK_SCRIPT_NAME))
+        .find(|command| hook_script_path(command).is_some())
         .map(String::from)
 }
 
@@ -621,10 +645,19 @@ pub(crate) fn path_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
 const PATH_START: &str = "__BANSHEE_PATH_START__";
 const PATH_END: &str = "__BANSHEE_PATH_END__";
 
+/// The text before the first `start`, between it and the next `end`, and after.
+pub(crate) fn split_between<'a>(
+    text: &'a str,
+    start: &str,
+    end: &str,
+) -> Option<(&'a str, &'a str, &'a str)> {
+    let (before, rest) = text.split_once(start)?;
+    let (inside, after) = rest.split_once(end)?;
+    Some((before, inside, after))
+}
+
 fn extract_path(output: &str) -> Option<OsString> {
-    let after_start = output.split_once(PATH_START)?.1;
-    let path = after_start.split_once(PATH_END)?.0;
-    Some(OsString::from(path))
+    split_between(output, PATH_START, PATH_END).map(|(_, path, _)| OsString::from(path))
 }
 
 // A login profile that blocks would otherwise hold the first caller forever,

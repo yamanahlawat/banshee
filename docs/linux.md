@@ -10,6 +10,18 @@
 - **On a Wayland session** (Hyprland, Sway, GNOME), bind the record commands in
   your compositor instead.
 - **`banshee bind hyprland`** does this for Hyprland.
+- **It asks for the key,** then whether you hold it while you speak or tap it
+  to start and stop.
+- **The default key** is `audio.hotkey`. A lone modifier falls back to `F9`,
+  because Hyprland fires its binds only on the release.
+- **It saves both answers** as `audio.hotkey` and `audio.hotkey_mode`.
+- **`--yes`** skips the questions and binds the saved key and mode.
+- **Bind owns only the lines** between `BEGIN BANSHEE MANAGED BLOCK` and
+  `END BANSHEE MANAGED BLOCK`, and replaces only those.
+- **A bind of your own** outside the markers stays as it is.
+- **A config with no markers** gets the block at the end.
+- **Bind names each older line** that runs `banshee record` outside the block,
+  by file and line, before the diff. It removes none of them.
 - **Sway and GNOME** have no connector. Bind the same commands by hand, in their
   own syntax.
 - **On Omarchy** the block goes to `~/.config/hypr/bindings.lua`.
@@ -19,22 +31,40 @@
   file it would write.
 
 ```lua
--- Banshee
+-- BEGIN BANSHEE MANAGED BLOCK
 o.bind("F9", "Banshee: hold to dictate", "banshee record start --dictate")
 o.bind("F9", nil, "banshee record stop", { release = true })
 o.bind("SHIFT + F9", "Banshee: hold to record", "banshee record start")
 o.bind("SHIFT + F9", nil, "banshee record stop", { release = true })
+-- END BANSHEE MANAGED BLOCK
 ```
 
 ```conf
-# Banshee
+# BEGIN BANSHEE MANAGED BLOCK
 bind  = , F9, exec, banshee record start --dictate
 bindr = , F9, exec, banshee record stop
 bind  = SHIFT, F9, exec, banshee record start
 bindr = SHIFT, F9, exec, banshee record stop
+# END BANSHEE MANAGED BLOCK
 ```
 
-- **Both release binds** are there on purpose, in either config style.
+- **Tap** binds one toggle for each key, with no release bind:
+
+```lua
+-- BEGIN BANSHEE MANAGED BLOCK
+o.bind("F9", "Banshee: tap to dictate", "banshee record toggle --dictate")
+o.bind("SHIFT + F9", "Banshee: tap to record", "banshee record toggle")
+-- END BANSHEE MANAGED BLOCK
+```
+
+```conf
+# BEGIN BANSHEE MANAGED BLOCK
+bind = , F9, exec, banshee record toggle --dictate
+bind = SHIFT, F9, exec, banshee record toggle
+# END BANSHEE MANAGED BLOCK
+```
+
+- **Both release binds** in the hold block are there on purpose, in either config style.
 - **Hyprland** matches modifiers exactly, and `Shift` may be released before
   `F9`.
 - **Bind an ordinary key,** not a modifier.
@@ -114,17 +144,19 @@ Then:
 
 ```bash
 cargo install tauri-cli --version "^2" --locked
-make install-window
+make install
 ```
 
-- **`make install`** builds and installs the daemon and the CLI.
-- **A machine with no GTK** still runs them.
-- **`make install-window`** depends on `install`, so it installs the daemon, the
-  CLI and the window together.
-- **It needs** GTK, WebKitGTK and Node 22.
+- **`make install`** builds and installs the daemon, the CLI and the window.
+- **It builds the window** only when `webkit2gtk-4.1`, `gtk+-3.0`, `npm` and the
+  Tauri CLI are present. The window needs Node 22.
+- **Without them** it installs the daemon and the CLI, and names what is missing.
+  A machine with no GTK still runs them.
+- **A plain `cargo build` of `banshee-app`** leaves out the UI. The window then
+  loads `localhost:5173` and shows "connection refused".
 - **It puts** `banshee-app` in `~/.local/bin`, a desktop entry in
   `~/.local/share/applications`, and icons in `~/.local/share/icons/hicolor`.
 - **The launcher** opens the window with WM class `banshee-app`.
 - **The install points** `banshee-app` at `target/release`.
 - **A `cargo clean` or a moved clone** breaks the window's daemon control.
-- **Run `make install-window` again** to put it back.
+- **Run `make install` again** to put it back.

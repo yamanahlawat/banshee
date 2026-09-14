@@ -9,10 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`banshee bind hyprland` binds the key in your Hyprland config.** It
-  appends the block to `~/.config/hypr/bindings.lua` on Omarchy, or to
-  `~/.config/hypr/hyprland.conf` elsewhere, shows the change first, and runs
-  `hyprctl reload`. A second run finds the block and reports it bound.
+- **`banshee bind hyprland` binds the key in your Hyprland config.** It asks
+  for the key and whether you hold it or tap it, and writes the matching block
+  to `~/.config/hypr/bindings.lua` on Omarchy, or to
+  `~/.config/hypr/hyprland.conf` elsewhere. It replaces only the lines between
+  its `BEGIN BANSHEE MANAGED BLOCK` and `END BANSHEE MANAGED BLOCK` markers.
+  It names any older `banshee record` line outside them by file and line, and
+  removes none. It shows the change first, and runs `hyprctl reload`. It saves both answers as `audio.hotkey` and
+  `audio.hotkey_mode`. A lone modifier is refused, because Hyprland fires its
+  binds only on the release. `--yes` binds the saved key and mode.
   `banshee bind` alone prints the block for you to paste, and names the file
   it would write to. On macOS it says the daemon binds the key itself and
   names `banshee config set audio.hotkey`.
@@ -51,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`make install` on Linux builds the desktop window too.** It builds the
+  window when WebKitGTK, GTK 3, npm and the Tauri CLI are present. Without
+  them it installs the daemon and the CLI, and names what is missing. It
+  replaces `make install-window`, which is gone.
 - **The README leads with the Linux quickstart.** It gives macOS the same
   weight second, and moves every other install route to `docs/install.md`.
 - **The daemon names who listens and who speaks.** `stt.provider` and
@@ -69,6 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`banshee connect claude` knows its own Stop hook by the script's exact
+  file name.** A hook that runs a script such as `my-banshee-speak-check.sh`
+  or `banshee-speak-check.sh.bak` no longer counts as Banshee's, so connect
+  adds Banshee's hook beside it. A hook that runs `banshee-speak-check.sh`
+  from a path of your own is still left alone. A quoted path that holds a
+  space is read whole, so connect names the file you registered.
 - **The system fallback voice speaks on Linux too, and names itself when it
   cannot start.** `tts.fallback = "system"` uses `say` on macOS and
   `espeak-ng` on Linux. When the fallback itself fails to start, the reason

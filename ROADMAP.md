@@ -17,8 +17,9 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
   after showing the change. Antigravity, Claude Code, OpenCode and Pi are verified on a real
   install; Cursor and Codex wait for a report (#53, #54).
 - A microphone that disappears no longer stops dictation (#47).
-- The desktop window and the menu bar icon run on Linux. `make install-window` builds both
-  from a source clone, and the icon sits in any bar that hosts StatusNotifierItem. The
+- The desktop window and the menu bar icon run on Linux. `make install` builds the icon
+  from a source clone, and the window too when GTK, WebKitGTK, npm and the Tauri CLI are
+  there. The icon sits in any bar that hosts StatusNotifierItem. The
   blockers band names a missing Wayland typer. On Wayland the compositor holds the hotkey,
   and the window says so instead of naming a key nothing binds.
 
