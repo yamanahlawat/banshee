@@ -6,6 +6,10 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
 
 ## Landed
 
+- Linux onboarding in four commands: the installer, `banshee start` (which fetches the
+  models), `banshee bind hyprland` (which writes the F9 binding after showing it) and
+  `banshee connect claude`. `banshee record toggle` is one key for a compositor with no
+  release bind. The README leads with this path and every doc is pointers.
 - Bring your own keys. A remote listener behind `stt.provider = "remote"` and a remote voice
   behind `tts.provider = "remote"`, each with its own key in an owner-only file. Every surface
   says when audio or text leaves the machine.

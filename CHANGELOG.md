@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-14
+
 ### Added
 
 - **`banshee bind hyprland` binds the key in your Hyprland config.** It asks
@@ -873,7 +875,8 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/yamanahlawat/banshee/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/yamanahlawat/banshee/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/yamanahlawat/banshee/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/yamanahlawat/banshee/compare/v0.12.0...v0.12.1
