@@ -340,9 +340,7 @@ The `preset` picks which Whisper model Banshee uses:
   Two runs in one second get separate copies, because the second name rises
   above the first.
 - **Each copy carries the whole path of its folder,** with `/` written as `%`.
-  Two watched folders that share a basename then keep separate copies. A copy
-  from an older Banshee carries the basename alone, and still restores where one
-  watched folder carries that basename.
+  Two watched folders that share a basename then keep separate copies.
 - **It keeps the newest `snapshots` copies,** and never fewer than one.
 - **`banshee tell --undo` puts the newest copy back,** and names every folder
   it replaced.

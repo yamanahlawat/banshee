@@ -486,14 +486,10 @@ pub struct Restored {
 pub fn restore(from: &Path, paths: &[PathBuf]) -> Restored {
     let mut result = Restored::default();
     for target in paths {
-        let copy = match copy_for(from, target, paths) {
-            Ok(Some(copy)) => copy,
-            Ok(None) => continue,
-            Err(why) => {
-                result.failed.push((target.display().to_string(), why));
-                continue;
-            }
-        };
+        let copy = from.join(snapshot_key(target));
+        if !copy.is_dir() {
+            continue;
+        }
         if std::fs::symlink_metadata(target).is_ok_and(|meta| meta.is_symlink()) {
             result.failed.push((
                 target.display().to_string(),
@@ -509,38 +505,6 @@ pub fn restore(from: &Path, paths: &[PathBuf]) -> Restored {
         }
     }
     result
-}
-
-/// The copy of `target` inside the snapshot, or `None` where it holds none.
-///
-/// A snapshot from before Banshee keyed a copy on the whole path holds the
-/// basename alone. Such a copy reaches a folder only where one watched folder
-/// carries that basename. Two folders named `omarchy` would each get the
-/// other's files.
-fn copy_for(from: &Path, target: &Path, paths: &[PathBuf]) -> Result<Option<PathBuf>, String> {
-    let keyed = from.join(snapshot_key(target));
-    if keyed.is_dir() {
-        return Ok(Some(keyed));
-    }
-    let Some(name) = target.file_name() else {
-        return Ok(None);
-    };
-    let older = from.join(name);
-    if !older.is_dir() {
-        return Ok(None);
-    }
-    let shared = paths
-        .iter()
-        .filter(|path| path.file_name() == Some(name))
-        .count();
-    if shared > 1 {
-        return Err(format!(
-            "an older snapshot holds one {} for {shared} watched folders; \
-             put the copy back by hand",
-            name.to_string_lossy()
-        ));
-    }
-    Ok(Some(older))
 }
 
 /// Stages the copy beside the target and swaps with two renames, so a fault

@@ -817,55 +817,6 @@ fn two_watched_folders_with_one_name_keep_their_own_copies() {
 }
 
 #[test]
-fn an_older_snapshot_that_fits_two_folders_is_refused_rather_than_guessed() {
-    let root = crate::test_support::scratch("tell-restore-older-ambiguous");
-    let config = root.join(".config").join("omarchy");
-    let share = root.join(".local").join("share").join("omarchy");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::create_dir_all(&share).unwrap();
-    std::fs::write(config.join("theme"), "tokyo-night\n").unwrap();
-    std::fs::write(share.join("theme"), "catppuccin\n").unwrap();
-
-    // A snapshot taken before Banshee keyed a copy on the whole path.
-    let older = root.join("snapshots").join("100");
-    std::fs::create_dir_all(older.join("omarchy")).unwrap();
-    std::fs::write(older.join("omarchy").join("theme"), "the merge\n").unwrap();
-
-    let result = restore(&older, &[config.clone(), share.clone()]);
-
-    assert!(result.done.is_empty(), "{:?}", result.done);
-    assert_eq!(result.failed.len(), 2, "{:?}", result.failed);
-    assert_eq!(
-        std::fs::read_to_string(config.join("theme")).unwrap(),
-        "tokyo-night\n",
-        "a copy that fits two folders must reach neither"
-    );
-    assert_eq!(
-        std::fs::read_to_string(share.join("theme")).unwrap(),
-        "catppuccin\n"
-    );
-}
-
-#[test]
-fn a_snapshot_from_before_the_whole_path_key_still_restores() {
-    let root = crate::test_support::scratch("tell-restore-older");
-    let hypr = root.join("hypr");
-    std::fs::create_dir_all(&hypr).unwrap();
-    let older = root.join("snapshots").join("100");
-    std::fs::create_dir_all(older.join("hypr")).unwrap();
-    std::fs::write(older.join("hypr").join("looknfeel.lua"), "gaps = 5\n").unwrap();
-    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 40\n").unwrap();
-
-    let result = restore(&older, std::slice::from_ref(&hypr));
-
-    assert_eq!(result.done, vec![hypr.display().to_string()]);
-    assert_eq!(
-        std::fs::read_to_string(hypr.join("looknfeel.lua")).unwrap(),
-        "gaps = 5\n"
-    );
-}
-
-#[test]
 fn a_second_snapshot_in_the_same_second_gets_a_directory_of_its_own() {
     let root = crate::test_support::scratch("tell-snapshot-same-second");
     let hypr = root.join("hypr");
@@ -1176,13 +1127,17 @@ fn a_restore_that_put_one_folder_back_stays_a_success() {
     assert!(!failed_outright(&Restored::default()));
 }
 
-/// A snapshot from before Banshee keyed a copy on the whole path: the copy sits
-/// under the basename alone. It answers with the folder a restore writes to.
+/// Puts one copy in a snapshot, keyed the way `snapshot` keys it. It answers
+/// with the folder a restore writes to.
 fn snapshot_holding(dir: &Path, name: &str, contents: &str) -> PathBuf {
-    let copy = dir.join("snapshots").join("1000").join(name);
+    let target = dir.join(name);
+    let copy = dir
+        .join("snapshots")
+        .join("1000")
+        .join(snapshot_key(&target));
     std::fs::create_dir_all(&copy).unwrap();
     std::fs::write(copy.join("looknfeel.lua"), contents).unwrap();
-    dir.join(name)
+    target
 }
 
 /// The watched folders as absolute paths, so `expand` leaves them alone and no
