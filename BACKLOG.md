@@ -125,13 +125,24 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   returns without collecting either channel. The threads are never joined, because a
   surviving descendant can hold those pipes open for ever. In the CLI the cost ends with
   the process. In the daemon it accumulates until a restart.
-- No test can fail if the agent is pointed back at Banshee's own directory. `run` resolves
-  the real home and spawns a real agent, so the two lines that hand the agent its working
-  directory are out of reach of the suite. Measured: changing both `&run_in` back to
-  `&state` leaves all 661 tests green. Four tests cover `agent_dir` itself and two cover
-  `show`, so the separation is stated and named; it is only the last two call sites that
-  nothing guards. A seam that lets a test drive `run` against a temporary home and a fake
-  agent binary would close it.
+- `tell::run` has no test of its own. It opens with `state_dir()`, which resolves the real
+  home, and then spawns a real agent, so no test reaches its body. Every rule it applies is
+  tested one level down, and a review moved four more rules out of it for that reason, but
+  the orchestration is not tested. Measured: pointing the agent back at Banshee's own
+  directory, by changing both `&run_in` to `&state`, left all 661 tests green. The seam it
+  wants is a `run_in(state, ...)` that mirrors the existing `undo_in(state, ...)`.
+- A reset that works sounds nothing, by choice. The user rejected a cue for "start over"
+  after hearing the alternative. A reset that fails still sounds the error cue, so silence
+  means the thread cleared. The cost is that a dead key and a cleared thread sound alike.
+  Left here so real use can say whether that matters.
+- A leaked run lock can still be taken twice, in a three-process race. The takeover is a
+  rename, so two processes cannot both hold it, but the standard library has no atomic
+  compare-and-delete. A third process can enter between the check and the rename. It needs
+  a leaked lock and two processes racing, so it is narrower than the case it replaced.
+- Several io errors in `tell` still reach the user as a bare errno. `BansheeError::file`
+  gives a path, and `clear_thread` and the daemon socket use it, but `snapshot`,
+  `copy_tree`, `write_session` and `state_dir` do not. A user who cannot see the screen
+  hears "Permission denied (os error 13)" and no filename.
 - `banshee bind` writes binds the running daemon may not understand. After an upgrade with
   no daemon restart, the tell key records to the mailbox and nothing says so.
 - Nothing checks the derived tell chord against bindings the user already has. `strays`

@@ -8,9 +8,10 @@
 # template images macOS tints, drawn at 36px where the arcs need their own
 # spacing, and they are the artist's originals.
 #
-# Each renderer produces different antialiasing in the tiles. A regeneration on a
-# different platform rewrites some of them. This is not a drawing change.
-# Measured error: RMSE 0.0025 to 0.0130 on a 0 to 1 scale.
+# A regeneration on another machine can rewrite some tiles. This is not a
+# drawing change. Where ImageMagick delegates SVG to librsvg, the first two
+# renderers agree: measured RMSE 7.2e-05 on a 0 to 1 scale. Nobody has measured
+# the sips path, which runs only on macOS.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

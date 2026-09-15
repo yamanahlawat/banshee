@@ -323,13 +323,26 @@ The `preset` picks which Whisper model Banshee uses:
   sounds like. `banshee status` names the tool.
 - **A run whose reply arrived too late only reaches `banshee status`.** The agent
   already spoke while it ran, so this one sounds no cue.
+- **"start over" clears the thread and sounds nothing.** Silence is the chosen
+  answer for a reset that works. A reset that fails sounds the error cue, and
+  `banshee status` names the file Banshee could not remove.
+- **The cues carry every tell failure, so `audio.cues.enabled = false` hides
+  them.** `banshee status` says so while the cues are off.
+- **A dictation no longer hides a tell failure.** `banshee status` keeps the last
+  tell failure until the next tell run, whatever else you dictate in between.
 - **`thread_timeout_min` is how long the same conversation stays open.** Within
   it, "a bit more" reaches the agent that did the work. After it, the next
   command starts a new thread.
 - **`run_timeout_min` is a stated default, not a measurement.** No run has been
   timed to a limit. Raise it if a command is killed before it finishes.
 - **Before every command Banshee copies each folder in `paths`** to
-  `~/.banshee/tell/snapshots/<unix-seconds>/`.
+  `~/.banshee/tell/snapshots/<number>/`. The number is the Unix time in seconds.
+  Two runs in one second get separate copies, because the second name rises
+  above the first.
+- **Each copy carries the whole path of its folder,** with `/` written as `%`.
+  Two watched folders that share a basename then keep separate copies. A copy
+  from an older Banshee carries the basename alone, and still restores where one
+  watched folder carries that basename.
 - **It keeps the newest `snapshots` copies,** and never fewer than one.
 - **`banshee tell --undo` puts the newest copy back,** and names every folder
   it replaced.

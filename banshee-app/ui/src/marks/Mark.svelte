@@ -50,9 +50,9 @@
         stroke-dasharray={form === 'notrunning' ? '22 14' : undefined}
       />
       {#if form === 'listening'}
-        <!-- Solid over-ear headphones. They have to hold at 18px against
-             five other forms, and must not resemble recording, the only
-             other form that fills the whole body solid. -->
+        <!-- Solid over-ear headphones. The window draws this mark at 34px.
+             The cups must not resemble recording, the only other form that
+             fills the whole body solid. -->
         <ellipse cx="17" cy="46" rx="12" ry="17" fill="currentColor" />
         <ellipse cx="83" cy="46" rx="12" ry="17" fill="currentColor" />
       {/if}

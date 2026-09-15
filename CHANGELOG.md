@@ -31,8 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command of a thread, and `docs/configuration.md` states the difference.
   Banshee itself speaks nothing. A failed run sounds the error cue, and so does
   a run that finished after Banshee refused it a tool, because that one leaves
-  you with silence. `banshee status` names the reason, the agent it would run,
-  and whether that agent is scoped.
+  you with silence. A reset that works sounds nothing at all. `banshee status`
+  names the reason, the agent it would run, and whether that agent is scoped,
+  and it keeps the last tell failure until the next tell run, so a dictation in
+  between no longer hides it. The cues carry every tell failure, so
+  `banshee status` says when `audio.cues.enabled` is false.
   `tell.run_timeout_min` defaults to 5 minutes, which is a stated default and
   not a measurement: no run has been timed to a limit.
 - **`banshee bind hyprland` binds the key in your Hyprland config.** It asks
