@@ -8,6 +8,7 @@
   "recording": false,
   "armed": false,
   "transcribing": false,
+  "telling": false,
   "speaking": false,
   "uptime_seconds": 5,
   "vad_threshold": 0.5,
@@ -68,6 +69,20 @@
       "voice": "af_sky",
       "speed": 1.2000000476837158,
       "fallback": "system"
+    },
+    "tell": {
+      "agent": "",
+      "thread_timeout_min": 10,
+      "run_timeout_min": 5,
+      "snapshots": 10,
+      "paths": [
+        "~/.config/hypr",
+        "~/.config/omarchy",
+        "~/.config/alacritty",
+        "~/.config/foot",
+        "~/.config/kitty",
+        "~/.config/ghostty"
+      ]
     }
   },
   "pending": [],

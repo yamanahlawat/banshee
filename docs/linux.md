@@ -29,6 +29,14 @@
 - **`hyprctl reload`** runs after the write.
 - **`banshee bind` alone** prints the block for you to paste, and names the
   file it would write.
+- **It binds a tell key too.** Hold it and speak, and your coding agent changes
+  the config. See
+  [cli.md](cli.md#telling-your-agent-to-change-the-desktop).
+- **The tell chord is the dictate chord plus one modifier,** the first free one
+  of `Super`, `Ctrl` and `Alt`.
+- **`Shift` is not among them.** The record bind holds it.
+- **A dictate key that already holds all three** gets no tell bind, and `bind`
+  says so.
 
 ```lua
 -- BEGIN BANSHEE MANAGED BLOCK
@@ -36,6 +44,8 @@ o.bind("F9", "Banshee: hold to dictate", "banshee record start --dictate")
 o.bind("F9", nil, "banshee record stop", { release = true })
 o.bind("SHIFT + F9", "Banshee: hold to record", "banshee record start")
 o.bind("SHIFT + F9", nil, "banshee record stop", { release = true })
+o.bind("SUPER + F9", "Banshee: hold to tell the agent", "banshee record start --tell")
+o.bind("SUPER + F9", nil, "banshee record stop", { release = true })
 -- END BANSHEE MANAGED BLOCK
 ```
 
@@ -45,6 +55,8 @@ bind  = , F9, exec, banshee record start --dictate
 bindr = , F9, exec, banshee record stop
 bind  = SHIFT, F9, exec, banshee record start
 bindr = SHIFT, F9, exec, banshee record stop
+bind  = SUPER, F9, exec, banshee record start --tell
+bindr = SUPER, F9, exec, banshee record stop
 # END BANSHEE MANAGED BLOCK
 ```
 
@@ -54,6 +66,7 @@ bindr = SHIFT, F9, exec, banshee record stop
 -- BEGIN BANSHEE MANAGED BLOCK
 o.bind("F9", "Banshee: tap to dictate", "banshee record toggle --dictate")
 o.bind("SHIFT + F9", "Banshee: tap to record", "banshee record toggle")
+o.bind("SUPER + F9", "Banshee: tap to tell the agent", "banshee record toggle --tell")
 -- END BANSHEE MANAGED BLOCK
 ```
 
@@ -61,6 +74,7 @@ o.bind("SHIFT + F9", "Banshee: tap to record", "banshee record toggle")
 # BEGIN BANSHEE MANAGED BLOCK
 bind = , F9, exec, banshee record toggle --dictate
 bind = SHIFT, F9, exec, banshee record toggle
+bind = SUPER, F9, exec, banshee record toggle --tell
 # END BANSHEE MANAGED BLOCK
 ```
 
@@ -108,7 +122,7 @@ bind = SHIFT, F9, exec, banshee record toggle
     "return-type": "json",
     "restart-interval": 5,
     "format": "{icon}",
-    "format-icons": { "idle": "mic", "recording": "REC", "speaking": "spk" }
+    "format-icons": { "idle": "mic", "recording": "REC", "busy": "...", "speaking": "spk" }
 }
 ```
 
@@ -116,6 +130,7 @@ bind = SHIFT, F9, exec, banshee record toggle
 
 ```css
 #custom-banshee.recording { color: #e06c75; }
+#custom-banshee.busy      { color: #e5c07b; }
 #custom-banshee.speaking  { color: #61afef; }
 ```
 

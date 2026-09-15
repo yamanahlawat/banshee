@@ -11,6 +11,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`banshee tell "<text>"` sends a command to your coding agent, which
+  changes your desktop.** Banshee sends your words and nothing else: the
+  agent's own skills carry the desktop knowledge. The agent edits the config
+  and speaks the result back through Banshee. `banshee bind hyprland` now
+  writes a tell key beside the dictate key: the dictate chord plus the first
+  free modifier of `Super`, `Ctrl` or `Alt`, and a key that already holds all
+  three gets none, which `bind` says. Within `tell.thread_timeout_min` the
+  next command continues the same conversation, so "a bit more" works.
+  "start over" ends the thread and starts no agent. "show me" reopens the
+  thread in a terminal, so you can read what the agent wrote. Before
+  every command Banshee copies the folders in `tell.paths` to
+  `~/.banshee/tell/snapshots/`, keeps the newest `tell.snapshots` copies, and
+  `banshee tell --undo` puts the newest back. The agent runs in
+  `~/.banshee/tell/run/`, so it never lists Banshee's own snapshots and edits a
+  copy of your config. Claude Code gets those folders, and the run directory it
+  works in. OpenCode takes no folder list, so it can
+  edit anything: `banshee tell` prints which of the two it is on the first
+  command of a thread, and `docs/configuration.md` states the difference.
+  Banshee itself speaks nothing. A failed run sounds the error cue, and so does
+  a run that finished after Banshee refused it a tool, because that one leaves
+  you with silence. A reset that works sounds nothing at all. `banshee status`
+  names the reason, the agent it would run, and whether that agent is scoped,
+  and it keeps the last tell failure until the next tell run, so a dictation in
+  between no longer hides it. The cues carry every tell failure, so
+  `banshee status` says when `audio.cues.enabled` is false.
+  `tell.run_timeout_min` defaults to 5 minutes, which is a stated default and
+  not a measurement: no run has been timed to a limit.
 - **`banshee bind hyprland` binds the key in your Hyprland config.** It asks
   for the key and whether you hold it or tap it, and writes the matching block
   to `~/.config/hypr/bindings.lua` on Omarchy, or to

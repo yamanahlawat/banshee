@@ -11,8 +11,9 @@ Real daemon replies, captured on macOS 25.6.0: Banshee 0.11.1 on 2026-08-27,
 except `not-running.json`, which the
 daemon cannot produce because a stopped daemon answers nothing, two objects
 in `remote.json` that the capture predates: `remote.tts` and
-`config.tts.remote`, and `ready.json`'s `remote` block, which that capture
-predates too. `remote-speech.json` holds both of the `remote.json` objects
+`config.tts.remote`, `ready.json`'s `remote` block, which that capture
+predates too, and `remote.json`'s `telling: false`, added by hand because the
+daemon did not report that flag when the reply was captured. `remote-speech.json` holds both of the `remote.json` objects
 from a real reply, so it is the one to read for the speaker's shape.
 `daemon.always_on` and `cues.start`, `cues.stop`, `cues.ready`, `cues.error`
 were removed from every mock by hand, because the daemon stopped sending

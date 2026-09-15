@@ -134,6 +134,8 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         }
     }
 
+    report_tell(&config);
+
     if let Some(service) = crate::service::service_file_path() {
         if service.exists() {
             note("start-at-login service installed");
@@ -153,6 +155,44 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         println!("Problems found. Work down from the top.");
     }
     healthy
+}
+
+/// What `banshee tell` would run. A note and never a failure: a machine with
+/// no headless agent still records, types and speaks.
+fn report_tell(config: &Config) {
+    // The same call `tell` makes, so the checklist cannot name one agent while
+    // a command runs another.
+    let agent = crate::connect::Env::from_machine()
+        .and_then(|env| crate::tell::resolved_agent(&config.tell, &env, &env.home));
+    let found = agent.is_ok();
+    note(&tell_line(agent));
+    if let Some(line) = silent_tell_line(found, config.audio.cues.enabled) {
+        note(line);
+    }
+}
+
+/// What a user who turned cues off no longer hears. The cue is the only sign
+/// the key path gives that a run failed, and nothing else takes its place.
+fn silent_tell_line(agent_found: bool, cues_on: bool) -> Option<&'static str> {
+    (agent_found && !cues_on).then_some(
+        "cues are off, so a failed tell makes no sound; \
+         set [audio.cues] enabled = true to hear it",
+    )
+}
+
+/// The failure carries its own fix, so this adds none.
+fn tell_line(agent: Result<crate::tell::Headless, BansheeError>) -> String {
+    match agent {
+        Ok(agent) if agent.scoped() => format!(
+            "tell runs {}, and it gets the folders in tell.paths, and its own run directory",
+            agent.name()
+        ),
+        Ok(agent) => format!(
+            "tell runs {}, which takes no folder list, so it can edit any file",
+            agent.name()
+        ),
+        Err(reason) => format!("tell has no agent: {reason}"),
+    }
 }
 
 // Optional dependency, so it reports but never fails the health check.
@@ -633,7 +673,7 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     if let Some(error) = live(daemon, |status| {
         status["last_error"].as_str().map(str::to_string)
     }) {
-        note(&format!("the last transcription failed: {error}"));
+        note(&last_error_line(&error));
     }
     if let Some(error) = live(daemon, |status| {
         status["last_speech_error"].as_str().map(str::to_string)
@@ -650,6 +690,12 @@ fn settings_voice(config: &Config, tts_remote: bool) -> &str {
     } else {
         &config.tts.voice
     }
+}
+
+/// Names no producer: four paths write `last_error`, and naming one lies about
+/// the other three.
+fn last_error_line(error: &str) -> String {
+    format!("the last attempt failed: {error}")
 }
 
 /// The key and the voice have their own checks below, so this line names

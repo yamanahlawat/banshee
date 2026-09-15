@@ -6,6 +6,7 @@
   themselves only when no daemon runs.
 - `start`, `serve`, `tray` and `service` manage the daemon.
 - `connect` and `bind` edit another tool's config directly.
+- `tell` runs your coding agent itself, and that agent edits your config.
 - `banshee <command> --help` prints this table in your terminal.
 
 | Command                         | What it does                                               |
@@ -30,8 +31,40 @@
 | `banshee listen`                | Print recent transcriptions                                |
 | `banshee record start` / `stop` / `toggle` | Push-to-talk without the hotkey; `toggle` is one key that starts, then stops |
 | `banshee speak "<text>"`        | Speak some text aloud                                      |
+| `banshee tell "<text>"`         | Send a command to your coding agent, which changes your desktop |
+| `banshee tell --undo`           | Put the watched folders back from the newest snapshot      |
 | `banshee history`               | List all saved transcriptions                              |
 | `banshee clear-history`         | Clear the saved transcriptions                             |
+
+## Telling your agent to change the desktop
+
+- `banshee tell "make the window gaps bigger"` runs your coding agent with
+  those words.
+- Banshee sends your words and nothing else. The agent's own skills carry the
+  desktop knowledge.
+- The agent edits the config, and speaks the result through Banshee.
+- Banshee itself says nothing. `banshee tell` prints what the agent may edit
+  before it starts.
+- The tell key sounds no cue of its own. A tell recording ends on the same
+  record-stop cue as a dictation.
+- A failed run sounds the error cue. `banshee status` names the reason.
+- The menu bar icon shows Busy for the length of the run, so you can see that
+  the agent still works.
+- `banshee tell --undo` puts the watched folders back from the newest snapshot.
+- The folders, the agent and the timeouts are settings. See
+  [configuration.md](configuration.md#telling-your-agent).
+- The tell key runs the same command from any window. See
+  [linux.md](linux.md#the-key-on-wayland).
+
+Two phrases Banshee answers itself. It hands neither to the agent:
+
+- `banshee tell "start over"` ends the thread, and starts no agent.
+- `banshee tell "show me"` reopens the thread in a terminal, so you can read
+  what the agent wrote.
+- Each phrase must be the whole sentence. Case and a trailing `.` or `!` are
+  ignored.
+- A longer sentence goes to the agent, so `show me a list of themes` is a
+  command.
 
 ## Following what the daemon is doing
 
@@ -41,6 +74,7 @@
 $ banshee watch
 idle
 recording
+busy
 idle
 speaking
 idle
@@ -48,6 +82,9 @@ idle
 
 - The first line is the state at connect.
 - The daemon pushes the rest as they happen.
+- The words are `idle`, `recording`, `busy`, `speaking` and `listening`.
+- `busy` means Banshee transcribes what you said, or the agent a `banshee tell`
+  started still runs. Neither one needs you.
 - The command exits non-zero when the daemon stops, so a supervisor can
   restart it.
 - For a single answer, not a stream, ask `banshee status`.

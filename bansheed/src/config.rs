@@ -399,6 +399,53 @@ impl Default for TTSConfig {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TellConfig {
+    /// Empty asks Omarchy, then the connected agents.
+    pub agent: String,
+    /// Minutes a saved thread stays resumable.
+    pub thread_timeout_min: u64,
+    /// Minutes before a run is killed rather than waited on. 5 is a stated
+    /// default, not a measurement: no run has yet been timed to a limit.
+    pub run_timeout_min: u64,
+    /// How many snapshots to keep.
+    pub snapshots: usize,
+    /// The folders Banshee copies before a command. An agent that takes a
+    /// folder list gets this one.
+    pub paths: Vec<String>,
+}
+
+impl Default for TellConfig {
+    fn default() -> Self {
+        TellConfig {
+            agent: String::new(),
+            thread_timeout_min: 10,
+            run_timeout_min: 5,
+            snapshots: 10,
+            // The list the Omarchy skill names for itself.
+            paths: [
+                "~/.config/hypr",
+                "~/.config/omarchy",
+                "~/.config/alacritty",
+                "~/.config/foot",
+                "~/.config/kitty",
+                "~/.config/ghostty",
+            ]
+            .map(String::from)
+            .to_vec(),
+        }
+    }
+}
+
+impl TellConfig {
+    /// Never zero: a zero would delete the copy the run just took, and
+    /// `banshee tell --undo` would never have one.
+    pub fn keep(&self) -> usize {
+        self.snapshots.max(1)
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -406,6 +453,7 @@ pub struct Config {
     pub audio: AudioConfig,
     pub stt: STTConfig,
     pub tts: TTSConfig,
+    pub tell: TellConfig,
     /// Parsed so a `config.toml` that carries it still loads, and never written
     /// back or reported, so it does not read as a setting.
     #[serde(default, skip_serializing)]

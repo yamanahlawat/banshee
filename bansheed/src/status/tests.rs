@@ -1,4 +1,4 @@
-use super::{microphone_line, report_probe};
+use super::{BansheeError, microphone_line, report_probe};
 
 const DAEMON_HOLDS: &str = "daemon has the microphone";
 
@@ -84,6 +84,14 @@ fn a_microphone_that_will_not_open_fails_the_checklist() {
     )));
 }
 
+#[test]
+fn the_last_error_line_names_no_producer() {
+    assert_eq!(
+        super::last_error_line("opencode exited exit status: 1"),
+        "the last attempt failed: opencode exited exit status: 1"
+    );
+}
+
 // The checklist names the host either way, because that is the server the
 // config asks for. Only the daemon says whether text reaches it.
 #[test]
@@ -112,6 +120,51 @@ fn the_settings_line_names_the_voice_of_the_speaker_in_force() {
         config.tts.remote.voice
     );
     assert_eq!(super::settings_voice(&config, false), config.tts.voice);
+}
+
+#[test]
+fn the_tell_line_says_whether_the_agent_is_scoped() {
+    use crate::tell::Headless;
+
+    assert_eq!(
+        super::tell_line(Ok(Headless::ClaudeCode)),
+        "tell runs claude, and it gets the folders in tell.paths, and its own run directory"
+    );
+    assert_eq!(
+        super::tell_line(Ok(Headless::OpenCode)),
+        "tell runs opencode, which takes no folder list, so it can edit any file"
+    );
+}
+
+// The cue is the whole failure signal the key path has, and the user does not
+// read the screen.
+#[test]
+fn the_checklist_says_a_failed_tell_is_silent_while_cues_are_off() {
+    let line = super::silent_tell_line(true, false).expect("cues off must be named");
+    assert!(
+        line.contains("makes no sound") && line.contains("[audio.cues]"),
+        "the line must say what is lost and which key restores it: {line}"
+    );
+    assert_eq!(
+        super::silent_tell_line(true, true),
+        None,
+        "the cue still sounds, so there is nothing to warn about"
+    );
+    assert_eq!(
+        super::silent_tell_line(false, false),
+        None,
+        "no agent can fail, and the line above already says so"
+    );
+}
+
+#[test]
+fn a_tell_line_with_no_agent_carries_the_reason_whole() {
+    let refused = BansheeError::Rejected("no connected agent. Run: banshee connect claude".into());
+
+    assert_eq!(
+        super::tell_line(Err(refused)),
+        "tell has no agent: no connected agent. Run: banshee connect claude"
+    );
 }
 
 #[cfg(target_os = "macos")]

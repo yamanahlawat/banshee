@@ -157,6 +157,7 @@ fn state_word(state: &serde_json::Value) -> &'static str {
         banshee_common::Activity::Recording => "recording",
         banshee_common::Activity::Speaking => "speaking",
         banshee_common::Activity::Listening => "listening",
+        banshee_common::Activity::Busy => "busy",
     }
 }
 
@@ -652,6 +653,30 @@ pub async fn speak(text: String) -> Result<(), BansheeError> {
     Ok(())
 }
 
+/// Prints what the agent wrote. A refused `speak_status` leaves this print as
+/// the only thing the user gets.
+pub fn tell(
+    text: Option<String>,
+    undo: bool,
+    config: Result<Config, BansheeError>,
+) -> Result<(), BansheeError> {
+    let config = config?;
+    if undo {
+        println!("{}", crate::tell::undo(&config.tell)?);
+        return Ok(());
+    }
+    let text =
+        text.ok_or_else(|| BansheeError::Rejected("say what to tell it, or pass --undo".into()))?;
+    let told = crate::tell::run(&text, &config.tell, &|line| println!("{line}"))?;
+    for warning in &told.warnings {
+        eprintln!("{}", warning.text());
+    }
+    if let Some(reply) = told.reply {
+        println!("{reply}");
+    }
+    Ok(())
+}
+
 pub async fn history() -> Result<(), BansheeError> {
     match utils::call_daemon(banshee_common::BANSHEE_HISTORY, serde_json::json!({})).await {
         Ok(result) => println!(
@@ -676,14 +701,14 @@ pub async fn clear_history() -> Result<(), BansheeError> {
 
 pub async fn record(action: args::RecordAction) -> Result<(), BansheeError> {
     let (method, params) = match action {
-        args::RecordAction::Start { dictate } => (
+        args::RecordAction::Start { dictate, tell } => (
             banshee_common::BANSHEE_RECORD_START,
-            serde_json::json!({ "dictate": dictate }),
+            serde_json::json!({ "dictate": dictate, "tell": tell }),
         ),
         args::RecordAction::Stop => (banshee_common::BANSHEE_RECORD_STOP, serde_json::json!({})),
-        args::RecordAction::Toggle { dictate } => (
+        args::RecordAction::Toggle { dictate, tell } => (
             banshee_common::BANSHEE_RECORD_TOGGLE,
-            serde_json::json!({ "dictate": dictate }),
+            serde_json::json!({ "dictate": dictate, "tell": tell }),
         ),
     };
     if let Err(error) = utils::call_daemon(method, params).await {

@@ -186,6 +186,7 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "recording": daemon_state.is_recording(),
         "armed": daemon_state.is_armed(),
         "transcribing": daemon_state.is_transcribing(),
+        "telling": daemon_state.is_telling(),
         "speaking": daemon_state.speech().is_speaking(),
         "uptime_seconds": daemon_state.uptime().as_secs(),
         "vad_threshold": daemon_state.vad_threshold(),
@@ -271,6 +272,7 @@ pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
         "recording": daemon_state.is_recording(),
         "armed": daemon_state.is_armed(),
         "transcribing": daemon_state.is_transcribing(),
+        "telling": daemon_state.is_telling(),
         "speaking": daemon_state.speech().is_speaking(),
         "audio_device": daemon_state.audio_device(),
         "missing_device": daemon_state.missing_device(),
@@ -319,10 +321,19 @@ fn stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse 
 }
 
 fn dictate_target(params: &Params<'_>) -> Result<TranscribeTarget, Box<JsonRpcResponse>> {
-    Ok(if params.flag("dictate")? {
-        TranscribeTarget::Dictate
-    } else {
-        TranscribeTarget::Mailbox
+    let dictate = params.flag("dictate")?;
+    let tell = params.flag("tell")?;
+    Ok(match (dictate, tell) {
+        (true, true) => {
+            return Err(Box::new(JsonRpcResponse::error(
+                params.id(),
+                -32602,
+                "dictate and tell are two destinations. Pass one.",
+            )));
+        }
+        (true, false) => TranscribeTarget::Dictate,
+        (false, true) => TranscribeTarget::Tell,
+        (false, false) => TranscribeTarget::Mailbox,
     })
 }
 

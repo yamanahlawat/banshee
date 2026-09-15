@@ -323,6 +323,20 @@ impl Pipeline {
                             }
                         }
                     }
+                    TranscribeTarget::Tell => {
+                        println!("Telling the agent: {transcription}");
+                        let config = self.state.config();
+                        let cues = self.cues.clone();
+                        let state = Arc::clone(&self.state);
+                        let words = transcription;
+                        // Off the hotkey thread: an agent run takes tens of
+                        // seconds, and the key must answer the next press.
+                        std::thread::spawn(move || {
+                            deliver_tell(&state, &cues, || {
+                                crate::tell::run(&words, &config.tell, &|line| println!("{line}"))
+                            })
+                        });
+                    }
                 }
             }
             Err(error) => {
@@ -523,6 +537,302 @@ fn save_history(state: &DaemonState, transcription: &str) {
         state.with_history(|c| crate::history::TranscriptionHistory::insert(c, transcription));
     if let Some(Err(e)) = stored {
         eprintln!("Failed to insert transcription into database: {e}");
+    }
+}
+
+/// The `telling` flag, raised for the life of one run. `Drop` lowers it.
+/// Nothing else clears it, so a raised flag holds the icon on Busy until the
+/// daemon restarts.
+struct Telling<'a>(&'a DaemonState);
+
+impl<'a> Telling<'a> {
+    fn held(state: &'a DaemonState) -> Self {
+        state.set_telling(true);
+        Telling(state)
+    }
+}
+
+impl Drop for Telling<'_> {
+    fn drop(&mut self) {
+        self.0.set_telling(false);
+    }
+}
+
+/// Runs one agent turn and answers for it. A run that worked sounds no cue:
+/// the agent already spoke through Banshee's MCP server.
+///
+/// The catch is here on purpose. Without it the thread ends with no cue and no
+/// error, and the user waits for nothing.
+fn deliver_tell(
+    state: &DaemonState,
+    cues: &Cues,
+    run: impl FnOnce() -> Result<crate::tell::Told, banshee_common::error::BansheeError>,
+) {
+    let _telling = Telling::held(state);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(told)) => warn_tell(state, cues, &told.warnings),
+        Ok(Err(error)) => fail_tell(state, cues, error.to_string()),
+        Err(panic) => fail_tell(
+            state,
+            cues,
+            format!("The command stopped on a fault: {}", panic_reason(panic)),
+        ),
+    }
+}
+
+/// What a run that exited 0 still got wrong. The hotkey path has no terminal,
+/// so `banshee status` names the warnings instead of the journal. A refused
+/// tool also sounds the failure cue: it sounds like a run that worked.
+fn warn_tell(state: &DaemonState, cues: &Cues, warnings: &[crate::tell::Warning]) {
+    if warnings.is_empty() {
+        state.set_tell_error(None);
+        return;
+    }
+    let reason = warnings
+        .iter()
+        .map(crate::tell::Warning::text)
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!("tell warned: {reason}");
+    state.set_tell_error(Some(reason));
+    if warnings
+        .iter()
+        .any(crate::tell::Warning::leaves_the_user_with_silence)
+    {
+        cues.send(Cue::Error);
+    }
+}
+
+fn fail_tell(state: &DaemonState, cues: &Cues, reason: String) {
+    eprintln!("tell failed: {reason}");
+    state.set_tell_error(Some(reason));
+    cues.send(Cue::Error);
+}
+
+/// What a panic carried. `catch_unwind` answers with a boxed payload, and
+/// `panic!` builds either a `&str` or a `String`.
+fn panic_reason(panic: Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no message".to_string())
+}
+
+#[cfg(test)]
+mod tell_tests {
+    use super::*;
+    use crate::tell::Told;
+
+    /// Whether the player said nothing. The watcher thread hands a queued line
+    /// to the backend, so the wait comes before the answer.
+    fn said_nothing(lines: &crate::test_support::SpokenLines) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if !lines.lock().unwrap().is_empty() {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    #[test]
+    fn a_run_that_worked_says_nothing_and_adds_no_cue_of_its_own() {
+        let (state, lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Ok(Told {
+                reply: Some("The gap is five.".to_string()),
+                warnings: vec![],
+            })
+        });
+        assert!(
+            said_nothing(&lines),
+            "the agent speaks for itself, and Banshee adds no voice of its own"
+        );
+        assert!(
+            sounded.try_recv().is_err(),
+            "the agent has already spoken, so a cue behind it says the same thing twice"
+        );
+        assert_eq!(
+            state.last_error(),
+            None,
+            "a clean run leaves status nothing to name"
+        );
+    }
+
+    // The user hears the failure cue and dictates one message on the way to a
+    // terminal. Status is the only place left that holds why the run failed.
+    #[test]
+    fn a_dictation_that_works_leaves_the_tell_failure_for_status() {
+        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, _sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Err(banshee_common::error::BansheeError::Rejected(
+                "opencode exited exit status: 1".to_string(),
+            ))
+        });
+
+        state.set_last_error(None);
+
+        assert_eq!(
+            state.last_error(),
+            Some("opencode exited exit status: 1".to_string()),
+            "the cue has already sounded, so status is all the user has left"
+        );
+    }
+
+    #[test]
+    fn a_run_that_worked_clears_the_last_run_that_failed() {
+        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, _sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Err(banshee_common::error::BansheeError::Rejected(
+                "opencode exited exit status: 1".to_string(),
+            ))
+        });
+
+        deliver_tell(&state, &cues, || Ok(Told::default()));
+
+        assert_eq!(
+            state.last_error(),
+            None,
+            "a stale reason sends the user after a failure that is already fixed"
+        );
+    }
+
+    // "start over" reaches no agent and sounds nothing. The user chose silence
+    // here over a cue of its own. A reset that fails is still an error, so it
+    // sounds the error cue and `banshee status` names it.
+    #[test]
+    fn a_command_banshee_answers_itself_sounds_nothing() {
+        let (state, lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Ok(Told {
+                reply: Some("Thread cleared.".to_string()),
+                warnings: vec![],
+            })
+        });
+        assert!(
+            sounded.try_recv().is_err(),
+            "the user asked for no sound on a reset that worked"
+        );
+        assert!(said_nothing(&lines));
+    }
+
+    #[test]
+    fn a_refused_tool_sounds_the_cue_and_keeps_the_warning_for_status() {
+        let (state, lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Ok(Told {
+                reply: Some("The gap is five.".to_string()),
+                warnings: vec![crate::tell::Warning::DeniedTools(
+                    "claude was refused these tools, so it may have worked in silence: \
+                     mcp__banshee__speak_status"
+                        .to_string(),
+                )],
+            })
+        });
+        assert!(
+            matches!(sounded.try_recv(), Ok(Cue::Error)),
+            "a refused tool sounds exactly like a run that worked, so it needs a cue"
+        );
+        let reason = state.last_error().expect("the warning must be kept");
+        assert!(
+            reason.contains("mcp__banshee__speak_status"),
+            "status must name the tool: {reason}"
+        );
+        assert!(said_nothing(&lines));
+    }
+
+    #[test]
+    fn a_lost_reply_is_kept_for_status_without_a_cue() {
+        let (state, lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Ok(Told {
+                reply: None,
+                warnings: vec![crate::tell::Warning::LostOutput(
+                    "opencode finished, but its output did not arrive in time.".to_string(),
+                )],
+            })
+        });
+        assert!(
+            sounded.try_recv().is_err(),
+            "the agent spoke while it ran, so the failure cue would say the run failed"
+        );
+        assert_eq!(
+            state.last_error(),
+            Some("opencode finished, but its output did not arrive in time.".to_string()),
+            "the loss still has to reach status"
+        );
+        assert!(said_nothing(&lines));
+    }
+
+    #[test]
+    fn a_failed_run_sounds_the_cue_and_keeps_the_reason_for_status() {
+        let (state, lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Err(banshee_common::error::BansheeError::Rejected(
+                "opencode exited exit status: 1".to_string(),
+            ))
+        });
+        assert!(matches!(sounded.try_recv(), Ok(Cue::Error)));
+        assert_eq!(
+            state.last_error(),
+            Some("opencode exited exit status: 1".to_string()),
+            "the cue says that something went wrong, and status says what"
+        );
+        assert!(
+            said_nothing(&lines),
+            "the reason is a machine string, and a voice reading it out is unpleasant"
+        );
+    }
+
+    #[test]
+    fn a_run_that_panics_sounds_the_cue_and_keeps_the_fault_for_status() {
+        let (state, lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || panic!("attempt to add with overflow"));
+        assert!(matches!(sounded.try_recv(), Ok(Cue::Error)));
+        let reason = state.last_error().expect("the fault must be kept");
+        assert!(
+            reason.contains("attempt to add with overflow"),
+            "the fault must name itself: {reason}"
+        );
+        assert!(said_nothing(&lines));
+    }
+
+    #[test]
+    fn a_run_raises_the_telling_flag_and_lowers_it_on_every_exit() {
+        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, _sounded) = Cues::recording();
+        assert!(!state.is_telling(), "the flag starts down");
+
+        let mut raised = false;
+        deliver_tell(&state, &cues, || {
+            raised = state.is_telling();
+            Ok(Told {
+                reply: None,
+                warnings: vec![],
+            })
+        });
+        assert!(raised, "the flag must be up while the agent runs");
+        assert!(!state.is_telling(), "a run that worked lowers it");
+
+        deliver_tell(&state, &cues, || {
+            Err(banshee_common::error::BansheeError::Rejected(
+                "opencode exited exit status: 1".to_string(),
+            ))
+        });
+        assert!(!state.is_telling(), "a run that failed lowers it");
+
+        deliver_tell(&state, &cues, || panic!("attempt to add with overflow"));
+        assert!(!state.is_telling(), "a run that panicked lowers it");
     }
 }
 
