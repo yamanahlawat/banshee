@@ -6,6 +6,11 @@
 use crate::connect::Agent;
 use banshee_common::error::BansheeError;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 pub use crate::config::TellConfig;
 
@@ -19,26 +24,25 @@ pub struct Session {
 
 /// The session id to continue, or `None` to start a new thread. A saved thread
 /// from a different agent never carries over: the id means nothing to it.
-pub fn resume(saved: Option<&Session>, agent: &str, now: u64, timeout_min: u64) -> Option<String> {
+pub fn resume(saved: Option<&Session>, agent: &str, now: u64, window: Duration) -> Option<String> {
     let session = saved?;
     if session.agent != agent {
         return None;
     }
-    // A clock that went backwards reads as an expired thread rather than an
-    // endless one, so `checked_sub` decides instead of a subtraction that wraps.
+    // A clock that went backwards reads as an expired thread, not an endless one.
     let elapsed = now.checked_sub(session.at)?;
-    (elapsed <= timeout_min * 60).then(|| session.id.clone())
+    (elapsed <= window.as_secs()).then(|| session.id.clone())
 }
 
-/// Ends the thread and spawns nothing. Banshee matches the phrase itself,
-/// because an agent asked to forget cannot prove that it did.
+/// Whether the words are the phrase that ends the thread. Banshee matches it
+/// itself: an agent asked to forget cannot prove that it did.
 pub fn is_reset(words: &str) -> bool {
     let trimmed = words.trim().trim_end_matches(['.', '!']).trim();
     trimmed.eq_ignore_ascii_case("start over")
 }
 
-/// The agents with a headless mode Banshee has measured. Every other
-/// `connect::Agent` has no entry, and `tell` does not offer it.
+/// The agents with a headless mode Banshee has measured. `tell` offers no
+/// other `connect::Agent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Headless {
     ClaudeCode,
@@ -71,8 +75,7 @@ impl Headless {
     }
 
     /// Whether the folder list reaches the agent. Measured: Claude Code takes
-    /// `--add-dir`; OpenCode's only working flag is `--auto`, which allows any
-    /// edit anywhere.
+    /// `--add-dir`, and OpenCode has no flag that takes one.
     pub fn scoped(self) -> bool {
         matches!(self, Headless::ClaudeCode)
     }
@@ -124,10 +127,7 @@ pub fn agent_for(
         })
 }
 
-use std::path::{Path, PathBuf};
-
-/// The arguments for one headless run. Every flag is measured. The plan's
-/// Global Constraints say what breaks without each one.
+/// The arguments for one headless run.
 ///
 /// `--` closes the flags, so a command that starts with a hyphen stays a
 /// message. Measured on both agents.
@@ -192,8 +192,8 @@ pub fn session_id(agent: Headless, stdout: &str) -> Option<String> {
     objects(stdout).find_map(|value| value.get(key)?.as_str().map(str::to_string))
 }
 
-/// What the agent wrote. The user already heard it speak, so this serves the
-/// terminal, and a run that printed nothing readable is not a failure.
+/// What the agent wrote, for the terminal. Output holding nothing readable is
+/// not a failure.
 pub fn reply(agent: Headless, stdout: &str) -> Option<String> {
     match agent {
         Headless::OpenCode => objects(stdout)
@@ -227,24 +227,17 @@ fn objects(stdout: &str) -> impl DoubleEndedIterator<Item = serde_json::Value> +
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
 }
 
-use std::io::Read;
-use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// One run at a time: the atomic guards two calls inside this one process
-/// (the hotkey path lives in the daemon, which stays up), and the lock file
-/// guards two separate `banshee tell` invocations, which share no memory to
-/// guard with. Two agents editing the same files at once leave a config
+/// One run at a time. Two agents editing the same files at once leave a config
 /// neither of them wrote, and the second run's snapshot holds the first run's
-/// half-done work.
+/// half-done work. The atomic guards two calls inside the daemon, which stays
+/// up; the lock file guards two `banshee tell` invocations, which share no
+/// memory to guard with.
 pub struct RunLock {
     path: PathBuf,
-    /// What this holder wrote into the file. Compared again in `Drop`: a
-    /// spurious takeover (the margin `run()` adds still exceeded, or a clock
-    /// oddity) means the file now names a different holder, and deleting it
+    /// What this holder wrote into the file. Compared again in `Drop`: after a
+    /// spurious takeover the file names a different holder, and deleting it
     /// then would delete a live lock rather than a dead one.
     token: String,
 }
@@ -318,13 +311,11 @@ fn lock_is_stale(path: &Path, stale_after: Duration) -> bool {
     }
 }
 
-/// Pure, so the rule is tested directly rather than only through a file.
 fn stale(started: u64, now: u64, stale_after: Duration) -> bool {
     now.saturating_sub(started) > stale_after.as_secs()
 }
 
-/// `~` is the only expansion. A person writes the config file, and a person
-/// writes `~`.
+/// `~` is the only expansion: a person writes the config file, not a shell.
 pub fn expand(path: &str, home: &Path) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => home.join(rest),
@@ -345,8 +336,8 @@ pub fn snapshot(paths: &[PathBuf], into: &Path, at: u64) -> Result<PathBuf, Bans
             continue;
         };
         if let Err(e) = copy_tree(source, &made.join(name)) {
-            // Clean up the partial snapshot so only whole snapshots exist, and
-            // Task 7's `--undo` cannot pick a half-written one.
+            // Only whole snapshots exist, so `--undo` cannot pick a
+            // half-written one.
             let _ = std::fs::remove_dir_all(&made);
             return Err(e);
         }
@@ -361,9 +352,8 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), BansheeError> {
         let target = to.join(entry.file_name());
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
-            // Recreate the symlink as-is, rather than following it. A restore then
-            // writes back what the user actually had. A symlink loop or a dotfile
-            // tree that links back on itself cannot crash the restore.
+            // Following the link would copy what it points at, and a dotfile
+            // tree that links back on itself would loop for ever.
             let link_target = std::fs::read_link(entry.path())?;
             // std::os::unix::fs::symlink refuses an existing path, where
             // std::fs::copy below overwrites one silently. restore's staged
@@ -381,9 +371,8 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), BansheeError> {
 }
 
 /// The most recent snapshot. Names are Unix seconds, so the newest is the
-/// highest number. A stray file that happens to parse as a number is not a
-/// snapshot: without `is_dir`, it would win here and every folder would then
-/// find no copy to restore, which reads as a misleading success.
+/// highest number. A stray file that parses as a number is not a snapshot: it
+/// would outrank every real one and leave nothing to restore.
 pub fn newest(snapshots: &Path) -> Option<PathBuf> {
     std::fs::read_dir(snapshots)
         .ok()?
@@ -408,15 +397,12 @@ pub struct Restored {
 /// Puts each folder back, and reports the ones it replaced and the ones it
 /// could not.
 ///
-/// The copy lands beside the folder first and the swap is two renames, so a
-/// fault never leaves the user with no config. A folder the snapshot does not
-/// hold is left alone: it did not exist when the copy ran, and removal would
-/// take work the user did since. A folder that is itself a symlink is refused
-/// rather than replaced: swapping it for a plain directory would silently
-/// stop every later edit from reaching wherever it points (a dotfiles repo,
-/// say). A fault on one folder does not cost the record of the folders
-/// already put back: the loop carries on rather than aborting on the first
-/// error.
+/// A folder the snapshot does not hold is left alone: it did not exist when
+/// the copy ran, and removal would take work the user did since. A folder that
+/// is itself a symlink is refused rather than replaced: a plain directory in
+/// its place would silently stop every later edit from reaching wherever it
+/// points (a dotfiles repo, say). A fault on one folder does not cost the
+/// record of the folders already put back.
 pub fn restore(from: &Path, paths: &[PathBuf]) -> Restored {
     let mut result = Restored::default();
     for target in paths {
@@ -444,7 +430,8 @@ pub fn restore(from: &Path, paths: &[PathBuf]) -> Restored {
     result
 }
 
-/// The staged-copy-then-two-renames swap for one folder.
+/// Stages the copy beside the target and swaps with two renames, so a fault
+/// never leaves the user with no config.
 fn restore_one(copy: &Path, target: &Path) -> Result<(), BansheeError> {
     let staged = with_suffix(target, ".banshee-restoring");
     let replaced = with_suffix(target, ".banshee-replaced");
@@ -471,16 +458,12 @@ pub fn undo(config: &TellConfig) -> Result<String, BansheeError> {
     undo_in(&dir()?, config)
 }
 
-/// `dir` is `tell`'s own working directory, the same one `run` locks and
-/// snapshots into. Kept apart from `undo` so a test can pass a scratch
-/// directory instead of the real one.
+/// `dir` is `tell`'s own working directory, the one `run` locks and snapshots
+/// into.
 fn undo_in(dir: &Path, config: &TellConfig) -> Result<String, BansheeError> {
-    // Restoring folders while an agent is mid-edit is exactly the corruption
-    // this lock exists to prevent, and undo is the command a user reaches for
-    // when something is already going wrong. The margin matches `run`'s own,
-    // so undo never judges a still-active run stale early and steps on it.
-    let run_deadline = Duration::from_secs(config.run_timeout_min.saturating_mul(60));
-    let Some(_lock) = RunLock::take(dir, run_deadline + PRE_SPAWN_MARGIN) else {
+    // The margin matches `run`'s own, so undo never judges a still-active run
+    // stale and steps on the folders it is mid-edit in.
+    let Some(_lock) = RunLock::take(dir, run_deadline(config) + PRE_SPAWN_MARGIN) else {
         return Err(BansheeError::Rejected(
             "a command is already running. Try again once it finishes.".into(),
         ));
@@ -491,12 +474,24 @@ fn undo_in(dir: &Path, config: &TellConfig) -> Result<String, BansheeError> {
     })?;
     let home = crate::service::home_dir()?;
     let watched: Vec<PathBuf> = config.paths.iter().map(|p| expand(p, &home)).collect();
-    Ok(describe(&restore(&from, &watched)))
+    let restored = restore(&from, &watched);
+    let sentence = describe(&restored);
+    if failed_outright(&restored) {
+        // Rejected, not Other: Other prints "Internal error:" in front of the
+        // text, and this sentence is the one the user hears.
+        return Err(BansheeError::Rejected(sentence));
+    }
+    Ok(sentence)
 }
 
-/// The sentence `undo` prints. A user who cannot see the screen needs to hear
-/// what changed even when part of the restore did not go through, not only
-/// when all of it did or none of it did.
+/// A restore that put nothing back and failed. A partial restore stays a
+/// success: it did put folders back.
+fn failed_outright(restored: &Restored) -> bool {
+    restored.done.is_empty() && !restored.failed.is_empty()
+}
+
+/// The sentence `undo` prints. A partial restore still says what changed: the
+/// user cannot see the screen.
 fn describe(restored: &Restored) -> String {
     let done =
         (!restored.done.is_empty()).then(|| format!("Put back: {}", restored.done.join(", ")));
@@ -564,9 +559,8 @@ fn now_seconds() -> u64 {
         .unwrap_or_default()
 }
 
-/// Connected and runnable. `connect` answers connected the way `connect::row`
-/// does at `connect.rs:137`. The binary is resolved apart from that, because
-/// `connect` finds OpenCode by a directory and holds no binary name for it.
+/// Connected and runnable: connected the way `connect::row` answers it, plus a
+/// binary on PATH.
 pub fn ready(env: &crate::connect::Env) -> Vec<Headless> {
     Headless::ALL
         .into_iter()
@@ -581,19 +575,26 @@ pub fn ready(env: &crate::connect::Env) -> Vec<Headless> {
         .collect()
 }
 
-/// What `omarchy-default-agent` prints, or `None` where the command is absent.
-/// The command exits 0 and prints nothing when Omarchy has no default.
-fn omarchy_default(path: &std::ffi::OsStr) -> Option<String> {
-    let output = std::process::Command::new("omarchy-default-agent")
-        .env("PATH", path)
-        .output()
-        .ok()?;
+/// A stated allowance, not a measurement, for a command that only prints a
+/// name. This runs inside the run lock and before the only other deadline in
+/// the module, so a hang here leaves the user with no cue at all.
+const OMARCHY_BOUND: Duration = Duration::from_secs(5);
+
+/// What `omarchy-default-agent` prints, or `None` where the command is absent,
+/// hangs, or prints nothing. The command exits 0 and prints nothing when
+/// Omarchy has no default.
+fn omarchy_default(path: &std::ffi::OsStr, dir: &Path) -> Option<String> {
+    let program = crate::status::resolve("omarchy-default-agent", path)?;
+    let Ran::Finished { output, .. } = run_bounded(&program, &[], dir, path, OMARCHY_BOUND).ok()?
+    else {
+        return None;
+    };
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!name.is_empty()).then_some(name)
 }
 
-/// What to print before the first spawn with a new agent. `None` on a resumed
-/// thread: the design asks for this only on the first turn.
+/// What the user must be told before the first spawn. `None` on a resumed
+/// thread: the scope was stated on the turn that opened it.
 fn opening_announcement(agent: Headless, resume_id: Option<&str>) -> Option<String> {
     resume_id.is_none().then(|| {
         if agent.scoped() {
@@ -612,23 +613,27 @@ fn opening_announcement(agent: Headless, resume_id: Option<&str>) -> Option<Stri
 
 /// What running the child produced: what it wrote, or that it ran out of time.
 enum Ran {
-    Finished(std::process::Output),
+    /// `stdout_lost` says the read of stdout gave up before the bytes came, so
+    /// an empty `output.stdout` means the pipe was still held open rather than
+    /// that the child stayed quiet. The session id and the reply are in there.
+    Finished {
+        output: std::process::Output,
+        stdout_lost: bool,
+    },
     TimedOut,
 }
 
 /// A stated allowance, not a measurement, for a reader thread to finish once
 /// its pipe should already be closed. `opencode run` starts a local server, so
 /// a descendant surviving the child and holding its end of the pipe open is
-/// the likely case rather than the rare one; a reader is never joined without
-/// this bound.
+/// the likely case rather than the rare one.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// Runs the child bounded by `timeout`. Stdout and stderr each drain on their
 /// own thread as the child writes, so a full pipe buffer cannot deadlock the
 /// wait. The wait itself polls `try_wait` rather than blocking on `wait`, so a
-/// child stuck on a network call or a hung tool is killed instead of held on
-/// to forever: the user cannot see the terminal, so a hang must not read as
-/// success.
+/// child stuck on a network call or a hung tool is killed rather than held on
+/// to for ever.
 fn run_bounded(
     program: &Path,
     argv: &[String],
@@ -651,18 +656,20 @@ fn run_bounded(
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
-            let (stdout, stderr) = collect_both(stdout_rx, stderr_rx);
-            return Ok(Ran::Finished(std::process::Output {
-                status,
-                stdout,
-                stderr,
-            }));
+            let (stdout, stderr, stdout_lost) = collect_both(stdout_rx, stderr_rx);
+            return Ok(Ran::Finished {
+                output: std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                },
+                stdout_lost,
+            });
         }
         if Instant::now() >= deadline {
-            // The child itself is killed here, but a descendant it left
-            // running (a server it started, say) can still hold the pipe's
-            // write end open. Killing this child alone would not close it,
-            // so this waits on the child only, never on the pipes.
+            // A descendant the child left running (a server it started, say)
+            // can still hold the pipe's write end open, and killing the child
+            // does not close it. So this waits on the child, never the pipes.
             let _ = child.kill();
             let _ = child.wait();
             return Ok(Ran::TimedOut);
@@ -688,20 +695,27 @@ fn drain(mut pipe: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<Vec<
 }
 
 /// Collects both channels concurrently, so two `DRAIN_GRACE` waits cost one
-/// `DRAIN_GRACE`, not two.
+/// `DRAIN_GRACE`, not two. Stderr carries no lost flag of its own: it only
+/// decorates the message of a run that already failed.
 fn collect_both(
     stdout_rx: std::sync::mpsc::Receiver<Vec<u8>>,
     stderr_rx: std::sync::mpsc::Receiver<Vec<u8>>,
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Vec<u8>, Vec<u8>, bool) {
     // This join cannot hang: the thread's own wait is bounded by DRAIN_GRACE.
-    let stderr_thread = std::thread::spawn(move || collect(stderr_rx));
-    let stdout = collect(stdout_rx);
+    let stderr_thread = std::thread::spawn(move || collect(stderr_rx).0);
+    let (stdout, stdout_lost) = collect(stdout_rx);
     let stderr = stderr_thread.join().unwrap_or_default();
-    (stdout, stderr)
+    (stdout, stderr, stdout_lost)
 }
 
-fn collect(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
-    rx.recv_timeout(DRAIN_GRACE).unwrap_or_default()
+/// The bytes, and whether the read gave up before they came.
+fn collect(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> (Vec<u8>, bool) {
+    match rx.recv_timeout(DRAIN_GRACE) {
+        Ok(bytes) => (bytes, false),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (Vec::new(), true),
+        // The reader ended without sending, so the pipe held nothing.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => (Vec::new(), false),
+    }
 }
 
 /// A stated allowance, not a measurement, for the checks `run` makes before it
@@ -711,12 +725,70 @@ fn collect(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
 /// and a second command would then judge a live lock stale and start beside it.
 const PRE_SPAWN_MARGIN: Duration = Duration::from_secs(30);
 
-/// Runs one command. Answers with what the agent wrote, for the terminal. The
-/// user already heard it: the agent speaks through Banshee's own MCP server.
-pub fn run(words: &str, config: &TellConfig) -> Result<Option<String>, BansheeError> {
+/// The ceiling on every configured span. A day is past any run a person waits
+/// through and past any thread they still hold in mind, and the ceiling is
+/// stated, not measured. Without it a large configured value overflows the
+/// `Duration` the lock adds its margin to, the `Instant` the poll compares
+/// against, and the minutes `resume` turns into seconds. All three panic, and
+/// the hotkey path runs in a thread of its own, where a panic leaves the user
+/// waiting for a result that never comes.
+const MAX_SPAN: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Configured minutes, bounded.
+fn span(minutes: u64) -> Duration {
+    Duration::from_secs(minutes.saturating_mul(60)).min(MAX_SPAN)
+}
+
+/// How long one agent run may take.
+fn run_deadline(config: &TellConfig) -> Duration {
+    span(config.run_timeout_min)
+}
+
+/// How long a saved thread stays resumable.
+fn thread_window(config: &TellConfig) -> Duration {
+    span(config.thread_timeout_min)
+}
+
+/// What one run answers with once it ends. The caller decides how each fact
+/// reaches the user: `banshee tell` prints, and the hotkey speaks. The scope
+/// is not here: it has to arrive before the run, so it goes out through
+/// `notify` instead.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Told {
+    /// What the agent wrote.
+    pub reply: Option<String>,
+    /// What went wrong without failing the run.
+    pub warnings: Vec<String>,
+}
+
+impl Told {
+    /// The lines a user who cannot see the screen must hear. The reply is not
+    /// among them: the agent spoke it already.
+    pub fn must_hear(&self) -> impl Iterator<Item = &str> {
+        self.warnings.iter().map(String::as_str)
+    }
+}
+
+/// Says what the agent may edit, then starts it. The order is the contract.
+/// The same words after a run of tens of seconds are a receipt, not a warning,
+/// and on the terminal that run is the user's only window to press Ctrl-C.
+fn announce_then_start<T>(
+    notify: &dyn Fn(&str),
+    agent: Headless,
+    resume_id: Option<&str>,
+    start: impl FnOnce() -> T,
+) -> T {
+    if let Some(line) = opening_announcement(agent, resume_id) {
+        notify(&line);
+    }
+    start()
+}
+
+/// Runs one command. It prints nothing: the caller decides how a line reaches
+/// the user. `notify` carries the scope, and it fires before the agent starts.
+pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<Told, BansheeError> {
     let dir = dir()?;
-    let run_deadline = Duration::from_secs(config.run_timeout_min.saturating_mul(60));
-    let Some(_lock) = RunLock::take(&dir, run_deadline + PRE_SPAWN_MARGIN) else {
+    let Some(_lock) = RunLock::take(&dir, run_deadline(config) + PRE_SPAWN_MARGIN) else {
         return Err(BansheeError::Rejected(
             "a command is already running. Wait for it to finish.".into(),
         ));
@@ -725,13 +797,16 @@ pub fn run(words: &str, config: &TellConfig) -> Result<Option<String>, BansheeEr
     // undone by that run writing a fresh session back once it finishes.
     if is_reset(words) {
         let _ = std::fs::remove_file(dir.join("session.json"));
-        return Ok(Some("Thread cleared.".to_string()));
+        return Ok(Told {
+            reply: Some("Thread cleared.".to_string()),
+            ..Told::default()
+        });
     }
 
     let env = crate::connect::Env::from_machine()?;
     let agent = agent_for(
         Some(config.agent.as_str()),
-        omarchy_default(&env.path).as_deref(),
+        omarchy_default(&env.path, &dir).as_deref(),
         &ready(&env),
     )?;
     let program = crate::status::resolve(agent.binary(), &env.path)
@@ -750,55 +825,106 @@ pub fn run(words: &str, config: &TellConfig) -> Result<Option<String>, BansheeEr
         saved.as_ref(),
         agent.name(),
         now_seconds(),
-        config.thread_timeout_min,
+        thread_window(config),
     );
-    if let Some(line) = opening_announcement(agent, resume_id.as_deref()) {
-        println!("{line}");
-    }
-    let argv = argv_for(agent, words, resume_id.as_deref(), &dir, &present);
-
-    // An agent CLI is often a script whose interpreter the daemon's own PATH
-    // does not hold. `connect` learned this first.
-    let output = match run_bounded(&program, &argv, &dir, &env.path, run_deadline)? {
-        Ran::Finished(output) => output,
-        Ran::TimedOut => {
-            return Err(BansheeError::Rejected(format!(
-                "{} did not answer within {} minutes. Raise tell.run_timeout_min to give it \
-                 longer.",
-                agent.name(),
-                config.run_timeout_min
-            )));
-        }
+    let ran = announce_then_start(notify, agent, resume_id.as_deref(), || {
+        let argv = argv_for(agent, words, resume_id.as_deref(), &dir, &present);
+        // An agent CLI is often a script whose interpreter the daemon's own
+        // PATH does not hold.
+        run_bounded(&program, &argv, &dir, &env.path, run_deadline(config))
+    })?;
+    let Ran::Finished {
+        output,
+        stdout_lost,
+    } = ran
+    else {
+        return Err(BansheeError::Rejected(format!(
+            "{} did not answer within {} minutes. Raise tell.run_timeout_min to give it longer.",
+            agent.name(),
+            config.run_timeout_min
+        )));
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    if let Some(id) = session_id(agent, &stdout) {
+    let thread = thread_to_save(
+        session_id(agent, &stdout),
+        resume_id.as_deref(),
+        stdout_lost,
+    );
+    if let Some(id) = &thread {
         write_session(
             &dir,
             &Session {
                 agent: agent.name().to_string(),
-                id,
+                id: id.clone(),
                 at: now_seconds(),
             },
         )?;
     }
-    let denied = denied_tools(agent, &stdout);
-    if !denied.is_empty() {
-        eprintln!(
-            "{} was refused these tools, so it may have worked in silence: {}",
-            agent.name(),
-            denied.join(", ")
-        );
+    let mut warnings: Vec<String> = denied_warning(agent, &denied_tools(agent, &stdout))
+        .into_iter()
+        .collect();
+    if stdout_lost {
+        warnings.push(lost_output_warning(agent, thread.is_some()));
     }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(BansheeError::Other(format!(
-            "{} exited {}: {stderr}",
-            agent.name(),
-            output.status
-        )));
+        // A failed run answers with no `Told`, and a refused tool still says
+        // why the agent stayed silent.
+        return Err(BansheeError::Other(
+            std::iter::once(format!(
+                "{} exited {}: {stderr}",
+                agent.name(),
+                output.status
+            ))
+            .chain(warnings)
+            .collect::<Vec<_>>()
+            .join(" "),
+        ));
     }
-    Ok(reply(agent, &stdout))
+    Ok(Told {
+        reply: reply(agent, &stdout),
+        warnings,
+    })
+}
+
+/// The thread to save. A lost stdout carries no id away with it, but a resumed
+/// run still knows which thread it asked for, and "a bit more" needs it.
+fn thread_to_save(
+    found: Option<String>,
+    resume_id: Option<&str>,
+    stdout_lost: bool,
+) -> Option<String> {
+    match found {
+        Some(id) => Some(id),
+        None if stdout_lost => resume_id.map(str::to_string),
+        None => None,
+    }
+}
+
+/// What the user hears when the read of stdout gave up. `kept` says whether
+/// the thread survived, because the next command behaves differently.
+fn lost_output_warning(agent: Headless, kept: bool) -> String {
+    let thread = if kept {
+        "The thread is kept."
+    } else {
+        "The next command starts a new thread."
+    };
+    format!(
+        "{} finished, but its output did not arrive in time. Its reply is lost. {thread}",
+        agent.name()
+    )
+}
+
+/// What the user hears about the tools `denied_tools` found.
+fn denied_warning(agent: Headless, denied: &[String]) -> Option<String> {
+    (!denied.is_empty()).then(|| {
+        format!(
+            "{} was refused these tools, so it may have worked in silence: {}",
+            agent.name(),
+            denied.join(", ")
+        )
+    })
 }
 
 #[cfg(test)]

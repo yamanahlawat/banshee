@@ -1012,3 +1012,38 @@ fn one_mock_carries_every_config_key(name: &str, body: &str) {
         "{name} is missing {missing:?} and carries {invented:?}, which no reply does"
     );
 }
+
+#[test]
+fn the_tell_flag_picks_the_tell_target() {
+    let built = request(
+        BANSHEE_RECORD_START,
+        Some(serde_json::json!({"tell": true})),
+    );
+    let params = Params::new(&built);
+    assert!(matches!(
+        dictate_target(&params).unwrap(),
+        TranscribeTarget::Tell
+    ));
+}
+
+#[test]
+fn no_flag_still_means_the_mailbox() {
+    let built = request(BANSHEE_RECORD_START, None);
+    let params = Params::new(&built);
+    assert!(matches!(
+        dictate_target(&params).unwrap(),
+        TranscribeTarget::Mailbox
+    ));
+}
+
+#[test]
+fn dictate_and_tell_together_are_refused_rather_than_guessed() {
+    // The words typed into a window and the words handed to an agent are two
+    // destinations. A silent choice would put a desktop command in a text field.
+    let built = request(
+        BANSHEE_RECORD_START,
+        Some(serde_json::json!({"dictate": true, "tell": true})),
+    );
+    let params = Params::new(&built);
+    assert!(dictate_target(&params).is_err());
+}

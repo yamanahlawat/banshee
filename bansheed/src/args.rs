@@ -129,6 +129,9 @@ pub enum RecordAction {
         /// Type the transcription into the focused app instead of saving it
         #[clap(long)]
         dictate: bool,
+        /// Send the transcription to your coding agent instead of typing it
+        #[clap(long, conflicts_with = "dictate")]
+        tell: bool,
     },
     /// Stop recording and transcribe (like releasing the hotkey)
     Stop,
@@ -137,5 +140,8 @@ pub enum RecordAction {
         /// Type the transcription into the focused app instead of saving it
         #[clap(long)]
         dictate: bool,
+        /// Send the transcription to your coding agent instead of typing it
+        #[clap(long, conflicts_with = "dictate")]
+        tell: bool,
     },
 }

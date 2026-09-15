@@ -32,6 +32,26 @@ pub const CAPTURE_SILENCE_LIMIT: Duration = Duration::from_secs(1);
 pub enum TranscribeTarget {
     Mailbox,
     Dictate,
+    /// Hand the words to a coding agent, which changes the desktop.
+    Tell,
+}
+
+impl TranscribeTarget {
+    fn as_u8(self) -> u8 {
+        match self {
+            TranscribeTarget::Mailbox => 0,
+            TranscribeTarget::Dictate => 1,
+            TranscribeTarget::Tell => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> TranscribeTarget {
+        match value {
+            1 => TranscribeTarget::Dictate,
+            2 => TranscribeTarget::Tell,
+            _ => TranscribeTarget::Mailbox,
+        }
+    }
 }
 
 pub struct AskCommand {
@@ -261,7 +281,7 @@ pub struct DaemonState {
     cues: Cues,
     barge_in: Mutex<BargeInMode>,
     // Start and stop can be separate RPC calls, so this cannot live on a stack
-    pending_dictate: AtomicBool,
+    pending_target: AtomicU8,
     // enigo posts to the same HID stream rdev listens at, so while this is
     // true the hotkey listener drops events: the paste's own modifier presses
     // would otherwise cancel or open sessions.
@@ -319,7 +339,7 @@ impl DaemonState {
             speech: Arc::new(speech),
             commands,
             cues,
-            pending_dictate: AtomicBool::new(false),
+            pending_target: AtomicU8::new(TranscribeTarget::Mailbox.as_u8()),
             typing: AtomicBool::new(false),
             push_to_talk_deadline: AtomicU64::new(0),
             capture_tick: AtomicU64::new(0),
@@ -351,10 +371,8 @@ impl DaemonState {
                 (self.started_at.elapsed() + MAX_PUSH_TO_TALK).as_millis() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
-            self.pending_dictate.store(
-                matches!(action, TranscribeTarget::Dictate),
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            self.pending_target
+                .store(action.as_u8(), std::sync::atomic::Ordering::Release);
             self.cues.send(Cue::RecordStart);
             println!("Recording started...");
             true
@@ -369,14 +387,10 @@ impl DaemonState {
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             println!("Recording stopped");
             self.cues.send(Cue::RecordStop);
-            let action = if self
-                .pending_dictate
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                TranscribeTarget::Dictate
-            } else {
-                TranscribeTarget::Mailbox
-            };
+            let action = TranscribeTarget::from_u8(
+                self.pending_target
+                    .load(std::sync::atomic::Ordering::Acquire),
+            );
             let _ = self.commands.send(ConsumerCommand::Transcribe(action));
         } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
             self.cues.send(Cue::RecordStop);

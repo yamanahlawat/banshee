@@ -12,7 +12,7 @@ fn saved(agent: &str, at: u64) -> Session {
 fn a_command_inside_the_window_continues_the_thread() {
     let session = saved("opencode", 1_000);
     assert_eq!(
-        resume(Some(&session), "opencode", 1_000 + 9 * 60, 10),
+        resume(Some(&session), "opencode", 1_000 + 9 * 60, span(10)),
         Some("ses_one".to_string())
     );
 }
@@ -21,7 +21,7 @@ fn a_command_inside_the_window_continues_the_thread() {
 fn a_command_past_the_window_starts_a_new_thread() {
     let session = saved("opencode", 1_000);
     assert_eq!(
-        resume(Some(&session), "opencode", 1_000 + 11 * 60, 10),
+        resume(Some(&session), "opencode", 1_000 + 11 * 60, span(10)),
         None
     );
 }
@@ -29,18 +29,18 @@ fn a_command_past_the_window_starts_a_new_thread() {
 #[test]
 fn a_different_agent_does_not_inherit_the_thread() {
     let session = saved("opencode", 1_000);
-    assert_eq!(resume(Some(&session), "claude", 1_000 + 60, 10), None);
+    assert_eq!(resume(Some(&session), "claude", 1_000 + 60, span(10)), None);
 }
 
 #[test]
 fn no_saved_thread_starts_a_new_one() {
-    assert_eq!(resume(None, "opencode", 1_000, 10), None);
+    assert_eq!(resume(None, "opencode", 1_000, span(10)), None);
 }
 
 #[test]
 fn a_clock_that_went_backwards_starts_a_new_thread() {
     let session = saved("opencode", 2_000);
-    assert_eq!(resume(Some(&session), "opencode", 1_000, 10), None);
+    assert_eq!(resume(Some(&session), "opencode", 1_000, span(10)), None);
 }
 
 #[test]
@@ -70,8 +70,6 @@ fn the_slug_comes_from_connect_rather_than_a_second_list() {
 
 #[test]
 fn only_claude_is_scoped_to_the_watched_folders() {
-    // Measured: OpenCode's only working permission flag is --auto, which allows
-    // any edit anywhere. Nothing narrower runs without a hang.
     assert!(Headless::ClaudeCode.scoped());
     assert!(!Headless::OpenCode.scoped());
 }
@@ -254,7 +252,6 @@ fn claude_resumes_by_session_id() {
 
 #[test]
 fn a_command_that_starts_with_a_hyphen_stays_a_message() {
-    // Measured on both agents: the `--` separator keeps it out of the flags.
     for agent in Headless::ALL {
         let command = argv_for(agent, "-brighter please", None, run_dir(), &one_folder());
         let last_two = &command[command.len() - 2..];
@@ -314,8 +311,6 @@ fn a_run_with_several_text_parts_keeps_the_last_one() {
 
 #[test]
 fn a_refused_tool_is_visible_in_the_output() {
-    // The one failure that breaks the loop in silence. A reader of a failed run
-    // must be able to find it.
     let denied = r#"{"result":"done","session_id":"a","permission_denials":[{"tool_name":"mcp__banshee__speak_status"}]}"#;
     assert!(
         denied_tools(Headless::ClaudeCode, denied)
@@ -339,8 +334,6 @@ fn the_saved_thread_survives_a_write_and_a_read() {
 
 #[test]
 fn a_corrupt_session_file_reads_as_no_thread_rather_than_a_failure() {
-    // A half-written file must not stop the next command. A lost thread costs
-    // one repeated sentence; a refused run costs the feature.
     let dir = crate::test_support::scratch("tell-corrupt");
     std::fs::write(dir.join("session.json"), "{not json").unwrap();
     assert_eq!(read_session(&dir), None);
@@ -372,7 +365,6 @@ fn a_tell_section_in_config_toml_parses() {
             .unwrap();
     assert_eq!(config.tell.agent, "claude");
     assert_eq!(config.tell.thread_timeout_min, 30);
-    // Untouched keys keep their defaults.
     assert_eq!(config.tell.snapshots, 10);
 }
 
@@ -382,14 +374,23 @@ fn a_config_with_no_tell_section_still_loads() {
     assert_eq!(config.tell.thread_timeout_min, 10);
 }
 
+/// Every `RunLock` shares one process-wide atomic, so the tests that take one
+/// run one at a time. Two of them in parallel would refuse each other and go
+/// red on a rule neither of them tests.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A failed test panics while it holds the lock, and a poisoned mutex must not
+/// turn one red test into every later one.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|held| held.into_inner())
+}
+
 #[test]
 fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
-    // Every scenario here shares one process-wide atomic, so they all live in
-    // this one test: two test functions racing for the lock would be flaky.
+    let _serial = serial();
+    // Every scenario lives here: two test functions racing for the lock would
+    // be flaky.
     let long = std::time::Duration::from_secs(600);
-
-    // Two agents editing the same files at once leave a config neither wrote,
-    // and the second run's snapshot holds the first run's half-done work.
     let dir = crate::test_support::scratch("tell-lock");
     {
         let _first = RunLock::take(&dir, long).expect("the first run takes the lock");
@@ -398,10 +399,8 @@ fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
             "a second run must be refused"
         );
 
-        // undo is exactly the command a user reaches for when something is
-        // already going wrong, so it must be refused too, not just a second
-        // run. Checked inside this same block, on this same lock: a second
-        // test function racing for the process-wide atomic would be flaky.
+        // undo is the command a user reaches for when something is already
+        // going wrong, so it must be refused too, not just a second run.
         let config = TellConfig::default();
         let error = undo_in(&dir, &config).unwrap_err();
         assert_eq!(
@@ -414,9 +413,6 @@ fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
         "the lock must free on drop"
     );
 
-    // A lock file older than the run's own deadline belonged to a run that
-    // was killed, not one still working. Refusing forever would wedge the
-    // feature past any recovery.
     let stale_dir = crate::test_support::scratch("tell-lock-stale");
     std::fs::write(
         stale_dir.join("run.lock"),
@@ -429,7 +425,6 @@ fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
         "a lock older than the deadline must be taken over"
     );
 
-    // A half-written or corrupt lock file must not wedge the feature either.
     let garbled_dir = crate::test_support::scratch("tell-lock-garbled");
     std::fs::write(garbled_dir.join("run.lock"), "not a timestamp").unwrap();
     assert!(
@@ -437,9 +432,6 @@ fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
         "a garbled lock file must be treated as stale"
     );
 
-    // A spurious takeover (the margin `run()` adds still exceeded, say) means
-    // the file now names a different holder by the time this one drops.
-    // Deleting it then would delete a live lock rather than a dead one.
     let token_dir = crate::test_support::scratch("tell-lock-token");
     let taken = RunLock::take(&token_dir, long).expect("the lock is free");
     std::fs::write(token_dir.join("run.lock"), "999999999 424242").unwrap();
@@ -493,36 +485,62 @@ fn a_child_that_finishes_in_time_is_read_normally() {
         std::time::Duration::from_secs(5),
     )
     .unwrap();
-    let Ran::Finished(output) = ran else {
+    let Ran::Finished {
+        output,
+        stdout_lost,
+    } = ran
+    else {
         panic!("a command that finishes in time must not read as timed out");
     };
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    assert!(
+        !stdout_lost,
+        "a pipe that closed must not read as a lost one"
+    );
 }
 
 #[test]
 fn a_descendant_holding_the_pipe_does_not_hold_the_call_open() {
-    // `opencode run` starts a local server, so a child that exits while a
-    // descendant keeps running (and keeps the pipe open) is the case this
-    // guards, not an edge case. A shell that backgrounds a long sleep and
-    // exits stands in for it: the immediate child is gone almost at once,
-    // but the backgrounded sleep inherits the piped stdout and stderr and
-    // holds them open for a hundred seconds.
+    // A shell that backgrounds a long sleep and exits stands in for
+    // `opencode run` and the local server it leaves behind: the immediate
+    // child is gone almost at once, but the backgrounded sleep inherits the
+    // piped stdout and stderr and holds them open for a hundred seconds.
     let path = std::env::var_os("PATH").unwrap_or_default();
     let sh = crate::status::resolve("sh", &path).expect("sh must be on PATH to test this");
     let start = std::time::Instant::now();
     let ran = run_bounded(
         &sh,
-        &["-c".to_string(), "sleep 100 & exit 0".to_string()],
+        &[
+            "-c".to_string(),
+            // The echo proves the loss: the child did write, and the bytes sit
+            // in a pipe the backgrounded sleep still holds open.
+            "echo written-but-unread; sleep 100 & exit 0".to_string(),
+        ],
         &std::env::temp_dir(),
         &path,
         std::time::Duration::from_secs(5),
     )
     .unwrap();
-    assert!(matches!(ran, Ran::Finished(_)));
+    let Ran::Finished {
+        output,
+        stdout_lost,
+    } = ran
+    else {
+        panic!("a child that exits must not read as timed out");
+    };
     assert!(
         start.elapsed() < std::time::Duration::from_secs(5),
         "a descendant holding the pipe must not hold the call open"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "the read gave up, so nothing arrived"
+    );
+    assert!(
+        stdout_lost,
+        "empty output here must not read as a quiet child: the reply and the \
+         session id were both in there"
     );
 }
 
@@ -573,7 +591,6 @@ fn a_snapshot_copies_every_named_folder() {
 
 #[test]
 fn a_folder_that_is_not_there_is_skipped_rather_than_a_failure() {
-    // Most machines have no ghostty. A missing folder is normal, not a fault.
     let root = crate::test_support::scratch("tell-missing");
     let into = root.join("snapshots");
     let made = snapshot(&[root.join("ghostty")], &into, 1).unwrap();
@@ -613,8 +630,6 @@ fn prune_sorts_by_number_rather_than_by_name() {
 
 #[test]
 fn a_snapshots_setting_of_zero_still_keeps_one() {
-    // A zero would delete the copy the run just took, and --undo would never
-    // have one to restore.
     let config = TellConfig {
         snapshots: 0,
         ..TellConfig::default()
@@ -635,10 +650,8 @@ fn a_snapshot_copies_a_symlink_as_a_symlink() {
     let into = root.join("snapshots");
     let made = snapshot(std::slice::from_ref(&source), &into, 1).unwrap();
 
-    // The snapshot carries the symlink, not a copy of what it pointed to.
     let link_path = made.join("source/link.txt");
     assert!(std::fs::symlink_metadata(&link_path).unwrap().is_symlink());
-    // And the regular file is still there.
     assert_eq!(
         std::fs::read_to_string(made.join("source/file.txt")).unwrap(),
         "content\n"
@@ -650,25 +663,18 @@ fn a_snapshot_does_not_follow_symlink_loops() {
     let root = crate::test_support::scratch("tell-symlink-loop");
     let source = root.join("source");
     std::fs::create_dir_all(&source).unwrap();
-    // Create a symlink loop: source/loop -> source
     #[cfg(unix)]
     std::os::unix::fs::symlink(".", source.join("loop")).unwrap();
 
     let into = root.join("snapshots");
-    // This should complete without hanging or crashing.
     let made = snapshot(std::slice::from_ref(&source), &into, 1).unwrap();
 
-    // The loop symlink is recreated, not followed.
     let loop_path = made.join("source/loop");
     assert!(std::fs::symlink_metadata(&loop_path).unwrap().is_symlink());
 }
 
 #[test]
 fn copying_a_symlink_twice_into_the_same_destination_succeeds() {
-    // std::os::unix::fs::symlink refuses an existing path with EEXIST, where
-    // std::fs::copy silently overwrites it. restore's staged directory is
-    // only best-effort removed first, so a leftover from an earlier attempt
-    // must not fail a later copy.
     let root = crate::test_support::scratch("tell-copy-twice");
     let source = root.join("source");
     std::fs::create_dir_all(&source).unwrap();
@@ -698,9 +704,6 @@ fn the_newest_snapshot_is_the_highest_number() {
 
 #[test]
 fn a_stray_file_that_parses_as_a_number_does_not_outrank_a_real_snapshot() {
-    // Without an is_dir check, a stray file would win max_by_key here, every
-    // folder would then find no copy to restore, and undo would answer with
-    // a misleading success: nothing changed because nothing was ever tried.
     let snapshots = crate::test_support::scratch("tell-newest-stray-file");
     std::fs::create_dir_all(snapshots.join("100")).unwrap();
     std::fs::write(snapshots.join("999999"), "not a snapshot").unwrap();
@@ -743,8 +746,6 @@ fn a_restore_puts_the_files_back_and_names_the_folders() {
 
 #[test]
 fn a_restore_leaves_no_temporary_folder_behind() {
-    // The live folder must survive until the copy is whole, so the swap is two
-    // renames. Neither staging folder may outlive the call.
     let root = crate::test_support::scratch("tell-restore-safe");
     let hypr = root.join("hypr");
     std::fs::create_dir_all(&hypr).unwrap();
@@ -768,8 +769,6 @@ fn a_restore_leaves_no_temporary_folder_behind() {
 
 #[test]
 fn a_folder_with_no_copy_in_the_snapshot_is_left_alone() {
-    // ghostty was absent when the snapshot ran. Removal now would delete a
-    // folder the user made since.
     let root = crate::test_support::scratch("tell-restore-absent");
     let ghostty = root.join("ghostty");
     std::fs::create_dir_all(&ghostty).unwrap();
@@ -786,10 +785,6 @@ fn a_folder_with_no_copy_in_the_snapshot_is_left_alone() {
 
 #[test]
 fn a_symlinked_target_is_refused_and_named_rather_than_replaced() {
-    // Swapping a symlinked config folder for a plain directory would
-    // silently stop every later edit in whatever it links to (a dotfiles
-    // repo, say) from reaching the desktop. Refusing destroys nothing and
-    // says exactly what to do by hand.
     let root = crate::test_support::scratch("tell-restore-symlinked-target");
     let real = root.join("real-hypr");
     std::fs::create_dir_all(&real).unwrap();
@@ -821,8 +816,6 @@ fn a_symlinked_target_is_refused_and_named_rather_than_replaced() {
 
 #[test]
 fn a_failure_on_one_folder_does_not_cost_the_record_of_the_ones_already_restored() {
-    // A failure on the fourth of six folders, say, must still tell the user
-    // that the first three went back, not just that something failed.
     let root = crate::test_support::scratch("tell-restore-partial");
     let a = root.join("a");
     std::fs::create_dir_all(&a).unwrap();
@@ -893,4 +886,282 @@ fn describe_says_nothing_changed_when_the_snapshot_held_no_watched_folder() {
         describe(&Restored::default()),
         "The snapshot held none of the watched folders. Nothing changed."
     );
+}
+
+#[test]
+fn a_restore_that_put_nothing_back_is_a_failure_rather_than_a_success() {
+    assert!(failed_outright(&Restored {
+        done: Vec::new(),
+        failed: vec![("/home/x/.config/hypr".to_string(), "denied".to_string())],
+    }));
+}
+
+#[test]
+fn a_restore_that_put_one_folder_back_stays_a_success() {
+    assert!(!failed_outright(&Restored {
+        done: vec!["/home/x/.config/hypr".to_string()],
+        failed: vec![("/home/x/.config/ghostty".to_string(), "denied".to_string())],
+    }));
+    assert!(!failed_outright(&Restored::default()));
+}
+
+/// Builds `<dir>/snapshots/<at>/<name>` holding one file, and answers with the
+/// folder the restore would write back to.
+fn snapshot_holding(dir: &Path, name: &str, contents: &str) -> PathBuf {
+    let copy = dir.join("snapshots").join("1000").join(name);
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("looknfeel.lua"), contents).unwrap();
+    dir.join(name)
+}
+
+/// The watched folders as absolute paths, so `expand` leaves them alone and no
+/// test can reach the real `~/.config`.
+fn config_watching(targets: &[&Path]) -> TellConfig {
+    TellConfig {
+        paths: targets.iter().map(|p| p.display().to_string()).collect(),
+        ..TellConfig::default()
+    }
+}
+
+#[test]
+fn an_undo_that_restored_nothing_fails_while_the_sentence_stays_the_same() {
+    let _serial = serial();
+    let dir = crate::test_support::scratch("tell-undo-all-failed");
+    let target = snapshot_holding(&dir, "hypr", "gaps = 5\n");
+    // A symlinked folder is refused rather than replaced, so this restore has
+    // one failure and nothing put back.
+    std::os::unix::fs::symlink(dir.join("elsewhere"), &target).unwrap();
+
+    let error = undo_in(&dir, &config_watching(&[&target])).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "Could not put back: {} (is a symlink; put the copy back by hand)",
+            target.display()
+        ),
+        "the words the user hears must not change, only the exit code"
+    );
+}
+
+#[test]
+fn an_undo_that_restored_one_folder_succeeds() {
+    let _serial = serial();
+    let dir = crate::test_support::scratch("tell-undo-partial");
+    let kept = snapshot_holding(&dir, "hypr", "gaps = 5\n");
+    let lost = snapshot_holding(&dir, "ghostty", "font = 12\n");
+    std::fs::create_dir_all(&kept).unwrap();
+    std::os::unix::fs::symlink(dir.join("elsewhere"), &lost).unwrap();
+
+    let sentence = undo_in(&dir, &config_watching(&[&kept, &lost])).unwrap();
+    assert!(
+        sentence.starts_with(&format!("Put back: {}", kept.display())),
+        "a partial restore stays a success: {sentence}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(kept.join("looknfeel.lua")).unwrap(),
+        "gaps = 5\n"
+    );
+}
+
+#[test]
+fn a_run_timeout_of_a_lifetime_is_clamped_rather_than_overflowing() {
+    let config = TellConfig {
+        run_timeout_min: u64::MAX,
+        ..TellConfig::default()
+    };
+    assert_eq!(run_deadline(&config), MAX_SPAN);
+    let _lock_deadline = run_deadline(&config) + PRE_SPAWN_MARGIN;
+    let _poll_deadline = Instant::now() + run_deadline(&config);
+}
+
+#[test]
+fn a_run_timeout_under_the_ceiling_is_the_one_configured() {
+    let config = TellConfig {
+        run_timeout_min: 5,
+        ..TellConfig::default()
+    };
+    assert_eq!(run_deadline(&config), Duration::from_secs(300));
+}
+
+#[test]
+fn a_thread_timeout_of_a_lifetime_is_clamped_rather_than_overflowing() {
+    let config = TellConfig {
+        thread_timeout_min: u64::MAX,
+        ..TellConfig::default()
+    };
+    assert_eq!(thread_window(&config), MAX_SPAN);
+    let session = saved("opencode", 1_000);
+    assert_eq!(
+        resume(
+            Some(&session),
+            "opencode",
+            1_000 + MAX_SPAN.as_secs(),
+            thread_window(&config)
+        ),
+        Some("ses_one".to_string()),
+        "a thread as old as the ceiling is still inside it"
+    );
+    assert_eq!(
+        resume(
+            Some(&session),
+            "opencode",
+            1_000 + MAX_SPAN.as_secs() + 1,
+            thread_window(&config)
+        ),
+        None,
+        "the ceiling ends the thread whatever the config asked for"
+    );
+}
+
+#[test]
+fn a_thread_timeout_under_the_ceiling_is_the_one_configured() {
+    let config = TellConfig {
+        thread_timeout_min: 30,
+        ..TellConfig::default()
+    };
+    assert_eq!(thread_window(&config), Duration::from_secs(1_800));
+}
+
+#[test]
+fn a_lost_stdout_keeps_the_thread_the_run_asked_to_resume() {
+    assert_eq!(
+        thread_to_save(None, Some("ses_one"), true),
+        Some("ses_one".to_string()),
+        "the run knows the thread it asked for, and \"a bit more\" needs it"
+    );
+}
+
+#[test]
+fn a_lost_stdout_on_a_fresh_thread_saves_nothing() {
+    assert_eq!(thread_to_save(None, None, true), None);
+}
+
+#[test]
+fn an_id_in_the_output_wins_over_the_one_the_run_asked_for() {
+    assert_eq!(
+        thread_to_save(Some("ses_two".to_string()), Some("ses_one"), true),
+        Some("ses_two".to_string())
+    );
+}
+
+#[test]
+fn a_read_that_finished_saves_only_what_the_output_named() {
+    // Without the `stdout_lost` guard a resumed run with no id in its output
+    // would keep writing the same thread back for ever.
+    assert_eq!(thread_to_save(None, Some("ses_one"), false), None);
+}
+
+#[test]
+fn a_lost_reply_says_whether_the_thread_survived() {
+    assert_eq!(
+        lost_output_warning(Headless::OpenCode, true),
+        "opencode finished, but its output did not arrive in time. Its reply is lost. \
+         The thread is kept."
+    );
+    assert!(
+        lost_output_warning(Headless::OpenCode, false).ends_with("starts a new thread."),
+        "a lost thread must not read as a kept one"
+    );
+}
+
+#[test]
+fn a_refused_tool_becomes_a_line_the_user_gets() {
+    assert_eq!(
+        denied_warning(
+            Headless::ClaudeCode,
+            &["mcp__banshee__speak_status".to_string()]
+        ),
+        Some(
+            "claude was refused these tools, so it may have worked in silence: \
+             mcp__banshee__speak_status"
+                .to_string()
+        )
+    );
+    assert_eq!(denied_warning(Headless::ClaudeCode, &[]), None);
+}
+
+#[test]
+fn the_user_must_hear_the_warnings_but_not_the_reply() {
+    let told = Told {
+        reply: Some("The gap is five.".to_string()),
+        warnings: vec![
+            "It was refused a tool.".to_string(),
+            "Its output did not arrive in time.".to_string(),
+        ],
+    };
+    assert_eq!(
+        told.must_hear().collect::<Vec<_>>(),
+        vec![
+            "It was refused a tool.",
+            "Its output did not arrive in time.",
+        ],
+        "the agent spoke its own reply, so speaking it again says it twice"
+    );
+}
+
+/// What one run said and did, in the order it happened.
+fn ordered(agent: Headless, resume_id: Option<&str>) -> Vec<String> {
+    let steps = std::sync::Mutex::new(Vec::new());
+    announce_then_start(
+        &|line| steps.lock().unwrap().push(format!("said: {line}")),
+        agent,
+        resume_id,
+        || steps.lock().unwrap().push("started the agent".to_string()),
+    );
+    steps.into_inner().unwrap()
+}
+
+#[test]
+fn the_scope_reaches_the_user_before_the_agent_starts() {
+    assert_eq!(
+        ordered(Headless::OpenCode, None),
+        vec![
+            "said: Running opencode. It can edit anything: OpenCode takes no folder list.",
+            "started the agent",
+        ]
+    );
+}
+
+#[test]
+fn a_resumed_thread_starts_the_agent_and_says_nothing() {
+    assert_eq!(
+        ordered(Headless::ClaudeCode, Some("ses_one")),
+        vec!["started the agent"],
+        "the scope is stated on the first turn, and the run must still happen"
+    );
+}
+
+#[test]
+fn a_run_with_nothing_to_report_asks_for_no_speech() {
+    let told = Told {
+        reply: Some("Done.".to_string()),
+        ..Told::default()
+    };
+    assert_eq!(told.must_hear().count(), 0);
+}
+
+#[test]
+fn a_bounded_run_closes_stdin_rather_than_inheriting_it() {
+    // `omarchy_default` runs through here for this and for the deadline.
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let sh = crate::status::resolve("sh", &path).expect("sh must be on PATH to test this");
+    // `cat` answers only when stdin closes, so a run that inherits a terminal
+    // would sit here until the bound killed it.
+    let start = Instant::now();
+    let ran = run_bounded(
+        &sh,
+        &["-c".to_string(), "cat; echo read-to-the-end".to_string()],
+        &std::env::temp_dir(),
+        &path,
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let Ran::Finished { output, .. } = ran else {
+        panic!("a closed stdin must let the child finish");
+    };
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "read-to-the-end"
+    );
+    assert!(start.elapsed() < Duration::from_secs(5));
 }

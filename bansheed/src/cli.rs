@@ -666,7 +666,11 @@ pub fn tell(
     }
     let text =
         text.ok_or_else(|| BansheeError::Rejected("say what to tell it, or pass --undo".into()))?;
-    match crate::tell::run(&text, &config.tell)? {
+    let told = crate::tell::run(&text, &config.tell, &|line| println!("{line}"))?;
+    for warning in &told.warnings {
+        eprintln!("{warning}");
+    }
+    match told.reply {
         Some(reply) => println!("{reply}"),
         None => println!("The agent finished and wrote nothing."),
     }
@@ -697,14 +701,14 @@ pub async fn clear_history() -> Result<(), BansheeError> {
 
 pub async fn record(action: args::RecordAction) -> Result<(), BansheeError> {
     let (method, params) = match action {
-        args::RecordAction::Start { dictate } => (
+        args::RecordAction::Start { dictate, tell } => (
             banshee_common::BANSHEE_RECORD_START,
-            serde_json::json!({ "dictate": dictate }),
+            serde_json::json!({ "dictate": dictate, "tell": tell }),
         ),
         args::RecordAction::Stop => (banshee_common::BANSHEE_RECORD_STOP, serde_json::json!({})),
-        args::RecordAction::Toggle { dictate } => (
+        args::RecordAction::Toggle { dictate, tell } => (
             banshee_common::BANSHEE_RECORD_TOGGLE,
-            serde_json::json!({ "dictate": dictate }),
+            serde_json::json!({ "dictate": dictate, "tell": tell }),
         ),
     };
     if let Err(error) = utils::call_daemon(method, params).await {

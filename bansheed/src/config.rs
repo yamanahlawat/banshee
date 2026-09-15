@@ -404,13 +404,12 @@ impl Default for TTSConfig {
 pub struct TellConfig {
     /// Empty asks Omarchy, then the connected agents.
     pub agent: String,
-    /// Minutes. The field carries its unit, the way `endpoint_silence_ms` does.
+    /// Minutes a saved thread stays resumable.
     pub thread_timeout_min: u64,
     /// Minutes before a run is killed rather than waited on. 5 is a stated
     /// default, not a measurement: no run has yet been timed to a limit.
     pub run_timeout_min: u64,
-    /// How many snapshots to keep. One is the floor: a zero would delete the
-    /// copy the run just took, and `banshee tell --undo` would never have one.
+    /// How many snapshots to keep.
     pub snapshots: usize,
     /// The folders Banshee copies before a command. An agent that takes a
     /// folder list gets this one.
@@ -440,7 +439,8 @@ impl Default for TellConfig {
 }
 
 impl TellConfig {
-    /// Never zero, so a run always leaves something to restore.
+    /// Never zero: a zero would delete the copy the run just took, and
+    /// `banshee tell --undo` would never have one.
     pub fn keep(&self) -> usize {
         self.snapshots.max(1)
     }

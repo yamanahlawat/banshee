@@ -319,10 +319,19 @@ fn stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse 
 }
 
 fn dictate_target(params: &Params<'_>) -> Result<TranscribeTarget, Box<JsonRpcResponse>> {
-    Ok(if params.flag("dictate")? {
-        TranscribeTarget::Dictate
-    } else {
-        TranscribeTarget::Mailbox
+    let dictate = params.flag("dictate")?;
+    let tell = params.flag("tell")?;
+    Ok(match (dictate, tell) {
+        (true, true) => {
+            return Err(Box::new(JsonRpcResponse::error(
+                params.id(),
+                -32602,
+                "dictate and tell are two destinations. Pass one.",
+            )));
+        }
+        (true, false) => TranscribeTarget::Dictate,
+        (false, true) => TranscribeTarget::Tell,
+        (false, false) => TranscribeTarget::Mailbox,
     })
 }
 

@@ -13,6 +13,8 @@ pub enum Cue {
     RecordStop,
     Ready,
     Error,
+    // The words went to the agent rather than into the focused window
+    Tell,
     // The only signal that an armed mic went hot or shut
     Arm,
     Disarm,
@@ -26,6 +28,9 @@ impl Cue {
             Cue::RecordStop => &[(880.0, 70), (660.0, 90)],
             Cue::Ready => &[(523.0, 90), (784.0, 140)],
             Cue::Error => &[(220.0, 120), (196.0, 160)],
+            // Three notes where every other cue has two, rising to a pitch none
+            // of them reach: the ear counts and places it without looking
+            Cue::Tell => &[(587.0, 70), (880.0, 70), (1318.0, 130)],
             Cue::Arm => &[(523.0, 70), (1046.0, 120)],
             Cue::Disarm => &[(1046.0, 70), (523.0, 120)],
         }
@@ -141,20 +146,57 @@ fn tone(frequency: f32, ms: u64) -> impl Source + Send {
 mod tests {
     use super::*;
 
+    const EVERY_CUE: [Cue; 7] = [
+        Cue::RecordStart,
+        Cue::RecordStop,
+        Cue::Ready,
+        Cue::Error,
+        Cue::Tell,
+        Cue::Arm,
+        Cue::Disarm,
+    ];
+
+    fn every_other_cue() -> impl Iterator<Item = Cue> {
+        EVERY_CUE
+            .into_iter()
+            .filter(|cue| !matches!(cue, Cue::Tell))
+    }
+
+    fn rises(tones: &[(f32, u64)]) -> bool {
+        tones.windows(2).all(|pair| pair[1].0 > pair[0].0)
+    }
+
     #[test]
     fn every_cue_has_audible_tones() {
-        for cue in [
-            Cue::RecordStart,
-            Cue::RecordStop,
-            Cue::Ready,
-            Cue::Error,
-            Cue::Arm,
-            Cue::Disarm,
-        ] {
+        for cue in EVERY_CUE {
             for &(frequency, ms) in cue.tones() {
                 assert!((100.0..=2000.0).contains(&frequency));
                 assert!((30..=500).contains(&ms));
             }
+        }
+    }
+
+    // The user is eyes-free, so the only thing that separates a command sent to
+    // the agent from one typed into the focused window is how the cue sounds.
+    #[test]
+    fn the_agent_cue_is_the_only_one_with_three_rising_tones() {
+        assert!(rises(Cue::Tell.tones()));
+        for cue in every_other_cue() {
+            assert!(
+                Cue::Tell.tones().len() > cue.tones().len(),
+                "the count alone must tell {cue:?} and the agent cue apart"
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_cue_ends_above_every_other_cue() {
+        let top = |cue: Cue| cue.tones().iter().map(|&(hz, _)| hz).fold(0.0, f32::max);
+        for cue in every_other_cue() {
+            assert!(
+                top(Cue::Tell) > top(cue),
+                "the agent cue must not end where {cue:?} does"
+            );
         }
     }
 

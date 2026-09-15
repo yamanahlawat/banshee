@@ -325,6 +325,20 @@ fn a_toggle_stops_the_session_a_toggle_started() {
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
 }
 
+// A wrong byte here hands an utterance to the agent silently, or drops it
+// into the mailbox instead of running one
+#[test]
+fn a_tell_session_stops_into_the_agent() {
+    let (state, requests) = test_state_with_commands();
+
+    assert!(state.record_start(TranscribeTarget::Tell));
+    state.record_stop();
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Tell))
+    ));
+}
+
 // A wrong routing here turns typed-with-the-modifier noise into dictation
 #[test]
 fn cancel_discards_the_session_instead_of_routing_it() {
