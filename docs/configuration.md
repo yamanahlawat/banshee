@@ -46,6 +46,16 @@ barge_in = "stop"      # stop = the record hotkey cuts off whatever Banshee is s
 
 [audio.cues]
 enabled = true         # tones on record start/stop, success, and errors
+
+[tell]
+agent = ""              # empty asks Omarchy's default agent, then the connected agents
+thread_timeout_min = 10 # minutes the same agent conversation stays open
+run_timeout_min = 5     # minutes before one run is killed
+snapshots = 10          # copies of the folders below to keep; 1 is the floor
+paths = [               # the folders Banshee copies, and the list a scoped agent gets
+  "~/.config/hypr", "~/.config/omarchy", "~/.config/alacritty",
+  "~/.config/foot", "~/.config/kitty", "~/.config/ghostty",
+]
 ```
 
 - **`input_device` is a case-insensitive substring** of the microphone name, so
@@ -278,3 +288,36 @@ The `preset` picks which Whisper model Banshee uses:
   and Banshee discards the accidental recording. It does not transcribe it.
 - **On Wayland the daemon sees no key,** so `banshee bind hyprland` writes the
   binding in the compositor instead. See [linux.md](linux.md).
+
+## Telling your agent
+
+- **`banshee tell "<text>"` hands your words to a coding agent,** which edits
+  your config and speaks the result.
+- **Banshee ships no prompt and no desktop knowledge.** It sends your words and
+  nothing else, and the agent's own skills carry the rest.
+- **An empty `agent` asks `omarchy-default-agent` first,** then takes the first
+  connected agent that has a headless mode.
+- **`banshee config set tell.agent claude`** pins one instead.
+- **Claude Code and OpenCode are the two agents with a headless mode Banshee
+  has measured.** `banshee tell` names any other agent and refuses to run it.
+- **Claude Code takes the folder list,** and keeps its own run directory
+  writable too.
+- **OpenCode runs unscoped.** It refuses every write outside its own run
+  directory, and the config block that should allow one hangs the run instead.
+  Only `--auto` works, and `--auto` allows any edit anywhere.
+- **Banshee says out loud what the agent may edit,** on the first command of a
+  thread.
+- **`banshee status` names the agent it would run,** and whether it is scoped.
+- **`thread_timeout_min` is how long the same conversation stays open.** Within
+  it, "a bit more" reaches the agent that did the work. After it, the next
+  command starts a new thread.
+- **`run_timeout_min` is a stated default, not a measurement.** No run has been
+  timed to a limit. Raise it if a command is killed before it finishes.
+- **Before every command Banshee copies each folder in `paths`** to
+  `~/.banshee/tell/snapshots/<unix-seconds>/`.
+- **It keeps the newest `snapshots` copies,** and never fewer than one.
+- **`banshee tell --undo` puts the newest copy back,** and names every folder
+  it replaced.
+- **A folder that is itself a symlink is refused rather than replaced,** and
+  named, so a link into a dotfiles repo survives.
+- **`paths` defaults to the six folders the Omarchy agent skill names.**

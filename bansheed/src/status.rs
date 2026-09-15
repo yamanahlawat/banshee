@@ -134,6 +134,8 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         }
     }
 
+    report_tell(&config.tell);
+
     if let Some(service) = crate::service::service_file_path() {
         if service.exists() {
             note("start-at-login service installed");
@@ -153,6 +155,31 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         println!("Problems found. Work down from the top.");
     }
     healthy
+}
+
+/// What `banshee tell` would run. A note and never a failure: a machine with
+/// no headless agent still records, types and speaks.
+fn report_tell(config: &crate::config::TellConfig) {
+    // The same call `tell` makes, so the checklist cannot name one agent while
+    // a command runs another. The home directory only hosts the Omarchy probe.
+    let agent = crate::connect::Env::from_machine()
+        .and_then(|env| crate::tell::resolved_agent(config, &env, &env.home));
+    note(&tell_line(agent));
+}
+
+/// The `tell` line. The failure carries its own fix, so this adds none.
+fn tell_line(agent: Result<crate::tell::Headless, BansheeError>) -> String {
+    match agent {
+        Ok(agent) if agent.scoped() => format!(
+            "tell runs {}, and it gets the folders in tell.paths, and its own run directory",
+            agent.name()
+        ),
+        Ok(agent) => format!(
+            "tell runs {}, which takes no folder list, so it can edit any file",
+            agent.name()
+        ),
+        Err(reason) => format!("tell has no agent: {reason}"),
+    }
 }
 
 // Optional dependency, so it reports but never fails the health check.

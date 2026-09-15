@@ -37,8 +37,20 @@ pub fn resume(saved: Option<&Session>, agent: &str, now: u64, window: Duration) 
 /// Whether the words are the phrase that ends the thread. Banshee matches it
 /// itself: an agent asked to forget cannot prove that it did.
 pub fn is_reset(words: &str) -> bool {
+    is_exactly(words, "start over")
+}
+
+/// Whether the words ask for the thread on a screen. Banshee matches it
+/// itself: the agent is headless, so it has nowhere to put what it wrote.
+pub fn is_show(words: &str) -> bool {
+    is_exactly(words, "show me")
+}
+
+/// The phrase and nothing more. A longer sentence that starts the same way is a
+/// command for the agent: "show me a list of themes" is one.
+fn is_exactly(words: &str, phrase: &str) -> bool {
     let trimmed = words.trim().trim_end_matches(['.', '!']).trim();
-    trimmed.eq_ignore_ascii_case("start over")
+    trimmed.eq_ignore_ascii_case(phrase)
 }
 
 /// The agents with a headless mode Banshee has measured. `tell` offers no
@@ -71,6 +83,16 @@ impl Headless {
         match self {
             Headless::ClaudeCode => "claude",
             Headless::OpenCode => "opencode",
+        }
+    }
+
+    /// The flag that continues a thread. Measured: the same flag on the root
+    /// command opens the agent's own screen on that thread, where `run` and
+    /// `--print` keep it headless.
+    pub fn resume_flag(self) -> &'static str {
+        match self {
+            Headless::ClaudeCode => "--resume",
+            Headless::OpenCode => "--session",
         }
     }
 
@@ -127,6 +149,20 @@ pub fn agent_for(
         })
 }
 
+/// The agent a command would run. `dir` is the directory the Omarchy probe
+/// runs in, and it must exist, or the probe cannot spawn.
+pub fn resolved_agent(
+    config: &TellConfig,
+    env: &crate::connect::Env,
+    dir: &Path,
+) -> Result<Headless, BansheeError> {
+    agent_for(
+        Some(config.agent.as_str()),
+        omarchy_default(&env.path, dir).as_deref(),
+        &ready(env),
+    )
+}
+
 /// The arguments for one headless run.
 ///
 /// `--` closes the flags, so a command that starts with a hyphen stays a
@@ -170,11 +206,7 @@ pub fn argv_for(
         }
     };
     if let Some(id) = resume {
-        let flag = match agent {
-            Headless::OpenCode => "--session",
-            Headless::ClaudeCode => "--resume",
-        };
-        argv.push(flag.into());
+        argv.push(agent.resume_flag().into());
         argv.push(id.into());
     }
     argv.push("--".into());
@@ -599,7 +631,7 @@ fn opening_announcement(agent: Headless, resume_id: Option<&str>) -> Option<Stri
     resume_id.is_none().then(|| {
         if agent.scoped() {
             format!(
-                "Running {}. It can edit only the folders in tell.paths.",
+                "Running {}. It gets the folders in tell.paths, and its own run directory.",
                 agent.name()
             )
         } else {
@@ -755,7 +787,8 @@ fn thread_window(config: &TellConfig) -> Duration {
 /// `notify` instead.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Told {
-    /// What the agent wrote.
+    /// What to print once the command ends. A command that only opened a
+    /// screen has none: it said its line through `notify` before the spawn.
     pub reply: Option<String>,
     /// What went wrong without failing the run.
     pub warnings: Vec<String>,
@@ -784,6 +817,105 @@ fn announce_then_start<T>(
     start()
 }
 
+/// The terminals Banshee opens a thread in, each with the words that put a
+/// command inside it. Omarchy's own launcher comes first: it floats the window
+/// and wraps the run. The rest are the terminals `tell.paths` already names, so
+/// a machine without Omarchy still gets a screen.
+const TERMINALS: [(&str, &[&str]); 5] = [
+    ("omarchy-launch-floating-terminal-with-presentation", &[]),
+    ("alacritty", &["-e", "sh", "-c"]),
+    ("ghostty", &["-e", "sh", "-c"]),
+    ("foot", &["sh", "-c"]),
+    ("kitty", &["sh", "-c"]),
+];
+
+/// The first terminal on PATH, and how it takes a command.
+fn terminal(path: &std::ffi::OsStr) -> Option<(PathBuf, &'static [&'static str])> {
+    TERMINALS
+        .iter()
+        .find_map(|(name, words)| Some((crate::status::resolve(name, path)?, *words)))
+}
+
+/// The command the terminal runs. It carries the directory and the binary
+/// itself: Omarchy's launcher hands the line to a systemd unit, which starts it
+/// somewhere else, with a PATH the daemon never chose.
+fn show_line(agent: Headless, binary: &Path, dir: &Path, id: &str) -> String {
+    format!(
+        "cd {} && {} {} {}",
+        quoted(&dir.display().to_string()),
+        quoted(&binary.display().to_string()),
+        agent.resume_flag(),
+        quoted(id)
+    )
+}
+
+/// One shell word. A home directory may hold a space, and every launcher hands
+/// the line to a shell.
+fn quoted(word: &str) -> String {
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+/// The thread a screen can be opened on, or why there is none.
+fn thread_to_show(
+    saved: Option<&Session>,
+    now: u64,
+    window: Duration,
+) -> Result<(Headless, String), String> {
+    let Some(session) = saved else {
+        return Err("There is no thread to show. Nothing has run yet.".into());
+    };
+    let Some(agent) = Headless::from_name(&session.agent) else {
+        return Err(format!(
+            "The last thread belongs to {}, which Banshee cannot open.",
+            session.agent
+        ));
+    };
+    let Some(id) = resume(saved, &session.agent, now, window) else {
+        return Err("The last thread has timed out. Say something to start a new one.".into());
+    };
+    Ok((agent, id))
+}
+
+/// Opens the stored thread in a terminal, and runs no agent. The headless agent
+/// writes to the journal, which nobody reads, so this is the one way what it
+/// wrote reaches the user.
+fn show(
+    dir: &Path,
+    config: &TellConfig,
+    path: &std::ffi::OsStr,
+    notify: &dyn Fn(&str),
+) -> Result<Told, BansheeError> {
+    let (agent, id) = thread_to_show(
+        read_session(dir).as_ref(),
+        now_seconds(),
+        thread_window(config),
+    )
+    .map_err(BansheeError::Rejected)?;
+    let binary = crate::status::resolve(agent.binary(), path)
+        .ok_or_else(|| BansheeError::Rejected(format!("{} is not on PATH", agent.binary())))?;
+    let (program, words) = terminal(path).ok_or_else(|| {
+        BansheeError::Rejected(
+            "no terminal Banshee knows is on PATH, so it has nowhere to open the thread.".into(),
+        )
+    })?;
+    let mut argv: Vec<String> = words.iter().map(|word| (*word).to_string()).collect();
+    argv.push(show_line(agent, &binary, dir, &id));
+    // Said before the spawn, and not returned as a reply: the window is
+    // detached, so a launcher that dies after exec reaches nobody.
+    notify(&format!("Opening the thread in {}.", agent.name()));
+    let mut child = std::process::Command::new(&program)
+        .args(&argv)
+        .env("PATH", path)
+        .stdin(Stdio::null())
+        .spawn()?;
+    // Reaped off this thread: the window outlives the command, and a child
+    // nobody waits on stays in the daemon's process table for its whole life.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(Told::default())
+}
+
 /// Runs one command. It prints nothing: the caller decides how a line reaches
 /// the user. `notify` carries the scope, and it fires before the agent starts.
 pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<Told, BansheeError> {
@@ -802,13 +934,12 @@ pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<To
             ..Told::default()
         });
     }
+    if is_show(words) {
+        return show(&dir, config, &crate::connect::resolved_path(), notify);
+    }
 
     let env = crate::connect::Env::from_machine()?;
-    let agent = agent_for(
-        Some(config.agent.as_str()),
-        omarchy_default(&env.path, &dir).as_deref(),
-        &ready(&env),
-    )?;
+    let agent = resolved_agent(config, &env, &dir)?;
     let program = crate::status::resolve(agent.binary(), &env.path)
         .ok_or_else(|| BansheeError::Rejected(format!("{} is not on PATH", agent.binary())))?;
 
@@ -883,7 +1014,10 @@ pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<To
         ));
     }
     Ok(Told {
-        reply: reply(agent, &stdout),
+        reply: Some(
+            reply(agent, &stdout)
+                .unwrap_or_else(|| format!("{} finished and wrote nothing.", agent.name())),
+        ),
         warnings,
     })
 }

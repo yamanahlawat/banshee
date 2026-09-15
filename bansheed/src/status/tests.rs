@@ -1,4 +1,4 @@
-use super::{microphone_line, report_probe};
+use super::{BansheeError, microphone_line, report_probe};
 
 const DAEMON_HOLDS: &str = "daemon has the microphone";
 
@@ -112,6 +112,34 @@ fn the_settings_line_names_the_voice_of_the_speaker_in_force() {
         config.tts.remote.voice
     );
     assert_eq!(super::settings_voice(&config, false), config.tts.voice);
+}
+
+// The two agents differ in what they may edit, and the user cannot see the
+// screen, so the line says which one it is rather than naming the agent alone.
+#[test]
+fn the_tell_line_says_whether_the_agent_is_scoped() {
+    use crate::tell::Headless;
+
+    assert_eq!(
+        super::tell_line(Ok(Headless::ClaudeCode)),
+        "tell runs claude, and it gets the folders in tell.paths, and its own run directory"
+    );
+    assert_eq!(
+        super::tell_line(Ok(Headless::OpenCode)),
+        "tell runs opencode, which takes no folder list, so it can edit any file"
+    );
+}
+
+// The resolver's own message names the agent to connect, so a second fix here
+// would be a second sentence to keep correct.
+#[test]
+fn a_tell_line_with_no_agent_carries_the_reason_whole() {
+    let refused = BansheeError::Rejected("no connected agent. Run: banshee connect claude".into());
+
+    assert_eq!(
+        super::tell_line(Err(refused)),
+        "tell has no agent: no connected agent. Run: banshee connect claude"
+    );
 }
 
 #[cfg(target_os = "macos")]

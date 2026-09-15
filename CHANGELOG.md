@@ -11,6 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`banshee tell "<text>"` sends a command to your coding agent, which
+  changes your desktop.** Banshee sends your words and nothing else: the
+  agent's own skills carry the desktop knowledge. The agent edits the config
+  and speaks the result back through Banshee. `banshee bind hyprland` now
+  writes a tell key beside the dictate key: the dictate chord plus the first
+  free modifier of `Super`, `Ctrl` or `Alt`, and a key that already holds all
+  three gets none, which `bind` says. Within `tell.thread_timeout_min` the
+  next command continues the same conversation, so "a bit more" works.
+  "start over" ends the thread and starts no agent. "show me" reopens the
+  thread in a terminal, so you can read what the agent wrote. Before
+  every command Banshee copies the folders in `tell.paths` to
+  `~/.banshee/tell/snapshots/`, keeps the newest `tell.snapshots` copies, and
+  `banshee tell --undo` puts the newest back. Claude Code gets those folders,
+  and the run directory it works in. OpenCode takes no folder list, so it can
+  edit anything, and Banshee says which of the two it is on the first command
+  of a thread.
+  `banshee status` names the agent it would run and whether it is scoped.
+  `tell.run_timeout_min` defaults to 5 minutes, which is a stated default and
+  not a measurement: no run has been timed to a limit.
 - **`banshee bind hyprland` binds the key in your Hyprland config.** It asks
   for the key and whether you hold it or tap it, and writes the matching block
   to `~/.config/hypr/bindings.lua` on Omarchy, or to

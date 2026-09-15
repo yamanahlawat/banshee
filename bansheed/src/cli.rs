@@ -670,9 +670,8 @@ pub fn tell(
     for warning in &told.warnings {
         eprintln!("{warning}");
     }
-    match told.reply {
-        Some(reply) => println!("{reply}"),
-        None => println!("The agent finished and wrote nothing."),
+    if let Some(reply) = told.reply {
+        println!("{reply}");
     }
     Ok(())
 }

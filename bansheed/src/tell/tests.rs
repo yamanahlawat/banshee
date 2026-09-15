@@ -57,6 +57,20 @@ fn start_over_inside_a_longer_command_is_not_a_reset() {
 }
 
 #[test]
+fn show_me_asks_for_the_screen_whatever_its_case_or_spacing() {
+    assert!(is_show("show me"));
+    assert!(is_show("  Show me.  "));
+    assert!(is_show("SHOW ME"));
+}
+
+#[test]
+fn show_me_inside_a_longer_command_still_reaches_the_agent() {
+    assert!(!is_show("show me a list of themes"));
+    assert!(!is_show("show me the current gap size"));
+    assert!(!is_show("start over"));
+}
+
+#[test]
 fn the_slug_comes_from_connect_rather_than_a_second_list() {
     assert_eq!(
         Headless::ClaudeCode.name(),
@@ -548,7 +562,10 @@ fn a_descendant_holding_the_pipe_does_not_hold_the_call_open() {
 fn a_fresh_thread_names_the_agent_and_a_resumed_one_does_not() {
     assert_eq!(
         opening_announcement(Headless::ClaudeCode, None),
-        Some("Running claude. It can edit only the folders in tell.paths.".to_string())
+        Some(
+            "Running claude. It gets the folders in tell.paths, and its own run directory."
+                .to_string()
+        )
     );
     assert_eq!(
         opening_announcement(Headless::OpenCode, None),
@@ -1020,6 +1037,241 @@ fn a_thread_timeout_under_the_ceiling_is_the_one_configured() {
         ..TellConfig::default()
     };
     assert_eq!(thread_window(&config), Duration::from_secs(1_800));
+}
+
+#[test]
+fn the_screen_opens_on_the_stored_thread_and_its_own_agent() {
+    let session = saved("opencode", 1_000);
+    assert_eq!(
+        thread_to_show(Some(&session), 1_000 + 60, span(10)),
+        Ok((Headless::OpenCode, "ses_one".to_string()))
+    );
+}
+
+#[test]
+fn a_run_that_never_happened_is_said_rather_than_shown() {
+    let answer = thread_to_show(None, 1_000, span(10)).unwrap_err();
+    assert!(
+        answer.contains("Nothing has run yet"),
+        "an empty agent staring at the user says nothing: {answer}"
+    );
+}
+
+#[test]
+fn a_thread_past_the_window_is_said_rather_than_shown() {
+    let session = saved("opencode", 1_000);
+    let answer = thread_to_show(Some(&session), 1_000 + 11 * 60, span(10)).unwrap_err();
+    assert!(answer.contains("timed out"), "{answer}");
+}
+
+#[test]
+fn a_thread_from_an_agent_banshee_cannot_open_names_that_agent() {
+    let session = saved("codex", 1_000);
+    let answer = thread_to_show(Some(&session), 1_000 + 60, span(10)).unwrap_err();
+    assert!(answer.contains("codex"), "{answer}");
+}
+
+#[test]
+fn the_screen_resumes_the_thread_with_the_root_command() {
+    let dir = Path::new("/home/ada/.banshee/tell");
+    assert_eq!(
+        show_line(
+            Headless::OpenCode,
+            Path::new("/usr/bin/opencode"),
+            dir,
+            "ses_one"
+        ),
+        "cd '/home/ada/.banshee/tell' && '/usr/bin/opencode' --session 'ses_one'"
+    );
+    assert_eq!(
+        show_line(
+            Headless::ClaudeCode,
+            Path::new("/usr/bin/claude"),
+            dir,
+            "abc-123"
+        ),
+        "cd '/home/ada/.banshee/tell' && '/usr/bin/claude' --resume 'abc-123'"
+    );
+}
+
+#[test]
+fn a_home_holding_a_space_or_a_quote_stays_one_word() {
+    assert_eq!(
+        show_line(
+            Headless::OpenCode,
+            Path::new("/home/ada's box/bin/opencode"),
+            Path::new("/home/ada's box/tell"),
+            "ses_one"
+        ),
+        "cd '/home/ada'\\''s box/tell' && '/home/ada'\\''s box/bin/opencode' --session 'ses_one'"
+    );
+}
+
+/// A file on PATH that a spawn can run. The name is what `terminal` looks for.
+fn executable(dir: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let file = dir.join(name);
+    std::fs::write(&file, body).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn only_path(dir: &Path) -> std::ffi::OsString {
+    std::ffi::OsString::from(dir.display().to_string())
+}
+
+#[test]
+fn omarchys_floating_terminal_wins_over_a_plain_one() {
+    let dir = crate::test_support::scratch("tell-terminal-omarchy");
+    executable(&dir, "kitty", "#!/bin/sh\n");
+    executable(
+        &dir,
+        "omarchy-launch-floating-terminal-with-presentation",
+        "#!/bin/sh\n",
+    );
+    let (program, words) = terminal(&only_path(&dir)).expect("a terminal must be found");
+    assert_eq!(
+        program,
+        dir.join("omarchy-launch-floating-terminal-with-presentation")
+    );
+    assert!(
+        words.is_empty(),
+        "the launcher takes the command as its own arguments"
+    );
+}
+
+#[test]
+fn a_machine_without_omarchy_still_gets_a_screen() {
+    let dir = crate::test_support::scratch("tell-terminal-plain");
+    executable(&dir, "kitty", "#!/bin/sh\n");
+    let (program, words) = terminal(&only_path(&dir)).expect("a terminal must be found");
+    assert_eq!(program, dir.join("kitty"));
+    assert_eq!(words.to_vec(), vec!["sh", "-c"]);
+}
+
+#[test]
+fn no_terminal_on_path_is_none_rather_than_a_guess() {
+    let dir = crate::test_support::scratch("tell-terminal-none");
+    assert!(terminal(&only_path(&dir)).is_none());
+}
+
+/// What the terminal was handed, once it has written it down.
+fn recorded(file: &Path) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(file) {
+            return text.lines().map(str::to_string).collect();
+        }
+        assert!(Instant::now() < deadline, "the terminal never ran");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Opens the thread with `dir` as the whole PATH, and keeps what was said.
+/// A sibling test that forks between the write of this terminal and its close
+/// holds the file open, so the spawn is retried rather than believed.
+fn shown(dir: &Path) -> (Result<Told, BansheeError>, Vec<String>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let said = std::cell::RefCell::new(Vec::new());
+        let told = show(dir, &TellConfig::default(), &only_path(dir), &|line| {
+            said.borrow_mut().push(line.to_string());
+        });
+        let busy = matches!(&told, Err(BansheeError::Io(error))
+            if error.kind() == std::io::ErrorKind::ExecutableFileBusy);
+        if !busy || Instant::now() >= deadline {
+            return (told, said.into_inner());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A terminal that writes down its arguments, and a thread to open. The agent
+/// binary is the caller's to install: its absence is what one test measures.
+fn with_a_thread(name: &str) -> PathBuf {
+    let dir = crate::test_support::scratch(name);
+    executable(
+        &dir,
+        "kitty",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n",
+    );
+    write_session(
+        &dir,
+        &Session {
+            agent: "opencode".to_string(),
+            id: "ses_one".to_string(),
+            at: now_seconds(),
+        },
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn show_hands_the_thread_to_the_terminal_it_found() {
+    let dir = with_a_thread("tell-show-spawn");
+    executable(&dir, "opencode", "#!/bin/sh\n");
+
+    shown(&dir).0.unwrap();
+    assert_eq!(
+        recorded(&dir.join("kitty.args")),
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "cd '{}' && '{}' --session 'ses_one'",
+                dir.display(),
+                dir.join("opencode").display()
+            ),
+        ],
+        "the terminal gets the resolved binary: its PATH is not the daemon's"
+    );
+}
+
+#[test]
+fn show_says_what_it_opens_rather_than_returning_it() {
+    let dir = with_a_thread("tell-show-said");
+    executable(&dir, "opencode", "#!/bin/sh\n");
+
+    let (told, said) = shown(&dir);
+    assert_eq!(said, vec!["Opening the thread in opencode.".to_string()]);
+    assert_eq!(
+        told.unwrap(),
+        Told::default(),
+        "a returned reply never reaches the hotkey user"
+    );
+}
+
+#[test]
+fn show_refuses_an_agent_that_left_the_path() {
+    let dir = with_a_thread("tell-show-gone");
+
+    let (told, said) = shown(&dir);
+    let error = told.unwrap_err();
+    assert!(
+        error.to_string().contains("opencode is not on PATH"),
+        "{error}"
+    );
+    assert!(said.is_empty(), "{said:?}");
+    assert!(
+        !dir.join("kitty.args").exists(),
+        "a terminal that can only print `command not found` must not open"
+    );
+}
+
+#[test]
+fn show_opens_nothing_when_there_is_no_thread() {
+    let dir = crate::test_support::scratch("tell-show-empty");
+    executable(
+        &dir,
+        "kitty",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n",
+    );
+    let error = shown(&dir).0.unwrap_err();
+    assert!(error.to_string().contains("Nothing has run yet"), "{error}");
+    assert!(
+        !dir.join("kitty.args").exists(),
+        "an empty agent must not be opened"
+    );
 }
 
 #[test]
