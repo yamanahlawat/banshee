@@ -68,6 +68,20 @@
       "voice": "af_sky",
       "speed": 1.2000000476837158,
       "fallback": "system"
+    },
+    "tell": {
+      "agent": "",
+      "thread_timeout_min": 10,
+      "run_timeout_min": 5,
+      "snapshots": 10,
+      "paths": [
+        "~/.config/hypr",
+        "~/.config/omarchy",
+        "~/.config/alacritty",
+        "~/.config/foot",
+        "~/.config/kitty",
+        "~/.config/ghostty"
+      ]
     }
   },
   "pending": [],

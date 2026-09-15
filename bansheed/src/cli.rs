@@ -652,6 +652,17 @@ pub async fn speak(text: String) -> Result<(), BansheeError> {
     Ok(())
 }
 
+/// Prints what the agent wrote. The agent already spoke it, so this is the
+/// record rather than the reply.
+pub fn tell(text: String, config: Result<Config, BansheeError>) -> Result<(), BansheeError> {
+    let config = config?;
+    match crate::tell::run(&text, &config.tell)? {
+        Some(reply) => println!("{reply}"),
+        None => println!("The agent finished and wrote nothing."),
+    }
+    Ok(())
+}
+
 pub async fn history() -> Result<(), BansheeError> {
     match utils::call_daemon(banshee_common::BANSHEE_HISTORY, serde_json::json!({})).await {
         Ok(result) => println!(

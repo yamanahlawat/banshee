@@ -51,6 +51,8 @@ pub enum CommandType {
     },
     /// Speaks a message via text-to-speech
     Speak { text: String },
+    /// Sends a command to your coding agent, which changes your desktop
+    Tell { text: String },
     /// List all transcriptions in the database
     History,
     /// Clears all transcriptions in the database
