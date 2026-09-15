@@ -55,7 +55,7 @@ async fn main() -> Result<(), BansheeError> {
         CommandType::Status { json } => cli::status(json, config_result).await,
         CommandType::Listen => cli::listen().await,
         CommandType::Speak { text } => cli::speak(text).await,
-        CommandType::Tell { text } => cli::tell(text, config_result),
+        CommandType::Tell { text, undo } => cli::tell(text, undo, config_result),
         CommandType::History => cli::history().await,
         CommandType::ClearHistory => cli::clear_history().await,
         CommandType::Record { action } => cli::record(action).await,

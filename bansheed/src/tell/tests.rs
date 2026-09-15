@@ -397,6 +397,17 @@ fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
             RunLock::take(&dir, long).is_none(),
             "a second run must be refused"
         );
+
+        // undo is exactly the command a user reaches for when something is
+        // already going wrong, so it must be refused too, not just a second
+        // run. Checked inside this same block, on this same lock: a second
+        // test function racing for the process-wide atomic would be flaky.
+        let config = TellConfig::default();
+        let error = undo_in(&dir, &config).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "a command is already running. Try again once it finishes."
+        );
     }
     assert!(
         RunLock::take(&dir, long).is_some(),
@@ -528,5 +539,358 @@ fn a_fresh_thread_names_the_agent_and_a_resumed_one_does_not() {
     assert_eq!(
         opening_announcement(Headless::ClaudeCode, Some("ses_one")),
         None
+    );
+}
+
+#[test]
+fn a_tilde_path_expands_against_home() {
+    let home = Path::new("/home/x");
+    assert_eq!(expand("~/.config/hypr", home), home.join(".config/hypr"));
+    assert_eq!(expand("/etc/thing", home), Path::new("/etc/thing"));
+}
+
+#[test]
+fn a_snapshot_copies_every_named_folder() {
+    let root = crate::test_support::scratch("tell-snapshot");
+    let hypr = root.join("hypr");
+    std::fs::create_dir_all(hypr.join("nested")).unwrap();
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 5\n").unwrap();
+    std::fs::write(hypr.join("nested/input.lua"), "kb = us\n").unwrap();
+
+    let into = root.join("snapshots");
+    let made = snapshot(std::slice::from_ref(&hypr), &into, 1_789_402_180).unwrap();
+
+    assert_eq!(made, into.join("1789402180"));
+    assert_eq!(
+        std::fs::read_to_string(made.join("hypr/looknfeel.lua")).unwrap(),
+        "gaps = 5\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(made.join("hypr/nested/input.lua")).unwrap(),
+        "kb = us\n"
+    );
+}
+
+#[test]
+fn a_folder_that_is_not_there_is_skipped_rather_than_a_failure() {
+    // Most machines have no ghostty. A missing folder is normal, not a fault.
+    let root = crate::test_support::scratch("tell-missing");
+    let into = root.join("snapshots");
+    let made = snapshot(&[root.join("ghostty")], &into, 1).unwrap();
+    assert!(made.is_dir());
+    assert!(!made.join("ghostty").exists());
+}
+
+#[test]
+fn prune_keeps_the_newest_and_deletes_the_rest() {
+    let snapshots = crate::test_support::scratch("tell-prune");
+    for name in ["100", "200", "300", "400"] {
+        std::fs::create_dir_all(snapshots.join(name)).unwrap();
+    }
+    prune(&snapshots, 2).unwrap();
+    let mut left: Vec<String> = std::fs::read_dir(&snapshots)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    left.sort();
+    assert_eq!(left, vec!["300".to_string(), "400".to_string()]);
+}
+
+#[test]
+fn prune_sorts_by_number_rather_than_by_name() {
+    // "1000" sorts before "900" as text, and after it as a time.
+    let snapshots = crate::test_support::scratch("tell-prune-order");
+    for name in ["900", "1000"] {
+        std::fs::create_dir_all(snapshots.join(name)).unwrap();
+    }
+    prune(&snapshots, 1).unwrap();
+    let left: Vec<String> = std::fs::read_dir(&snapshots)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(left, vec!["1000".to_string()]);
+}
+
+#[test]
+fn a_snapshots_setting_of_zero_still_keeps_one() {
+    // A zero would delete the copy the run just took, and --undo would never
+    // have one to restore.
+    let config = TellConfig {
+        snapshots: 0,
+        ..TellConfig::default()
+    };
+    assert_eq!(config.keep(), 1);
+}
+
+#[test]
+fn a_snapshot_copies_a_symlink_as_a_symlink() {
+    let root = crate::test_support::scratch("tell-symlink");
+    let source = root.join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("file.txt"), "content\n").unwrap();
+    std::fs::create_dir_all(source.join("subdir")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("file.txt", source.join("link.txt")).unwrap();
+
+    let into = root.join("snapshots");
+    let made = snapshot(std::slice::from_ref(&source), &into, 1).unwrap();
+
+    // The snapshot carries the symlink, not a copy of what it pointed to.
+    let link_path = made.join("source/link.txt");
+    assert!(std::fs::symlink_metadata(&link_path).unwrap().is_symlink());
+    // And the regular file is still there.
+    assert_eq!(
+        std::fs::read_to_string(made.join("source/file.txt")).unwrap(),
+        "content\n"
+    );
+}
+
+#[test]
+fn a_snapshot_does_not_follow_symlink_loops() {
+    let root = crate::test_support::scratch("tell-symlink-loop");
+    let source = root.join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    // Create a symlink loop: source/loop -> source
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(".", source.join("loop")).unwrap();
+
+    let into = root.join("snapshots");
+    // This should complete without hanging or crashing.
+    let made = snapshot(std::slice::from_ref(&source), &into, 1).unwrap();
+
+    // The loop symlink is recreated, not followed.
+    let loop_path = made.join("source/loop");
+    assert!(std::fs::symlink_metadata(&loop_path).unwrap().is_symlink());
+}
+
+#[test]
+fn copying_a_symlink_twice_into_the_same_destination_succeeds() {
+    // std::os::unix::fs::symlink refuses an existing path with EEXIST, where
+    // std::fs::copy silently overwrites it. restore's staged directory is
+    // only best-effort removed first, so a leftover from an earlier attempt
+    // must not fail a later copy.
+    let root = crate::test_support::scratch("tell-copy-twice");
+    let source = root.join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("file.txt"), "content\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("file.txt", source.join("link.txt")).unwrap();
+
+    let dest = root.join("dest");
+    copy_tree(&source, &dest).unwrap();
+    copy_tree(&source, &dest).unwrap();
+
+    assert!(
+        std::fs::symlink_metadata(dest.join("link.txt"))
+            .unwrap()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn the_newest_snapshot_is_the_highest_number() {
+    let snapshots = crate::test_support::scratch("tell-newest");
+    for name in ["900", "1000", "950"] {
+        std::fs::create_dir_all(snapshots.join(name)).unwrap();
+    }
+    assert_eq!(newest(&snapshots), Some(snapshots.join("1000")));
+}
+
+#[test]
+fn a_stray_file_that_parses_as_a_number_does_not_outrank_a_real_snapshot() {
+    // Without an is_dir check, a stray file would win max_by_key here, every
+    // folder would then find no copy to restore, and undo would answer with
+    // a misleading success: nothing changed because nothing was ever tried.
+    let snapshots = crate::test_support::scratch("tell-newest-stray-file");
+    std::fs::create_dir_all(snapshots.join("100")).unwrap();
+    std::fs::write(snapshots.join("999999"), "not a snapshot").unwrap();
+    assert_eq!(newest(&snapshots), Some(snapshots.join("100")));
+}
+
+#[test]
+fn no_snapshot_yet_is_none_rather_than_an_error() {
+    let snapshots = crate::test_support::scratch("tell-newest-empty");
+    assert_eq!(newest(&snapshots), None);
+}
+
+#[test]
+fn a_restore_puts_the_files_back_and_names_the_folders() {
+    let root = crate::test_support::scratch("tell-restore");
+    let hypr = root.join("hypr");
+    std::fs::create_dir_all(&hypr).unwrap();
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 5\n").unwrap();
+
+    let into = root.join("snapshots");
+    snapshot(std::slice::from_ref(&hypr), &into, 100).unwrap();
+
+    // The agent changes one file and adds another.
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 40\n").unwrap();
+    std::fs::write(hypr.join("stray.lua"), "oops\n").unwrap();
+
+    let named = restore(&newest(&into).unwrap(), std::slice::from_ref(&hypr));
+
+    assert_eq!(
+        std::fs::read_to_string(hypr.join("looknfeel.lua")).unwrap(),
+        "gaps = 5\n"
+    );
+    assert!(
+        !hypr.join("stray.lua").exists(),
+        "a restore must remove a file the agent added, or the config keeps it"
+    );
+    assert_eq!(named.done, vec![hypr.display().to_string()]);
+    assert!(named.failed.is_empty());
+}
+
+#[test]
+fn a_restore_leaves_no_temporary_folder_behind() {
+    // The live folder must survive until the copy is whole, so the swap is two
+    // renames. Neither staging folder may outlive the call.
+    let root = crate::test_support::scratch("tell-restore-safe");
+    let hypr = root.join("hypr");
+    std::fs::create_dir_all(&hypr).unwrap();
+    std::fs::write(hypr.join("a.lua"), "one\n").unwrap();
+    let into = root.join("snapshots");
+    snapshot(std::slice::from_ref(&hypr), &into, 100).unwrap();
+
+    restore(&newest(&into).unwrap(), std::slice::from_ref(&hypr));
+
+    assert!(hypr.is_dir(), "the folder must exist after a restore");
+    let leftovers: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|name| name.contains("banshee-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temporary folders left behind: {leftovers:?}"
+    );
+}
+
+#[test]
+fn a_folder_with_no_copy_in_the_snapshot_is_left_alone() {
+    // ghostty was absent when the snapshot ran. Removal now would delete a
+    // folder the user made since.
+    let root = crate::test_support::scratch("tell-restore-absent");
+    let ghostty = root.join("ghostty");
+    std::fs::create_dir_all(&ghostty).unwrap();
+    std::fs::write(ghostty.join("new.toml"), "made later\n").unwrap();
+    let into = root.join("snapshots");
+    std::fs::create_dir_all(into.join("100")).unwrap();
+
+    let named = restore(&into.join("100"), std::slice::from_ref(&ghostty));
+
+    assert!(ghostty.join("new.toml").exists());
+    assert!(named.done.is_empty());
+    assert!(named.failed.is_empty());
+}
+
+#[test]
+fn a_symlinked_target_is_refused_and_named_rather_than_replaced() {
+    // Swapping a symlinked config folder for a plain directory would
+    // silently stop every later edit in whatever it links to (a dotfiles
+    // repo, say) from reaching the desktop. Refusing destroys nothing and
+    // says exactly what to do by hand.
+    let root = crate::test_support::scratch("tell-restore-symlinked-target");
+    let real = root.join("real-hypr");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("looknfeel.lua"), "gaps = 1\n").unwrap();
+
+    let hypr = root.join("hypr");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, &hypr).unwrap();
+
+    let into = root.join("snapshots");
+    snapshot(std::slice::from_ref(&hypr), &into, 100).unwrap();
+    std::fs::write(real.join("looknfeel.lua"), "gaps = 40\n").unwrap();
+
+    let result = restore(&newest(&into).unwrap(), std::slice::from_ref(&hypr));
+
+    assert!(result.done.is_empty());
+    assert_eq!(result.failed.len(), 1);
+    assert_eq!(result.failed[0].0, hypr.display().to_string());
+    assert!(
+        std::fs::symlink_metadata(&hypr).unwrap().is_symlink(),
+        "the link itself must survive a refusal"
+    );
+    assert_eq!(
+        std::fs::read_to_string(real.join("looknfeel.lua")).unwrap(),
+        "gaps = 40\n",
+        "a refusal must not touch the file the link points to either"
+    );
+}
+
+#[test]
+fn a_failure_on_one_folder_does_not_cost_the_record_of_the_ones_already_restored() {
+    // A failure on the fourth of six folders, say, must still tell the user
+    // that the first three went back, not just that something failed.
+    let root = crate::test_support::scratch("tell-restore-partial");
+    let a = root.join("a");
+    std::fs::create_dir_all(&a).unwrap();
+    let hypr = a.join("hypr");
+    std::fs::create_dir_all(&hypr).unwrap();
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 5\n").unwrap();
+
+    let b = root.join("b");
+    std::fs::create_dir_all(&b).unwrap();
+    let ghostty = b.join("ghostty");
+    std::fs::create_dir_all(&ghostty).unwrap();
+    std::fs::write(ghostty.join("config.toml"), "one\n").unwrap();
+
+    let into = root.join("snapshots");
+    snapshot(&[hypr.clone(), ghostty.clone()], &into, 100).unwrap();
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 40\n").unwrap();
+
+    // b has no write permission, so the staged copy for ghostty cannot be
+    // created there: restoring it must fail without touching hypr's own,
+    // already-succeeded, restore.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&b).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&b, perms).unwrap();
+    }
+
+    let result = restore(&newest(&into).unwrap(), &[hypr.clone(), ghostty.clone()]);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&b).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&b, perms).unwrap();
+    }
+
+    assert_eq!(result.done, vec![hypr.display().to_string()]);
+    assert_eq!(
+        std::fs::read_to_string(hypr.join("looknfeel.lua")).unwrap(),
+        "gaps = 5\n",
+        "the folder that succeeded must still be restored"
+    );
+    assert_eq!(result.failed.len(), 1);
+    assert_eq!(result.failed[0].0, ghostty.display().to_string());
+}
+
+#[test]
+fn describe_names_both_the_kept_and_the_lost_when_a_restore_is_partial() {
+    let restored = Restored {
+        done: vec!["/home/x/.config/hypr".to_string()],
+        failed: vec![(
+            "/home/x/.config/ghostty".to_string(),
+            "is a symlink; put the copy back by hand".to_string(),
+        )],
+    };
+    assert_eq!(
+        describe(&restored),
+        "Put back: /home/x/.config/hypr. Could not put back: \
+         /home/x/.config/ghostty (is a symlink; put the copy back by hand)."
+    );
+}
+
+#[test]
+fn describe_says_nothing_changed_when_the_snapshot_held_no_watched_folder() {
+    assert_eq!(
+        describe(&Restored::default()),
+        "The snapshot held none of the watched folders. Nothing changed."
     );
 }

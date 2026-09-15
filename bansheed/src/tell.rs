@@ -332,6 +332,211 @@ pub fn expand(path: &str, home: &Path) -> PathBuf {
     }
 }
 
+/// Copies each folder into `<into>/<at>/<folder name>`. A folder that is not
+/// there is skipped: most machines have only two or three of the six.
+pub fn snapshot(paths: &[PathBuf], into: &Path, at: u64) -> Result<PathBuf, BansheeError> {
+    let made = into.join(at.to_string());
+    std::fs::create_dir_all(&made)?;
+    for source in paths {
+        if !source.is_dir() {
+            continue;
+        }
+        let Some(name) = source.file_name() else {
+            continue;
+        };
+        if let Err(e) = copy_tree(source, &made.join(name)) {
+            // Clean up the partial snapshot so only whole snapshots exist, and
+            // Task 7's `--undo` cannot pick a half-written one.
+            let _ = std::fs::remove_dir_all(&made);
+            return Err(e);
+        }
+    }
+    Ok(made)
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), BansheeError> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            // Recreate the symlink as-is, rather than following it. A restore then
+            // writes back what the user actually had. A symlink loop or a dotfile
+            // tree that links back on itself cannot crash the restore.
+            let link_target = std::fs::read_link(entry.path())?;
+            // std::os::unix::fs::symlink refuses an existing path, where
+            // std::fs::copy below overwrites one silently. restore's staged
+            // directory is only best-effort removed first, so a leftover
+            // from an earlier attempt must not fail this one.
+            let _ = std::fs::remove_file(&target);
+            std::os::unix::fs::symlink(link_target, target)?;
+        } else if file_type.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// The most recent snapshot. Names are Unix seconds, so the newest is the
+/// highest number. A stray file that happens to parse as a number is not a
+/// snapshot: without `is_dir`, it would win here and every folder would then
+/// find no copy to restore, which reads as a misleading success.
+pub fn newest(snapshots: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(snapshots)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let at = entry.file_name().to_string_lossy().parse::<u64>().ok()?;
+            Some((at, entry.path()))
+        })
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, path)| path)
+}
+
+/// What a restore did with every watched folder: the ones it put back, and
+/// the ones it could not, each paired with why not.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Restored {
+    pub done: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
+/// Puts each folder back, and reports the ones it replaced and the ones it
+/// could not.
+///
+/// The copy lands beside the folder first and the swap is two renames, so a
+/// fault never leaves the user with no config. A folder the snapshot does not
+/// hold is left alone: it did not exist when the copy ran, and removal would
+/// take work the user did since. A folder that is itself a symlink is refused
+/// rather than replaced: swapping it for a plain directory would silently
+/// stop every later edit from reaching wherever it points (a dotfiles repo,
+/// say). A fault on one folder does not cost the record of the folders
+/// already put back: the loop carries on rather than aborting on the first
+/// error.
+pub fn restore(from: &Path, paths: &[PathBuf]) -> Restored {
+    let mut result = Restored::default();
+    for target in paths {
+        let Some(name) = target.file_name() else {
+            continue;
+        };
+        let copy = from.join(name);
+        if !copy.is_dir() {
+            continue;
+        }
+        if std::fs::symlink_metadata(target).is_ok_and(|meta| meta.is_symlink()) {
+            result.failed.push((
+                target.display().to_string(),
+                "is a symlink; put the copy back by hand".into(),
+            ));
+            continue;
+        }
+        match restore_one(&copy, target) {
+            Ok(()) => result.done.push(target.display().to_string()),
+            Err(e) => result
+                .failed
+                .push((target.display().to_string(), e.to_string())),
+        }
+    }
+    result
+}
+
+/// The staged-copy-then-two-renames swap for one folder.
+fn restore_one(copy: &Path, target: &Path) -> Result<(), BansheeError> {
+    let staged = with_suffix(target, ".banshee-restoring");
+    let replaced = with_suffix(target, ".banshee-replaced");
+    let _ = std::fs::remove_dir_all(&staged);
+    let _ = std::fs::remove_dir_all(&replaced);
+    copy_tree(copy, &staged)?;
+    if target.exists() {
+        std::fs::rename(target, &replaced)?;
+    }
+    std::fs::rename(&staged, target)?;
+    let _ = std::fs::remove_dir_all(&replaced);
+    Ok(())
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Puts the newest snapshot back, and reports the folders it replaced and the
+/// ones it could not.
+pub fn undo(config: &TellConfig) -> Result<String, BansheeError> {
+    undo_in(&dir()?, config)
+}
+
+/// `dir` is `tell`'s own working directory, the same one `run` locks and
+/// snapshots into. Kept apart from `undo` so a test can pass a scratch
+/// directory instead of the real one.
+fn undo_in(dir: &Path, config: &TellConfig) -> Result<String, BansheeError> {
+    // Restoring folders while an agent is mid-edit is exactly the corruption
+    // this lock exists to prevent, and undo is the command a user reaches for
+    // when something is already going wrong. The margin matches `run`'s own,
+    // so undo never judges a still-active run stale early and steps on it.
+    let run_deadline = Duration::from_secs(config.run_timeout_min.saturating_mul(60));
+    let Some(_lock) = RunLock::take(dir, run_deadline + PRE_SPAWN_MARGIN) else {
+        return Err(BansheeError::Rejected(
+            "a command is already running. Try again once it finishes.".into(),
+        ));
+    };
+    let snapshots = dir.join("snapshots");
+    let from = newest(&snapshots).ok_or_else(|| {
+        BansheeError::Rejected("no snapshot to restore. Nothing has run yet.".into())
+    })?;
+    let home = crate::service::home_dir()?;
+    let watched: Vec<PathBuf> = config.paths.iter().map(|p| expand(p, &home)).collect();
+    Ok(describe(&restore(&from, &watched)))
+}
+
+/// The sentence `undo` prints. A user who cannot see the screen needs to hear
+/// what changed even when part of the restore did not go through, not only
+/// when all of it did or none of it did.
+fn describe(restored: &Restored) -> String {
+    let done =
+        (!restored.done.is_empty()).then(|| format!("Put back: {}", restored.done.join(", ")));
+    let failed = (!restored.failed.is_empty()).then(|| {
+        format!(
+            "Could not put back: {}",
+            restored
+                .failed
+                .iter()
+                .map(|(name, why)| format!("{name} ({why})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    match (done, failed) {
+        (Some(done), Some(failed)) => format!("{done}. {failed}."),
+        (Some(done), None) => done,
+        (None, Some(failed)) => failed,
+        (None, None) => "The snapshot held none of the watched folders. Nothing changed.".into(),
+    }
+}
+
+/// Keeps the `keep` newest snapshots. Names are Unix seconds, so they sort as
+/// numbers, not as text.
+pub fn prune(snapshots: &Path, keep: usize) -> Result<(), BansheeError> {
+    let mut made: Vec<(u64, PathBuf)> = std::fs::read_dir(snapshots)?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let at = entry.file_name().to_string_lossy().parse::<u64>().ok()?;
+            Some((at, entry.path()))
+        })
+        .collect();
+    made.sort_by_key(|(at, _)| *at);
+    let extra = made.len().saturating_sub(keep);
+    for (_, path) in made.into_iter().take(extra) {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
 /// The agent's working directory. Each agent reads a settings file from the
 /// directory it runs in, so the spawn gets one of its own rather than a project.
 pub fn dir() -> Result<PathBuf, BansheeError> {
@@ -535,6 +740,10 @@ pub fn run(words: &str, config: &TellConfig) -> Result<Option<String>, BansheeEr
     let home = crate::service::home_dir()?;
     let watched: Vec<PathBuf> = config.paths.iter().map(|p| expand(p, &home)).collect();
     let present: Vec<PathBuf> = watched.iter().filter(|p| p.is_dir()).cloned().collect();
+
+    let snapshots = dir.join("snapshots");
+    snapshot(&present, &snapshots, now_seconds())?;
+    prune(&snapshots, config.keep())?;
 
     let saved = read_session(&dir);
     let resume_id = resume(

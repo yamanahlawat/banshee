@@ -654,8 +654,18 @@ pub async fn speak(text: String) -> Result<(), BansheeError> {
 
 /// Prints what the agent wrote. The agent already spoke it, so this is the
 /// record rather than the reply.
-pub fn tell(text: String, config: Result<Config, BansheeError>) -> Result<(), BansheeError> {
+pub fn tell(
+    text: Option<String>,
+    undo: bool,
+    config: Result<Config, BansheeError>,
+) -> Result<(), BansheeError> {
     let config = config?;
+    if undo {
+        println!("{}", crate::tell::undo(&config.tell)?);
+        return Ok(());
+    }
+    let text =
+        text.ok_or_else(|| BansheeError::Rejected("say what to tell it, or pass --undo".into()))?;
     match crate::tell::run(&text, &config.tell)? {
         Some(reply) => println!("{reply}"),
         None => println!("The agent finished and wrote nothing."),
