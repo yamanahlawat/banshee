@@ -266,7 +266,9 @@ pub struct DaemonState {
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
-    // Why the last transcription failed, cleared by the next one that succeeds.
+    // Why the last hotkey-path attempt failed - resampling, transcribing,
+    // listening for an answer, or telling the agent - cleared by the next
+    // one that succeeds.
     last_error: watch::Sender<Option<String>>,
     // Why the last spoken reply failed, cleared by the next one that plays.
     last_speech_error: watch::Sender<Option<String>>,

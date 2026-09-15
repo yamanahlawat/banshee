@@ -84,6 +84,16 @@ fn a_microphone_that_will_not_open_fails_the_checklist() {
     )));
 }
 
+// last_error is written by resample, transcription, ask-listening and tell
+// failures alike, so the line must not claim one of them by name.
+#[test]
+fn the_last_error_line_names_no_producer() {
+    assert_eq!(
+        super::last_error_line("opencode exited exit status: 1"),
+        "the last attempt failed: opencode exited exit status: 1"
+    );
+}
+
 // The checklist names the host either way, because that is the server the
 // config asks for. Only the daemon says whether text reaches it.
 #[test]

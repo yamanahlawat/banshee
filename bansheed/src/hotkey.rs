@@ -333,9 +333,7 @@ impl Pipeline {
                         // seconds, and the key must answer the next press.
                         std::thread::spawn(move || {
                             deliver_tell(&state, &cues, || {
-                                crate::tell::run(&words, &config.tell, &|line| {
-                                    say(&state, &cues, line)
-                                })
+                                crate::tell::run(&words, &config.tell, &|line| println!("{line}"))
                             })
                         });
                     }
@@ -542,12 +540,8 @@ fn save_history(state: &DaemonState, transcription: &str) {
     }
 }
 
-/// Hands one agent run to a user who cannot see the screen. This thread's
-/// stdout is the journal, so everything the run answers with is spoken.
-///
-/// The cue sounds first, and before the agent starts: the same key press could
-/// have typed the words into the focused window, and the agent then takes tens
-/// of seconds to say anything.
+/// Hands one agent run to a user who cannot see the screen. Banshee itself
+/// says nothing: the agent speaks its own result through the MCP server.
 ///
 /// A run that worked sounds no cue of its own: the agent has already spoken
 /// through Banshee's MCP server, and a beep behind its voice says it twice.
@@ -559,13 +553,8 @@ fn deliver_tell(
     cues: &Cues,
     run: impl FnOnce() -> Result<crate::tell::Told, banshee_common::error::BansheeError>,
 ) {
-    cues.send(Cue::Tell);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
-        Ok(Ok(told)) => {
-            for line in told.must_hear() {
-                say(state, cues, line);
-            }
-        }
+        Ok(Ok(_)) => {}
         Ok(Err(error)) => fail_tell(state, cues, error.to_string()),
         Err(panic) => fail_tell(
             state,
@@ -575,27 +564,12 @@ fn deliver_tell(
     }
 }
 
-/// A beep alone says that something went wrong, not what, so the reason is
-/// spoken as well. It is spoken first: a refused line records an error of its
-/// own, and the run's reason is the one worth keeping.
+/// The cue is the whole signal a run failed. The reason is a machine string, so
+/// it is kept for `banshee status` to name and never spoken.
 fn fail_tell(state: &Arc<DaemonState>, cues: &Cues, reason: String) {
     eprintln!("tell failed: {reason}");
-    say(state, cues, &reason);
     state.set_last_error(Some(reason));
     cues.send(Cue::Error);
-}
-
-/// Speaks one line through the daemon's own player. `interrupt` is false, so
-/// the line queues behind whatever the agent is still saying.
-///
-/// A player that refuses the line beeps instead, or the user gets no speech
-/// and no cue at all.
-fn say(state: &Arc<DaemonState>, cues: &Cues, line: &str) {
-    if let Err(error) = state.speech().speak(line, false, None) {
-        eprintln!("Failed to speak: {error}");
-        state.set_last_error(Some(format!("Could not speak: {error}")));
-        cues.send(Cue::Error);
-    }
 }
 
 /// What a panic carried. `catch_unwind` answers with a boxed payload, and
@@ -613,44 +587,21 @@ mod tell_tests {
     use super::*;
     use crate::tell::Told;
 
-    /// The player starts a queued line from its watcher thread, so a second
-    /// line arrives a moment after the first.
-    fn spoken(lines: &crate::test_support::SpokenLines, want: usize) -> Vec<String> {
+    /// Whether the player was asked to say nothing. A queued line reaches the
+    /// backend from the watcher thread, so the wait comes before the answer.
+    fn said_nothing(lines: &crate::test_support::SpokenLines) -> bool {
         let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let said = lines.lock().unwrap().clone();
-            if said.len() >= want || Instant::now() >= deadline {
-                return said;
+        while Instant::now() < deadline {
+            if !lines.lock().unwrap().is_empty() {
+                return false;
             }
             thread::sleep(Duration::from_millis(10));
         }
-    }
-
-    /// The cue a run sounded before it started, taken from inside the run
-    /// itself: a cue sent after the agent answers is tens of seconds late.
-    fn cue_before_the_agent_ran(sounded: &mpsc::Receiver<Cue>) -> Option<Cue> {
-        sounded.try_recv().ok()
+        true
     }
 
     #[test]
-    fn the_words_reaching_the_agent_sound_their_own_cue_before_it_runs() {
-        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, sounded) = Cues::recording();
-        let heard = std::cell::Cell::new(None);
-        deliver_tell(&state, &cues, || {
-            heard.set(cue_before_the_agent_ran(&sounded));
-            Ok(Told::default())
-        });
-        assert!(
-            matches!(heard.get(), Some(Cue::Tell)),
-            "the user cannot see where the words went, and the agent is silent \
-             for tens of seconds: {:?}",
-            heard.get()
-        );
-    }
-
-    #[test]
-    fn a_run_that_worked_speaks_its_warnings_and_adds_no_cue_of_its_own() {
+    fn a_run_that_worked_says_nothing_and_adds_no_cue_of_its_own() {
         let (state, lines) = crate::test_support::daemon_state_recording_speech();
         let (cues, sounded) = Cues::recording();
         deliver_tell(&state, &cues, || {
@@ -662,12 +613,10 @@ mod tell_tests {
                 ],
             })
         });
-        assert_eq!(
-            spoken(&lines, 2),
-            vec!["A tool was refused.", "Its output did not arrive."],
-            "stdout here is the journal, so these reach nobody unless they are spoken"
+        assert!(
+            said_nothing(&lines),
+            "the agent speaks for itself, and Banshee adds no voice of its own"
         );
-        assert!(matches!(sounded.try_recv(), Ok(Cue::Tell)));
         assert!(
             sounded.try_recv().is_err(),
             "the agent has already spoken, so a cue behind it says the same thing twice"
@@ -675,52 +624,38 @@ mod tell_tests {
     }
 
     #[test]
-    fn a_failed_run_speaks_the_reason_as_well_as_sounding_the_cue() {
+    fn a_failed_run_sounds_the_cue_and_keeps_the_reason_for_status() {
         let (state, lines) = crate::test_support::daemon_state_recording_speech();
         let (cues, sounded) = Cues::recording();
         deliver_tell(&state, &cues, || {
             Err(banshee_common::error::BansheeError::Rejected(
-                "opencode is not connected".to_string(),
+                "opencode exited exit status: 1".to_string(),
             ))
         });
-        assert!(matches!(sounded.try_recv(), Ok(Cue::Tell)));
         assert!(matches!(sounded.try_recv(), Ok(Cue::Error)));
-        assert_eq!(
-            spoken(&lines, 1),
-            vec!["opencode is not connected"],
-            "a beep says that something went wrong, not what"
-        );
         assert_eq!(
             state.last_error(),
-            Some("opencode is not connected".to_string())
+            Some("opencode exited exit status: 1".to_string()),
+            "the cue says that something went wrong, and status says what"
         );
-    }
-
-    #[test]
-    fn a_player_that_refuses_the_line_still_beeps() {
-        let state = crate::test_support::daemon_state_refusing_speech();
-        let (cues, sounded) = Cues::recording();
-        say(&state, &cues, "A tool was refused.");
-        assert!(matches!(sounded.try_recv(), Ok(Cue::Error)));
-        let reason = state.last_error().expect("the refusal must be kept");
         assert!(
-            reason.contains("Could not speak"),
-            "the refusal must name itself: {reason}"
+            said_nothing(&lines),
+            "the reason is a machine string, and a voice reading it out is unpleasant"
         );
     }
 
     #[test]
-    fn a_run_that_panics_still_reaches_the_user() {
-        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
+    fn a_run_that_panics_sounds_the_cue_and_keeps_the_fault_for_status() {
+        let (state, lines) = crate::test_support::daemon_state_recording_speech();
         let (cues, sounded) = Cues::recording();
         deliver_tell(&state, &cues, || panic!("attempt to add with overflow"));
-        assert!(matches!(sounded.try_recv(), Ok(Cue::Tell)));
         assert!(matches!(sounded.try_recv(), Ok(Cue::Error)));
         let reason = state.last_error().expect("the fault must be kept");
         assert!(
             reason.contains("attempt to add with overflow"),
             "the fault must name itself: {reason}"
         );
+        assert!(said_nothing(&lines));
     }
 }
 

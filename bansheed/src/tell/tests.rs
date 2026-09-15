@@ -1332,25 +1332,6 @@ fn a_refused_tool_becomes_a_line_the_user_gets() {
     assert_eq!(denied_warning(Headless::ClaudeCode, &[]), None);
 }
 
-#[test]
-fn the_user_must_hear_the_warnings_but_not_the_reply() {
-    let told = Told {
-        reply: Some("The gap is five.".to_string()),
-        warnings: vec![
-            "It was refused a tool.".to_string(),
-            "Its output did not arrive in time.".to_string(),
-        ],
-    };
-    assert_eq!(
-        told.must_hear().collect::<Vec<_>>(),
-        vec![
-            "It was refused a tool.",
-            "Its output did not arrive in time.",
-        ],
-        "the agent spoke its own reply, so speaking it again says it twice"
-    );
-}
-
 /// What one run said and did, in the order it happened.
 fn ordered(agent: Headless, resume_id: Option<&str>) -> Vec<String> {
     let steps = std::sync::Mutex::new(Vec::new());
@@ -1381,15 +1362,6 @@ fn a_resumed_thread_starts_the_agent_and_says_nothing() {
         vec!["started the agent"],
         "the scope is stated on the first turn, and the run must still happen"
     );
-}
-
-#[test]
-fn a_run_with_nothing_to_report_asks_for_no_speech() {
-    let told = Told {
-        reply: Some("Done.".to_string()),
-        ..Told::default()
-    };
-    assert_eq!(told.must_hear().count(), 0);
 }
 
 #[test]

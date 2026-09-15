@@ -300,14 +300,20 @@ The `preset` picks which Whisper model Banshee uses:
 - **`banshee config set tell.agent claude`** pins one instead.
 - **Claude Code and OpenCode are the two agents with a headless mode Banshee
   has measured.** `banshee tell` names any other agent and refuses to run it.
-- **Claude Code takes the folder list,** and keeps its own run directory
-  writable too.
-- **OpenCode runs unscoped.** It refuses every write outside its own run
-  directory, and the config block that should allow one hangs the run instead.
-  Only `--auto` works, and `--auto` allows any edit anywhere.
-- **Banshee says out loud what the agent may edit,** on the first command of a
-  thread.
+- **The two agents get different scopes, and the difference is wide. Read it
+  before you pick one:**
+  - **Claude Code gets the folders in `tell.paths`, and its own run directory.**
+    Nothing else is writable.
+  - **OpenCode gets no folder list, so it can edit any file on the machine.**
+    It refuses every write outside its own run directory, and the config block
+    that should allow one hangs the run instead. Only `--auto` works, and
+    `--auto` allows any edit anywhere.
+- **The tell key names no scope aloud.** Banshee never speaks for itself.
+  `banshee tell` prints the scope in your terminal, on the first command of a
+  thread. For the key, this page is the record.
 - **`banshee status` names the agent it would run,** and whether it is scoped.
+- **A failed run sounds the error cue, and nothing else.** Run `banshee status`
+  for the reason: it names the last failure.
 - **`thread_timeout_min` is how long the same conversation stays open.** Within
   it, "a bit more" reaches the agent that did the work. After it, the next
   command starts a new thread.

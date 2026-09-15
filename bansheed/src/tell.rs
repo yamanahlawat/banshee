@@ -510,7 +510,7 @@ fn undo_in(dir: &Path, config: &TellConfig) -> Result<String, BansheeError> {
     let sentence = describe(&restored);
     if failed_outright(&restored) {
         // Rejected, not Other: Other prints "Internal error:" in front of the
-        // text, and this sentence is the one the user hears.
+        // text, and this sentence is the one the user reads.
         return Err(BansheeError::Rejected(sentence));
     }
     Ok(sentence)
@@ -625,8 +625,8 @@ fn omarchy_default(path: &std::ffi::OsStr, dir: &Path) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// What the user must be told before the first spawn. `None` on a resumed
-/// thread: the scope was stated on the turn that opened it.
+/// What `notify` carries before the first spawn. `None` on a resumed thread:
+/// the scope was stated on the turn that opened it.
 fn opening_announcement(agent: Headless, resume_id: Option<&str>) -> Option<String> {
     resume_id.is_none().then(|| {
         if agent.scoped() {
@@ -782,27 +782,18 @@ fn thread_window(config: &TellConfig) -> Duration {
 }
 
 /// What one run answers with once it ends. The caller decides how each fact
-/// reaches the user: `banshee tell` prints, and the hotkey speaks. The scope
-/// is not here: it has to arrive before the run, so it goes out through
-/// `notify` instead.
+/// reaches the user, and `banshee tell` prints both. The scope is not here: it
+/// has to arrive before the run, so it goes out through `notify` instead.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Told {
     /// What to print once the command ends. A command that only opened a
-    /// screen has none: it said its line through `notify` before the spawn.
+    /// screen has none: it wrote its line through `notify` before the spawn.
     pub reply: Option<String>,
     /// What went wrong without failing the run.
     pub warnings: Vec<String>,
 }
 
-impl Told {
-    /// The lines a user who cannot see the screen must hear. The reply is not
-    /// among them: the agent spoke it already.
-    pub fn must_hear(&self) -> impl Iterator<Item = &str> {
-        self.warnings.iter().map(String::as_str)
-    }
-}
-
-/// Says what the agent may edit, then starts it. The order is the contract.
+/// Names what the agent may edit, then starts it. The order is the contract.
 /// The same words after a run of tens of seconds are a receipt, not a warning,
 /// and on the terminal that run is the user's only window to press Ctrl-C.
 fn announce_then_start<T>(
@@ -900,7 +891,7 @@ fn show(
     })?;
     let mut argv: Vec<String> = words.iter().map(|word| (*word).to_string()).collect();
     argv.push(show_line(agent, &binary, dir, &id));
-    // Said before the spawn, and not returned as a reply: the window is
+    // Sent before the spawn, and not returned as a reply: the window is
     // detached, so a launcher that dies after exec reaches nobody.
     notify(&format!("Opening the thread in {}.", agent.name()));
     let mut child = std::process::Command::new(&program)
@@ -1036,7 +1027,7 @@ fn thread_to_save(
     }
 }
 
-/// What the user hears when the read of stdout gave up. `kept` says whether
+/// What the user reads when the read of stdout gave up. `kept` says whether
 /// the thread survived, because the next command behaves differently.
 fn lost_output_warning(agent: Headless, kept: bool) -> String {
     let thread = if kept {
@@ -1050,7 +1041,7 @@ fn lost_output_warning(agent: Headless, kept: bool) -> String {
     )
 }
 
-/// What the user hears about the tools `denied_tools` found.
+/// What the user reads about the tools `denied_tools` found.
 fn denied_warning(agent: Headless, denied: &[String]) -> Option<String> {
     (!denied.is_empty()).then(|| {
         format!(

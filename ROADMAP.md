@@ -10,8 +10,8 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
   Omarchy config and speaks the result. `banshee bind hyprland` binds a tell key beside the
   dictate key. Before every command Banshee copies the watched folders, and `banshee tell
   --undo` puts them back. Claude Code is held to `tell.paths`; OpenCode takes no folder list,
-  so it can edit anything, and Banshee says so out loud. `BACKLOG.md` holds what real use
-  has still to settle.
+  so it can edit anything, and `docs/configuration.md` states the difference. `BACKLOG.md`
+  holds what real use has still to settle.
 - Linux onboarding in four commands: the installer, `banshee start` (which fetches the
   models), `banshee bind hyprland` (which writes the F9 binding after showing it) and
   `banshee connect claude`. `banshee record toggle` is one key for a compositor with no

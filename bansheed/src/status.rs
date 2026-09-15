@@ -660,7 +660,7 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     if let Some(error) = live(daemon, |status| {
         status["last_error"].as_str().map(str::to_string)
     }) {
-        note(&format!("the last transcription failed: {error}"));
+        note(&last_error_line(&error));
     }
     if let Some(error) = live(daemon, |status| {
         status["last_speech_error"].as_str().map(str::to_string)
@@ -677,6 +677,13 @@ fn settings_voice(config: &Config, tts_remote: bool) -> &str {
     } else {
         &config.tts.voice
     }
+}
+
+/// `last_error` is written by resample, transcription, ask-listening and
+/// tell failures alike, so the line cannot name which one it was without
+/// lying to the rest.
+fn last_error_line(error: &str) -> String {
+    format!("the last attempt failed: {error}")
 }
 
 /// The key and the voice have their own checks below, so this line names

@@ -43,6 +43,11 @@
 - Banshee sends your words and nothing else. The agent's own skills carry the
   desktop knowledge.
 - The agent edits the config, and speaks the result through Banshee.
+- Banshee itself says nothing. `banshee tell` prints what the agent may edit
+  before it starts.
+- The tell key sounds no cue of its own. A tell recording ends on the same
+  record-stop cue as a dictation.
+- A failed run sounds the error cue. `banshee status` names the reason.
 - `banshee tell --undo` puts the watched folders back from the newest snapshot.
 - The folders, the agent and the timeouts are settings. See
   [configuration.md](configuration.md#telling-your-agent).

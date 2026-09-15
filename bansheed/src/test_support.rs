@@ -123,25 +123,6 @@ pub fn daemon_state_recording_speech() -> (Arc<DaemonState>, SpokenLines) {
     (state(None, speech, std::sync::mpsc::channel().0), spoken)
 }
 
-// A backend that refuses every line, as a broken or missing player does
-struct RefusingBackend;
-
-impl TtsBackend for RefusingBackend {
-    fn start(
-        &self,
-        _text: &str,
-        _voice: Option<&str>,
-    ) -> std::io::Result<Box<dyn ActiveUtterance>> {
-        Err(std::io::Error::other("the player is not there"))
-    }
-}
-
-/// A daemon state whose speech player refuses every line.
-pub fn daemon_state_refusing_speech() -> Arc<DaemonState> {
-    let speech = SpeechPlayer::new(Box::new(RefusingBackend));
-    state(None, speech, std::sync::mpsc::channel().0)
-}
-
 /// A daemon state whose backend keeps what it was last told to speak in.
 pub fn daemon_state_recording_tts() -> (Arc<DaemonState>, RecordedTts) {
     let recorded: RecordedTts = Arc::default();
