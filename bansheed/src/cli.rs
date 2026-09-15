@@ -669,7 +669,7 @@ pub fn tell(
         text.ok_or_else(|| BansheeError::Rejected("say what to tell it, or pass --undo".into()))?;
     let told = crate::tell::run(&text, &config.tell, &|line| println!("{line}"))?;
     for warning in &told.warnings {
-        eprintln!("{warning}");
+        eprintln!("{}", warning.text());
     }
     if let Some(reply) = told.reply {
         println!("{reply}");

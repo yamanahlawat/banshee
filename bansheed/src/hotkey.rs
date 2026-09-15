@@ -571,13 +571,36 @@ fn deliver_tell(
 ) {
     let _telling = Telling::held(state);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
-        Ok(Ok(_)) => {}
+        Ok(Ok(told)) => warn_tell(state, cues, &told.warnings),
         Ok(Err(error)) => fail_tell(state, cues, error.to_string()),
         Err(panic) => fail_tell(
             state,
             cues,
             format!("The command stopped on a fault: {}", panic_reason(panic)),
         ),
+    }
+}
+
+/// What a run that exited 0 still got wrong. The hotkey path has no terminal,
+/// so the warnings would end in the journal and reach nobody: `banshee status`
+/// names them instead. One of them also sounds the failure cue, because a
+/// refused tool leaves a run that the user cannot tell from one that worked.
+fn warn_tell(state: &DaemonState, cues: &Cues, warnings: &[crate::tell::Warning]) {
+    if warnings.is_empty() {
+        return;
+    }
+    let reason = warnings
+        .iter()
+        .map(crate::tell::Warning::text)
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!("tell warned: {reason}");
+    state.set_last_error(Some(reason));
+    if warnings
+        .iter()
+        .any(crate::tell::Warning::leaves_the_user_with_silence)
+    {
+        cues.send(Cue::Error);
     }
 }
 
@@ -624,10 +647,7 @@ mod tell_tests {
         deliver_tell(&state, &cues, || {
             Ok(Told {
                 reply: Some("The gap is five.".to_string()),
-                warnings: vec![
-                    "A tool was refused.".to_string(),
-                    "Its output did not arrive.".to_string(),
-                ],
+                warnings: vec![],
             })
         });
         assert!(
@@ -638,6 +658,61 @@ mod tell_tests {
             sounded.try_recv().is_err(),
             "the agent has already spoken, so a cue behind it says the same thing twice"
         );
+        assert_eq!(
+            state.last_error(),
+            None,
+            "a clean run leaves status nothing to name"
+        );
+    }
+
+    #[test]
+    fn a_refused_tool_sounds_the_cue_and_keeps_the_warning_for_status() {
+        let (state, lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Ok(Told {
+                reply: Some("The gap is five.".to_string()),
+                warnings: vec![crate::tell::Warning::DeniedTools(
+                    "claude was refused these tools, so it may have worked in silence: \
+                     mcp__banshee__speak_status"
+                        .to_string(),
+                )],
+            })
+        });
+        assert!(
+            matches!(sounded.try_recv(), Ok(Cue::Error)),
+            "a refused tool sounds exactly like a run that worked, so it needs a cue"
+        );
+        let reason = state.last_error().expect("the warning must be kept");
+        assert!(
+            reason.contains("mcp__banshee__speak_status"),
+            "status must name the tool: {reason}"
+        );
+        assert!(said_nothing(&lines));
+    }
+
+    #[test]
+    fn a_lost_reply_is_kept_for_status_without_a_cue() {
+        let (state, lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Ok(Told {
+                reply: None,
+                warnings: vec![crate::tell::Warning::LostOutput(
+                    "opencode finished, but its output did not arrive in time.".to_string(),
+                )],
+            })
+        });
+        assert!(
+            sounded.try_recv().is_err(),
+            "the agent spoke while it ran, so the failure cue would say the run failed"
+        );
+        assert_eq!(
+            state.last_error(),
+            Some("opencode finished, but its output did not arrive in time.".to_string()),
+            "the loss still has to reach status"
+        );
+        assert!(said_nothing(&lines));
     }
 
     #[test]

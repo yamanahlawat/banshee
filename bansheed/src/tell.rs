@@ -487,20 +487,19 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// Puts the newest snapshot back, and reports the folders it replaced and the
 /// ones it could not.
 pub fn undo(config: &TellConfig) -> Result<String, BansheeError> {
-    undo_in(&dir()?, config)
+    undo_in(&state_dir()?, config)
 }
 
-/// `dir` is `tell`'s own working directory, the one `run` locks and snapshots
-/// into.
-fn undo_in(dir: &Path, config: &TellConfig) -> Result<String, BansheeError> {
+/// `state` is Banshee's own directory, the one `run` locks and snapshots into.
+fn undo_in(state: &Path, config: &TellConfig) -> Result<String, BansheeError> {
     // The margin matches `run`'s own, so undo never judges a still-active run
     // stale and steps on the folders it is mid-edit in.
-    let Some(_lock) = RunLock::take(dir, run_deadline(config) + PRE_SPAWN_MARGIN) else {
+    let Some(_lock) = RunLock::take(state, run_deadline(config) + PRE_SPAWN_MARGIN) else {
         return Err(BansheeError::Rejected(
             "a command is already running. Try again once it finishes.".into(),
         ));
     };
-    let snapshots = dir.join("snapshots");
+    let snapshots = snapshots_dir(state);
     let from = newest(&snapshots).ok_or_else(|| {
         BansheeError::Rejected("no snapshot to restore. Nothing has run yet.".into())
     })?;
@@ -564,12 +563,28 @@ pub fn prune(snapshots: &Path, keep: usize) -> Result<(), BansheeError> {
     Ok(())
 }
 
-/// The agent's working directory. Each agent reads a settings file from the
-/// directory it runs in, so the spawn gets one of its own rather than a project.
-pub fn dir() -> Result<PathBuf, BansheeError> {
+/// Banshee's own directory for `tell`. The snapshots, the session file and the
+/// run lock live here.
+pub fn state_dir() -> Result<PathBuf, BansheeError> {
     let dir = crate::service::home_dir()?.join(".banshee").join("tell");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// The agent's working directory. Each agent reads a settings file from the
+/// directory it runs in, so the spawn gets one of its own rather than a project.
+///
+/// It is not `state` itself. The agent may create, edit and delete anything
+/// inside the directory it runs in, so nothing Banshee has to keep may live
+/// there: an agent that lists its own directory would find the snapshots and
+/// edit a copy instead of the real config.
+pub fn agent_dir(state: &Path) -> PathBuf {
+    state.join("run")
+}
+
+/// The snapshot store. `newest` and `restore` read the same path.
+fn snapshots_dir(state: &Path) -> PathBuf {
+    state.join("snapshots")
 }
 
 /// `None` for a missing or unreadable file. A lost thread costs one repeated
@@ -789,7 +804,35 @@ pub struct Told {
     /// screen has none: it wrote its line through `notify` before the spawn.
     pub reply: Option<String>,
     /// What went wrong without failing the run.
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Warning>,
+}
+
+/// What went wrong in a run that still exited 0. The kind is kept apart from
+/// the sentence because the hotkey path answers the two differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Warning {
+    /// Tools the agent asked for and did not get.
+    DeniedTools(String),
+    /// The reply did not arrive before the read of stdout gave up.
+    LostOutput(String),
+}
+
+impl Warning {
+    /// The sentence the user reads.
+    pub fn text(&self) -> &str {
+        match self {
+            Warning::DeniedTools(line) | Warning::LostOutput(line) => line,
+        }
+    }
+
+    /// Whether the user perceives nothing at all. A refused `speak_status`
+    /// sounds exactly like a run that worked, so only this kind needs a cue of
+    /// its own. A lost reply still reaches the user: the agent spoke over MCP
+    /// while it ran, and a thread that went with the output shows itself on the
+    /// next command.
+    pub fn leaves_the_user_with_silence(&self) -> bool {
+        matches!(self, Warning::DeniedTools(_))
+    }
 }
 
 /// Names what the agent may edit, then starts it. Said first, not last: only
@@ -868,14 +911,19 @@ fn thread_to_show(
 /// Opens the stored thread in a terminal, and runs no agent. The headless agent
 /// writes to the journal, which nobody reads, so this is the one way what it
 /// wrote reaches the user.
+///
+/// The thread comes from `state` and the terminal opens in `run_in`: the agent
+/// on that screen writes wherever it is started, exactly as the headless one
+/// does.
 fn show(
-    dir: &Path,
+    state: &Path,
+    run_in: &Path,
     config: &TellConfig,
     path: &std::ffi::OsStr,
     notify: &dyn Fn(&str),
 ) -> Result<Told, BansheeError> {
     let (agent, id) = thread_to_show(
-        read_session(dir).as_ref(),
+        read_session(state).as_ref(),
         now_seconds(),
         thread_window(config),
     )
@@ -888,7 +936,7 @@ fn show(
         )
     })?;
     let mut argv: Vec<String> = words.iter().map(|word| (*word).to_string()).collect();
-    argv.push(show_line(agent, &binary, dir, &id));
+    argv.push(show_line(agent, &binary, run_in, &id));
     // Sent before the spawn, and not returned as a reply: the window is
     // detached, so a launcher that dies after exec reaches nobody.
     notify(&format!("Opening the thread in {}.", agent.name()));
@@ -908,8 +956,9 @@ fn show(
 /// Runs one command. It prints nothing, and `notify` fires with the scope
 /// before the agent starts.
 pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<Told, BansheeError> {
-    let dir = dir()?;
-    let Some(_lock) = RunLock::take(&dir, run_deadline(config) + PRE_SPAWN_MARGIN) else {
+    let state = state_dir()?;
+    let run_in = agent_dir(&state);
+    let Some(_lock) = RunLock::take(&state, run_deadline(config) + PRE_SPAWN_MARGIN) else {
         return Err(BansheeError::Rejected(
             "a command is already running. Wait for it to finish.".into(),
         ));
@@ -917,18 +966,25 @@ pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<To
     // Taken with the lock held: a reset racing an in-flight run must not be
     // undone by that run writing a fresh session back once it finishes.
     if is_reset(words) {
-        let _ = std::fs::remove_file(dir.join("session.json"));
+        let _ = std::fs::remove_file(state.join("session.json"));
         return Ok(Told {
             reply: Some("Thread cleared.".to_string()),
             ..Told::default()
         });
     }
+    std::fs::create_dir_all(&run_in)?;
     if is_show(words) {
-        return show(&dir, config, &crate::connect::resolved_path(), notify);
+        return show(
+            &state,
+            &run_in,
+            config,
+            &crate::connect::resolved_path(),
+            notify,
+        );
     }
 
     let env = crate::connect::Env::from_machine()?;
-    let agent = resolved_agent(config, &env, &dir)?;
+    let agent = resolved_agent(config, &env, &state)?;
     let program = crate::status::resolve(agent.binary(), &env.path)
         .ok_or_else(|| BansheeError::Rejected(format!("{} is not on PATH", agent.binary())))?;
 
@@ -936,22 +992,22 @@ pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<To
     let watched: Vec<PathBuf> = config.paths.iter().map(|p| expand(p, &home)).collect();
     let present: Vec<PathBuf> = watched.iter().filter(|p| p.is_dir()).cloned().collect();
 
-    let snapshots = dir.join("snapshots");
+    let snapshots = snapshots_dir(&state);
     snapshot(&present, &snapshots, now_seconds())?;
     prune(&snapshots, config.keep())?;
 
-    let saved = read_session(&dir);
+    let saved = read_session(&state);
     let resume_id = resume(
         saved.as_ref(),
         agent.name(),
         now_seconds(),
         thread_window(config),
     );
-    let argv = argv_for(agent, words, resume_id.as_deref(), &dir, &present);
+    let argv = argv_for(agent, words, resume_id.as_deref(), &run_in, &present);
     // An agent CLI is often a script whose interpreter the daemon's own PATH
     // does not hold.
     let ran = announce_then_start(notify, agent, resume_id.as_deref(), || {
-        run_bounded(&program, &argv, &dir, &env.path, run_deadline(config))
+        run_bounded(&program, &argv, &run_in, &env.path, run_deadline(config))
     })?;
     let Ran::Finished {
         output,
@@ -973,7 +1029,7 @@ pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<To
     );
     if let Some(id) = &thread {
         write_session(
-            &dir,
+            &state,
             &Session {
                 agent: agent.name().to_string(),
                 id: id.clone(),
@@ -981,7 +1037,7 @@ pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<To
             },
         )?;
     }
-    let mut warnings: Vec<String> = denied_warning(agent, &denied_tools(agent, &stdout))
+    let mut warnings: Vec<Warning> = denied_warning(agent, &denied_tools(agent, &stdout))
         .into_iter()
         .collect();
     if stdout_lost {
@@ -997,7 +1053,7 @@ pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<To
                 agent.name(),
                 output.status
             ))
-            .chain(warnings)
+            .chain(warnings.iter().map(|warning| warning.text().to_string()))
             .collect::<Vec<_>>()
             .join(" "),
         ));
@@ -1027,26 +1083,26 @@ fn thread_to_save(
 
 /// What the user reads when the read of stdout gave up. `kept` says whether
 /// the thread survived, because the next command behaves differently.
-fn lost_output_warning(agent: Headless, kept: bool) -> String {
+fn lost_output_warning(agent: Headless, kept: bool) -> Warning {
     let thread = if kept {
         "The thread is kept."
     } else {
         "The next command starts a new thread."
     };
-    format!(
+    Warning::LostOutput(format!(
         "{} finished, but its output did not arrive in time. Its reply is lost. {thread}",
         agent.name()
-    )
+    ))
 }
 
 /// What the user reads about the tools `denied_tools` found.
-fn denied_warning(agent: Headless, denied: &[String]) -> Option<String> {
+fn denied_warning(agent: Headless, denied: &[String]) -> Option<Warning> {
     (!denied.is_empty()).then(|| {
-        format!(
+        Warning::DeniedTools(format!(
             "{} was refused these tools, so it may have worked in silence: {}",
             agent.name(),
             denied.join(", ")
-        )
+        ))
     })
 }
 

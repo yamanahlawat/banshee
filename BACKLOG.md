@@ -120,10 +120,18 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   headless run hang instead. Measured twice, past 100 seconds each time. Only `--auto`
   works, and it allows any edit anywhere. The cause of the hang is not known, and it
   deserves a report upstream.
-- A timed-out run leaks one thread and one descriptor inside the daemon. The threads
-  draining the agent's pipes are never joined, because a surviving descendant can hold
-  those pipes open for ever. In the CLI the cost ends with the process. In the daemon it
-  accumulates until a restart.
+- A timed-out run leaks two threads and two descriptors inside the daemon, one pair for
+  stdout and one for stderr. `run_bounded` calls `drain` once per pipe, and a timeout
+  returns without collecting either channel. The threads are never joined, because a
+  surviving descendant can hold those pipes open for ever. In the CLI the cost ends with
+  the process. In the daemon it accumulates until a restart.
+- No test can fail if the agent is pointed back at Banshee's own directory. `run` resolves
+  the real home and spawns a real agent, so the two lines that hand the agent its working
+  directory are out of reach of the suite. Measured: changing both `&run_in` back to
+  `&state` leaves all 661 tests green. Four tests cover `agent_dir` itself and two cover
+  `show`, so the separation is stated and named; it is only the last two call sites that
+  nothing guards. A seam that lets a test drive `run` against a temporary home and a fake
+  agent binary would close it.
 - `banshee bind` writes binds the running daemon may not understand. After an upgrade with
   no daemon restart, the tell key records to the mailbox and nothing says so.
 - Nothing checks the derived tell chord against bindings the user already has. `strays`

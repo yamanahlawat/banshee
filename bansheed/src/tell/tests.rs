@@ -151,12 +151,41 @@ fn a_configured_agent_with_no_headless_entry_names_the_ones_that_have_one() {
 
 use std::path::{Path, PathBuf};
 
-fn run_dir() -> &'static Path {
-    Path::new("/home/x/.banshee/tell")
+/// The agent's working directory, derived the way `run` derives it.
+fn run_dir() -> PathBuf {
+    agent_dir(Path::new("/home/x/.banshee/tell"))
 }
 
 fn one_folder() -> Vec<PathBuf> {
     vec![PathBuf::from("/home/x/.config/hypr")]
+}
+
+#[test]
+fn nothing_banshee_keeps_lives_inside_the_agents_directory() {
+    // An agent that lists its own working directory must not find the
+    // snapshots there and edit a copy of the config instead of the real one.
+    let state = Path::new("/home/x/.banshee/tell");
+    let run_in = agent_dir(state);
+    for kept in [
+        snapshots_dir(state),
+        state.join("session.json"),
+        state.join("run.lock"),
+    ] {
+        assert!(
+            !kept.starts_with(&run_in),
+            "{} sits inside the agent's directory",
+            kept.display()
+        );
+    }
+}
+
+#[test]
+fn the_snapshot_store_keeps_the_path_earlier_runs_wrote_to() {
+    assert_eq!(
+        snapshots_dir(Path::new("/home/x/.banshee/tell")),
+        Path::new("/home/x/.banshee/tell/snapshots"),
+        "a moved store would strand every snapshot the user already has"
+    );
 }
 
 #[test]
@@ -168,13 +197,13 @@ fn opencode_runs_headless_with_auto() {
             Headless::OpenCode,
             "make the gaps bigger",
             None,
-            run_dir(),
+            &run_dir(),
             &one_folder()
         ),
         vec![
             "run",
             "--dir",
-            "/home/x/.banshee/tell",
+            "/home/x/.banshee/tell/run",
             "--auto",
             "--format",
             "json",
@@ -188,7 +217,7 @@ fn opencode_runs_headless_with_auto() {
 fn opencode_is_never_given_a_folder_list() {
     // Measured: an opencode.json permission block makes the run hang instead of
     // asking. --auto is all OpenCode has, and it takes no folders.
-    let command = argv_for(Headless::OpenCode, "hi", None, run_dir(), &one_folder());
+    let command = argv_for(Headless::OpenCode, "hi", None, &run_dir(), &one_folder());
     assert!(!command.iter().any(|part| part.contains("hypr")));
 }
 
@@ -198,7 +227,7 @@ fn opencode_resumes_by_session_id() {
         Headless::OpenCode,
         "a bit more",
         Some("ses_one"),
-        run_dir(),
+        &run_dir(),
         &one_folder(),
     );
     assert!(
@@ -218,7 +247,7 @@ fn claude_is_allowed_to_speak_and_to_reach_the_folders() {
             Headless::ClaudeCode,
             "make the gaps bigger",
             None,
-            run_dir(),
+            &run_dir(),
             &one_folder()
         ),
         vec![
@@ -243,7 +272,7 @@ fn claude_takes_one_add_dir_flag_per_folder() {
         PathBuf::from("/home/x/.config/hypr"),
         PathBuf::from("/home/x/.config/omarchy"),
     ];
-    let command = argv_for(Headless::ClaudeCode, "hi", None, run_dir(), &folders);
+    let command = argv_for(Headless::ClaudeCode, "hi", None, &run_dir(), &folders);
     let count = command.iter().filter(|part| *part == "--add-dir").count();
     assert_eq!(count, 2);
 }
@@ -254,7 +283,7 @@ fn claude_resumes_by_session_id() {
         Headless::ClaudeCode,
         "a bit more",
         Some("07247d4f"),
-        run_dir(),
+        &run_dir(),
         &one_folder(),
     );
     assert!(
@@ -267,7 +296,7 @@ fn claude_resumes_by_session_id() {
 #[test]
 fn a_command_that_starts_with_a_hyphen_stays_a_message() {
     for agent in Headless::ALL {
-        let command = argv_for(agent, "-brighter please", None, run_dir(), &one_folder());
+        let command = argv_for(agent, "-brighter please", None, &run_dir(), &one_folder());
         let last_two = &command[command.len() - 2..];
         assert_eq!(last_two, ["--", "-brighter please"]);
     }
@@ -1173,9 +1202,15 @@ fn shown(dir: &Path) -> (Result<Told, BansheeError>, Vec<String>) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let said = std::cell::RefCell::new(Vec::new());
-        let told = show(dir, &TellConfig::default(), &only_path(dir), &|line| {
-            said.borrow_mut().push(line.to_string());
-        });
+        let told = show(
+            dir,
+            &agent_dir(dir),
+            &TellConfig::default(),
+            &only_path(dir),
+            &|line| {
+                said.borrow_mut().push(line.to_string());
+            },
+        );
         let busy = matches!(&told, Err(BansheeError::Io(error))
             if error.kind() == std::io::ErrorKind::ExecutableFileBusy);
         if !busy || Instant::now() >= deadline {
@@ -1219,11 +1254,29 @@ fn show_hands_the_thread_to_the_terminal_it_found() {
             "-c".to_string(),
             format!(
                 "cd '{}' && '{}' --session 'ses_one'",
-                dir.display(),
+                dir.join("run").display(),
                 dir.join("opencode").display()
             ),
         ],
         "the terminal gets the resolved binary: its PATH is not the daemon's"
+    );
+}
+
+#[test]
+fn the_screen_reads_the_thread_from_banshees_directory_and_opens_the_agents() {
+    let dir = with_a_thread("tell-show-dirs");
+    executable(&dir, "opencode", "#!/bin/sh\n");
+
+    // `with_a_thread` wrote session.json into `dir` itself, so a screen that
+    // opened would have had to read it from there. The directory below is
+    // spelled out: one derived from `agent_dir` would agree with it however
+    // `agent_dir` is written.
+    shown(&dir).0.unwrap();
+    let line = recorded(&dir.join("kitty.args")).pop().unwrap();
+    assert!(
+        line.starts_with(&format!("cd '{}' ", dir.join("run").display())),
+        "an agent on a screen writes where it is started, so it starts where \
+         the headless one does: {line}"
     );
 }
 
@@ -1307,11 +1360,16 @@ fn a_read_that_finished_saves_only_what_the_output_named() {
 fn a_lost_reply_says_whether_the_thread_survived() {
     assert_eq!(
         lost_output_warning(Headless::OpenCode, true),
-        "opencode finished, but its output did not arrive in time. Its reply is lost. \
-         The thread is kept."
+        Warning::LostOutput(
+            "opencode finished, but its output did not arrive in time. Its reply is lost. \
+             The thread is kept."
+                .to_string()
+        )
     );
     assert!(
-        lost_output_warning(Headless::OpenCode, false).ends_with("starts a new thread."),
+        lost_output_warning(Headless::OpenCode, false)
+            .text()
+            .ends_with("starts a new thread."),
         "a lost thread must not read as a kept one"
     );
 }
@@ -1323,11 +1381,11 @@ fn a_refused_tool_becomes_a_line_the_user_gets() {
             Headless::ClaudeCode,
             &["mcp__banshee__speak_status".to_string()]
         ),
-        Some(
+        Some(Warning::DeniedTools(
             "claude was refused these tools, so it may have worked in silence: \
              mcp__banshee__speak_status"
                 .to_string()
-        )
+        ))
     );
     assert_eq!(denied_warning(Headless::ClaudeCode, &[]), None);
 }

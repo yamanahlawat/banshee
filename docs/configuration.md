@@ -308,12 +308,21 @@ The `preset` picks which Whisper model Banshee uses:
     It refuses every write outside its own run directory, and the config block
     that should allow one hangs the run instead. Only `--auto` works, and
     `--auto` allows any edit anywhere.
+- **The agent runs in `~/.banshee/tell/run/`, and Banshee keeps nothing there.**
+  The snapshots, the saved thread and the run lock sit one level up, in
+  `~/.banshee/tell/`. An agent that lists its own directory must not find a
+  copy of your config there and edit the copy.
 - **The tell key names no scope aloud.** Banshee never speaks for itself.
   `banshee tell` prints the scope in your terminal, on the first command of a
   thread. For the key, this page is the record.
 - **`banshee status` names the agent it would run,** and whether it is scoped.
 - **A failed run sounds the error cue, and nothing else.** Run `banshee status`
   for the reason: it names the last failure.
+- **A run that was refused a tool sounds the same cue.** The agent finished, but
+  it could not speak, so the key gives you silence and silence is what success
+  sounds like. `banshee status` names the tool.
+- **A run whose reply arrived too late only reaches `banshee status`.** The agent
+  already spoke while it ran, so this one sounds no cue.
 - **`thread_timeout_min` is how long the same conversation stays open.** Within
   it, "a bit more" reaches the agent that did the work. After it, the next
   command starts a new thread.

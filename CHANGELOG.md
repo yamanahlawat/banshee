@@ -23,13 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread in a terminal, so you can read what the agent wrote. Before
   every command Banshee copies the folders in `tell.paths` to
   `~/.banshee/tell/snapshots/`, keeps the newest `tell.snapshots` copies, and
-  `banshee tell --undo` puts the newest back. Claude Code gets those folders,
-  and the run directory it works in. OpenCode takes no folder list, so it can
+  `banshee tell --undo` puts the newest back. The agent runs in
+  `~/.banshee/tell/run/`, so it never lists Banshee's own snapshots and edits a
+  copy of your config. Claude Code gets those folders, and the run directory it
+  works in. OpenCode takes no folder list, so it can
   edit anything: `banshee tell` prints which of the two it is on the first
   command of a thread, and `docs/configuration.md` states the difference.
-  Banshee itself speaks nothing. A failed run sounds the error cue, and
-  `banshee status` names the reason, the agent it would run, and whether that
-  agent is scoped.
+  Banshee itself speaks nothing. A failed run sounds the error cue, and so does
+  a run that finished after Banshee refused it a tool, because that one leaves
+  you with silence. `banshee status` names the reason, the agent it would run,
+  and whether that agent is scoped.
   `tell.run_timeout_min` defaults to 5 minutes, which is a stated default and
   not a measurement: no run has been timed to a limit.
 - **`banshee bind hyprland` binds the key in your Hyprland config.** It asks
