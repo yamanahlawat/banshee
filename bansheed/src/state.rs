@@ -266,6 +266,8 @@ pub struct DaemonState {
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
+    // True for the life of one agent run the tell key started.
+    telling: watch::Sender<bool>,
     // Why the last hotkey-path attempt failed - resampling, transcribing,
     // listening for an answer, or telling the agent - cleared by the next
     // one that succeeds.
@@ -333,6 +335,7 @@ impl DaemonState {
             latest_transcription_id: watch::channel(0).0,
             recording_active: watch::channel(false).0,
             transcribing: watch::channel(false).0,
+            telling: watch::channel(false).0,
             last_error: watch::channel(None).0,
             last_speech_error: watch::channel(None).0,
             device_changes: watch::channel(0).0,
@@ -548,6 +551,18 @@ impl DaemonState {
 
     pub fn subscribe_transcribing(&self) -> watch::Receiver<bool> {
         self.transcribing.subscribe()
+    }
+
+    pub fn set_telling(&self, on: bool) {
+        self.telling.send_replace(on);
+    }
+
+    pub fn is_telling(&self) -> bool {
+        *self.telling.borrow()
+    }
+
+    pub fn subscribe_telling(&self) -> watch::Receiver<bool> {
+        self.telling.subscribe()
     }
 
     pub fn set_last_error(&self, error: Option<String>) {

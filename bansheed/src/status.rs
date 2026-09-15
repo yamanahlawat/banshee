@@ -161,13 +161,13 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 /// no headless agent still records, types and speaks.
 fn report_tell(config: &crate::config::TellConfig) {
     // The same call `tell` makes, so the checklist cannot name one agent while
-    // a command runs another. The home directory only hosts the Omarchy probe.
+    // a command runs another.
     let agent = crate::connect::Env::from_machine()
         .and_then(|env| crate::tell::resolved_agent(config, &env, &env.home));
     note(&tell_line(agent));
 }
 
-/// The `tell` line. The failure carries its own fix, so this adds none.
+/// The failure carries its own fix, so this adds none.
 fn tell_line(agent: Result<crate::tell::Headless, BansheeError>) -> String {
     match agent {
         Ok(agent) if agent.scoped() => format!(
@@ -679,9 +679,8 @@ fn settings_voice(config: &Config, tts_remote: bool) -> &str {
     }
 }
 
-/// `last_error` is written by resample, transcription, ask-listening and
-/// tell failures alike, so the line cannot name which one it was without
-/// lying to the rest.
+/// Names no producer: four paths write `last_error`, and naming one lies about
+/// the other three.
 fn last_error_line(error: &str) -> String {
     format!("the last attempt failed: {error}")
 }

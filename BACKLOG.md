@@ -89,6 +89,76 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   about 40 lines of script and markup, plus the `.held` style rule, in each of them. Only the
   setting name differs.
 
+## banshee tell
+
+- A written reply from the agent never reaches a person who used the hotkey. `tell::run`
+  answers with the reply, `cli::tell` prints it, and the hotkey arm drops it. The MCP shim
+  tells every agent to "reserve written output for what must be read on screen, such as
+  code, file paths, commands, URLs, and lists", which assumes a screen the written half
+  lands on. Started from the key, there is none. Speaking the whole reply was rejected:
+  ten steps is unbearable aloud. Keeping it in the history was rejected: the window is too
+  small to read it. The agreed start is that the user asks for it, by saying "show me", and
+  Banshee reopens that thread in a terminal through Omarchy's own
+  `omarchy agent prompt "<text>"`. Nothing opens unbidden, and no length decides anything,
+  because no length has been measured. Left here rather than designed further, so real use
+  can say what it should be.
+- Nothing tells a person by ear that their words went to the agent and not into the
+  window. Both routes end on the same record-stop cue. The spec's step 3 asks for a cue
+  when the words land, and a three-note one was built and then removed: it played right
+  after the record-stop cue, so one command sounded five notes. A swap was offered, the
+  new cue instead of the stop cue rather than after it, and refused. The decision is to
+  add no cue at all until the right interface is settled, and to keep only the cues that
+  already existed. A failed run still sounds the error cue, and `banshee status` names the
+  reason.
+- Banshee itself says nothing on the hotkey path. It spoke the agent's scope, a failure
+  reason and any warnings, and all three were removed after real use: the reasons are
+  machine text, and a voice reading `opencode exited exit status: 1` is worse than a
+  beep. The scope difference is written down instead. The cost is that a failed run tells
+  you that it failed and not why, until you ask `banshee status`.
+- OpenCode runs unscoped, and nothing narrower works. It auto-rejects a write outside its
+  run directory, and the `opencode.json` permission block that should allow one makes a
+  headless run hang instead. Measured twice, past 100 seconds each time. Only `--auto`
+  works, and it allows any edit anywhere. The cause of the hang is not known, and it
+  deserves a report upstream.
+- A timed-out run leaks one thread and one descriptor inside the daemon. The threads
+  draining the agent's pipes are never joined, because a surviving descendant can hold
+  those pipes open for ever. In the CLI the cost ends with the process. In the daemon it
+  accumulates until a restart.
+- `banshee bind` writes binds the running daemon may not understand. After an upgrade with
+  no daemon restart, the tell key records to the mailbox and nothing says so.
+- Nothing checks the derived tell chord against bindings the user already has. `strays`
+  only finds `banshee record` lines in the file Banshee writes.
+- A running tell cannot be stopped. `banshee tell --undo` takes the same lock, correctly,
+  so a person waits out `tell.run_timeout_min` while the agent edits.
+- A restore does not put back directory permissions. `create_dir_all` applies the umask, so
+  a folder that was `0700` comes back `0755`.
+- A restore writes no snapshot of what it replaces, so a mistaken `--undo` after a day of
+  edits by hand has nothing to return to.
+- `undo` prints its failure through `Debug`, so a total failure reads
+  `Error: Rejected("...")` rather than the sentence it was written as. Every command in the
+  binary reads that way; one `Display` wrapper in `main` would fix all of them.
+- Nobody knows when a changed `tell` setting takes effect. `banshee config set` reports
+  every `tell` key as needing a restart, while `settings::configure` hands the daemon the
+  whole new config. The two disagree and neither was measured, so the documentation makes
+  no claim either way.
+- A transcribed `?` or `,` defeats `start over` and `show me`. The match strips a trailing
+  `.` and `!` only, so "Show me?" runs headlessly as an agent command and costs a run.
+  Whisper emits a question mark on a short rising phrase, so this is common rather than
+  rare. The match mirrors `is_reset`, which is the consistency that argued against
+  widening it, and no wider set has been measured against real transcripts.
+- The six state marks are drawn in three independent places: the PNGs in
+  `bansheed/assets/tray/`, the generator `scripts/make-state-tiles.sh`, and the Svelte
+  component `banshee-app/ui/src/marks/Mark.svelte`. All three carry the same reasoning
+  in their own comments. Changing the tray left the window showing the old listening bar
+  until somebody noticed, which is the first time the duplication actually cost anything.
+- `speaking`'s arcs sit five units tighter in the menu bar than in the window, because
+  36 pixels cannot hold the pair at the window's spacing. The two are deliberately
+  different and nothing records that outside this line.
+- The window's pending message reads the transcribing flag alone, so it stays silent
+  while an agent started by the tell key runs. The icon shows busy; the words do not.
+- No real speech has ever reached the tell arm inside a test. The path is proven on a real
+  machine and by a state-machine round trip, and by nothing in between.
+
 ## Testing
 
 - No WebDriver acceptance layer, so nothing exercises the Rust socket and the Svelte face

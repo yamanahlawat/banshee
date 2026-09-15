@@ -141,18 +141,16 @@ fn tone(frequency: f32, ms: u64) -> impl Source + Send {
 mod tests {
     use super::*;
 
-    const EVERY_CUE: [Cue; 6] = [
-        Cue::RecordStart,
-        Cue::RecordStop,
-        Cue::Ready,
-        Cue::Error,
-        Cue::Arm,
-        Cue::Disarm,
-    ];
-
     #[test]
     fn every_cue_has_audible_tones() {
-        for cue in EVERY_CUE {
+        for cue in [
+            Cue::RecordStart,
+            Cue::RecordStop,
+            Cue::Ready,
+            Cue::Error,
+            Cue::Arm,
+            Cue::Disarm,
+        ] {
             for &(frequency, ms) in cue.tones() {
                 assert!((100.0..=2000.0).contains(&frequency));
                 assert!((30..=500).contains(&ms));

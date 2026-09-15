@@ -8,6 +8,7 @@
   "recording": false,
   "armed": false,
   "transcribing": false,
+  "telling": false,
   "speaking": false,
   "uptime_seconds": 5,
   "vad_threshold": 0.5,

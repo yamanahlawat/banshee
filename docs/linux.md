@@ -122,7 +122,7 @@ bind = SUPER, F9, exec, banshee record toggle --tell
     "return-type": "json",
     "restart-interval": 5,
     "format": "{icon}",
-    "format-icons": { "idle": "mic", "recording": "REC", "speaking": "spk" }
+    "format-icons": { "idle": "mic", "recording": "REC", "busy": "...", "speaking": "spk" }
 }
 ```
 
@@ -130,6 +130,7 @@ bind = SUPER, F9, exec, banshee record toggle --tell
 
 ```css
 #custom-banshee.recording { color: #e06c75; }
+#custom-banshee.busy      { color: #e5c07b; }
 #custom-banshee.speaking  { color: #61afef; }
 ```
 

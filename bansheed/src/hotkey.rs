@@ -540,19 +540,36 @@ fn save_history(state: &DaemonState, transcription: &str) {
     }
 }
 
-/// Hands one agent run to a user who cannot see the screen. Banshee itself
-/// says nothing: the agent speaks its own result through the MCP server.
-///
-/// A run that worked sounds no cue of its own: the agent has already spoken
-/// through Banshee's MCP server, and a beep behind its voice says it twice.
+/// The `telling` flag, raised for the life of one run. Lowered on drop, not by
+/// hand: nothing else clears it, so a run that leaves it raised holds the icon
+/// on Busy until the daemon restarts.
+struct Telling<'a>(&'a DaemonState);
+
+impl<'a> Telling<'a> {
+    fn held(state: &'a DaemonState) -> Self {
+        state.set_telling(true);
+        Telling(state)
+    }
+}
+
+impl Drop for Telling<'_> {
+    fn drop(&mut self) {
+        self.0.set_telling(false);
+    }
+}
+
+/// Runs one agent turn and answers for it. A run that worked sounds no cue of
+/// its own: the agent has already spoken through Banshee's MCP server, and a
+/// beep behind its voice says the same thing twice.
 ///
 /// A panic is caught here, or the thread ends with no cue and no error and the
 /// user waits for a result that never comes.
 fn deliver_tell(
-    state: &Arc<DaemonState>,
+    state: &DaemonState,
     cues: &Cues,
     run: impl FnOnce() -> Result<crate::tell::Told, banshee_common::error::BansheeError>,
 ) {
+    let _telling = Telling::held(state);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok(_)) => {}
         Ok(Err(error)) => fail_tell(state, cues, error.to_string()),
@@ -564,9 +581,9 @@ fn deliver_tell(
     }
 }
 
-/// The cue is the whole signal a run failed. The reason is a machine string, so
-/// it is kept for `banshee status` to name and never spoken.
-fn fail_tell(state: &Arc<DaemonState>, cues: &Cues, reason: String) {
+/// The cue is the whole signal that a run failed. The reason is a machine
+/// string, kept for `banshee status` to name.
+fn fail_tell(state: &DaemonState, cues: &Cues, reason: String) {
     eprintln!("tell failed: {reason}");
     state.set_last_error(Some(reason));
     cues.send(Cue::Error);
@@ -656,6 +673,34 @@ mod tell_tests {
             "the fault must name itself: {reason}"
         );
         assert!(said_nothing(&lines));
+    }
+
+    #[test]
+    fn a_run_raises_the_telling_flag_and_lowers_it_on_every_exit() {
+        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, _sounded) = Cues::recording();
+        assert!(!state.is_telling(), "the flag starts down");
+
+        let mut raised = false;
+        deliver_tell(&state, &cues, || {
+            raised = state.is_telling();
+            Ok(Told {
+                reply: None,
+                warnings: vec![],
+            })
+        });
+        assert!(raised, "the flag must be up while the agent runs");
+        assert!(!state.is_telling(), "a run that worked lowers it");
+
+        deliver_tell(&state, &cues, || {
+            Err(banshee_common::error::BansheeError::Rejected(
+                "opencode exited exit status: 1".to_string(),
+            ))
+        });
+        assert!(!state.is_telling(), "a run that failed lowers it");
+
+        deliver_tell(&state, &cues, || panic!("attempt to add with overflow"));
+        assert!(!state.is_telling(), "a run that panicked lowers it");
     }
 }
 

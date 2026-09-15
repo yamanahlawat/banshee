@@ -54,6 +54,38 @@ describe('the state word', () => {
   it('is Working while transcribing, even though the mode has not gone idle', () => {
     const state = reduceLive(reduceStatus(empty(), ready), transcribing);
     expect(stateWord(state)).toBe('Working');
+    expect(lampForm('Working')).toBe('busy');
+  });
+  it('is Working while an agent a tell started still runs', () => {
+    const state = reduceLive(reduceStatus(empty(), ready), { telling: true });
+    expect(stateWord(state)).toBe('Working');
+    expect(lampForm('Working')).toBe('busy');
+  });
+  it('is Listening, not Working, when armed and telling both hold', () => {
+    // A `banshee tell` run that calls ask_user is armed and telling at once;
+    // waiting on the answer outranks the run still open behind it.
+    const state = reduceLive(reduceStatus(empty(), ready), {
+      armed: true,
+      recording: true,
+      telling: true,
+    });
+    expect(stateWord(state)).toBe('Listening');
+  });
+  it('is Listening, not Working, when armed and transcribing both hold', () => {
+    const state = reduceLive(reduceStatus(empty(), ready), {
+      armed: true,
+      recording: true,
+      transcribing: true,
+    });
+    expect(stateWord(state)).toBe('Listening');
+  });
+  it('is Recording, not Working, when recording and telling both hold', () => {
+    const state = reduceLive(reduceStatus(empty(), ready), { recording: true, telling: true });
+    expect(stateWord(state)).toBe('Recording');
+  });
+  it('is Speaking, not Working, when speaking and telling both hold', () => {
+    const state = reduceLive(reduceStatus(empty(), ready), { speaking: true, telling: true });
+    expect(stateWord(state)).toBe('Speaking');
   });
   it('is Speaking when the daemon says so', () => {
     const state = reduceLive(reduceStatus(empty(), ready), speaking);

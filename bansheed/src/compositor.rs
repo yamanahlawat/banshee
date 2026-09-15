@@ -92,8 +92,7 @@ impl Layout {
         let shifted: Vec<&str> = std::iter::once("SHIFT")
             .chain(mods.iter().copied())
             .collect();
-        // SHIFT is taken by the record bind, so the free modifier is searched
-        // for from SUPER.
+        // SHIFT is taken by the record bind, so the search starts at SUPER.
         let telling: Option<Vec<&str>> = ["SUPER", "CTRL", "ALT"]
             .into_iter()
             .find(|modifier| !mods.contains(modifier))

@@ -42,6 +42,7 @@ export type Live = {
   speaking: boolean;
   armed: boolean;
   transcribing: boolean;
+  telling: boolean;
   audio_device: string | null;
   missing_device: string | null;
   last_error: string | null;
@@ -72,7 +73,7 @@ export type Word =
   | 'Not ready'
   | 'Downloading'
   | 'Not running';
-export type LampForm = 'idle' | 'recording' | 'speaking' | 'listening' | 'notrunning';
+export type LampForm = 'idle' | 'recording' | 'speaking' | 'listening' | 'busy' | 'notrunning';
 
 export function empty(): Daemon {
   return {
@@ -82,6 +83,7 @@ export function empty(): Daemon {
       speaking: false,
       armed: false,
       transcribing: false,
+      telling: false,
       audio_device: null,
       missing_device: null,
       last_error: null,
@@ -124,12 +126,14 @@ export function isDown(state: Daemon): boolean {
   return state.down !== null || state.status?.running === false;
 }
 // `recording` is true whenever `armed` is, so the narrower flag is tested first.
+// Waiting on an answer outranks work in progress, matching `Activity::of` in
+// banshee-common/src/lib.rs.
 export function stateWord(state: Daemon): Word {
   if (isDown(state)) return 'Not running';
-  if (state.live.transcribing) return 'Working';
   if (state.live.armed) return 'Listening';
   if (state.live.recording) return 'Recording';
   if (state.live.speaking) return 'Speaking';
+  if (state.live.transcribing || state.live.telling) return 'Working';
   if (state.download !== null) return 'Downloading';
   if ((state.status?.blockers?.length ?? 0) > 0) return 'Not ready';
   return 'Ready';
@@ -139,9 +143,10 @@ export function lampForm(word: Word): LampForm {
   if (word === 'Recording') return 'recording';
   if (word === 'Speaking') return 'speaking';
   // The one state where doing nothing is the wrong answer, so it cannot share
-  // a silhouette with Ready. Working, Downloading and Not ready still do: each
-  // resolves on its own, and the window shouts them in the body anyway.
+  // a silhouette with Ready. Downloading and Not ready still do: each resolves
+  // on its own, and the window shouts them in the body anyway.
   if (word === 'Listening') return 'listening';
+  if (word === 'Working') return 'busy';
   return 'idle';
 }
 

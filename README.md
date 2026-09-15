@@ -78,10 +78,11 @@ banshee connect claude
 - [Toggle instead of hold, and rebind the key](docs/configuration.md#the-hotkey)
 - The menu bar icon answers one question: can I speak right now.
 
-| Idle | Recording | Speaking | Waiting for you | Not running |
-|:----:|:---------:|:--------:|:---------------:|:-----------:|
-| <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/listening.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
+| Idle | Recording | Busy | Speaking | Waiting for you | Not running |
+|:----:|:---------:|:----:|:--------:|:---------------:|:-----------:|
+| <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/busy.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/listening.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
 
+- Busy means Banshee transcribes what you said, or the agent a `banshee tell` started still runs.
 - Waiting for you means an agent asked a question and holds for your answer.
 - The states differ by shape, never by colour alone, and macOS tints the template image.
 

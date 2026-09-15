@@ -157,6 +157,7 @@ fn state_word(state: &serde_json::Value) -> &'static str {
         banshee_common::Activity::Recording => "recording",
         banshee_common::Activity::Speaking => "speaking",
         banshee_common::Activity::Listening => "listening",
+        banshee_common::Activity::Busy => "busy",
     }
 }
 

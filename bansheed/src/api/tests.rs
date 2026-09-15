@@ -607,6 +607,25 @@ fn live_state_reports_transcribing() {
 }
 
 #[test]
+fn live_state_reports_telling() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    assert_eq!(live_state(&state)["telling"], serde_json::json!(false));
+    state.set_telling(true);
+    assert_eq!(live_state(&state)["telling"], serde_json::json!(true));
+    state.set_telling(false);
+    assert_eq!(live_state(&state)["telling"], serde_json::json!(false));
+}
+
+#[test]
+fn setting_telling_wakes_a_subscriber() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let mut changes = state.subscribe_telling();
+    state.set_telling(true);
+    assert!(changes.has_changed().expect("the sender outlives this"));
+    assert!(*changes.borrow_and_update());
+}
+
+#[test]
 fn setting_transcribing_wakes_a_subscriber() {
     let state = test_state(std::sync::mpsc::channel().0);
     let mut changes = state.subscribe_transcribing();

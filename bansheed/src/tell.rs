@@ -781,9 +781,8 @@ fn thread_window(config: &TellConfig) -> Duration {
     span(config.thread_timeout_min)
 }
 
-/// What one run answers with once it ends. The caller decides how each fact
-/// reaches the user, and `banshee tell` prints both. The scope is not here: it
-/// has to arrive before the run, so it goes out through `notify` instead.
+/// What one run answers with once it ends. The scope is not here: it has to
+/// arrive before the run, so `notify` carries it instead.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Told {
     /// What to print once the command ends. A command that only opened a
@@ -793,9 +792,8 @@ pub struct Told {
     pub warnings: Vec<String>,
 }
 
-/// Names what the agent may edit, then starts it. The order is the contract.
-/// The same words after a run of tens of seconds are a receipt, not a warning,
-/// and on the terminal that run is the user's only window to press Ctrl-C.
+/// Names what the agent may edit, then starts it. Said first, not last: only
+/// while the run is open can the user still press Ctrl-C.
 fn announce_then_start<T>(
     notify: &dyn Fn(&str),
     agent: Headless,
@@ -907,8 +905,8 @@ fn show(
     Ok(Told::default())
 }
 
-/// Runs one command. It prints nothing: the caller decides how a line reaches
-/// the user. `notify` carries the scope, and it fires before the agent starts.
+/// Runs one command. It prints nothing, and `notify` fires with the scope
+/// before the agent starts.
 pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<Told, BansheeError> {
     let dir = dir()?;
     let Some(_lock) = RunLock::take(&dir, run_deadline(config) + PRE_SPAWN_MARGIN) else {
@@ -949,10 +947,10 @@ pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<To
         now_seconds(),
         thread_window(config),
     );
+    let argv = argv_for(agent, words, resume_id.as_deref(), &dir, &present);
+    // An agent CLI is often a script whose interpreter the daemon's own PATH
+    // does not hold.
     let ran = announce_then_start(notify, agent, resume_id.as_deref(), || {
-        let argv = argv_for(agent, words, resume_id.as_deref(), &dir, &present);
-        // An agent CLI is often a script whose interpreter the daemon's own
-        // PATH does not hold.
         run_bounded(&program, &argv, &dir, &env.path, run_deadline(config))
     })?;
     let Ran::Finished {

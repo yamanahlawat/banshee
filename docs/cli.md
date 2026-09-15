@@ -48,6 +48,8 @@
 - The tell key sounds no cue of its own. A tell recording ends on the same
   record-stop cue as a dictation.
 - A failed run sounds the error cue. `banshee status` names the reason.
+- The menu bar icon shows Busy for the length of the run, so you can see that
+  the agent still works.
 - `banshee tell --undo` puts the watched folders back from the newest snapshot.
 - The folders, the agent and the timeouts are settings. See
   [configuration.md](configuration.md#telling-your-agent).
@@ -72,6 +74,7 @@ Two phrases Banshee answers itself. It hands neither to the agent:
 $ banshee watch
 idle
 recording
+busy
 idle
 speaking
 idle
@@ -79,6 +82,9 @@ idle
 
 - The first line is the state at connect.
 - The daemon pushes the rest as they happen.
+- The words are `idle`, `recording`, `busy`, `speaking` and `listening`.
+- `busy` means Banshee transcribes what you said, or the agent a `banshee tell`
+  started still runs. Neither one needs you.
 - The command exits non-zero when the daemon stops, so a supervisor can
   restart it.
 - For a single answer, not a stream, ask `banshee status`.

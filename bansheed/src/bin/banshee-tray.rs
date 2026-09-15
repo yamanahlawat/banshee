@@ -60,6 +60,7 @@ mod tray {
         Recording,
         Speaking,
         Listening,
+        Busy,
         NotRunning,
     }
 
@@ -71,6 +72,7 @@ mod tray {
                 Some(Activity::Recording) => Indicator::Recording,
                 Some(Activity::Speaking) => Indicator::Speaking,
                 Some(Activity::Listening) => Indicator::Listening,
+                Some(Activity::Busy) => Indicator::Busy,
             }
         }
 
@@ -81,12 +83,13 @@ mod tray {
                 Indicator::Speaking => "Speaking",
                 // What it means to a person, not the name on the wire.
                 Indicator::Listening => "Waiting for you",
+                Indicator::Busy => "Busy",
                 Indicator::NotRunning => "Not running",
             }
         }
     }
 
-    // The mark ships as five rendered states, drawn from the same geometry the
+    // The mark ships as six rendered states, drawn from the same geometry the
     // window uses. macOS paints a template image from its alpha alone, so each
     // asset is black with the drawing in the alpha channel. tray-icon renders
     // any icon 18pt tall, which makes 36px its 2x asset.
@@ -96,6 +99,7 @@ mod tray {
             Indicator::Recording => include_bytes!("../../assets/tray/mark-recording.png"),
             Indicator::Speaking => include_bytes!("../../assets/tray/mark-speaking.png"),
             Indicator::Listening => include_bytes!("../../assets/tray/mark-listening.png"),
+            Indicator::Busy => include_bytes!("../../assets/tray/mark-busy.png"),
             Indicator::NotRunning => include_bytes!("../../assets/tray/mark-notrunning.png"),
         };
         let mut reader = png::Decoder::new(std::io::Cursor::new(asset)).read_info()?;
@@ -108,8 +112,9 @@ mod tray {
 
     // macOS paints a template image from the alpha and picks the colour itself.
     // Every other platform draws the RGB it is given, and the assets are black,
-    // so the mark has to carry its own colour there. `#e2673d` is the accent the
-    // window uses on a dark ground.
+    // so the mark carries white: what macOS produces, and what the other icons
+    // in a panel use. A light panel makes white hard to see, and
+    // StatusNotifierItem exposes no panel foreground colour to follow instead.
     #[cfg(target_os = "macos")]
     fn tint(_pixels: &mut [u8]) {}
 
@@ -117,9 +122,9 @@ mod tray {
     fn tint(pixels: &mut [u8]) {
         for pixel in pixels.as_chunks_mut::<4>().0 {
             // The alpha is the drawing. Only the colour under it changes.
-            pixel[0] = 0xe2;
-            pixel[1] = 0x67;
-            pixel[2] = 0x3d;
+            pixel[0] = 0xff;
+            pixel[1] = 0xff;
+            pixel[2] = 0xff;
         }
     }
 
@@ -739,11 +744,12 @@ mod tray {
             serde_json::json!({"recording": recording, "speaking": speaking})
         }
 
-        const STATES: [Indicator; 5] = [
+        const STATES: [Indicator; 6] = [
             Indicator::Idle,
             Indicator::Recording,
             Indicator::Speaking,
             Indicator::Listening,
+            Indicator::Busy,
             Indicator::NotRunning,
         ];
 
@@ -787,6 +793,14 @@ mod tray {
             assert_eq!(tinted.len(), raw.len(), "{w}x{h} must not change size");
             let alpha_of = |v: &[u8]| v.as_chunks::<4>().0.iter().map(|p| p[3]).collect::<Vec<_>>();
             assert_eq!(alpha_of(&tinted), alpha_of(&raw), "the alpha carries the mark");
+            assert!(
+                tinted
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|p| p[..3] == [0xff, 0xff, 0xff]),
+                "tint must paint white"
+            );
         }
 
         fn device(open: Option<&str>, missing: Option<&str>) -> Device {
