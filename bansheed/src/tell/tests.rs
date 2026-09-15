@@ -131,7 +131,6 @@ fn no_ready_agent_names_what_to_do() {
 
 #[test]
 fn a_configured_agent_that_is_not_ready_is_an_error_rather_than_a_fallback() {
-    // A pinned agent is a decision. Another agent run in its place hides it.
     let error = agent_for(Some("claude"), Some("opencode"), &[Headless::OpenCode]).unwrap_err();
     assert!(
         error.to_string().contains("claude"),
@@ -151,7 +150,6 @@ fn a_configured_agent_with_no_headless_entry_names_the_ones_that_have_one() {
 
 use std::path::{Path, PathBuf};
 
-/// The agent's working directory, derived the way `run` derives it.
 fn run_dir() -> PathBuf {
     agent_dir(Path::new("/home/x/.banshee/tell"))
 }
@@ -163,7 +161,7 @@ fn one_folder() -> Vec<PathBuf> {
 #[test]
 fn nothing_banshee_keeps_lives_inside_the_agents_directory() {
     // An agent that lists its own working directory must not find the
-    // snapshots there and edit a copy of the config instead of the real one.
+    // snapshots there. It would edit a copy, not the real config.
     let state = Path::new("/home/x/.banshee/tell");
     let run_in = agent_dir(state);
     for kept in [
@@ -211,14 +209,6 @@ fn opencode_runs_headless_with_auto() {
             "make the gaps bigger",
         ]
     );
-}
-
-#[test]
-fn opencode_is_never_given_a_folder_list() {
-    // Measured: an opencode.json permission block makes the run hang instead of
-    // asking. --auto is all OpenCode has, and it takes no folders.
-    let command = argv_for(Headless::OpenCode, "hi", None, &run_dir(), &one_folder());
-    assert!(!command.iter().any(|part| part.contains("hypr")));
 }
 
 #[test]
@@ -355,11 +345,11 @@ fn a_run_with_several_text_parts_keeps_the_last_one() {
 #[test]
 fn a_refused_tool_is_visible_in_the_output() {
     let denied = r#"{"result":"done","session_id":"a","permission_denials":[{"tool_name":"mcp__banshee__speak_status"}]}"#;
-    assert!(
-        denied_tools(Headless::ClaudeCode, denied)
-            .contains(&"mcp__banshee__speak_status".to_string())
-    );
-    assert!(denied_tools(Headless::ClaudeCode, CLAUDE_OUT).is_empty());
+    assert!(denied_tools(denied).contains(&"mcp__banshee__speak_status".to_string()));
+    assert!(denied_tools(CLAUDE_OUT).is_empty());
+    // Measured on opencode 1.18.31: the string "denials" is absent from the
+    // binary, where "sessionID" appears 2143 times.
+    assert!(denied_tools(OPENCODE_OUT).is_empty());
 }
 
 #[test]
@@ -376,10 +366,75 @@ fn the_saved_thread_survives_a_write_and_a_read() {
 }
 
 #[test]
+fn a_reset_that_cannot_remove_the_thread_is_an_error_rather_than_a_confirmation() {
+    let dir = crate::test_support::scratch("tell-reset-denied");
+    write_session(
+        &dir,
+        &Session {
+            agent: "opencode".to_string(),
+            id: "ses_one".to_string(),
+            at: now_seconds(),
+        },
+    )
+    .unwrap();
+    // An unlink asks the parent directory for write permission, not the file.
+    let denied = read_only(&dir);
+    let answer = clear_thread(&dir);
+    writable(&dir);
+
+    assert!(
+        denied,
+        "the directory must refuse the removal for this to measure anything"
+    );
+    let error = answer.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&dir.join("session.json").display().to_string()),
+        "a user who cannot see the screen needs the path: {error}"
+    );
+    assert!(
+        read_session(&dir).is_some(),
+        "the thread is still there, so the answer must not say it is cleared"
+    );
+}
+
+#[test]
+fn a_reset_with_no_saved_thread_still_clears() {
+    let dir = crate::test_support::scratch("tell-reset-empty");
+    assert_eq!(
+        clear_thread(&dir).unwrap().reply.as_deref(),
+        Some("Thread cleared."),
+        "a fresh daemon has no file to remove, and that is not a failure"
+    );
+}
+
+#[test]
 fn a_corrupt_session_file_reads_as_no_thread_rather_than_a_failure() {
     let dir = crate::test_support::scratch("tell-corrupt");
     std::fs::write(dir.join("session.json"), "{not json").unwrap();
     assert_eq!(read_session(&dir), None);
+}
+
+/// Takes write permission off `dir`, and answers whether the removal it guards
+/// now fails. A test that runs as root gets `false`: root ignores the mode.
+fn read_only(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(dir).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(dir, perms).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join("banshee-permission-probe"))
+        .is_err()
+}
+
+fn writable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(dir).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(dir, perms).unwrap();
 }
 
 #[test]
@@ -417,13 +472,10 @@ fn a_config_with_no_tell_section_still_loads() {
     assert_eq!(config.tell.thread_timeout_min, 10);
 }
 
-/// Every `RunLock` shares one process-wide atomic, so the tests that take one
-/// run one at a time. Two of them in parallel would refuse each other and go
-/// red on a rule neither of them tests.
+/// Every `RunLock` shares one process-wide atomic, so these tests run one at a
+/// time.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A failed test panics while it holds the lock, and a poisoned mutex must not
-/// turn one red test into every later one.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|held| held.into_inner())
 }
@@ -431,8 +483,6 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 #[test]
 fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
     let _serial = serial();
-    // Every scenario lives here: two test functions racing for the lock would
-    // be flaky.
     let long = std::time::Duration::from_secs(600);
     let dir = crate::test_support::scratch("tell-lock");
     {
@@ -456,13 +506,24 @@ fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
         "the lock must free on drop"
     );
 
+    let short = std::time::Duration::from_secs(60);
+    let young_dir = crate::test_support::scratch("tell-lock-young");
+    std::fs::write(
+        young_dir.join("run.lock"),
+        format!("{} 424242", now_seconds() - 30),
+    )
+    .unwrap();
+    assert!(
+        RunLock::take(&young_dir, short).is_none(),
+        "a lock younger than the deadline is a live run"
+    );
+
     let stale_dir = crate::test_support::scratch("tell-lock-stale");
     std::fs::write(
         stale_dir.join("run.lock"),
         (now_seconds() - 1_000).to_string(),
     )
     .unwrap();
-    let short = std::time::Duration::from_secs(60);
     assert!(
         RunLock::take(&stale_dir, short).is_some(),
         "a lock older than the deadline must be taken over"
@@ -487,13 +548,33 @@ fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
 }
 
 #[test]
-fn a_lock_younger_than_the_deadline_is_not_stale() {
-    assert!(!stale(1_000, 1_030, std::time::Duration::from_secs(60)));
+fn a_takeover_that_finds_a_live_lock_puts_it_back_rather_than_stealing_it() {
+    let dir = crate::test_support::scratch("tell-lock-live");
+    let path = dir.join("run.lock");
+    let live = format!("{} 424242", now_seconds());
+    std::fs::write(&path, &live).unwrap();
+
+    assert!(!claim_stale(&path, std::time::Duration::from_secs(60)));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        live,
+        "a process a step behind must not remove a fresh lock"
+    );
 }
 
 #[test]
-fn a_lock_older_than_the_deadline_is_stale() {
-    assert!(stale(1_000, 2_000, std::time::Duration::from_secs(60)));
+fn one_caller_takes_over_a_dead_lock_and_the_next_one_finds_nothing_to_move() {
+    let dir = crate::test_support::scratch("tell-lock-takeover");
+    let path = dir.join("run.lock");
+    std::fs::write(&path, format!("{} 424242", now_seconds() - 1_000)).unwrap();
+    let short = std::time::Duration::from_secs(60);
+
+    assert!(claim_stale(&path, short), "a dead lock is taken over");
+    assert!(
+        !claim_stale(&path, short),
+        "the second caller finds no file to move"
+    );
+    assert!(!path.exists());
 }
 
 #[test]
@@ -545,10 +626,10 @@ fn a_child_that_finishes_in_time_is_read_normally() {
 
 #[test]
 fn a_descendant_holding_the_pipe_does_not_hold_the_call_open() {
-    // A shell that backgrounds a long sleep and exits stands in for
-    // `opencode run` and the local server it leaves behind: the immediate
-    // child is gone almost at once, but the backgrounded sleep inherits the
-    // piped stdout and stderr and holds them open for a hundred seconds.
+    // A shell that backgrounds a long sleep and exits stands in for `opencode
+    // run` and the server it leaves behind. The child is gone at once. The
+    // sleep inherits the piped stdout and stderr and holds them for a hundred
+    // seconds.
     let path = std::env::var_os("PATH").unwrap_or_default();
     let sh = crate::status::resolve("sh", &path).expect("sh must be on PATH to test this");
     let start = std::time::Instant::now();
@@ -624,13 +705,14 @@ fn a_snapshot_copies_every_named_folder() {
     let into = root.join("snapshots");
     let made = snapshot(std::slice::from_ref(&hypr), &into, 1_789_402_180).unwrap();
 
+    let copy = made.join(snapshot_key(&hypr));
     assert_eq!(made, into.join("1789402180"));
     assert_eq!(
-        std::fs::read_to_string(made.join("hypr/looknfeel.lua")).unwrap(),
+        std::fs::read_to_string(copy.join("looknfeel.lua")).unwrap(),
         "gaps = 5\n"
     );
     assert_eq!(
-        std::fs::read_to_string(made.join("hypr/nested/input.lua")).unwrap(),
+        std::fs::read_to_string(copy.join("nested/input.lua")).unwrap(),
         "kb = us\n"
     );
 }
@@ -639,9 +721,10 @@ fn a_snapshot_copies_every_named_folder() {
 fn a_folder_that_is_not_there_is_skipped_rather_than_a_failure() {
     let root = crate::test_support::scratch("tell-missing");
     let into = root.join("snapshots");
-    let made = snapshot(&[root.join("ghostty")], &into, 1).unwrap();
+    let ghostty = root.join("ghostty");
+    let made = snapshot(std::slice::from_ref(&ghostty), &into, 1).unwrap();
     assert!(made.is_dir());
-    assert!(!made.join("ghostty").exists());
+    assert!(!made.join(snapshot_key(&ghostty)).exists());
 }
 
 #[test]
@@ -675,12 +758,152 @@ fn prune_sorts_by_number_rather_than_by_name() {
 }
 
 #[test]
+fn a_stray_file_that_parses_as_a_number_does_not_wedge_prune() {
+    let snapshots = crate::test_support::scratch("tell-prune-stray-file");
+    for name in ["100", "200"] {
+        std::fs::create_dir_all(snapshots.join(name)).unwrap();
+    }
+    std::fs::write(snapshots.join("50"), "not a snapshot").unwrap();
+
+    prune(&snapshots, 1).unwrap();
+
+    assert!(
+        snapshots.join("50").is_file(),
+        "a file prune cannot judge must be left rather than deleted"
+    );
+    assert!(
+        snapshots.join("200").is_dir(),
+        "the newest snapshot must stay"
+    );
+    assert!(!snapshots.join("100").exists());
+}
+
+#[test]
 fn a_snapshots_setting_of_zero_still_keeps_one() {
     let config = TellConfig {
         snapshots: 0,
         ..TellConfig::default()
     };
     assert_eq!(config.keep(), 1);
+}
+
+#[test]
+fn two_watched_folders_with_one_name_keep_their_own_copies() {
+    let root = crate::test_support::scratch("tell-snapshot-one-name");
+    let config = root.join(".config").join("omarchy");
+    let share = root.join(".local").join("share").join("omarchy");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&share).unwrap();
+    std::fs::write(config.join("theme"), "tokyo-night\n").unwrap();
+    std::fs::write(share.join("theme"), "catppuccin\n").unwrap();
+
+    let into = root.join("snapshots");
+    let made = snapshot(&[config.clone(), share.clone()], &into, 100).unwrap();
+    std::fs::write(config.join("theme"), "changed\n").unwrap();
+    std::fs::write(share.join("theme"), "changed\n").unwrap();
+
+    let result = restore(&made, &[config.clone(), share.clone()]);
+
+    assert!(result.failed.is_empty(), "{:?}", result.failed);
+    assert_eq!(
+        std::fs::read_to_string(config.join("theme")).unwrap(),
+        "tokyo-night\n",
+        "one folder must not get the other folder's files"
+    );
+    assert_eq!(
+        std::fs::read_to_string(share.join("theme")).unwrap(),
+        "catppuccin\n"
+    );
+}
+
+#[test]
+fn an_older_snapshot_that_fits_two_folders_is_refused_rather_than_guessed() {
+    let root = crate::test_support::scratch("tell-restore-older-ambiguous");
+    let config = root.join(".config").join("omarchy");
+    let share = root.join(".local").join("share").join("omarchy");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&share).unwrap();
+    std::fs::write(config.join("theme"), "tokyo-night\n").unwrap();
+    std::fs::write(share.join("theme"), "catppuccin\n").unwrap();
+
+    // A snapshot taken before Banshee keyed a copy on the whole path.
+    let older = root.join("snapshots").join("100");
+    std::fs::create_dir_all(older.join("omarchy")).unwrap();
+    std::fs::write(older.join("omarchy").join("theme"), "the merge\n").unwrap();
+
+    let result = restore(&older, &[config.clone(), share.clone()]);
+
+    assert!(result.done.is_empty(), "{:?}", result.done);
+    assert_eq!(result.failed.len(), 2, "{:?}", result.failed);
+    assert_eq!(
+        std::fs::read_to_string(config.join("theme")).unwrap(),
+        "tokyo-night\n",
+        "a copy that fits two folders must reach neither"
+    );
+    assert_eq!(
+        std::fs::read_to_string(share.join("theme")).unwrap(),
+        "catppuccin\n"
+    );
+}
+
+#[test]
+fn a_snapshot_from_before_the_whole_path_key_still_restores() {
+    let root = crate::test_support::scratch("tell-restore-older");
+    let hypr = root.join("hypr");
+    std::fs::create_dir_all(&hypr).unwrap();
+    let older = root.join("snapshots").join("100");
+    std::fs::create_dir_all(older.join("hypr")).unwrap();
+    std::fs::write(older.join("hypr").join("looknfeel.lua"), "gaps = 5\n").unwrap();
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 40\n").unwrap();
+
+    let result = restore(&older, std::slice::from_ref(&hypr));
+
+    assert_eq!(result.done, vec![hypr.display().to_string()]);
+    assert_eq!(
+        std::fs::read_to_string(hypr.join("looknfeel.lua")).unwrap(),
+        "gaps = 5\n"
+    );
+}
+
+#[test]
+fn a_second_snapshot_in_the_same_second_gets_a_directory_of_its_own() {
+    let root = crate::test_support::scratch("tell-snapshot-same-second");
+    let hypr = root.join("hypr");
+    std::fs::create_dir_all(&hypr).unwrap();
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 5\n").unwrap();
+
+    let into = root.join("snapshots");
+    let first = snapshot(std::slice::from_ref(&hypr), &into, 100).unwrap();
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 40\n").unwrap();
+    let second = snapshot(std::slice::from_ref(&hypr), &into, 100).unwrap();
+
+    assert_ne!(first, second);
+    assert_eq!(
+        std::fs::read_to_string(first.join(snapshot_key(&hypr)).join("looknfeel.lua")).unwrap(),
+        "gaps = 5\n",
+        "the second run must not write over the state the first one copied"
+    );
+    assert_eq!(newest(&into), Some(second));
+}
+
+#[test]
+fn a_clock_that_went_backwards_does_not_bury_the_newest_snapshot() {
+    let root = crate::test_support::scratch("tell-snapshot-backwards");
+    let hypr = root.join("hypr");
+    std::fs::create_dir_all(&hypr).unwrap();
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 5\n").unwrap();
+
+    let into = root.join("snapshots");
+    let first = snapshot(std::slice::from_ref(&hypr), &into, 1_000).unwrap();
+    let second = snapshot(std::slice::from_ref(&hypr), &into, 100).unwrap();
+
+    assert_eq!(newest(&into), Some(second.clone()));
+    prune(&into, 1).unwrap();
+    assert!(
+        second.is_dir(),
+        "prune must not delete the snapshot it just took"
+    );
+    assert!(!first.exists());
 }
 
 #[test]
@@ -696,10 +919,14 @@ fn a_snapshot_copies_a_symlink_as_a_symlink() {
     let into = root.join("snapshots");
     let made = snapshot(std::slice::from_ref(&source), &into, 1).unwrap();
 
-    let link_path = made.join("source/link.txt");
-    assert!(std::fs::symlink_metadata(&link_path).unwrap().is_symlink());
+    let copy = made.join(snapshot_key(&source));
+    assert!(
+        std::fs::symlink_metadata(copy.join("link.txt"))
+            .unwrap()
+            .is_symlink()
+    );
     assert_eq!(
-        std::fs::read_to_string(made.join("source/file.txt")).unwrap(),
+        std::fs::read_to_string(copy.join("file.txt")).unwrap(),
         "content\n"
     );
 }
@@ -715,7 +942,7 @@ fn a_snapshot_does_not_follow_symlink_loops() {
     let into = root.join("snapshots");
     let made = snapshot(std::slice::from_ref(&source), &into, 1).unwrap();
 
-    let loop_path = made.join("source/loop");
+    let loop_path = made.join(snapshot_key(&source)).join("loop");
     assert!(std::fs::symlink_metadata(&loop_path).unwrap().is_symlink());
 }
 
@@ -772,7 +999,6 @@ fn a_restore_puts_the_files_back_and_names_the_folders() {
     let into = root.join("snapshots");
     snapshot(std::slice::from_ref(&hypr), &into, 100).unwrap();
 
-    // The agent changes one file and adds another.
     std::fs::write(hypr.join("looknfeel.lua"), "gaps = 40\n").unwrap();
     std::fs::write(hypr.join("stray.lua"), "oops\n").unwrap();
 
@@ -880,8 +1106,7 @@ fn a_failure_on_one_folder_does_not_cost_the_record_of_the_ones_already_restored
     std::fs::write(hypr.join("looknfeel.lua"), "gaps = 40\n").unwrap();
 
     // b has no write permission, so the staged copy for ghostty cannot be
-    // created there: restoring it must fail without touching hypr's own,
-    // already-succeeded, restore.
+    // created there. The failure must not touch hypr, which restored already.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -951,8 +1176,8 @@ fn a_restore_that_put_one_folder_back_stays_a_success() {
     assert!(!failed_outright(&Restored::default()));
 }
 
-/// Builds `<dir>/snapshots/<at>/<name>` holding one file, and answers with the
-/// folder the restore would write back to.
+/// A snapshot from before Banshee keyed a copy on the whole path: the copy sits
+/// under the basename alone. It answers with the folder a restore writes to.
 fn snapshot_holding(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let copy = dir.join("snapshots").join("1000").join(name);
     std::fs::create_dir_all(&copy).unwrap();
@@ -1027,6 +1252,36 @@ fn a_run_timeout_under_the_ceiling_is_the_one_configured() {
         ..TellConfig::default()
     };
     assert_eq!(run_deadline(&config), Duration::from_secs(300));
+}
+
+#[test]
+fn a_timeout_names_the_deadline_that_ran_rather_than_the_configured_one() {
+    let config = TellConfig {
+        run_timeout_min: 100_000,
+        ..TellConfig::default()
+    };
+    let sentence = timed_out(Headless::OpenCode, run_deadline(&config));
+    assert!(
+        sentence.contains("1440 minutes"),
+        "the run had the ceiling, not the configured value: {sentence}"
+    );
+    assert!(
+        !sentence.contains("Raise tell.run_timeout_min"),
+        "a clamped run cannot be given longer: {sentence}"
+    );
+}
+
+#[test]
+fn a_timeout_under_the_ceiling_says_how_to_give_the_agent_longer() {
+    let config = TellConfig {
+        run_timeout_min: 5,
+        ..TellConfig::default()
+    };
+    let sentence = timed_out(Headless::ClaudeCode, run_deadline(&config));
+    assert!(
+        sentence.contains("5 minutes") && sentence.contains("Raise tell.run_timeout_min"),
+        "{sentence}"
+    );
 }
 
 #[test]
@@ -1136,7 +1391,6 @@ fn a_home_holding_a_space_or_a_quote_stays_one_word() {
     );
 }
 
-/// A file on PATH that a spawn can run. The name is what `terminal` looks for.
 fn executable(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
     let file = dir.join(name);
@@ -1183,7 +1437,6 @@ fn no_terminal_on_path_is_none_rather_than_a_guess() {
     assert!(terminal(&only_path(&dir)).is_none());
 }
 
-/// What the terminal was handed, once it has written it down.
 fn recorded(file: &Path) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -1195,9 +1448,8 @@ fn recorded(file: &Path) -> Vec<String> {
     }
 }
 
-/// Opens the thread with `dir` as the whole PATH, and keeps what was said.
-/// A sibling test that forks between the write of this terminal and its close
-/// holds the file open, so the spawn is retried rather than believed.
+/// Opens the thread with `dir` as the whole PATH, and keeps the lines `notify`
+/// printed. A sibling test can hold the new file open, so the spawn is retried.
 fn shown(dir: &Path) -> (Result<Told, BansheeError>, Vec<String>) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -1220,8 +1472,7 @@ fn shown(dir: &Path) -> (Result<Told, BansheeError>, Vec<String>) {
     }
 }
 
-/// A terminal that writes down its arguments, and a thread to open. The agent
-/// binary is the caller's to install: its absence is what one test measures.
+/// A terminal that writes down its arguments, and a thread to open.
 fn with_a_thread(name: &str) -> PathBuf {
     let dir = crate::test_support::scratch(name);
     executable(
@@ -1267,10 +1518,8 @@ fn the_screen_reads_the_thread_from_banshees_directory_and_opens_the_agents() {
     let dir = with_a_thread("tell-show-dirs");
     executable(&dir, "opencode", "#!/bin/sh\n");
 
-    // `with_a_thread` wrote session.json into `dir` itself, so a screen that
-    // opened would have had to read it from there. The directory below is
-    // spelled out: one derived from `agent_dir` would agree with it however
-    // `agent_dir` is written.
+    // The directory below is spelled out. One derived from `agent_dir` would
+    // agree with it however `agent_dir` is written.
     shown(&dir).0.unwrap();
     let line = recorded(&dir.join("kitty.args")).pop().unwrap();
     assert!(
@@ -1390,7 +1639,7 @@ fn a_refused_tool_becomes_a_line_the_user_gets() {
     assert_eq!(denied_warning(Headless::ClaudeCode, &[]), None);
 }
 
-/// What one run said and did, in the order it happened.
+/// What one run printed and did, in the order it happened.
 fn ordered(agent: Headless, resume_id: Option<&str>) -> Vec<String> {
     let steps = std::sync::Mutex::new(Vec::new());
     announce_then_start(
