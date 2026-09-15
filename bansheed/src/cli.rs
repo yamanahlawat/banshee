@@ -653,8 +653,8 @@ pub async fn speak(text: String) -> Result<(), BansheeError> {
     Ok(())
 }
 
-/// Prints what the agent wrote. The agent already spoke it, so this is the
-/// record rather than the reply.
+/// Prints what the agent wrote. A refused `speak_status` leaves this print as
+/// the only thing the user gets.
 pub fn tell(
     text: Option<String>,
     undo: bool,

@@ -122,8 +122,6 @@ fn the_settings_line_names_the_voice_of_the_speaker_in_force() {
     assert_eq!(super::settings_voice(&config, false), config.tts.voice);
 }
 
-// The two agents differ in what they may edit, and the user cannot see the
-// screen, so the line says which one it is rather than naming the agent alone.
 #[test]
 fn the_tell_line_says_whether_the_agent_is_scoped() {
     use crate::tell::Headless;
@@ -138,8 +136,27 @@ fn the_tell_line_says_whether_the_agent_is_scoped() {
     );
 }
 
-// The resolver's own message names the agent to connect, so a second fix here
-// would be a second sentence to keep correct.
+// The cue is the whole failure signal the key path has, and the user does not
+// read the screen.
+#[test]
+fn the_checklist_says_a_failed_tell_is_silent_while_cues_are_off() {
+    let line = super::silent_tell_line(true, false).expect("cues off must be named");
+    assert!(
+        line.contains("makes no sound") && line.contains("[audio.cues]"),
+        "the line must say what is lost and which key restores it: {line}"
+    );
+    assert_eq!(
+        super::silent_tell_line(true, true),
+        None,
+        "the cue still sounds, so there is nothing to warn about"
+    );
+    assert_eq!(
+        super::silent_tell_line(false, false),
+        None,
+        "no agent can fail, and the line above already says so"
+    );
+}
+
 #[test]
 fn a_tell_line_with_no_agent_carries_the_reason_whole() {
     let refused = BansheeError::Rejected("no connected agent. Run: banshee connect claude".into());

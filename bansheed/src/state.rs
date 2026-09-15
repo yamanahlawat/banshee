@@ -212,9 +212,24 @@ fn replace_if_new(field: &RwLock<Option<String>>, name: Option<String>) -> bool 
     true
 }
 
+/// A failure `banshee status` names, and the path that wrote it. A dictation
+/// that works says nothing about an agent run that failed, so a success must
+/// not clear the other side's reason.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Failed {
+    from: Source,
+    reason: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Source {
+    Dictation,
+    Tell,
+}
+
 /// Each move wakes the push task of every subscriber, so a value that has not
 /// changed sends nothing.
-fn send_if_new(channel: &watch::Sender<Option<String>>, value: Option<String>) {
+fn send_if_new<T: PartialEq>(channel: &watch::Sender<Option<T>>, value: Option<T>) {
     channel.send_if_modified(|current| {
         if *current == value {
             return false;
@@ -268,10 +283,10 @@ pub struct DaemonState {
     transcribing: watch::Sender<bool>,
     // True for the life of one agent run the tell key started.
     telling: watch::Sender<bool>,
-    // Why the last hotkey-path attempt failed - resampling, transcribing,
-    // listening for an answer, or telling the agent - cleared by the next
-    // one that succeeds.
-    last_error: watch::Sender<Option<String>>,
+    // Why the last hotkey-path attempt failed. Dictation writes it from
+    // resampling, transcribing, and listening for an answer. A tell run writes
+    // it too. Each side clears only what it wrote.
+    last_error: watch::Sender<Option<Failed>>,
     // Why the last spoken reply failed, cleared by the next one that plays.
     last_speech_error: watch::Sender<Option<String>>,
     // One counter for the whole device picture. It moves only when a setter
@@ -565,15 +580,38 @@ impl DaemonState {
         self.telling.subscribe()
     }
 
+    /// Why the last dictation failed. `None` clears a dictation failure and
+    /// leaves a tell failure standing.
     pub fn set_last_error(&self, error: Option<String>) {
-        send_if_new(&self.last_error, error);
+        self.write_failure(Source::Dictation, error);
+    }
+
+    /// Why the last agent run failed. Only the next agent run clears it.
+    pub fn set_tell_error(&self, error: Option<String>) {
+        self.write_failure(Source::Tell, error);
+    }
+
+    fn write_failure(&self, from: Source, reason: Option<String>) {
+        let cleared = self
+            .last_error
+            .borrow()
+            .as_ref()
+            .is_none_or(|failed| failed.from == from);
+        match reason {
+            Some(reason) => send_if_new(&self.last_error, Some(Failed { from, reason })),
+            None if cleared => send_if_new(&self.last_error, None),
+            None => {}
+        }
     }
 
     pub fn last_error(&self) -> Option<String> {
-        self.last_error.borrow().clone()
+        self.last_error
+            .borrow()
+            .as_ref()
+            .map(|failed| failed.reason.clone())
     }
 
-    pub fn subscribe_last_error(&self) -> watch::Receiver<Option<String>> {
+    pub fn subscribe_last_error(&self) -> watch::Receiver<Option<Failed>> {
         self.last_error.subscribe()
     }
 

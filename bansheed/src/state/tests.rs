@@ -521,6 +521,31 @@ fn clearing_an_error_that_is_already_clear_wakes_nobody() {
     );
 }
 
+// The two paths share one field, so each clears only what it wrote.
+#[test]
+fn a_success_on_one_path_leaves_the_other_path_s_failure_standing() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+    state.set_tell_error(Some("opencode exited exit status: 1".to_string()));
+    state.set_last_error(None);
+    assert_eq!(
+        state.last_error().as_deref(),
+        Some("opencode exited exit status: 1"),
+        "a dictation that works says nothing about an agent run that failed"
+    );
+
+    state.set_last_error(Some("the microphone would not open".to_string()));
+    state.set_tell_error(None);
+    assert_eq!(
+        state.last_error().as_deref(),
+        Some("the microphone would not open"),
+        "an agent run that works says nothing about a microphone that would not open"
+    );
+
+    state.set_last_error(None);
+    assert_eq!(state.last_error(), None, "each path still clears its own");
+}
+
 // One field per side, so a failed listen and a failed reply never overwrite
 // each other.
 #[test]

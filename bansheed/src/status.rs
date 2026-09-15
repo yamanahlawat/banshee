@@ -134,7 +134,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         }
     }
 
-    report_tell(&config.tell);
+    report_tell(&config);
 
     if let Some(service) = crate::service::service_file_path() {
         if service.exists() {
@@ -159,12 +159,25 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 
 /// What `banshee tell` would run. A note and never a failure: a machine with
 /// no headless agent still records, types and speaks.
-fn report_tell(config: &crate::config::TellConfig) {
+fn report_tell(config: &Config) {
     // The same call `tell` makes, so the checklist cannot name one agent while
     // a command runs another.
     let agent = crate::connect::Env::from_machine()
-        .and_then(|env| crate::tell::resolved_agent(config, &env, &env.home));
+        .and_then(|env| crate::tell::resolved_agent(&config.tell, &env, &env.home));
+    let found = agent.is_ok();
     note(&tell_line(agent));
+    if let Some(line) = silent_tell_line(found, config.audio.cues.enabled) {
+        note(line);
+    }
+}
+
+/// What a user who turned cues off no longer hears. The cue is the only sign
+/// the key path gives that a run failed, and nothing else takes its place.
+fn silent_tell_line(agent_found: bool, cues_on: bool) -> Option<&'static str> {
+    (agent_found && !cues_on).then_some(
+        "cues are off, so a failed tell makes no sound; \
+         set [audio.cues] enabled = true to hear it",
+    )
 }
 
 /// The failure carries its own fix, so this adds none.

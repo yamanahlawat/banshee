@@ -540,9 +540,9 @@ fn save_history(state: &DaemonState, transcription: &str) {
     }
 }
 
-/// The `telling` flag, raised for the life of one run. Lowered on drop, not by
-/// hand: nothing else clears it, so a run that leaves it raised holds the icon
-/// on Busy until the daemon restarts.
+/// The `telling` flag, raised for the life of one run. `Drop` lowers it.
+/// Nothing else clears it, so a raised flag holds the icon on Busy until the
+/// daemon restarts.
 struct Telling<'a>(&'a DaemonState);
 
 impl<'a> Telling<'a> {
@@ -558,12 +558,11 @@ impl Drop for Telling<'_> {
     }
 }
 
-/// Runs one agent turn and answers for it. A run that worked sounds no cue of
-/// its own: the agent has already spoken through Banshee's MCP server, and a
-/// beep behind its voice says the same thing twice.
+/// Runs one agent turn and answers for it. A run that worked sounds no cue:
+/// the agent already spoke through Banshee's MCP server.
 ///
-/// A panic is caught here, or the thread ends with no cue and no error and the
-/// user waits for a result that never comes.
+/// The catch is here on purpose. Without it the thread ends with no cue and no
+/// error, and the user waits for nothing.
 fn deliver_tell(
     state: &DaemonState,
     cues: &Cues,
@@ -582,11 +581,11 @@ fn deliver_tell(
 }
 
 /// What a run that exited 0 still got wrong. The hotkey path has no terminal,
-/// so the warnings would end in the journal and reach nobody: `banshee status`
-/// names them instead. One of them also sounds the failure cue, because a
-/// refused tool leaves a run that the user cannot tell from one that worked.
+/// so `banshee status` names the warnings instead of the journal. A refused
+/// tool also sounds the failure cue: it sounds like a run that worked.
 fn warn_tell(state: &DaemonState, cues: &Cues, warnings: &[crate::tell::Warning]) {
     if warnings.is_empty() {
+        state.set_tell_error(None);
         return;
     }
     let reason = warnings
@@ -595,7 +594,7 @@ fn warn_tell(state: &DaemonState, cues: &Cues, warnings: &[crate::tell::Warning]
         .collect::<Vec<_>>()
         .join(" ");
     eprintln!("tell warned: {reason}");
-    state.set_last_error(Some(reason));
+    state.set_tell_error(Some(reason));
     if warnings
         .iter()
         .any(crate::tell::Warning::leaves_the_user_with_silence)
@@ -604,11 +603,9 @@ fn warn_tell(state: &DaemonState, cues: &Cues, warnings: &[crate::tell::Warning]
     }
 }
 
-/// The cue is the whole signal that a run failed. The reason is a machine
-/// string, kept for `banshee status` to name.
 fn fail_tell(state: &DaemonState, cues: &Cues, reason: String) {
     eprintln!("tell failed: {reason}");
-    state.set_last_error(Some(reason));
+    state.set_tell_error(Some(reason));
     cues.send(Cue::Error);
 }
 
@@ -627,8 +624,8 @@ mod tell_tests {
     use super::*;
     use crate::tell::Told;
 
-    /// Whether the player was asked to say nothing. A queued line reaches the
-    /// backend from the watcher thread, so the wait comes before the answer.
+    /// Whether the player said nothing. The watcher thread hands a queued line
+    /// to the backend, so the wait comes before the answer.
     fn said_nothing(lines: &crate::test_support::SpokenLines) -> bool {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
@@ -663,6 +660,66 @@ mod tell_tests {
             None,
             "a clean run leaves status nothing to name"
         );
+    }
+
+    // The user hears the failure cue and dictates one message on the way to a
+    // terminal. Status is the only place left that holds why the run failed.
+    #[test]
+    fn a_dictation_that_works_leaves_the_tell_failure_for_status() {
+        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, _sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Err(banshee_common::error::BansheeError::Rejected(
+                "opencode exited exit status: 1".to_string(),
+            ))
+        });
+
+        state.set_last_error(None);
+
+        assert_eq!(
+            state.last_error(),
+            Some("opencode exited exit status: 1".to_string()),
+            "the cue has already sounded, so status is all the user has left"
+        );
+    }
+
+    #[test]
+    fn a_run_that_worked_clears_the_last_run_that_failed() {
+        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, _sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Err(banshee_common::error::BansheeError::Rejected(
+                "opencode exited exit status: 1".to_string(),
+            ))
+        });
+
+        deliver_tell(&state, &cues, || Ok(Told::default()));
+
+        assert_eq!(
+            state.last_error(),
+            None,
+            "a stale reason sends the user after a failure that is already fixed"
+        );
+    }
+
+    // "start over" reaches no agent and sounds nothing. The user chose silence
+    // here over a cue of its own. A reset that fails is still an error, so it
+    // sounds the error cue and `banshee status` names it.
+    #[test]
+    fn a_command_banshee_answers_itself_sounds_nothing() {
+        let (state, lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, sounded) = Cues::recording();
+        deliver_tell(&state, &cues, || {
+            Ok(Told {
+                reply: Some("Thread cleared.".to_string()),
+                warnings: vec![],
+            })
+        });
+        assert!(
+            sounded.try_recv().is_err(),
+            "the user asked for no sound on a reset that worked"
+        );
+        assert!(said_nothing(&lines));
     }
 
     #[test]
