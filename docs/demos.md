@@ -1,6 +1,6 @@
 # The demos
 
-Each video runs in real time. The quiet stretches, where the agent works, run faster.
+The talking runs in real time. The quiet stretches, where the agent works, run faster.
 White captions carry the person's words. Orange captions carry Banshee's voice.
 
 ## Linux, on Omarchy
