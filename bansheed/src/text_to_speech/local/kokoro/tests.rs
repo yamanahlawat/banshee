@@ -200,3 +200,67 @@ fn sentences_split_on_terminators() {
         vec!["no terminator"]
     );
 }
+
+#[test]
+fn a_mid_token_terminator_does_not_end_a_sentence() {
+    assert_eq!(
+        sentences("Release 0.12.1 is out.").collect::<Vec<_>>(),
+        vec!["Release 0.12.1 is out."]
+    );
+    assert_eq!(
+        sentences("Speed is 1.2 now.").collect::<Vec<_>>(),
+        vec!["Speed is 1.2 now."]
+    );
+    assert_eq!(
+        sentences("I changed config.toml and main.rs.").collect::<Vec<_>>(),
+        vec!["I changed config.toml and main.rs."]
+    );
+}
+
+#[test]
+fn a_terminator_still_ends_a_sentence_before_whitespace_or_text_end() {
+    assert_eq!(
+        sentences("Built 0.12.1. Tests pass! Ready?").collect::<Vec<_>>(),
+        vec!["Built 0.12.1.", "Tests pass!", "Ready?"]
+    );
+}
+
+#[test]
+fn a_terminator_before_a_closing_quote_or_bracket_ends_the_sentence_after_it() {
+    assert_eq!(
+        sentences(r#"He said "Stop!" Then he left. Now go."#).collect::<Vec<_>>(),
+        vec![r#"He said "Stop!""#, "Then he left.", "Now go."]
+    );
+    assert_eq!(
+        sentences("Work is done (finally.) Next task is queued.").collect::<Vec<_>>(),
+        vec!["Work is done (finally.)", "Next task is queued."]
+    );
+}
+
+#[test]
+fn an_initialism_is_never_split_between_its_letters() {
+    assert_eq!(
+        sentences("U.S.A. is here.").collect::<Vec<_>>(),
+        vec!["U.S.A.", "is here."]
+    );
+}
+
+#[test]
+fn a_run_of_closers_stays_with_the_sentence_it_ends() {
+    assert_eq!(
+        sentences(r#"(He said "Stop!") Next."#).collect::<Vec<_>>(),
+        vec![r#"(He said "Stop!")"#, "Next."]
+    );
+}
+
+#[test]
+fn every_closing_bracket_ends_the_sentence_after_it() {
+    for text in [
+        "Work is done (finally.) Next task is queued.",
+        "Work is done [finally.] Next task is queued.",
+        "Work is done {finally.} Next task is queued.",
+    ] {
+        let chunks = sentences(text).collect::<Vec<_>>();
+        assert_eq!(chunks.len(), 2, "{text:?} gave {chunks:?}");
+    }
+}
