@@ -510,17 +510,47 @@ pub fn restore(from: &Path, paths: &[PathBuf]) -> Restored {
 /// Stages the copy beside the target and swaps with two renames, so a fault
 /// never leaves the user with no config.
 fn restore_one(copy: &Path, target: &Path) -> Result<(), BansheeError> {
+    swap_in(copy, target, |from, to| std::fs::rename(from, to))
+}
+
+/// `rename` is taken rather than called, because no filesystem operation makes
+/// the second rename fail while the first one works. A test gives its own.
+fn swap_in(
+    copy: &Path,
+    target: &Path,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), BansheeError> {
     let staged = with_suffix(target, ".banshee-restoring");
     let replaced = with_suffix(target, ".banshee-replaced");
     let _ = std::fs::remove_dir_all(&staged);
     let _ = std::fs::remove_dir_all(&replaced);
     copy_tree(copy, &staged)?;
+    let mut moved_aside = false;
     if target.exists() {
-        std::fs::rename(target, &replaced)?;
+        rename(target, &replaced).map_err(|e| BansheeError::file(target, e))?;
+        moved_aside = true;
     }
-    std::fs::rename(&staged, target)?;
+    if let Err(e) = rename(&staged, target) {
+        if moved_aside {
+            return Err(put_back(&replaced, target, e));
+        }
+        return Err(BansheeError::file(target, e));
+    }
     let _ = std::fs::remove_dir_all(&replaced);
     Ok(())
+}
+
+/// Without this the watched folder has nothing in it at all.
+fn put_back(replaced: &Path, target: &Path, cause: std::io::Error) -> BansheeError {
+    if std::fs::rename(replaced, target).is_ok() {
+        return BansheeError::file(target, cause);
+    }
+    // Nothing else tells the user where the config went.
+    BansheeError::Rejected(format!(
+        "{}: {cause}. The config is now at {}. Move it back by hand.",
+        target.display(),
+        replaced.display()
+    ))
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -843,11 +873,11 @@ fn span(minutes: u64) -> Duration {
 }
 
 fn run_deadline(config: &TellConfig) -> Duration {
-    span(config.run_timeout_min)
+    span(config.run_minutes())
 }
 
 fn thread_window(config: &TellConfig) -> Duration {
-    span(config.thread_timeout_min)
+    span(config.thread_minutes())
 }
 
 /// What one run answers with once it ends. The scope is not here: it has to

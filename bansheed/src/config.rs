@@ -416,12 +416,15 @@ pub struct TellConfig {
     pub paths: Vec<String>,
 }
 
+const DEFAULT_THREAD_TIMEOUT_MIN: u64 = 10;
+const DEFAULT_RUN_TIMEOUT_MIN: u64 = 5;
+
 impl Default for TellConfig {
     fn default() -> Self {
         TellConfig {
             agent: String::new(),
-            thread_timeout_min: 10,
-            run_timeout_min: 5,
+            thread_timeout_min: DEFAULT_THREAD_TIMEOUT_MIN,
+            run_timeout_min: DEFAULT_RUN_TIMEOUT_MIN,
             snapshots: 10,
             // The list the Omarchy skill names for itself.
             paths: [
@@ -443,6 +446,24 @@ impl TellConfig {
     /// `banshee tell --undo` would never have one.
     pub fn keep(&self) -> usize {
         self.snapshots.max(1)
+    }
+
+    /// A zero deadline kills every run on its first poll, where a user who
+    /// writes one means no limit.
+    pub fn run_minutes(&self) -> u64 {
+        match self.run_timeout_min {
+            0 => DEFAULT_RUN_TIMEOUT_MIN,
+            minutes => minutes,
+        }
+    }
+
+    /// A zero window refuses every thread a second older than the one that
+    /// saved it.
+    pub fn thread_minutes(&self) -> u64 {
+        match self.thread_timeout_min {
+            0 => DEFAULT_THREAD_TIMEOUT_MIN,
+            minutes => minutes,
+        }
     }
 }
 

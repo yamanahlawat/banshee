@@ -8,8 +8,8 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
 
 - `banshee tell "<text>"` sends a command to your coding agent, which edits your Hyprland and
   Omarchy config and speaks the result. `banshee bind hyprland` binds a tell key beside the
-  dictate key. Before every command Banshee copies the watched folders, and `banshee tell
-  --undo` puts them back. Claude Code is held to `tell.paths`; OpenCode takes no folder list,
+  dictate key. Before each agent command Banshee copies the watched folders, and `banshee
+  tell --undo` puts them back. Claude Code is held to `tell.paths`; OpenCode takes no folder list,
   so it can edit anything, and `docs/configuration.md` states the difference. `BACKLOG.md`
   holds what real use has still to settle.
 - Linux onboarding in four commands: the installer, `banshee start` (which fetches the
