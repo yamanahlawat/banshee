@@ -252,3 +252,15 @@ fn a_run_of_closers_stays_with_the_sentence_it_ends() {
         vec![r#"(He said "Stop!")"#, "Next."]
     );
 }
+
+#[test]
+fn every_closing_bracket_ends_the_sentence_after_it() {
+    for text in [
+        "Work is done (finally.) Next task is queued.",
+        "Work is done [finally.] Next task is queued.",
+        "Work is done {finally.} Next task is queued.",
+    ] {
+        let chunks = sentences(text).collect::<Vec<_>>();
+        assert_eq!(chunks.len(), 2, "{text:?} gave {chunks:?}");
+    }
+}

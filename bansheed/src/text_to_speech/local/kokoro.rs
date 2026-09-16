@@ -182,7 +182,7 @@ fn installed(voice: &str) -> Result<(), BansheeError> {
     }
 }
 
-const CLOSERS: [char; 6] = ['"', '\'', '\u{201d}', '\u{2019}', ')', ']'];
+const CLOSERS: [char; 7] = ['"', '\'', '\u{201d}', '\u{2019}', ')', ']', '}'];
 
 // Streaming boundary only; the token cap is enforced per window in synthesize
 fn sentences(text: &str) -> impl Iterator<Item = &str> {
