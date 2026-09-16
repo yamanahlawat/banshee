@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.13.1] - 2026-09-14
-
 ### Added
 
 - **`banshee tell "<text>"` sends a command to your coding agent, which
@@ -38,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `banshee status` says when `audio.cues.enabled` is false.
   `tell.run_timeout_min` defaults to 5 minutes, which is a stated default and
   not a measurement: no run has been timed to a limit.
+
+## [0.13.1] - 2026-09-14
+
+### Added
+
 - **`banshee bind hyprland` binds the key in your Hyprland config.** It asks
   for the key and whether you hold it or tap it, and writes the matching block
   to `~/.config/hypr/bindings.lua` on Omarchy, or to
