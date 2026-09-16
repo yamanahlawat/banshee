@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A version number, a decimal and a year are spoken as what they are.**
+  `0.12.1` reads "zero twelve one" instead of "zero one two one", `1.2` reads
+  "one point two" instead of "one two", and `2026` reads "twenty twenty six"
+  instead of "two thousand and twenty six". A two-part version such as `1.10`
+  is still read as a decimal, so it says "one point one". The same upgrade lets
+  commas and full stops reach Kokoro as pause cues, which changes pacing
+  slightly throughout.
+
 - **A version number, a decimal or a file name is spoken as one phrase, not cut
   into separate sentences.** Banshee ended a sentence at every `.`, so
   `0.12.1` became three chunks with a pause inside the number, and

@@ -3106,8 +3106,8 @@ dependencies = [
 
 [[package]]
 name = "misaki-rs"
-version = "0.3.0"
-source = "git+https://github.com/yamanahlawat/misaki-rs?rev=99514c28c072d8a36456b2fcec6f1bd5471bfe06#99514c28c072d8a36456b2fcec6f1bd5471bfe06"
+version = "0.6.0"
+source = "git+https://github.com/yamanahlawat/misaki-rs?rev=0f84a2ae0f01e1455f793aeae8413521d1e9fdd5#0f84a2ae0f01e1455f793aeae8413521d1e9fdd5"
 dependencies = [
  "fancy-regex",
  "language-tokenizer",
