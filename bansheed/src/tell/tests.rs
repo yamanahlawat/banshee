@@ -1038,6 +1038,122 @@ fn a_symlinked_target_is_refused_and_named_rather_than_replaced() {
 }
 
 #[test]
+fn a_swap_that_fails_names_the_folder_rather_than_the_errno_alone() {
+    let root = crate::test_support::scratch("tell-restore-swap-named");
+    let hypr = root.join("hypr");
+    std::fs::create_dir_all(&hypr).unwrap();
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 5\n").unwrap();
+    let into = root.join("snapshots");
+    snapshot(std::slice::from_ref(&hypr), &into, 100).unwrap();
+
+    // A dangling link reads as absent, so the folder moves nowhere and the
+    // second rename fails on a name that is not a directory.
+    let gone = root.join("ghostty");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("nowhere"), &gone).unwrap();
+
+    let error = restore_one(&newest(&into).unwrap().join(snapshot_key(&hypr)), &gone)
+        .expect_err("a rename onto a dangling link must fail");
+
+    assert!(
+        error.to_string().contains(&gone.display().to_string()),
+        "the reason must name the folder: {error}"
+    );
+}
+
+#[test]
+fn a_swap_whose_second_rename_fails_leaves_the_config_where_it_was() {
+    let root = crate::test_support::scratch("tell-swap-rollback-wired");
+    let hypr = root.join("hypr");
+    let copy = root.join("copy");
+    std::fs::create_dir_all(&hypr).unwrap();
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(hypr.join("looknfeel.lua"), "gaps = 40\n").unwrap();
+    std::fs::write(copy.join("looknfeel.lua"), "gaps = 5\n").unwrap();
+
+    // The first rename works and the second one does not, which is the only
+    // order that can leave the user with no config at all.
+    let calls = std::cell::Cell::new(0);
+    let error = swap_in(&copy, &hypr, |from, to| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 1 {
+            std::fs::rename(from, to)
+        } else {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        }
+    })
+    .unwrap_err();
+
+    assert_eq!(calls.get(), 2, "the second rename must be reached");
+    assert!(
+        hypr.is_dir(),
+        "the watched folder must come back, not stay moved aside"
+    );
+    assert_eq!(
+        std::fs::read_to_string(hypr.join("looknfeel.lua")).unwrap(),
+        "gaps = 40\n",
+        "the folder that comes back must hold what it held before"
+    );
+    assert!(
+        error.to_string().contains(&hypr.display().to_string()),
+        "the reason must name the folder: {error}"
+    );
+}
+
+#[test]
+fn a_failed_swap_puts_the_old_folder_back_rather_than_leaving_none() {
+    let root = crate::test_support::scratch("tell-restore-rollback");
+    let hypr = root.join("hypr");
+    let replaced = with_suffix(&hypr, ".banshee-replaced");
+    std::fs::create_dir_all(&replaced).unwrap();
+    std::fs::write(replaced.join("looknfeel.lua"), "gaps = 40\n").unwrap();
+
+    let error = put_back(
+        &replaced,
+        &hypr,
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(hypr.join("looknfeel.lua")).unwrap(),
+        "gaps = 40\n",
+        "the folder the swap moved aside must be back at the watched name"
+    );
+    assert!(!replaced.exists(), "the folder moved aside must be gone");
+    assert!(
+        error.to_string().contains(&hypr.display().to_string()),
+        "the reason must name the folder: {error}"
+    );
+}
+
+#[test]
+fn a_rollback_that_fails_too_says_where_the_config_now_is() {
+    let root = crate::test_support::scratch("tell-restore-rollback-failed");
+    let hypr = root.join("hypr");
+    // A folder that is not empty refuses the rename back.
+    std::fs::create_dir_all(hypr.join("themes")).unwrap();
+    let replaced = with_suffix(&hypr, ".banshee-replaced");
+    std::fs::create_dir_all(&replaced).unwrap();
+    std::fs::write(replaced.join("looknfeel.lua"), "gaps = 40\n").unwrap();
+
+    let error = put_back(
+        &replaced,
+        &hypr,
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+    );
+
+    assert!(
+        error.to_string().contains(&replaced.display().to_string()),
+        "the reason must say where the config sits: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(replaced.join("looknfeel.lua")).unwrap(),
+        "gaps = 40\n",
+        "the config must survive a rollback that failed"
+    );
+}
+
+#[test]
 fn a_failure_on_one_folder_does_not_cost_the_record_of_the_ones_already_restored() {
     let root = crate::test_support::scratch("tell-restore-partial");
     let a = root.join("a");
@@ -1236,6 +1352,49 @@ fn a_timeout_under_the_ceiling_says_how_to_give_the_agent_longer() {
     assert!(
         sentence.contains("5 minutes") && sentence.contains("Raise tell.run_timeout_min"),
         "{sentence}"
+    );
+}
+
+#[test]
+fn a_zero_run_timeout_takes_the_shipped_default_rather_than_killing_every_run() {
+    let config = TellConfig {
+        run_timeout_min: 0,
+        ..TellConfig::default()
+    };
+    assert_eq!(run_deadline(&config), run_deadline(&TellConfig::default()));
+
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let sleep = crate::status::resolve("sleep", &path).expect("sleep must be on PATH to test this");
+    let ran = run_bounded(
+        &sleep,
+        &["0.3".to_string()],
+        &std::env::temp_dir(),
+        &path,
+        run_deadline(&config),
+    )
+    .unwrap();
+    assert!(
+        matches!(ran, Ran::Finished { .. }),
+        "a zero deadline must not kill the run on its first poll"
+    );
+}
+
+#[test]
+fn a_zero_thread_timeout_takes_the_shipped_default_rather_than_ending_every_thread() {
+    let config = TellConfig {
+        thread_timeout_min: 0,
+        ..TellConfig::default()
+    };
+    assert_eq!(
+        thread_window(&config),
+        thread_window(&TellConfig::default())
+    );
+
+    let session = saved("opencode", 1_000);
+    assert_eq!(
+        resume(Some(&session), "opencode", 1_060, thread_window(&config)),
+        Some("ses_one".to_string()),
+        "a minute later the thread must still continue"
     );
 }
 

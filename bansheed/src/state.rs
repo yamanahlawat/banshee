@@ -283,6 +283,9 @@ pub struct DaemonState {
     transcribing: watch::Sender<bool>,
     // True for the life of one agent run the tell key started.
     telling: watch::Sender<bool>,
+    // A second press that the run lock rejects ends first, and a flag alone
+    // would lower the icon under the run still going.
+    deliveries: Mutex<usize>,
     // Why the last hotkey-path attempt failed. Dictation writes it from
     // resampling, transcribing, and listening for an answer. A tell run writes
     // it too. Each side clears only what it wrote.
@@ -351,6 +354,7 @@ impl DaemonState {
             recording_active: watch::channel(false).0,
             transcribing: watch::channel(false).0,
             telling: watch::channel(false).0,
+            deliveries: Mutex::new(0),
             last_error: watch::channel(None).0,
             last_speech_error: watch::channel(None).0,
             device_changes: watch::channel(0).0,
@@ -568,8 +572,18 @@ impl DaemonState {
         self.transcribing.subscribe()
     }
 
-    pub fn set_telling(&self, on: bool) {
-        self.telling.send_replace(on);
+    /// The count and the flag move together under the lock, or two presses at
+    /// once leave the flag on the wrong one.
+    pub fn telling_started(&self) {
+        let mut live = self.deliveries.lock().unwrap();
+        *live += 1;
+        self.telling.send_replace(true);
+    }
+
+    pub fn telling_ended(&self) {
+        let mut live = self.deliveries.lock().unwrap();
+        *live = live.saturating_sub(1);
+        self.telling.send_replace(*live > 0);
     }
 
     pub fn is_telling(&self) -> bool {

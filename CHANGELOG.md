@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next command continues the same conversation, so "a bit more" works.
   "start over" ends the thread and starts no agent. "show me" reopens the
   thread in a terminal, so you can read what the agent wrote. Before
-  every command Banshee copies the folders in `tell.paths` to
+  each agent command Banshee copies the folders in `tell.paths` to
   `~/.banshee/tell/snapshots/`, keeps the newest `tell.snapshots` copies, and
   `banshee tell --undo` puts the newest back. The agent runs in
   `~/.banshee/tell/run/`, so it never lists Banshee's own snapshots and edits a

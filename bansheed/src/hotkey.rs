@@ -540,21 +540,20 @@ fn save_history(state: &DaemonState, transcription: &str) {
     }
 }
 
-/// The `telling` flag, raised for the life of one run. `Drop` lowers it.
-/// Nothing else clears it, so a raised flag holds the icon on Busy until the
-/// daemon restarts.
+/// Nothing else clears the flag, so one guard that leaks holds the icon on
+/// Busy until the daemon restarts.
 struct Telling<'a>(&'a DaemonState);
 
 impl<'a> Telling<'a> {
     fn held(state: &'a DaemonState) -> Self {
-        state.set_telling(true);
+        state.telling_started();
         Telling(state)
     }
 }
 
 impl Drop for Telling<'_> {
     fn drop(&mut self) {
-        self.0.set_telling(false);
+        self.0.telling_ended();
     }
 }
 
@@ -833,6 +832,34 @@ mod tell_tests {
 
         deliver_tell(&state, &cues, || panic!("attempt to add with overflow"));
         assert!(!state.is_telling(), "a run that panicked lowers it");
+    }
+
+    #[test]
+    fn a_second_press_that_ends_first_leaves_the_flag_up_for_the_run_still_going() {
+        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
+        let (cues, _sounded) = Cues::recording();
+
+        let mut still_up = false;
+        deliver_tell(&state, &cues, || {
+            // The second press takes a delivery of its own, which the run lock
+            // rejects while the first still holds it.
+            deliver_tell(&state, &cues, || {
+                Err(banshee_common::error::BansheeError::Rejected(
+                    "a command is already running. Wait for it to finish.".to_string(),
+                ))
+            });
+            still_up = state.is_telling();
+            Ok(Told {
+                reply: None,
+                warnings: vec![],
+            })
+        });
+
+        assert!(
+            still_up,
+            "a rejected second press must leave the busy state up for the first run"
+        );
+        assert!(!state.is_telling(), "the last delivery to end lowers it");
     }
 }
 

@@ -335,10 +335,11 @@ The `preset` picks which Whisper model Banshee uses:
   command starts a new thread.
 - **`run_timeout_min` is a stated default, not a measurement.** No run has been
   timed to a limit. Raise it if a command is killed before it finishes.
-- **Before every command Banshee copies each folder in `paths`** to
+- **Before each agent command Banshee copies each folder in `paths`** to
   `~/.banshee/tell/snapshots/<number>/`. The number is the Unix time in seconds.
   Two runs in one second get separate copies, because the second name rises
-  above the first.
+  above the first. "start over" and "show me" start no agent, so neither takes
+  a copy.
 - **Each copy carries the whole path of its folder,** with `/` written as `%`.
   Two watched folders that share a basename then keep separate copies.
 - **It keeps the newest `snapshots` copies,** and never fewer than one.
