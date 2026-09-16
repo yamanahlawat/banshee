@@ -68,15 +68,17 @@ banshee connect claude
 
 ## The keys
 
+The defaults, as `banshee bind hyprland` writes them:
+
 |                       | Linux, on Hyprland | macOS                    | What happens                                            |
 | --------------------- | ------------------ | ------------------------ | ------------------------------------------------------- |
 | **Dictate**           | `F9`               | `Right Option`           | The text is typed into the app you are focused on.      |
 | **Tell your agent**   | `Super` + `F9`     | `banshee tell "..."`     | Your agent changes your desktop, and speaks the result. |
 | **Keep, do not type** | `Shift` + `F9`     | `Shift` + `Right Option` | `banshee listen` prints it.                             |
 
+- **The key is yours.** `banshee bind hyprland` asks for it. The [demo videos](docs/demos.md) use `F5`.
 - **Hold the key** while you speak, or [tap it instead](docs/configuration.md#the-hotkey).
-- **The key is yours.** `banshee bind hyprland` asks for it. `F9` is the default, and the [demo videos](docs/demos.md) use `F5`.
-- **Tell is a compositor bind,** so Hyprland gets the key and macOS runs the command. [What tell does](docs/cli.md#telling-your-agent-to-change-the-desktop)
+- **Tell takes the first free modifier,** so a key that already holds `Super` gets `Ctrl` instead. [What tell does](docs/cli.md#telling-your-agent-to-change-the-desktop)
 
 ## Use it
 
