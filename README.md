@@ -18,6 +18,8 @@
 
 Claude Code finds a first-run bug in Banshee's own code, says out loud what it would change, and asks how far to take the fix. The answer is spoken back. Nothing was typed.
 
+[More demos](docs/demos.md): a focus mode built by voice on Omarchy, and a desktop set up for recording.
+
 ## Quickstart on Linux
 
 Hyprland, and Omarchy on it. Four commands:
