@@ -182,11 +182,34 @@ fn installed(voice: &str) -> Result<(), BansheeError> {
     }
 }
 
+const CLOSERS: [char; 6] = ['"', '\'', '\u{201d}', '\u{2019}', ')', ']'];
+
 // Streaming boundary only; the token cap is enforced per window in synthesize
 fn sentences(text: &str) -> impl Iterator<Item = &str> {
-    text.split_inclusive(['.', '!', '?'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    for (at, terminator) in text.char_indices() {
+        if !matches!(terminator, '.' | '!' | '?') {
+            continue;
+        }
+        let after = at + terminator.len_utf8();
+        let end = after
+            + text[after..]
+                .chars()
+                .take_while(|c| CLOSERS.contains(c))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        // A mid-token terminator ends nothing, so 0.12.1 survives as one chunk
+        // and one inference. The dot inside config.toml still reaches the G2P,
+        // which reads it as a pause; only the chunk boundary goes.
+        if !text[end..].chars().next().is_none_or(char::is_whitespace) {
+            continue;
+        }
+        chunks.push(text[start..end].trim());
+        start = end;
+    }
+    chunks.push(text[start..].trim());
+    chunks.into_iter().filter(|s| !s.is_empty())
 }
 
 pub struct KokoroEngine {

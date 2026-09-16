@@ -32,8 +32,8 @@ pub fn sanitize(input: &str) -> String {
         })
         .to_string();
 
-    // Speak the host as "example dot com"; raw dots would split the utterance
-    // into a gap, and the path adds nothing spoken
+    // Speak the host as "example dot com"; a raw dot reaches Kokoro as a pause
+    // inside the host, and the path adds nothing spoken
     text = URL_RE
         .replace_all(&text, |caps: &regex::Captures| {
             let host = caps[1].trim_end_matches(['.', ',', ';', ':', '!', '?']);

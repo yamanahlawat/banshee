@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A version number, a decimal or a file name is spoken as one phrase, not cut
+  into separate sentences.** Banshee ended a sentence at every `.`, so
+  `0.12.1` became three chunks with a pause inside the number, and
+  `config.toml` became two. A terminator now ends a sentence only where one
+  ends: before whitespace, at the end of the text, or after a closing quote or
+  bracket. An abbreviation such as `e.g.` still ends a chunk, and a reply with
+  no space after a full stop is spoken as a single chunk.
+
 ## [0.14.0] - 2026-09-16
 
 ### Added
