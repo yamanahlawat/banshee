@@ -18,6 +18,8 @@
 
 Claude Code finds a first-run bug in Banshee's own code, says out loud what it would change, and asks how far to take the fix. The answer is spoken back. Nothing was typed.
 
+[More demos](docs/demos.md): a focus mode built by voice on Omarchy, and a desktop set up for recording.
+
 ## Quickstart on Linux
 
 Hyprland, and Omarchy on it. Four commands:
@@ -34,9 +36,7 @@ banshee connect claude
 - `banshee bind hyprland` shows the block before it writes. Omarchy ships `wtype`, so nothing more is installed.
 - `banshee connect claude` shows the change before it writes.
 - The Claude Code hook needs `jq`. Restart Claude Code.
-- **Hold `F9`** and speak. The text is typed into the app you are focused on.
-- **Hold `Shift` and `F9`** to keep the text instead. `banshee listen` prints it.
-- **Hold `Super` and `F9`** and say what to change. Your coding agent edits the config and speaks the result. [What it does](docs/cli.md#telling-your-agent-to-change-the-desktop)
+- **Hold `F9`** and speak. The text is typed into the app you are focused on. [All three keys](#the-keys)
 - Omarchy's own dictation tool also uses `F9`. Unbind one if both are there.
 - `banshee status` names the fix, and changes nothing itself.
 - [Another compositor, or a status bar](docs/linux.md)
@@ -66,16 +66,27 @@ banshee connect claude
 - Restart the agent. It speaks its decisions and asks you questions out loud.
 - [Every other agent](#connect-your-coding-agent)
 
+## The keys
+
+The defaults, as `banshee bind hyprland` writes them:
+
+|                       | Linux, on Hyprland | macOS                    | What happens                                            |
+| --------------------- | ------------------ | ------------------------ | ------------------------------------------------------- |
+| **Dictate**           | `F9`               | `Right Option`           | The text is typed into the app you are focused on.      |
+| **Tell your agent**   | `Super` + `F9`     | `banshee tell "..."`     | Your agent changes your desktop, and speaks the result. |
+| **Keep, do not type** | `Shift` + `F9`     | `Shift` + `Right Option` | `banshee listen` prints it.                             |
+
+- **The key is yours.** `banshee bind hyprland` asks for it. The [demo videos](docs/demos.md) use `F5`.
+- **Hold the key** while you speak, or [tap it instead](docs/configuration.md#the-hotkey).
+- **Tell takes the first free modifier,** so a key that already holds `Super` gets `Ctrl` instead. [What tell does](docs/cli.md#telling-your-agent-to-change-the-desktop)
+
 ## Use it
 
-- **Hold the hotkey** and speak: `F9` on Linux, `Right Option` on macOS. On release the text is typed.
-- **Add `Shift`** to keep the text instead of typing it. `banshee listen` prints it.
 - **Talk over it.** The hotkey stops whatever Banshee says. `barge_in = "none"` lets it finish.
 - **The window.** `Open Banshee` in the menu bar: the last dictation with a copy button, the day's history, every setting. Quit it and dictation carries on.
 
 <p align="center"><img src="assets/window.png" width="360" alt="The Banshee window: the last dictation in large type with a copy button, the day's earlier dictations beneath it, and a footer naming the microphone, hotkey, voice and connected agents."></p>
 
-- [Toggle instead of hold, and rebind the key](docs/configuration.md#the-hotkey)
 - The menu bar icon answers one question: can I speak right now.
 
 | Idle | Recording | Busy | Speaking | Waiting for you | Not running |
