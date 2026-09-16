@@ -69,15 +69,11 @@ impl Layout {
     }
 
     fn block(&self, hotkey: Hotkey, mode: HotkeyMode) -> String {
-        format!(
-            "{}\n{}{}\n",
-            self.start(),
-            self.binds(hotkey, mode),
-            self.end()
-        )
+        let (binds, _) = self.binds(hotkey, mode);
+        format!("{}\n{}{}\n", self.start(), binds, self.end())
     }
 
-    fn binds(&self, hotkey: Hotkey, mode: HotkeyMode) -> String {
+    fn binds(&self, hotkey: Hotkey, mode: HotkeyMode) -> (String, Option<String>) {
         let Hotkey::Key {
             ctrl,
             alt,
@@ -96,44 +92,81 @@ impl Layout {
         let shifted: Vec<&str> = std::iter::once("SHIFT")
             .chain(mods.iter().copied())
             .collect();
-        match self.syntax {
+        // SHIFT is taken by the record bind, so the search starts at SUPER.
+        let telling: Option<Vec<&str>> = ["SUPER", "CTRL", "ALT"]
+            .into_iter()
+            .find(|modifier| !mods.contains(modifier))
+            .map(|modifier| {
+                std::iter::once(modifier)
+                    .chain(mods.iter().copied())
+                    .collect()
+            });
+        let tell_chord = telling
+            .as_ref()
+            .map(|parts| [parts.as_slice(), &[key]].concat().join(" + "));
+        let binds = match self.syntax {
             Syntax::Lua => {
                 let plain = [mods.as_slice(), &[key]].concat().join(" + ");
                 let shift = [shifted.as_slice(), &[key]].concat().join(" + ");
+                let tell_hold = tell_chord.as_ref().map_or(String::new(), |chord| {
+                    format!(
+                        r#"o.bind("{chord}", "Banshee: hold to tell the agent", "banshee record start --tell")
+o.bind("{chord}", nil, "banshee record stop", {{ release = true }})
+"#
+                    )
+                });
+                let tell_tap = tell_chord.as_ref().map_or(String::new(), |chord| {
+                    format!(
+                        r#"o.bind("{chord}", "Banshee: tap to tell the agent", "banshee record toggle --tell")
+"#
+                    )
+                });
                 match mode {
                     HotkeyMode::Hold => format!(
                         r#"o.bind("{plain}", "Banshee: hold to dictate", "banshee record start --dictate")
 o.bind("{plain}", nil, "banshee record stop", {{ release = true }})
 o.bind("{shift}", "Banshee: hold to record", "banshee record start")
 o.bind("{shift}", nil, "banshee record stop", {{ release = true }})
-"#
+{tell_hold}"#
                     ),
                     HotkeyMode::Toggle => format!(
                         r#"o.bind("{plain}", "Banshee: tap to dictate", "banshee record toggle --dictate")
 o.bind("{shift}", "Banshee: tap to record", "banshee record toggle")
-"#
+{tell_tap}"#
                     ),
                 }
             }
             Syntax::Conf => {
                 let plain = mods.join(" ");
                 let shift = shifted.join(" ");
+                let tell_mods = telling.as_ref().map(|parts| parts.join(" "));
+                let tell_hold = tell_mods.as_ref().map_or(String::new(), |chord| {
+                    format!(
+                        "bind  = {chord}, {key}, exec, banshee record start --tell
+bindr = {chord}, {key}, exec, banshee record stop
+"
+                    )
+                });
+                let tell_tap = tell_mods.as_ref().map_or(String::new(), |chord| {
+                    format!("bind = {chord}, {key}, exec, banshee record toggle --tell\n")
+                });
                 match mode {
                     HotkeyMode::Hold => format!(
                         "bind  = {plain}, {key}, exec, banshee record start --dictate
 bindr = {plain}, {key}, exec, banshee record stop
 bind  = {shift}, {key}, exec, banshee record start
 bindr = {shift}, {key}, exec, banshee record stop
-"
+{tell_hold}"
                     ),
                     HotkeyMode::Toggle => format!(
                         "bind = {plain}, {key}, exec, banshee record toggle --dictate
 bind = {shift}, {key}, exec, banshee record toggle
-"
+{tell_tap}"
                     ),
                 }
             }
-        }
+        };
+        (binds, tell_chord)
     }
 }
 
@@ -143,15 +176,19 @@ pub struct Rebind {
     pub changes: Vec<Change>,
     /// Lines, counted in the file as written, that run `banshee record` outside the markers.
     pub strays: Vec<usize>,
+    /// The chord that tells the agent. `None` when the dictate key holds every
+    /// modifier and nothing is left to add.
+    pub tell: Option<String>,
 }
 
 pub fn plan(hypr_dir: &Path, hotkey: Hotkey, mode: HotkeyMode) -> Result<Rebind, BansheeError> {
     let layout = Layout::detect(hypr_dir)?;
     let before = std::fs::read_to_string(&layout.path)?;
     let (start, end) = (layout.start(), layout.end());
+    let (binds, tell) = layout.binds(hotkey, mode);
     let after = match split_between(&before, &start, &end) {
         Some((head, _, tail)) => {
-            format!("{head}{start}\n{}{end}{tail}", layout.binds(hotkey, mode))
+            format!("{head}{start}\n{binds}{end}{tail}")
         }
         None if before.contains(BLOCK_START) => {
             return Err(BansheeError::Rejected(format!(
@@ -177,6 +214,7 @@ pub fn plan(hypr_dir: &Path, hotkey: Hotkey, mode: HotkeyMode) -> Result<Rebind,
         path: layout.path,
         changes,
         strays,
+        tell,
     })
 }
 
@@ -304,16 +342,24 @@ pub fn run(
         );
     }
     if rebind.changes.is_empty() {
+        let tell = match &rebind.tell {
+            Some(chord) => format!(", {chord} to tell your agent"),
+            None => ", no modifier left to tell your agent".to_string(),
+        };
         println!(
-            "Hyprland is already bound: {} {hotkey} to dictate, Shift+{hotkey} to record.",
+            "Hyprland is already bound: {} {hotkey} to dictate, Shift+{hotkey} to record{tell}.",
             press_word(mode)
         );
         return Ok((hotkey, mode));
     }
+    let tell = match &rebind.tell {
+        Some(chord) => format!(" {chord} tells your agent."),
+        None => " Your key holds every modifier, so nothing is left for the tell key.".to_string(),
+    };
     let done = match mode {
-        HotkeyMode::Hold => format!("Hyprland is bound: hold {hotkey} and speak."),
+        HotkeyMode::Hold => format!("Hyprland is bound: hold {hotkey} and speak.{tell}"),
         HotkeyMode::Toggle => {
-            format!("Hyprland is bound: tap {hotkey}, speak, and tap it again to stop.")
+            format!("Hyprland is bound: tap {hotkey}, speak, and tap it again to stop.{tell}")
         }
     };
     apply_plan(&rebind.changes, &env.path, yes, &done)?;

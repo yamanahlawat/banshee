@@ -10,6 +10,13 @@
     'M21 70 L24 46 C24 27 34 14 50 14 C66 14 76 27 76 46 L79 70 C79 80 72 88 64 86 ' +
     'C57 84 55 72 50 72 C45 72 43 84 36 86 C28 88 21 80 21 70 Z';
 
+  // The busy ring: an outer ellipse minus an inner one shifted up, so the band
+  // tapers instead of holding one width all the way round. A stroke cannot do
+  // that - two strokes of different widths cannot join without a visible step.
+  const RING =
+    'M6 40 a44 18 0 1 0 88 0 a44 18 0 1 0 -88 0 z ' +
+    'M9.5 38.8 a40 14.2 0 1 0 80 0 a40 14.2 0 1 0 -80 0 z';
+
   // The menu bar renders this monochrome, so shape alone tells the states apart.
   $: filled = form === 'recording';
 </script>
@@ -43,10 +50,25 @@
         stroke-dasharray={form === 'notrunning' ? '22 14' : undefined}
       />
       {#if form === 'listening'}
-        <!-- One bar, low in the hood. It has to hold at 18px against four
-             other forms, and must not resemble recording, which is the only
-             other form carrying solid ink. -->
-        <rect x="33" y="52" width="34" height="10" fill="currentColor" />
+        <!-- Solid over-ear headphones. The window draws this mark at 34px.
+             The cups must not resemble recording, the only other form that
+             fills the whole body solid. -->
+        <ellipse cx="17" cy="46" rx="12" ry="17" fill="currentColor" />
+        <ellipse cx="83" cy="46" rx="12" ry="17" fill="currentColor" />
+      {/if}
+      {#if form === 'busy'}
+        <!-- A ring behind the head: masked so it is hidden wherever the
+             shroud is, then drawn again clipped to its lower half, so that
+             near half crosses in front of the head instead of behind it. -->
+        <mask id="mark-busy-mask">
+          <rect x="-40" y="-40" width="180" height="180" fill="#fff" />
+          <path d={SHROUD} fill="#000" stroke="#000" stroke-width="15" stroke-linejoin="round" />
+        </mask>
+        <clipPath id="mark-busy-near">
+          <rect x="-40" y="40" width="180" height="100" />
+        </clipPath>
+        <path d={RING} fill="currentColor" fill-rule="evenodd" mask="url(#mark-busy-mask)" />
+        <path d={RING} fill="currentColor" fill-rule="evenodd" clip-path="url(#mark-busy-near)" />
       {/if}
       {#if form === 'speaking'}
         <!-- The gap is the point: closed up, the arcs read as earmuffs rather

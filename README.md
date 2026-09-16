@@ -10,6 +10,7 @@
 - Local Whisper and a local neural voice by default. No account.
 - Words leave your laptop only with a remote listener or voice you set. The tray and `banshee status` say so.
 - Also a dictation tool: hold a hotkey, speak. The text lands in the app you are focused on.
+- Tell it to change your desktop: `banshee tell "make the window gaps bigger"` hands your words to your coding agent.
 
 ## Demo
 
@@ -35,6 +36,7 @@ banshee connect claude
 - The Claude Code hook needs `jq`. Restart Claude Code.
 - **Hold `F9`** and speak. The text is typed into the app you are focused on.
 - **Hold `Shift` and `F9`** to keep the text instead. `banshee listen` prints it.
+- **Hold `Super` and `F9`** and say what to change. Your coding agent edits the config and speaks the result. [What it does](docs/cli.md#telling-your-agent-to-change-the-desktop)
 - Omarchy's own dictation tool also uses `F9`. Unbind one if both are there.
 - `banshee status` names the fix, and changes nothing itself.
 - [Another compositor, or a status bar](docs/linux.md)
@@ -76,10 +78,11 @@ banshee connect claude
 - [Toggle instead of hold, and rebind the key](docs/configuration.md#the-hotkey)
 - The menu bar icon answers one question: can I speak right now.
 
-| Idle | Recording | Speaking | Waiting for you | Not running |
-|:----:|:---------:|:--------:|:---------------:|:-----------:|
-| <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/listening.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
+| Idle | Recording | Busy | Speaking | Waiting for you | Not running |
+|:----:|:---------:|:----:|:--------:|:---------------:|:-----------:|
+| <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/busy.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/listening.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
 
+- Busy means Banshee transcribes what you said, or the agent a `banshee tell` started still runs.
 - Waiting for you means an agent asked a question and holds for your answer.
 - The states differ by shape, never by colour alone, and macOS tints the template image.
 

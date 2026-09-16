@@ -325,6 +325,20 @@ fn a_toggle_stops_the_session_a_toggle_started() {
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
 }
 
+// A wrong byte here hands an utterance to the agent silently, or drops it
+// into the mailbox instead of running one
+#[test]
+fn a_tell_session_stops_into_the_agent() {
+    let (state, requests) = test_state_with_commands();
+
+    assert!(state.record_start(TranscribeTarget::Tell));
+    state.record_stop();
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Tell))
+    ));
+}
+
 // A wrong routing here turns typed-with-the-modifier noise into dictation
 #[test]
 fn cancel_discards_the_session_instead_of_routing_it() {
@@ -505,6 +519,31 @@ fn clearing_an_error_that_is_already_clear_wakes_nobody() {
         watcher.has_changed().unwrap(),
         "a new failure must wake one"
     );
+}
+
+// The two paths share one field, so each clears only what it wrote.
+#[test]
+fn a_success_on_one_path_leaves_the_other_path_s_failure_standing() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+    state.set_tell_error(Some("opencode exited exit status: 1".to_string()));
+    state.set_last_error(None);
+    assert_eq!(
+        state.last_error().as_deref(),
+        Some("opencode exited exit status: 1"),
+        "a dictation that works says nothing about an agent run that failed"
+    );
+
+    state.set_last_error(Some("the microphone would not open".to_string()));
+    state.set_tell_error(None);
+    assert_eq!(
+        state.last_error().as_deref(),
+        Some("the microphone would not open"),
+        "an agent run that works says nothing about a microphone that would not open"
+    );
+
+    state.set_last_error(None);
+    assert_eq!(state.last_error(), None, "each path still clears its own");
 }
 
 // One field per side, so a failed listen and a failed reply never overwrite

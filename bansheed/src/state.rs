@@ -32,6 +32,26 @@ pub const CAPTURE_SILENCE_LIMIT: Duration = Duration::from_secs(1);
 pub enum TranscribeTarget {
     Mailbox,
     Dictate,
+    /// Hand the words to a coding agent, which changes the desktop.
+    Tell,
+}
+
+impl TranscribeTarget {
+    fn as_u8(self) -> u8 {
+        match self {
+            TranscribeTarget::Mailbox => 0,
+            TranscribeTarget::Dictate => 1,
+            TranscribeTarget::Tell => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> TranscribeTarget {
+        match value {
+            1 => TranscribeTarget::Dictate,
+            2 => TranscribeTarget::Tell,
+            _ => TranscribeTarget::Mailbox,
+        }
+    }
 }
 
 pub struct AskCommand {
@@ -192,9 +212,24 @@ fn replace_if_new(field: &RwLock<Option<String>>, name: Option<String>) -> bool 
     true
 }
 
+/// A failure `banshee status` names, and the path that wrote it. A dictation
+/// that works says nothing about an agent run that failed, so a success must
+/// not clear the other side's reason.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Failed {
+    from: Source,
+    reason: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Source {
+    Dictation,
+    Tell,
+}
+
 /// Each move wakes the push task of every subscriber, so a value that has not
 /// changed sends nothing.
-fn send_if_new(channel: &watch::Sender<Option<String>>, value: Option<String>) {
+fn send_if_new<T: PartialEq>(channel: &watch::Sender<Option<T>>, value: Option<T>) {
     channel.send_if_modified(|current| {
         if *current == value {
             return false;
@@ -246,8 +281,15 @@ pub struct DaemonState {
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
-    // Why the last transcription failed, cleared by the next one that succeeds.
-    last_error: watch::Sender<Option<String>>,
+    // True for the life of one agent run the tell key started.
+    telling: watch::Sender<bool>,
+    // A second press that the run lock rejects ends first, and a flag alone
+    // would lower the icon under the run still going.
+    deliveries: Mutex<usize>,
+    // Why the last hotkey-path attempt failed. Dictation writes it from
+    // resampling, transcribing, and listening for an answer. A tell run writes
+    // it too. Each side clears only what it wrote.
+    last_error: watch::Sender<Option<Failed>>,
     // Why the last spoken reply failed, cleared by the next one that plays.
     last_speech_error: watch::Sender<Option<String>>,
     // One counter for the whole device picture. It moves only when a setter
@@ -261,7 +303,7 @@ pub struct DaemonState {
     cues: Cues,
     barge_in: Mutex<BargeInMode>,
     // Start and stop can be separate RPC calls, so this cannot live on a stack
-    pending_dictate: AtomicBool,
+    pending_target: AtomicU8,
     // enigo posts to the same HID stream rdev listens at, so while this is
     // true the hotkey listener drops events: the paste's own modifier presses
     // would otherwise cancel or open sessions.
@@ -311,6 +353,8 @@ impl DaemonState {
             latest_transcription_id: watch::channel(0).0,
             recording_active: watch::channel(false).0,
             transcribing: watch::channel(false).0,
+            telling: watch::channel(false).0,
+            deliveries: Mutex::new(0),
             last_error: watch::channel(None).0,
             last_speech_error: watch::channel(None).0,
             device_changes: watch::channel(0).0,
@@ -319,7 +363,7 @@ impl DaemonState {
             speech: Arc::new(speech),
             commands,
             cues,
-            pending_dictate: AtomicBool::new(false),
+            pending_target: AtomicU8::new(TranscribeTarget::Mailbox.as_u8()),
             typing: AtomicBool::new(false),
             push_to_talk_deadline: AtomicU64::new(0),
             capture_tick: AtomicU64::new(0),
@@ -351,10 +395,8 @@ impl DaemonState {
                 (self.started_at.elapsed() + MAX_PUSH_TO_TALK).as_millis() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
-            self.pending_dictate.store(
-                matches!(action, TranscribeTarget::Dictate),
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            self.pending_target
+                .store(action.as_u8(), std::sync::atomic::Ordering::Release);
             self.cues.send(Cue::RecordStart);
             println!("Recording started...");
             true
@@ -369,14 +411,10 @@ impl DaemonState {
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             println!("Recording stopped");
             self.cues.send(Cue::RecordStop);
-            let action = if self
-                .pending_dictate
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                TranscribeTarget::Dictate
-            } else {
-                TranscribeTarget::Mailbox
-            };
+            let action = TranscribeTarget::from_u8(
+                self.pending_target
+                    .load(std::sync::atomic::Ordering::Acquire),
+            );
             let _ = self.commands.send(ConsumerCommand::Transcribe(action));
         } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
             self.cues.send(Cue::RecordStop);
@@ -534,15 +572,60 @@ impl DaemonState {
         self.transcribing.subscribe()
     }
 
+    /// The count and the flag move together under the lock, or two presses at
+    /// once leave the flag on the wrong one.
+    pub fn telling_started(&self) {
+        let mut live = self.deliveries.lock().unwrap();
+        *live += 1;
+        self.telling.send_replace(true);
+    }
+
+    pub fn telling_ended(&self) {
+        let mut live = self.deliveries.lock().unwrap();
+        *live = live.saturating_sub(1);
+        self.telling.send_replace(*live > 0);
+    }
+
+    pub fn is_telling(&self) -> bool {
+        *self.telling.borrow()
+    }
+
+    pub fn subscribe_telling(&self) -> watch::Receiver<bool> {
+        self.telling.subscribe()
+    }
+
+    /// Why the last dictation failed. `None` clears a dictation failure and
+    /// leaves a tell failure standing.
     pub fn set_last_error(&self, error: Option<String>) {
-        send_if_new(&self.last_error, error);
+        self.write_failure(Source::Dictation, error);
+    }
+
+    /// Why the last agent run failed. Only the next agent run clears it.
+    pub fn set_tell_error(&self, error: Option<String>) {
+        self.write_failure(Source::Tell, error);
+    }
+
+    fn write_failure(&self, from: Source, reason: Option<String>) {
+        let cleared = self
+            .last_error
+            .borrow()
+            .as_ref()
+            .is_none_or(|failed| failed.from == from);
+        match reason {
+            Some(reason) => send_if_new(&self.last_error, Some(Failed { from, reason })),
+            None if cleared => send_if_new(&self.last_error, None),
+            None => {}
+        }
     }
 
     pub fn last_error(&self) -> Option<String> {
-        self.last_error.borrow().clone()
+        self.last_error
+            .borrow()
+            .as_ref()
+            .map(|failed| failed.reason.clone())
     }
 
-    pub fn subscribe_last_error(&self) -> watch::Receiver<Option<String>> {
+    pub fn subscribe_last_error(&self) -> watch::Receiver<Option<Failed>> {
         self.last_error.subscribe()
     }
 

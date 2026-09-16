@@ -22,17 +22,19 @@ use crate::state::{ConsumerCommand, DaemonState, RecordingError};
 use crate::{audio, history, hotkey, models, permissions, text_to_speech};
 
 // Claimed before model loading, so a lost single-instance race stays cheap
-pub fn claim() -> Result<(std::path::PathBuf, UnixListener), io::Error> {
-    let socket_path = get_socket_path()
-        .ok_or_else(|| io::Error::other("could not find home directory for the socket path"))?;
+pub fn claim() -> Result<(std::path::PathBuf, UnixListener), BansheeError> {
+    let socket_path = get_socket_path().ok_or_else(|| {
+        BansheeError::Other("could not find home directory for the socket path".to_string())
+    })?;
 
     if let Some(parent_dir) = socket_path.parent() {
-        fs::create_dir_all(parent_dir)?;
+        fs::create_dir_all(parent_dir).map_err(|e| BansheeError::file(parent_dir, e))?;
     }
 
     let listener = claim_socket(&socket_path)?;
     // owner-only: the socket is a command channel into the mic and speakers
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+        .map_err(|e| BansheeError::file(&socket_path, e))?;
     Ok((socket_path, listener))
 }
 
@@ -294,8 +296,9 @@ struct StateWatches {
     recording: watch::Receiver<bool>,
     speaking: watch::Receiver<bool>,
     transcribing: watch::Receiver<bool>,
+    telling: watch::Receiver<bool>,
     devices: watch::Receiver<u64>,
-    last_error: watch::Receiver<Option<String>>,
+    last_error: watch::Receiver<Option<crate::state::Failed>>,
     last_speech_error: watch::Receiver<Option<String>>,
 }
 
@@ -314,6 +317,7 @@ async fn push_changes(
             woken = watches.recording.changed() => woken,
             woken = watches.speaking.changed() => woken,
             woken = watches.transcribing.changed() => woken,
+            woken = watches.telling.changed() => woken,
             woken = watches.devices.changed() => woken,
             woken = watches.last_error.changed() => woken,
             woken = watches.last_speech_error.changed() => woken,
@@ -368,6 +372,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
                     recording: state.subscribe_recording(),
                     speaking: state.speech().subscribe_speaking(),
                     transcribing: state.subscribe_transcribing(),
+                    telling: state.subscribe_telling(),
                     devices: state.device_changes(),
                     last_error: state.subscribe_last_error(),
                     last_speech_error: state.subscribe_last_speech_error(),
