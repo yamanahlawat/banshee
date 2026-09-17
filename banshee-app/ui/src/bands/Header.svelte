@@ -9,7 +9,7 @@
 </script>
 
 <header class="band">
-  <span class="mark"><Mark {form} size={34} /></span>
+  <span class="mark"><Mark {form} /></span>
   <span class="caps state">{word}</span>
   {#if waiting}
     <button class="caps waiting btn-underline" on:click={restart} disabled={restarting}>

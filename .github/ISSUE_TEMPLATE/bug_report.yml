@@ -3,10 +3,10 @@ description: Something is broken or behaves unexpectedly
 labels: ["bug"]
 body:
   - type: textarea
-    id: doctor
+    id: status
     attributes:
-      label: banshee doctor output
-      description: Paste the full output. It reports models, config, microphone, permissions, session type, and daemon health, and answers most of what we'd ask next.
+      label: banshee status output
+      description: Paste the full output. It reports models, config, microphone, permissions, session type, and daemon health, and answers most of what would be asked next.
       render: shell
     validations:
       required: true

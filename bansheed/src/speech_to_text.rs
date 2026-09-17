@@ -4,7 +4,7 @@ pub mod vad;
 
 use banshee_common::error::BansheeError;
 
-use crate::config::{STTConfig, STTPreset, SttProvider};
+use crate::config::{Provider, STTConfig, STTPreset};
 use crate::state::RecordingError;
 use local::whisper::WhisperEngine;
 use remote::openai_compatible::RemoteTranscriber;
@@ -57,12 +57,12 @@ pub trait Transcriber: Send {
 
 pub fn select_transcriber(stt: &STTConfig) -> Result<Box<dyn Transcriber>, RecordingError> {
     match stt.provider {
-        SttProvider::Local => {
+        Provider::Local => {
             let engine = WhisperEngine::new(stt.preset.model_name(), &stt.vocabulary, stt.into())
                 .map_err(|e| RecordingError::Model(e.to_string()))?;
             Ok(Box::new(engine))
         }
-        SttProvider::Remote => select_remote(stt, crate::credentials::Credentials::load()),
+        Provider::Remote => select_remote(stt, crate::credentials::Credentials::load()),
     }
 }
 
@@ -76,7 +76,7 @@ fn select_remote(
         .key(side)
         .ok_or_else(|| RecordingError::Provider(side.no_key()))?
         .to_string();
-    println!("Listening through {}", stt.remote.host());
+    log::info!("Listening through {}", stt.remote.host());
     let engine = RemoteTranscriber::new(&stt.remote, key, &stt.vocabulary, stt.into())
         .map_err(|e| RecordingError::Provider(e.to_string()))?;
     Ok(Box::new(engine))

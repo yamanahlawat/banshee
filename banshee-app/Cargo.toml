@@ -8,6 +8,9 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[lints]
+workspace = true
+
 # The bundle workflow ships the window; the dist builders have no GTK for it.
 [package.metadata.dist]
 dist = false
@@ -17,14 +20,14 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 banshee-common = { path = "../banshee-common" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-single-instance = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
 
 [dev-dependencies]
 tempfile = "3"
 # `start_paused`, so a test can prove a 30 s deadline without waiting 30 s.
-tokio = { version = "1", features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util"] }

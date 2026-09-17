@@ -63,7 +63,8 @@ pub fn accessibility_granted() -> bool {
     unsafe extern "C" {
         fn AXIsProcessTrusted() -> u8;
     }
-    // C booleans are unsigned char, so u8 keeps the call sound
+    // SAFETY: a plain call with no arguments into a system framework. C booleans
+    // are unsigned char, so u8 keeps the call sound.
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
@@ -84,12 +85,16 @@ pub fn ask_for_accessibility() {
             static kAXTrustedCheckOptionPrompt: CFStringRef;
             fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
         }
+        // SAFETY: the constant is a CFString the framework owns for the life of the
+        // process, and `get_rule` retains it rather than taking that ownership.
         let prompt = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
         let options = CFDictionary::from_CFType_pairs(&[(
             prompt.as_CFType(),
             CFBoolean::true_value().as_CFType(),
         )]);
-        // Called for the prompt; the answer is the read `accessibility_granted` makes.
+        // SAFETY: `options` is a live CFDictionary for the whole call, and the call
+        // reads it without keeping it. Called for the prompt; the answer is the read
+        // `accessibility_granted` makes.
         unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) };
     }
 }
@@ -106,7 +111,8 @@ pub fn key_presses_reach_us() -> Access {
     unsafe extern "C" {
         fn IOHIDCheckAccess(request: i32) -> i32;
     }
-    // IOHIDAccessType, in header order
+    // SAFETY: a call by value into a system framework, with no pointer to keep
+    // valid. IOHIDAccessType, in header order.
     match unsafe { IOHIDCheckAccess(LISTEN_EVENT) } {
         0 => Access::Granted,
         1 => Access::Denied,
@@ -127,8 +133,11 @@ pub fn pane_anchor(id: &str) -> Option<&'static str> {
 }
 
 #[cfg(target_os = "macos")]
+const OPEN: &str = "/usr/bin/open";
+
+#[cfg(target_os = "macos")]
 fn open_anchor(anchor: &str) -> Result<(), BansheeError> {
-    let status = std::process::Command::new("open")
+    let status = std::process::Command::new(OPEN)
         .arg(format!(
             "x-apple.systempreferences:com.apple.preference.security?{anchor}"
         ))
@@ -259,12 +268,12 @@ pub fn restart_when_granted() {
         if accessibility_granted() {
             return;
         }
-        eprintln!("the Accessibility grant is missing; the hotkey is inert until it lands");
+        log::warn!("the Accessibility grant is missing; the hotkey is inert until it lands");
         thread::spawn(|| {
             loop {
                 thread::sleep(POLL);
                 if accessibility_granted() {
-                    eprintln!("the Accessibility grant landed, restarting to pick it up");
+                    log::info!("the Accessibility grant landed, restarting to pick it up");
                     std::process::exit(1);
                 }
             }
@@ -351,5 +360,13 @@ mod wayland_typer_tests {
     #[test]
     fn x11_never_blocks_on_a_typer() {
         assert!(blockers_for(false, false).is_empty());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tool_tests {
+    #[test]
+    fn the_settings_opener_is_where_a_supervised_daemon_finds_it() {
+        crate::test_support::tool_is_installed(super::OPEN);
     }
 }

@@ -6,16 +6,12 @@ use banshee_common::{
     AgentRow, BANSHEE_AGENTS, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_CONNECT_APPLY,
     BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES,
     BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_SPEAK, BANSHEE_STATUS, InputDevice,
-    PlannedChange, Voice,
+    PlannedChange, Voice, rpc_code,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const PREVIEW_SENTENCE: &str = "This is how I sound.";
-
-/// A JSON-RPC parse error's code (-32700), reused here for a reply this
-/// client could not read, since that failure is ours, not the daemon's.
-const SHAPE_MISMATCH: i32 = -32700;
 
 /// The daemon's code and message when it answered; the transport's or the window's own
 /// message when it did not.
@@ -42,7 +38,8 @@ impl From<RpcError> for CommandError {
 
 fn shape_mismatch(error: serde_json::Error) -> CommandError {
     CommandError {
-        code: SHAPE_MISMATCH,
+        // Not the daemon's fault: its reply arrived and this client could not read it
+        code: rpc_code::PARSE,
         message: error.to_string(),
         transport: false,
         sent: true,

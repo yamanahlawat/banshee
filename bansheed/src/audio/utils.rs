@@ -2,6 +2,13 @@ use audioadapter_buffers::direct::InterleavedSlice;
 use banshee_common::error::BansheeError;
 use rubato::{Fft, FixedSync, Resampler};
 
+/// Unmeasured. Shared so both resamplers cut on the same seams.
+const WINDOW: usize = 1024;
+
+/// Margin on the predicted output length. Measured at zero frames needed, and
+/// `slack_is_never_needed` fails if that changes.
+const OUTPUT_SLACK: usize = 2 * WINDOW;
+
 // One persistent Fft fed fixed windows keeps chunk boundaries continuous;
 // per-batch one-shot resampling would glitch at every seam
 pub struct StreamingResampler {
@@ -19,7 +26,7 @@ impl StreamingResampler {
                 Fft::<f32>::new(
                     original_sample_rate as usize,
                     target_sample_rate as usize,
-                    1024,
+                    WINDOW,
                     1,
                     1,
                     FixedSync::Input,
@@ -79,7 +86,9 @@ pub fn resample_audio(
     let final_audio = if original_sample_rate == target_sample_rate {
         audio_data.to_vec()
     } else {
-        println!("Resampling audio from {original_sample_rate} Hz to {target_sample_rate} Hz...");
+        log::debug!(
+            "Resampling audio from {original_sample_rate} Hz to {target_sample_rate} Hz..."
+        );
         let nbr_input_frames = audio_data.len();
 
         let input_adapter = InterleavedSlice::new(audio_data, 1, nbr_input_frames)
@@ -88,7 +97,7 @@ pub fn resample_audio(
         let out_capacity = (audio_data.len() as f64 * target_sample_rate as f64
             / original_sample_rate as f64)
             .ceil() as usize
-            + 2048;
+            + OUTPUT_SLACK;
         let mut output = vec![0.0f32; out_capacity];
         let mut output_adapter = InterleavedSlice::new_mut(&mut output, 1, out_capacity)
             .map_err(|e| BansheeError::Other(format!("Failed to create output adapter: {e}")))?;
@@ -96,9 +105,9 @@ pub fn resample_audio(
         let mut resampler = Fft::<f32>::new(
             original_sample_rate as usize,
             target_sample_rate as usize,
-            1024, // chunk size
-            1,    // Sub chunks
-            1,    // Channels (mono)
+            WINDOW,
+            1, // Sub chunks
+            1, // Channels (mono)
             FixedSync::Both,
         )
         .map_err(|e| BansheeError::Other(format!("Failed to create resampler: {e}")))?;
@@ -140,5 +149,36 @@ mod tests {
         let mut out = Vec::new();
         resampler.push(&[0.1, 0.2, 0.3], &mut out).unwrap();
         assert_eq!(out, vec![0.1, 0.2, 0.3]);
+    }
+}
+
+#[cfg(test)]
+mod slack_tests {
+    use super::*;
+
+    /// Fails the day the reserve stops being a margin and starts carrying load.
+    #[test]
+    fn slack_is_never_needed() {
+        let mut worst = 0i64;
+        for (from, to) in [
+            (48_000u32, 16_000u32),
+            (44_100, 16_000),
+            (96_000, 16_000),
+            (16_000, 16_000),
+            (22_050, 16_000),
+            (8_000, 16_000),
+        ] {
+            for seconds in [0.02f64, 0.1, 1.0, 3.7] {
+                let frames = (from as f64 * seconds) as usize;
+                let input: Vec<f32> = (0..frames).map(|i| (i as f32 * 0.01).sin()).collect();
+                let predicted = (frames as f64 * f64::from(to) / f64::from(from)).ceil() as usize;
+                let written = resample_audio(&input, from, to).expect("a resample").len();
+                worst = worst.max(written as i64 - predicted as i64);
+            }
+        }
+        assert_eq!(
+            worst, 0,
+            "the resampler wrote past the predicted length, so the reserve is load-bearing now"
+        );
     }
 }

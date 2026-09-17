@@ -55,11 +55,19 @@ cargo build --release --workspace --exclude banshee-app
 
 - The VAD tests read `silero_vad.onnx` from `~/.banshee/models/`; run
   `banshee setup` once before the suite.
-- CI downloads the same file in its own step.
+- CI downloads the same file in its own step, and installs `espeak-ng` for the
+  out-of-vocabulary test.
+- The Kokoro tests need the model and two voices, which are too large for CI, so
+  they are `#[ignore]`d. Run them on a machine that has them:
+
+```bash
+cargo test kokoro -- --ignored
+```
 
 - Before opening a PR, make sure both of these pass:
 
 ```bash
+cargo fmt --all --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
@@ -74,6 +82,9 @@ cargo clippy --workspace --all-targets --exclude banshee-app -- -D warnings
 
 - CI runs the same clippy command on Linux, so a Linux-only warning fails the
   build there.
+- CI also runs `cargo deny check` against `deny.toml`: the advisory database,
+  every crate's licence and every crate's source. To run it here, install the
+  tool once with `cargo install cargo-deny --locked`.
 
 - For a change under `banshee-app/ui`, run the window's own checks from
   that directory.

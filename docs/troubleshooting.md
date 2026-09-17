@@ -4,7 +4,10 @@ This page lists what breaks, and the fix.
 
 - Start with `banshee status`; it catches most setup problems and names the
   fix.
-- The daemon logs to `~/.banshee/daemon.log`.
+- The daemon logs to `~/.banshee/daemon.log`. Every line carries a clock and a
+  level.
+- `BANSHEE_LOG=debug banshee start` adds what Banshee heard and typed. Plain
+  `banshee start` goes back to the default.
 - Run `banshee serve` in the foreground to watch it work.
 
 - **The microphone looks dead: you record, and nothing ever comes back.**

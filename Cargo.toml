@@ -13,6 +13,26 @@ readme = "README.md"
 keywords = ["voice", "dictation", "mcp", "whisper", "tts"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
+# One version per shared dependency; a crate adds only its own features.
+[workspace.dependencies]
+arboard = "3.6.1"
+chrono = "0.4"
+dirs = "6.0.0"
+log = "0.4.34"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = "1.52.3"
+toml = "1.1.2"
+# Default features are Linux-only pieces the crates below pick per platform.
+tray-icon = { version = "0.24.2", default-features = false }
+whisper-rs = "0.16.0"
+
+[workspace.lints.clippy]
+# Every unsafe block says why it is sound, where a reader finds it.
+undocumented_unsafe_blocks = "deny"
+# A module is `name.rs` beside a `name/` directory, never `name/mod.rs`.
+mod_module_files = "deny"
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

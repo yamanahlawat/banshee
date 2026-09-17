@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use banshee_common::{error::BansheeError, utils::get_config_path};
+use banshee_common::{error::BansheeError, utils::config_path};
 use serde::{Deserialize, Deserializer, Serialize};
 
 // Every section denies unknown fields: TOML binds a key to whatever table
@@ -105,7 +105,7 @@ fn spoken_or_english(value: String) -> String {
     if known_language(&value) {
         return value;
     }
-    eprintln!("banshee: '{value}' is not a language Whisper knows, so English is read instead");
+    log::warn!("'{value}' is not a language Whisper knows, so English is read instead");
     "en".to_string()
 }
 
@@ -134,17 +134,14 @@ fn rate<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum SttProvider {
+pub enum Provider {
     Local,
     Remote,
 }
 
-impl SttProvider {
+impl Provider {
     pub fn is_remote(self) -> bool {
-        match self {
-            SttProvider::Local => false,
-            SttProvider::Remote => true,
-        }
+        matches!(self, Provider::Remote)
     }
 }
 
@@ -258,22 +255,6 @@ fn api_key_refusal(setting: &str) -> String {
     format!("api_key does not belong in config.toml; set it with: banshee config set {setting}")
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum TtsProvider {
-    Local,
-    Remote,
-}
-
-impl TtsProvider {
-    pub fn is_remote(self) -> bool {
-        match self {
-            TtsProvider::Local => false,
-            TtsProvider::Remote => true,
-        }
-    }
-}
-
 /// What the remote speaker asks the server to send. These two are what it can
 /// decode, so a third value is refused where a person can read the refusal.
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -338,7 +319,7 @@ impl RemoteTtsConfig {
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct STTConfig {
-    pub provider: SttProvider,
+    pub provider: Provider,
     pub remote: RemoteSttConfig,
     pub preset: STTPreset,
     /// A Whisper language code, or `auto` to detect it. The English-only build
@@ -357,7 +338,7 @@ pub struct STTConfig {
 impl Default for STTConfig {
     fn default() -> Self {
         Self {
-            provider: SttProvider::Local,
+            provider: Provider::Local,
             remote: RemoteSttConfig::default(),
             preset: STTPreset::Balanced,
             language: "en".to_string(),
@@ -379,7 +360,7 @@ pub enum TTSFallback {
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct TTSConfig {
-    pub provider: TtsProvider,
+    pub provider: Provider,
     pub remote: RemoteTtsConfig,
     pub voice: String,
     #[serde(deserialize_with = "rate")]
@@ -390,7 +371,7 @@ pub struct TTSConfig {
 impl Default for TTSConfig {
     fn default() -> Self {
         Self {
-            provider: TtsProvider::Local,
+            provider: Provider::Local,
             remote: RemoteTtsConfig::default(),
             voice: "af_sky".to_string(),
             speed: 1.2,
@@ -475,24 +456,18 @@ pub struct Config {
     pub stt: STTConfig,
     pub tts: TTSConfig,
     pub tell: TellConfig,
-    /// Parsed so a `config.toml` that carries it still loads, and never written
-    /// back or reported, so it does not read as a setting.
-    #[serde(default, skip_serializing)]
-    #[allow(dead_code, reason = "parsed only so an older config still loads")]
-    logging: Option<toml::Value>,
 }
 
 impl Config {
     pub fn path() -> Result<PathBuf, BansheeError> {
-        get_config_path()
-            .ok_or_else(|| BansheeError::Other("Failed to get config path".to_string()))
+        config_path().ok_or_else(|| BansheeError::Other("Failed to get config path".to_string()))
     }
 
     /// Empty rather than an error when the file is absent, because no file means
     /// every default.
     pub fn read(path: &Path) -> Result<String, BansheeError> {
         if path.exists() {
-            Ok(std::fs::read_to_string(path)?)
+            std::fs::read_to_string(path).map_err(|source| BansheeError::file(path, source))
         } else {
             Ok(String::new())
         }
@@ -514,8 +489,19 @@ impl Config {
     }
 
     pub fn load() -> Result<Self, BansheeError> {
-        let contents = Config::read(&Config::path()?)?;
-        Config::parse(&contents)
+        Config::load_from(&Config::path()?)
+    }
+
+    /// `path` is the config.toml to read. Names the file in its refusal: toml
+    /// points at the offending line but not at the file it is in, and this
+    /// machine holds two.
+    fn load_from(path: &Path) -> Result<Self, BansheeError> {
+        let contents = Config::read(path)?;
+        Config::parse(&contents).map_err(|error| match error {
+            // Already names the setting and what to do about it
+            BansheeError::Rejected(_) => error,
+            other => BansheeError::Rejected(format!("{} does not parse: {other}", path.display())),
+        })
     }
 }
 
@@ -602,6 +588,17 @@ mod tests {
         );
     }
 
+    // A removed key is refused by name, the way every other removed key is.
+    #[test]
+    fn a_removed_logging_table_is_refused_by_name() {
+        let error = toml::from_str::<Config>("[logging]\nlevel = \"info\"\n")
+            .expect_err("a removed key must not parse");
+        assert!(
+            error.to_string().contains("logging"),
+            "the error must name the offending key: {error}"
+        );
+    }
+
     // The listener matches what this field parses, so an unmatchable binding
     // must fail the config load, not sit silent behind a working-looking file
     #[test]
@@ -624,8 +621,8 @@ mod tests {
     fn a_config_without_the_key_reads_as_local() {
         let config: Config =
             toml::from_str("[stt]\npreset = \"fast\"\n\n[tts]\nvoice = \"af_sky\"\n").unwrap();
-        assert_eq!(config.stt.provider, SttProvider::Local);
-        assert_eq!(config.tts.provider, TtsProvider::Local);
+        assert_eq!(config.stt.provider, Provider::Local);
+        assert_eq!(config.tts.provider, Provider::Local);
     }
 
     #[test]
@@ -651,7 +648,7 @@ mod tests {
             "[stt]\nprovider = \"remote\"\n\n[stt.remote]\nbase_url = \"https://api.groq.com/openai/v1\"\nmodel = \"whisper-large-v3-turbo\"\n",
         )
         .unwrap();
-        assert_eq!(config.stt.provider, SttProvider::Remote);
+        assert_eq!(config.stt.provider, Provider::Remote);
         assert!(config.stt.provider.is_remote());
         assert_eq!(config.stt.remote.base_url, "https://api.groq.com/openai/v1");
         assert_eq!(config.stt.remote.model, "whisper-large-v3-turbo");
@@ -755,7 +752,7 @@ mod tests {
             "[tts]\nprovider = \"remote\"\n\n[tts.remote]\nbase_url = \"https://api.openai.com/v1\"\nmodel = \"gpt-4o-mini-tts\"\nvoice = \"marin\"\ninstructions = \"Calm and even\"\n",
         )
         .unwrap();
-        assert_eq!(config.tts.provider, TtsProvider::Remote);
+        assert_eq!(config.tts.provider, Provider::Remote);
         assert!(config.tts.provider.is_remote());
         assert_eq!(config.tts.remote.model, "gpt-4o-mini-tts");
         assert_eq!(config.tts.remote.voice, "marin");
@@ -860,5 +857,31 @@ mod tests {
                 .contains("banshee config set stt.remote.api_key"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_config_that_does_not_parse_names_the_file_it_is_in() {
+        let dir = crate::test_support::unique_scratch("config-load");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[stt]\nlanguage =\n").unwrap();
+
+        let error = super::Config::load_from(&path).expect_err("an unfinished value must not load");
+        assert!(
+            error.to_string().contains(&path.display().to_string()),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_api_key_keeps_its_own_sentence() {
+        let dir = crate::test_support::unique_scratch("config-key");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[stt.remote]\napi_key = \"sk-proj-0000\"\n").unwrap();
+
+        let error = super::Config::load_from(&path).expect_err("a key in config.toml is refused");
+        assert!(!error.to_string().contains("sk-proj"), "{error}");
+        assert!(!error.to_string().contains("does not parse"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

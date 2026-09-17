@@ -16,6 +16,8 @@ use ringbuf::{
 
 use crate::state::DaemonState;
 
+/// Also the longest push-to-talk. At 48 kHz of `f32` this holds 23 MB for the
+/// daemon's life.
 pub const RING_SECS: usize = 120;
 
 // The name [audio] input_device carries to mean "whatever the OS is set to"
@@ -209,7 +211,7 @@ where
         .build_input_stream(
             &config.into(),
             data,
-            |error| eprintln!("Audio Error: {error}"),
+            |error| log::error!("Audio Error: {error}"),
             None,
         )
         .map_err(|e| BansheeError::Other(e.to_string()))?;
@@ -412,7 +414,8 @@ mod tests {
         serving: bool,
     }
 
-    // A rescan that reopens the device it already holds rebuilds a 23 MB ring
+    // A rescan that reopens the device it already holds rebuilds the whole ring,
+    // which RING_SECS sizes at 23 MB
     #[test]
     fn an_open_device_is_reopened_only_when_it_must_be() {
         let cases = [

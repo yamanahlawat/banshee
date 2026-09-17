@@ -8,6 +8,7 @@
     "build": "vite build",
     "check:bundle": "npm run build && node scripts/no-mocks-in-bundle.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "check:pi": "tsc --noEmit -p ../../integrations/pi",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

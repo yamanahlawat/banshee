@@ -56,7 +56,7 @@ impl Client {
         let id = self.next_id;
         self.next_id += 1;
         let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: banshee_common::Version::V2,
             method: method.to_string(),
             params: Some(params),
             id: Some(serde_json::json!(id)),

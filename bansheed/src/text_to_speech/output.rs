@@ -200,12 +200,6 @@ mod tests {
         assert_eq!(utterance.queued(), 1, "no chunk may follow a stop");
     }
 
-    #[test]
-    fn kokoro_synthesises_at_24_khz_in_mono() {
-        assert_eq!(SAMPLE_RATE.get(), 24_000);
-        assert_eq!(CHANNELS.get(), 1);
-    }
-
     // Half a second at half the mixer's rate comes out as half a second.
     #[test]
     fn a_chunk_at_another_rate_reaches_the_mixer_as_the_same_length_of_audio() {

@@ -15,11 +15,11 @@ mod tray {
     use std::time::Duration;
 
     use banshee_common::{Activity, BANSHEE_HISTORY, BANSHEE_STATE_CHANGED, EVENT_STATE, utils};
+    #[cfg(not(target_os = "macos"))]
+    use gtk::glib;
     use serde_json::Value;
     use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-    #[cfg(not(target_os = "macos"))]
-    use gtk::glib;
     #[cfg(target_os = "macos")]
     use winit::application::ApplicationHandler;
     #[cfg(target_os = "macos")]
@@ -644,6 +644,8 @@ mod tray {
             fn flock(fd: i32, operation: i32) -> i32;
         }
         const EXCLUSIVE_WITHOUT_WAITING: i32 = 2 | 4;
+        // SAFETY: `file` is open for the whole call, so the descriptor is valid, and
+        // flock reads nothing else.
         if unsafe { flock(file.as_raw_fd(), EXCLUSIVE_WITHOUT_WAITING) } != 0 {
             return Err("the menu bar icon is already running".into());
         }
@@ -770,7 +772,10 @@ mod tray {
                 .iter()
                 .filter(|p| p[3] > 40)
                 .any(|p| p[0] > 32 || p[1] > 32 || p[2] > 32);
-            assert!(lit, "every visible pixel is still black, so the bar shows nothing");
+            assert!(
+                lit,
+                "every visible pixel is still black, so the bar shows nothing"
+            );
         }
 
         // The shape lives in the alpha channel, so a tint that touches it redraws
@@ -791,8 +796,18 @@ mod tray {
             })
             .expect("the asset decodes twice");
             assert_eq!(tinted.len(), raw.len(), "{w}x{h} must not change size");
-            let alpha_of = |v: &[u8]| v.as_chunks::<4>().0.iter().map(|p| p[3]).collect::<Vec<_>>();
-            assert_eq!(alpha_of(&tinted), alpha_of(&raw), "the alpha carries the mark");
+            let alpha_of = |v: &[u8]| {
+                v.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|p| p[3])
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                alpha_of(&tinted),
+                alpha_of(&raw),
+                "the alpha carries the mark"
+            );
             assert!(
                 tinted
                     .as_chunks::<4>()

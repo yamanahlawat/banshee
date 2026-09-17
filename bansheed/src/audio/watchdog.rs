@@ -189,9 +189,9 @@ pub fn spawn(
                 Ok(selection) => selection,
                 Err(reason) => {
                     if binding.attempt_failed(&state, stalled, &reason) {
-                        eprintln!("Recording is unavailable: {reason}");
+                        log::error!("Recording is unavailable: {reason}");
                     } else {
-                        eprintln!("Capture keeps the device it has: {reason}");
+                        log::warn!("Capture keeps the device it has: {reason}");
                     }
                     continue;
                 }
@@ -219,9 +219,9 @@ pub fn spawn(
                     // not write a line every RETRY
                     match &selection.missing {
                         Some(name) => {
-                            println!("Capture rebound to {opened}, still waiting for {name}")
+                            log::info!("Capture rebound to {opened}, still waiting for {name}")
                         }
-                        None => println!("Capture rebound to {opened}"),
+                        None => log::info!("Capture rebound to {opened}"),
                     }
                     binding.serving(&state, wanted_now, opened, selection.missing);
                 }
@@ -231,9 +231,9 @@ pub fn spawn(
                     // the device only after play() succeeds, so the old name
                     // would otherwise stand
                     if binding.attempt_failed(&state, stalled, &reason) {
-                        eprintln!("Could not open {}: {reason}", selection.open);
+                        log::error!("Could not open {}: {reason}", selection.open);
                     } else {
-                        eprintln!(
+                        log::warn!(
                             "Capture keeps the device it has, {} did not open: {reason}",
                             selection.open
                         );

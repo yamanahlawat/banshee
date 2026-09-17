@@ -79,7 +79,7 @@ beforeEach(async () => {
     ],
   });
   vi.mocked(listVoices).mockResolvedValue({
-    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }],
+    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true }],
     current: 'af_sky',
   });
   vi.mocked(detectAgents).mockResolvedValue([]);
@@ -864,7 +864,7 @@ it('reads the voices again once their files have landed', async () => {
 
   vi.mocked(status).mockResolvedValue({ ...ready, blockers: [] });
   vi.mocked(listVoices).mockResolvedValue({
-    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }],
+    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true }],
     current: 'af_sky',
   });
   pushes.get('daemon:downloads')?.({
@@ -1983,12 +1983,4 @@ it('sends the answerer to the compositor binding while an agent waits', async ()
     expect(screen.getByText(/compositor's Banshee binding to answer/)).toBeTruthy(),
   );
   expect(screen.queryByText(/Tap Right Command to answer/)).toBeNull();
-});
-
-// A daemon older than the field sends none, and that daemon did bind the key.
-it('still names the key when the daemon reports nothing either way', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  expect(screen.getByRole('button', { name: /^Hotkey/ }).textContent).toMatch(/Right Command/);
 });

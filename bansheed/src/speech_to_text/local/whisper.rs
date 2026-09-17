@@ -1,15 +1,42 @@
-use banshee_common::{error::BansheeError, utils::get_models_path};
+use banshee_common::error::BansheeError;
 use whisper_rs::{FullParams, WhisperContext, WhisperContextParameters};
 
 use crate::config::STTPreset;
 use crate::speech_to_text::{Speech, Transcriber, english_only};
 
-const NO_SPEECH_PROB_GATE: f32 = 0.6;
-const AVG_LOGPROB_GATE: f32 = -1.0;
+/// Measured across widths 1 to 8: a 1.5% spread, and the same words from 2 up.
+/// whisper.cpp refuses more than 8, with an error naming nothing.
+const BEAM_SIZE: i32 = 5;
+const BEAM_PATIENCE: f32 = -1.0;
 
-// Both must fail together: the model doubts speech exists AND doubts its own words
-fn is_hallucination(no_speech_prob: f32, avg_logprob: f32) -> bool {
-    no_speech_prob > NO_SPEECH_PROB_GATE && avg_logprob < AVG_LOGPROB_GATE
+/// What Whisper says about one segment, for the debug line. Nothing gates on it:
+/// `no_speech_prob` read 0.00 across 314 segments of real audio.
+#[derive(Debug, Clone, Copy)]
+pub struct Confidence {
+    pub no_speech_prob: f32,
+    /// Decoder confidence: mean ln(p) over the segment's tokens.
+    pub avg_logprob: f32,
+}
+
+impl Confidence {
+    fn of(segment: &whisper_rs::WhisperSegment<'_>) -> Self {
+        let n_tokens = segment.n_tokens();
+        let mut logprob_sum = 0.0f32;
+        for index in 0..n_tokens {
+            if let Some(token) = segment.get_token(index) {
+                // clamp so a zero probability cannot produce -inf
+                logprob_sum += token.token_probability().max(f32::MIN_POSITIVE).ln();
+            }
+        }
+        Self {
+            no_speech_prob: segment.no_speech_probability(),
+            avg_logprob: if n_tokens > 0 {
+                logprob_sum / n_tokens as f32
+            } else {
+                0.0
+            },
+        }
+    }
 }
 
 fn build_initial_prompt(vocabulary: &[String]) -> Option<String> {
@@ -42,6 +69,7 @@ pub struct WhisperEngine {
     initial_prompt: Option<String>,
     english_only: bool,
     speech: Speech,
+    beam_size: i32,
 }
 
 impl WhisperEngine {
@@ -50,31 +78,18 @@ impl WhisperEngine {
         vocabulary: &[String],
         speech: Speech,
     ) -> Result<Self, BansheeError> {
-        println!("Loading Whisper AI...");
+        log::info!("Loading Whisper AI...");
         Ok(Self {
             context: Self::open(model)?,
             initial_prompt: build_initial_prompt(vocabulary),
             english_only: english_only(model),
             speech,
+            beam_size: BEAM_SIZE,
         })
     }
 
     fn open(model: &str) -> Result<WhisperContext, BansheeError> {
-        let models_path = get_models_path().ok_or_else(|| {
-            BansheeError::Other(
-                "Could not find home directory. Cannot initialize Whisper engine.".to_string(),
-            )
-        })?;
-
-        let whisper_model_path = models_path.join(model);
-
-        if !whisper_model_path.exists() {
-            return Err(BansheeError::Other(format!(
-                "Whisper model not found at {:?}. Cannot initialize Whisper engine.",
-                whisper_model_path
-            )));
-        }
-
+        let whisper_model_path = crate::models::model_path(model)?;
         let whisper_model_path_str = whisper_model_path.to_str().ok_or_else(|| {
             BansheeError::Other(format!(
                 "Failed to convert model path {:?} to string.",
@@ -91,16 +106,17 @@ impl WhisperEngine {
     }
 }
 
-impl Transcriber for WhisperEngine {
-    fn transcribe(&self, audio: &[f32]) -> Result<String, BansheeError> {
+impl WhisperEngine {
+    /// One pass of the model over `audio`, with every segment it found.
+    fn run(&self, audio: &[f32]) -> Result<whisper_rs::WhisperState, BansheeError> {
         let mut state = self
             .context
             .create_state()
             .map_err(|e| BansheeError::Transcription(e.to_string()))?;
 
         let mut params = FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
-            beam_size: 5,
-            patience: -1.0,
+            beam_size: self.beam_size,
+            patience: BEAM_PATIENCE,
         });
         let speech = spoken(self.english_only, &self.speech);
         params.set_language(speech.language.as_deref());
@@ -115,47 +131,30 @@ impl Transcriber for WhisperEngine {
         state
             .full(params, audio)
             .map_err(|e| BansheeError::Transcription(e.to_string()))?;
+        Ok(state)
+    }
+}
 
+impl Transcriber for WhisperEngine {
+    fn transcribe(&self, audio: &[f32]) -> Result<String, BansheeError> {
+        let state = self.run(audio)?;
         let mut transcription = String::new();
-
         for segment in state.as_iter() {
-            let no_speech_prob = segment.no_speech_probability();
-
-            // Decoder confidence: mean ln(p) over the segment's tokens
-            let n_tokens = segment.n_tokens();
-            let mut logprob_sum = 0.0f32;
-            for i in 0..n_tokens {
-                if let Some(token) = segment.get_token(i) {
-                    // clamp so a zero probability cannot produce -inf
-                    logprob_sum += token.token_probability().max(f32::MIN_POSITIVE).ln();
-                }
+            // Scoring reads every token through the FFI, so only when the line is on
+            if log::log_enabled!(log::Level::Debug) {
+                let confidence = Confidence::of(&segment);
+                log::debug!(
+                    "[{} - {}] (no_speech {:.2}, avg_logprob {:.2}): {segment}",
+                    // centiseconds
+                    segment.start_timestamp(),
+                    segment.end_timestamp(),
+                    confidence.no_speech_prob,
+                    confidence.avg_logprob,
+                );
             }
-            let avg_logprob = if n_tokens > 0 {
-                logprob_sum / n_tokens as f32
-            } else {
-                0.0
-            };
-
-            println!(
-                "[{} - {}] (no_speech {:.2}, avg_logprob {:.2}): {}",
-                // note start and end timestamps are in centiseconds
-                // (10s of milliseconds)
-                segment.start_timestamp(),
-                segment.end_timestamp(),
-                no_speech_prob,
-                avg_logprob,
-                // the Display impl for WhisperSegment will replace invalid UTF-8 with the Unicode replacement character
-                segment
-            );
-
-            if is_hallucination(no_speech_prob, avg_logprob) {
-                println!("Discarding segment as likely hallucination");
-                continue;
-            }
-
+            // The Display impl replaces invalid UTF-8 with the replacement character
             transcription.push_str(&segment.to_string());
         }
-
         Ok(transcription.trim().to_string())
     }
 
@@ -259,14 +258,15 @@ mod speech_tests {
 mod tests {
     use super::*;
 
+    // whisper.cpp allocates one decoder per beam and refuses more than eight,
+    // answering a generic "Error code: -4" that names nothing. Measured by
+    // asking for twelve.
     #[test]
-    fn gate_requires_both_signals_to_fail() {
-        assert!(is_hallucination(0.9, -1.5));
-        // confident words, model just doubts speech was present
-        assert!(!is_hallucination(0.9, -0.3));
-        // unconfident words, but the model heard speech
-        assert!(!is_hallucination(0.2, -1.5));
-        assert!(!is_hallucination(0.2, -0.3));
+    fn the_beam_stays_inside_what_whisper_allocates() {
+        assert!(
+            (1..=8).contains(&BEAM_SIZE),
+            "whisper.cpp refuses a beam over 8, and fails with an error naming nothing"
+        );
     }
 
     #[test]

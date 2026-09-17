@@ -12,13 +12,18 @@ use std::time::Duration;
 use banshee_common::{KokoroTTSConfig, error::BansheeError};
 use tokio::sync::watch;
 
-use crate::config::{TTSConfig, TTSFallback, TtsProvider};
+use crate::config::{Provider, TTSConfig, TTSFallback};
 use local::kokoro::{KokoroBackend, KokoroEngine};
 use local::say::SayBackend;
 use output::Output;
 use remote::openai_compatible::RemoteSpeechBackend;
 
+/// Unmeasured. A bound against growth, not a latency target.
 const MAX_QUEUED_UTTERANCES: usize = 8;
+
+/// The end of speech is noticed this late at worst, which is under the cue that
+/// follows it.
+const PLAYBACK_POLL: Duration = Duration::from_millis(50);
 
 /// What a speech backend has to say about one utterance. The backend cannot
 /// reach the player the state owns or the cue channel, so it sends this and a
@@ -39,7 +44,7 @@ pub fn drain_faults(
     for fault in faults {
         match fault {
             Fault::Failed(reason) => {
-                eprintln!("banshee: the reply was not spoken: {reason}");
+                log::error!("the reply was not spoken: {reason}");
                 cues.send(crate::audio::cues::Cue::Error);
                 state.set_last_speech_error(Some(reason));
             }
@@ -50,7 +55,13 @@ pub fn drain_faults(
 
 // A backend starts one utterance at a time; SpeechPlayer serializes them
 pub trait TtsBackend: Send + Sync {
-    fn start(&self, text: &str, voice: Option<&str>) -> std::io::Result<Box<dyn ActiveUtterance>>;
+    /// `Rejected` for a voice this backend cannot take; anything else is the
+    /// backend failing to start.
+    fn start(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError>;
 
     /// A live `[tts]` change. Answers the voice utterances now speak in, or
     /// `None` when the backend cannot honour the change: the system fallback
@@ -102,8 +113,8 @@ pub fn select_backend(
     faults: std::sync::mpsc::Sender<Fault>,
 ) -> Result<Selection, BansheeError> {
     match tts_config.provider {
-        TtsProvider::Local => select_local_backend(tts_config),
-        TtsProvider::Remote => {
+        Provider::Local => select_local_backend(tts_config, faults),
+        Provider::Remote => {
             // Not propagated: a credentials file that will not parse holds no
             // key the speaker can use, so it takes the path a missing key takes
             // and the daemon stays up.
@@ -142,7 +153,7 @@ fn select_remote_backend(
     };
     match built {
         Ok(backend) => {
-            println!(
+            log::info!(
                 "TTS: {} as {}",
                 tts_config.remote.host(),
                 tts_config.remote.voice
@@ -158,7 +169,7 @@ fn select_remote_backend(
         // agent's question still has to be heard.
         Err(error) => {
             let reason = error.to_string();
-            eprintln!("The remote speaker will not start: {reason}");
+            log::warn!("The remote speaker will not start: {reason}");
             let backend: Box<dyn TtsBackend> = match tts_config.fallback {
                 TTSFallback::System => Box::new(SayBackend),
                 TTSFallback::None => Box::new(Silent {
@@ -194,22 +205,25 @@ impl TtsBackend for Silent {
         &self,
         _text: &str,
         _voice: Option<&str>,
-    ) -> std::io::Result<Box<dyn ActiveUtterance>> {
-        Err(std::io::Error::other(self.reason.clone()))
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+        Err(BansheeError::Other(self.reason.clone()))
     }
 }
 
 /// Kokoro, or the OS voice when `tts.fallback` allows it and Kokoro cannot load.
 /// The output opens here rather than in `daemon.rs`: a machine with no output
 /// device has to reach the system voice, not stop the daemon.
-fn select_local_backend(tts_config: &TTSConfig) -> Result<Selection, BansheeError> {
+fn select_local_backend(
+    tts_config: &TTSConfig,
+    faults: std::sync::mpsc::Sender<Fault>,
+) -> Result<Selection, BansheeError> {
     let kokoro_config = KokoroTTSConfig::new(&tts_config.voice);
     let loaded = KokoroEngine::new(&kokoro_config, tts_config.speed).and_then(|engine| {
-        Output::open().map(|output| KokoroBackend::new(engine, std::sync::Arc::new(output)))
+        Output::open().map(|output| KokoroBackend::new(engine, std::sync::Arc::new(output), faults))
     });
     match loaded {
         Ok(backend) => {
-            println!("TTS: Kokoro (voice {})", tts_config.voice);
+            log::info!("TTS: Kokoro (voice {})", tts_config.voice);
             Ok(Selection {
                 backend: Box::new(backend),
                 speaker: Speaker::Configured(tts_config.voice.clone()),
@@ -218,7 +232,7 @@ fn select_local_backend(tts_config: &TTSConfig) -> Result<Selection, BansheeErro
         }
         Err(e) => match tts_config.fallback {
             TTSFallback::System => {
-                eprintln!("Kokoro unavailable, falling back to system TTS: {e}");
+                log::warn!("Kokoro unavailable, falling back to system TTS: {e}");
                 Ok(Selection {
                     backend: Box::new(SayBackend),
                     speaker: Speaker::Fallback,
@@ -274,7 +288,7 @@ impl SpeechPlayer {
         text: &str,
         interrupt: bool,
         voice: Option<&str>,
-    ) -> Result<u64, std::io::Error> {
+    ) -> Result<u64, BansheeError> {
         let normalized = pronunciation::normalize(text);
         let text = normalized.as_str();
         let mut playback = self.lock();
@@ -307,7 +321,19 @@ impl SpeechPlayer {
             return Ok(utterance_id);
         }
 
-        playback.active = Some(self.backend.start(text, voice)?);
+        match self.backend.start(text, voice) {
+            Ok(started) => playback.active = Some(started),
+            // An interrupt stopped whatever was speaking and nothing replaced
+            // it. The hotkey listener discards every chunk it captures while
+            // this reads true, so a reply that never starts would leave the
+            // daemon deaf.
+            Err(error) => {
+                drop(playback);
+                self.speaking
+                    .send_if_modified(|speaking| std::mem::replace(speaking, false));
+                return Err(error);
+            }
+        }
         let needs_watcher = !playback.watcher_running;
         playback.watcher_running = true;
         drop(playback);
@@ -338,7 +364,7 @@ impl SpeechPlayer {
 
     fn watch_playback(&self) {
         loop {
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(PLAYBACK_POLL);
             let mut playback = self.lock();
             let Some(active) = playback.active.as_mut() else {
                 // stopped; a speak arriving before we exit reuses this watcher
@@ -353,7 +379,7 @@ impl SpeechPlayer {
                 Some((next, voice)) => match self.backend.start(&next, voice.as_deref()) {
                     Ok(utterance) => playback.active = Some(utterance),
                     Err(e) => {
-                        eprintln!("Failed to speak queued utterance: {e}");
+                        log::error!("Failed to speak queued utterance: {e}");
                         playback.queue.clear();
                         playback.watcher_running = false;
                         drop(playback);
@@ -430,7 +456,7 @@ mod tests {
     #[test]
     fn a_remote_speaker_with_no_key_falls_back_and_says_why() {
         let tts = crate::config::TTSConfig {
-            provider: crate::config::TtsProvider::Remote,
+            provider: crate::config::Provider::Remote,
             remote: crate::config::RemoteTtsConfig {
                 voice: "marin".to_string(),
                 ..Default::default()
@@ -456,7 +482,7 @@ mod tests {
     #[test]
     fn a_credentials_file_that_will_not_parse_falls_back_and_says_why() {
         let tts = crate::config::TTSConfig {
-            provider: crate::config::TtsProvider::Remote,
+            provider: crate::config::Provider::Remote,
             remote: crate::config::RemoteTtsConfig {
                 voice: "marin".to_string(),
                 ..Default::default()
@@ -483,7 +509,7 @@ mod tests {
     #[test]
     fn with_no_fallback_every_utterance_fails_with_the_reason() {
         let tts = crate::config::TTSConfig {
-            provider: crate::config::TtsProvider::Remote,
+            provider: crate::config::Provider::Remote,
             remote: crate::config::RemoteTtsConfig {
                 voice: "marin".to_string(),
                 ..Default::default()
@@ -505,7 +531,7 @@ mod tests {
     #[test]
     fn a_remote_speaker_with_no_voice_names_the_voice_key() {
         let tts = crate::config::TTSConfig {
-            provider: crate::config::TtsProvider::Remote,
+            provider: crate::config::Provider::Remote,
             fallback: crate::config::TTSFallback::None,
             ..Default::default()
         };
@@ -532,7 +558,7 @@ mod tests {
             .expect("a nonexistent voice must not load")
             .to_string();
 
-        let selected = select_local_backend(&tts).unwrap();
+        let selected = select_local_backend(&tts, std::sync::mpsc::channel().0).unwrap();
         assert!(
             !selected.speaker.started(),
             "the system voice is not the speaker the config names"
@@ -541,5 +567,54 @@ mod tests {
             .fault
             .expect("the Kokoro start failure must be reported");
         assert_eq!(reason, expected);
+    }
+
+    /// A voice that goes missing between two replies, which `installed` refuses
+    /// by name.
+    struct RefusesAfterFirst(std::sync::atomic::AtomicUsize);
+
+    struct NeverEnds;
+
+    impl ActiveUtterance for NeverEnds {
+        fn is_finished(&mut self) -> bool {
+            false
+        }
+        fn stop(&mut self) {}
+    }
+
+    impl TtsBackend for RefusesAfterFirst {
+        fn start(
+            &self,
+            _text: &str,
+            _voice: Option<&str>,
+        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                Ok(Box::new(NeverEnds))
+            } else {
+                Err(BansheeError::Rejected(
+                    "Voice af_sky is not installed on this machine.".into(),
+                ))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_interrupt_leaves_nothing_speaking() {
+        let player = Arc::new(SpeechPlayer::new(Box::new(RefusesAfterFirst(
+            std::sync::atomic::AtomicUsize::new(0),
+        ))));
+        let mut speaking = player.subscribe_speaking();
+
+        player.speak("The first reply.", false, None).unwrap();
+        assert!(player.is_speaking(), "the first reply is playing");
+
+        player
+            .speak("The second reply.", true, Some("af_sky"))
+            .expect_err("the backend refuses the voice");
+
+        tokio::time::timeout(Duration::from_secs(3), speaking.wait_for(|s| !s))
+            .await
+            .expect("a reply that never started left the daemon deaf to the microphone")
+            .expect("speaking sender dropped");
     }
 }

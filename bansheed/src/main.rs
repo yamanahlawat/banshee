@@ -14,6 +14,7 @@ mod hotkey;
 mod models;
 mod permissions;
 mod readiness;
+mod remote;
 mod remote_probe;
 mod service;
 mod settings;
@@ -25,22 +26,26 @@ mod tell;
 mod test_support;
 mod text_to_speech;
 
+use std::process::ExitCode;
+
 use args::{Cli, CommandType};
-use banshee_common::error::BansheeError;
 use clap::Parser;
 
 use crate::config::Config;
 
 #[tokio::main]
-async fn main() -> Result<(), BansheeError> {
+async fn main() -> ExitCode {
+    banshee_common::logging::install();
     let cli = Cli::parse();
     // Unwrapped only by the arms that read it: RPC works without a parseable
     // config, and the checklist diagnoses a broken one
-    let config_result =
-        Config::load().inspect_err(|error| eprintln!("Failed to load config: {error}"));
+    let config_result = Config::load();
 
-    match cli.command {
-        CommandType::Serve => daemon::start(config_result?).await,
+    let outcome = match cli.command {
+        CommandType::Serve => match config_result {
+            Ok(config) => daemon::start(config).await,
+            Err(error) => Err(error),
+        },
         CommandType::Stop => cli::stop().await,
         CommandType::Devices => cli::devices().await,
         CommandType::Voices => cli::voices().await,
@@ -64,5 +69,12 @@ async fn main() -> Result<(), BansheeError> {
         CommandType::Connect { agent, yes } => cli::connect(agent, yes),
         CommandType::Bind { compositor, yes } => cli::bind(compositor, yes, config_result).await,
         CommandType::Service { action } => cli::service(action),
+    };
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{}", cli::failure_line(&error));
+            ExitCode::FAILURE
+        }
     }
 }

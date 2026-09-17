@@ -6,22 +6,24 @@ use banshee_common::error::BansheeError;
 use reqwest::blocking::Client;
 
 use crate::config::{RemoteTtsConfig, SpeechFormat, TTSConfig};
-use crate::credentials;
+use crate::credentials::{self, RemoteKey};
 use crate::text_to_speech::local::say::VOICE_NEEDS_KOKORO;
 use crate::text_to_speech::output::Output;
 use crate::text_to_speech::remote::arrival::{Arrival, declared};
 use crate::text_to_speech::{ActiveUtterance, Fault, TtsBackend, lock};
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 // The bound applies to the wait for headers and to each read, since the
 // blocking client keeps one timeout. The test bound is short, because a
 // fifteen-second test is a test nobody runs, and the fixture divides it for
 // the pause it leaves between two chunks.
+/// Unmeasured. A ceiling on a server that has stopped answering.
 const READ_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(1)
 } else {
     Duration::from_secs(15)
 };
+/// Unmeasured. Small enough that audio reaches the speaker before the whole
+/// body has arrived.
 const READ_SIZE: usize = 8 * 1024;
 /// Long enough for a server that says what to do about the refusal: the
 /// longest message met so far is 188 characters. Short enough for the status
@@ -50,32 +52,6 @@ pub struct RemoteSpeechBackend {
     faults: std::sync::mpsc::Sender<Fault>,
 }
 
-/// Built on a thread of its own, and joined, because reqwest's blocking builder
-/// makes and drops a temporary runtime, and a debug build of tokio refuses that
-/// drop on a worker.
-fn build_client() -> Result<Client, BansheeError> {
-    std::thread::spawn(|| {
-        Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(READ_TIMEOUT)
-            .build()
-    })
-    .join()
-    .map_err(|_| BansheeError::Other("the client for the remote speaker panicked".to_string()))?
-    .map_err(|error| BansheeError::Other(error.to_string()))
-}
-
-/// The sentence a status carries on its own, for an answer whose body names no
-/// fault.
-fn describe_status(status: reqwest::StatusCode) -> String {
-    match status.as_u16() {
-        401 | 403 => "the remote speaker refused the key".to_string(),
-        404 => "the remote speaker has no such model or voice".to_string(),
-        429 => "the remote speaker asked to slow down".to_string(),
-        code => format!("the remote speaker answered {code}"),
-    }
-}
-
 /// The reason a refused answer leaves. The server's own words win, because a
 /// status code says nothing a person can act on. `said` is the redacted body,
 /// or nothing for a body that was never read.
@@ -87,18 +63,7 @@ fn describe_refusal(
 ) -> String {
     match said.and_then(|body| server_message(body, api_key)) {
         Some(message) => format!("{host} says {message}"),
-        None => describe_status(status),
-    }
-}
-
-/// What a non-success answer leaves in the daemon log, on one line.
-fn log_line(status: reqwest::StatusCode, said: Option<&str>) -> String {
-    match said {
-        Some(body) => format!(
-            "banshee: the remote speaker answered {status}: {}",
-            credentials::one_line(body)
-        ),
-        None => format!("banshee: the remote speaker answered {status}"),
+        None => crate::remote::describe_status(RemoteKey::Tts, status),
     }
 }
 
@@ -159,7 +124,7 @@ impl RemoteSpeechBackend {
         }
         let base_url = remote.base_url.trim_end_matches('/').to_string();
         Ok(Self {
-            client: build_client()?,
+            client: crate::remote::build_client(READ_TIMEOUT, "speaker")?,
             host: crate::config::host_of(&base_url),
             base_url,
             model: remote.model.clone(),
@@ -209,9 +174,11 @@ impl RemoteSpeechBackend {
             // A refused key is the one body nothing reads: it is the likeliest
             // place for a server to echo the key back, and the sentence the
             // status carries is already the whole fault
-            let said = credentials::may_read_body(status)
-                .then(|| credentials::redacted(&credentials::read_body(response), &self.api_key));
-            eprintln!("{}", log_line(status, said.as_deref()));
+            let said = credentials::may_read_body(status).then(|| credentials::read_body(response));
+            log::warn!(
+                "{}",
+                crate::remote::log_line(RemoteKey::Tts, status, said.as_deref(), &self.api_key)
+            );
             return Err(describe_refusal(
                 &self.host,
                 status,
@@ -254,9 +221,13 @@ impl TtsBackend for RemoteSpeechBackend {
         Some(self.voice.clone())
     }
 
-    fn start(&self, text: &str, voice: Option<&str>) -> std::io::Result<Box<dyn ActiveUtterance>> {
+    fn start(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
         if voice.is_some() {
-            return Err(std::io::Error::other(VOICE_NEEDS_KOKORO));
+            return Err(BansheeError::Rejected(VOICE_NEEDS_KOKORO.into()));
         }
         Ok(Box::new(self.speak(text)))
     }
@@ -287,7 +258,7 @@ impl RemoteSpeechBackend {
                     return;
                 }
                 match said {
-                    Report::Line(line) => println!("{line}"),
+                    Report::Line(line) => log::info!("{line}"),
                     Report::Fault(fault) => {
                         let _ = faults.send(fault);
                     }
@@ -479,9 +450,11 @@ impl ActiveUtterance for RemoteUtterance {
 mod tests {
     use super::{READ_TIMEOUT, RemoteSpeechBackend, lock};
     use crate::config::{RemoteTtsConfig, SpeechFormat};
+    use crate::test_support::read_request;
     use crate::text_to_speech::output::Output;
     use crate::text_to_speech::{ActiveUtterance, Fault, TtsBackend};
-    use std::io::{Read, Write};
+    use banshee_common::error::BansheeError;
+    use std::io::Write;
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -512,7 +485,7 @@ mod tests {
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream);
+            let request = crate::test_support::read_request(&mut stream);
             let head = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\n\r\n"
             );
@@ -543,36 +516,6 @@ mod tests {
         (base_url, handle)
     }
 
-    fn read_request(stream: &mut std::net::TcpStream) -> String {
-        let mut buffer = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let mut content_length = None;
-        let mut header_end = None;
-        loop {
-            let read = stream.read(&mut chunk).unwrap();
-            if read == 0 {
-                break;
-            }
-            buffer.extend_from_slice(&chunk[..read]);
-            if header_end.is_none()
-                && let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n")
-            {
-                header_end = Some(end + 4);
-                let head = String::from_utf8_lossy(&buffer[..end]).to_lowercase();
-                content_length = head
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length:"))
-                    .and_then(|value| value.trim().parse::<usize>().ok());
-            }
-            if let (Some(end), Some(length)) = (header_end, content_length)
-                && buffer.len() >= end + length
-            {
-                break;
-            }
-        }
-        String::from_utf8_lossy(&buffer).to_string()
-    }
-
     /// What a fallback was asked to say. `SayBackend` would start a real `say`
     /// process, so the tests use this instead.
     #[derive(Default)]
@@ -592,7 +535,7 @@ mod tests {
             &self,
             text: &str,
             _voice: Option<&str>,
-        ) -> std::io::Result<Box<dyn ActiveUtterance>> {
+        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
             self.0
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
@@ -608,8 +551,8 @@ mod tests {
             &self,
             _text: &str,
             _voice: Option<&str>,
-        ) -> std::io::Result<Box<dyn ActiveUtterance>> {
-            Err(std::io::Error::other("no voice here"))
+        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+            Err(BansheeError::Other("no voice here".into()))
         }
     }
 
@@ -637,7 +580,7 @@ mod tests {
             &self,
             text: &str,
             _voice: Option<&str>,
-        ) -> std::io::Result<Box<dyn ActiveUtterance>> {
+        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
             lock(&self.said).push(text.to_string());
             Ok(Box::new(Held(Arc::clone(&self.ended))))
         }
@@ -779,6 +722,7 @@ mod tests {
         let Err(error) = built.backend.start("Hello.", Some("cedar")) else {
             panic!("the remote speaker cannot honour a per-request voice, so it must refuse");
         };
+        assert!(matches!(error, BansheeError::Rejected(_)), "{error:?}");
         assert!(error.to_string().contains("Kokoro"), "{error}");
     }
 
@@ -1473,18 +1417,6 @@ mod tests {
             assert_eq!(reason, "the remote speaker refused the key");
             assert!(!reason.contains("Incorrect"), "{reason}");
         }
-    }
-
-    #[test]
-    fn a_body_that_was_never_read_leaves_no_body_in_the_log() {
-        assert_eq!(
-            super::log_line(reqwest::StatusCode::UNAUTHORIZED, None),
-            "banshee: the remote speaker answered 401 Unauthorized"
-        );
-        assert_eq!(
-            super::log_line(reqwest::StatusCode::BAD_REQUEST, Some("{}")),
-            "banshee: the remote speaker answered 400 Bad Request: {}"
-        );
     }
 
     #[test]

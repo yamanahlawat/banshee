@@ -3,7 +3,7 @@ use crate::test_support::daemon_state as test_state;
 
 fn request(method: &str, params: Option<serde_json::Value>) -> JsonRpcRequest {
     JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
+        jsonrpc: banshee_common::Version::V2,
         method: method.to_string(),
         params,
         id: Some(serde_json::json!(1)),
@@ -75,7 +75,7 @@ async fn only_history_being_off_answers_its_own_code() {
 
     for method in [BANSHEE_HISTORY, BANSHEE_CLEAR_HISTORY] {
         let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: banshee_common::Version::V2,
             method: method.to_string(),
             params: Some(serde_json::json!({})),
             id: Some(serde_json::json!(1)),
@@ -210,7 +210,7 @@ async fn stop_replies_ok_and_signals_shutdown() {
     let state = test_state(std::sync::mpsc::channel().0);
 
     let request = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
+        jsonrpc: banshee_common::Version::V2,
         method: BANSHEE_STOP.to_string(),
         params: None,
         id: Some(serde_json::json!(1)),
@@ -385,7 +385,7 @@ async fn subscribe_answers_with_the_status_payload() {
     );
 }
 
-// Two spellings of one fact drift apart; this is what notices.
+// The two agree by construction, and nothing but this would notice if they stopped.
 #[test]
 fn a_pushed_change_agrees_with_what_status_reports() {
     let state = test_state(std::sync::mpsc::channel().0);
@@ -424,6 +424,23 @@ fn status_carries_the_config_the_daemon_parsed() {
     assert!(status["config"]["audio"]["hotkey"].is_string());
 }
 
+/// The window builds its key capture from this list rather than a table of its
+/// own, which would drift from the parser.
+#[test]
+fn status_reports_the_modifiers_the_parser_binds() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let reported = status_payload(&state)["bindable_modifiers"].clone();
+    let expected = serde_json::to_value(crate::binding::bindable_modifiers()).unwrap();
+
+    assert_eq!(reported, expected);
+    for refused in ["Shift", "LeftShift", "RightShift", "CapsLock"] {
+        assert!(
+            !reported.as_array().unwrap().iter().any(|n| n == refused),
+            "{refused} is reserved, so the window must never offer it"
+        );
+    }
+}
+
 #[test]
 fn status_reports_nothing_pending_on_a_fresh_daemon() {
     let state = test_state(std::sync::mpsc::channel().0);
@@ -444,7 +461,7 @@ fn english_only_follows_the_model_the_listener_loaded() {
 #[test]
 fn a_remote_listener_reports_no_model_and_is_not_english_only() {
     let mut config = crate::config::Config::default();
-    config.stt.provider = crate::config::SttProvider::Remote;
+    config.stt.provider = crate::config::Provider::Remote;
     let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
     let status = status_payload(&state);
     assert_eq!(status["stt_model"], serde_json::Value::Null);
@@ -487,7 +504,7 @@ fn each_side_reports_its_own_key() {
 /// A config whose speaker is the server, with `voice` named in its table.
 fn remote_speaker(voice: &str) -> crate::config::Config {
     let mut config = crate::config::Config::default();
-    config.tts.provider = crate::config::TtsProvider::Remote;
+    config.tts.provider = crate::config::Provider::Remote;
     config.tts.remote.base_url = "https://api.openai.com/v1".to_string();
     config.tts.remote.voice = voice.to_string();
     config
@@ -544,7 +561,7 @@ async fn the_voice_reported_under_a_remote_speaker_is_the_one_the_server_names()
 #[test]
 fn status_names_the_host_a_remote_listener_sends_audio_to() {
     let mut config = crate::config::Config::default();
-    config.stt.provider = crate::config::SttProvider::Remote;
+    config.stt.provider = crate::config::Provider::Remote;
     config.stt.remote.base_url = "https://api.groq.com/openai/v1".to_string();
     let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
     let remote = &status_payload(&state)["remote"];
@@ -823,7 +840,8 @@ impl crate::text_to_speech::TtsBackend for VoiceCapture {
         &self,
         _text: &str,
         voice: Option<&str>,
-    ) -> std::io::Result<Box<dyn crate::text_to_speech::ActiveUtterance>> {
+    ) -> Result<Box<dyn crate::text_to_speech::ActiveUtterance>, banshee_common::error::BansheeError>
+    {
         self.0.lock().unwrap().push(voice.map(str::to_string));
         Ok(Box::new(RecordedUtterance))
     }
@@ -841,6 +859,7 @@ async fn speak_passes_the_voice_parameter_to_the_backend() {
         crate::text_to_speech::Speaker::Fallback,
         std::sync::mpsc::channel().0,
         crate::audio::cues::Cues::silent(),
+        crate::test_support::scratch("api-models"),
     ));
 
     let response = dispatch(
@@ -989,8 +1008,8 @@ fn paths_of(value: &serde_json::Value) -> Vec<String> {
 
 // A window mock stands in for a real reply in every test that reads it, so a
 // mock missing a key the daemon writes lets a branch that reads that key pass
-// on a shape no daemon sends. `remote.json` predates `[tts.remote]`, which
-// is why the table was filled in by hand.
+// on a shape no daemon sends. Every mock that carries a `config` is listed, so
+// a new one that skips the table is the thing to notice.
 #[test]
 fn the_window_mocks_carry_every_config_key_the_reply_writes() {
     for (name, body) in [
@@ -1008,8 +1027,106 @@ fn the_window_mocks_carry_every_config_key_the_reply_writes() {
                 "/../banshee-app/ui/src/mocks/remote-speech.json"
             )),
         ),
+        (
+            "ready.json",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../banshee-app/ui/src/mocks/ready.json"
+            )),
+        ),
+        (
+            "permissions.json",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../banshee-app/ui/src/mocks/permissions.json"
+            )),
+        ),
+        (
+            "pending-cues.json",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../banshee-app/ui/src/mocks/pending-cues.json"
+            )),
+        ),
     ] {
         one_mock_carries_every_config_key(name, body);
+    }
+}
+
+/// The `banshee.state_changed` mocks, listed once so a fifth cannot be added to
+/// one of the two tests below and not the other.
+const LIVE_MOCKS: [(&str, &str); 4] = [
+    (
+        "recording.json",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../banshee-app/ui/src/mocks/recording.json"
+        )),
+    ),
+    (
+        "armed.json",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../banshee-app/ui/src/mocks/armed.json"
+        )),
+    ),
+    (
+        "transcribing.json",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../banshee-app/ui/src/mocks/transcribing.json"
+        )),
+    ),
+    (
+        "speaking.json",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../banshee-app/ui/src/mocks/speaking.json"
+        )),
+    ),
+];
+
+// The window feeds these to `reduceLive` as a `banshee.state_changed` push, so
+// a mock short of a key lets a branch pass on a payload no daemon sends.
+#[test]
+fn the_window_mocks_carry_every_live_key_the_push_writes() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let written: Vec<String> = live_state(&state)
+        .as_object()
+        .expect("an object")
+        .keys()
+        .cloned()
+        .collect();
+
+    for (name, body) in LIVE_MOCKS {
+        let mock: serde_json::Value = serde_json::from_str(body).expect("the mock parses");
+        let carried = mock.as_object().expect("an object");
+        let missing: Vec<&String> = written
+            .iter()
+            .filter(|key| !carried.contains_key(*key))
+            .collect();
+        let invented: Vec<&String> = carried
+            .keys()
+            .filter(|key| !written.contains(key))
+            .collect();
+        assert!(
+            missing.is_empty() && invented.is_empty(),
+            "{name} is missing {missing:?} and carries {invented:?}, which no push does"
+        );
+    }
+}
+
+// Each live mock names the activity the daemon would rank for its own flags,
+// so the window is never handed a word the ranking would not have chosen.
+#[test]
+fn each_live_mock_names_the_activity_its_flags_rank() {
+    for (name, body) in LIVE_MOCKS {
+        let mock: serde_json::Value = serde_json::from_str(body).expect("the mock parses");
+        assert_eq!(
+            mock["activity"],
+            serde_json::json!(banshee_common::Activity::of(&mock).word()),
+            "{name} names an activity its own flags do not rank"
+        );
     }
 }
 

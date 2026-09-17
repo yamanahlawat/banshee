@@ -220,9 +220,9 @@ fn a_daemon_that_is_not_running_fails_the_checklist() {
 use super::{Daemon, classify};
 
 #[test]
-fn a_reply_without_blockers_is_an_older_daemon() {
+fn a_reply_without_blockers_answers_nothing_the_checklist_can_read() {
     let reply = serde_json::json!({"running": true, "version": "0.7.0"});
-    assert!(matches!(classify(reply), Daemon::Legacy(_)));
+    assert!(matches!(classify(reply), Daemon::Silent(_)));
 }
 
 // A field that is present but unreadable is this build failing to parse a

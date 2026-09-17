@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
+  import { land } from './lib/focus';
   import {
     daemon,
     downloadLine,
@@ -71,8 +72,7 @@
     cameFrom = next === null ? cameFrom : from;
     job = next;
     if (next !== null) return;
-    await tick();
-    document.getElementById(cameFrom)?.focus();
+    await land(() => document.getElementById(cameFrom));
     cameFrom = '';
   }
   let query = '';
@@ -128,8 +128,7 @@
   $: live = !isDown($daemon);
   $: connected = $agents.filter((a) => a.presence === 'connected').length;
   // Wayland grants no global grab, so the daemon binds nothing and says so.
-  // A daemon older than the field sends nothing, and it did bind the key.
-  $: hotkeyListens = $daemon.status?.hotkey_listens !== false;
+  $: hotkeyListens = $daemon.status?.hotkey_listens === true;
   // The window names no key it has not been told. `audio.hotkey_mode` decides
   // the verb, because "Hold" is a lie when a tap is what starts it.
   $: boundKey = humanize(String(config.audio?.hotkey ?? ''));

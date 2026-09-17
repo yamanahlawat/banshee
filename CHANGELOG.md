@@ -7,7 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Every line in the daemon log carries a clock and a level, and a dictated
+  sentence reaches it only when asked for.** Lines read
+  `12:00:01.500 INFO  hotkey: Transcribed 3.2s of audio in 0.41s`. The text
+  Banshee heard, typed or told the agent is logged at `debug`. A supervisor
+  hands the daemon an environment of its own, so `BANSHEE_LOG=debug banshee
+  start` writes the level into the login service file and the daemon runs at
+  it. Use `BANSHEE_LOG=warn banshee start` for failures alone, and
+  `banshee start` on its own to go back to the default.
+
+- **The voice detector asks for one thread instead of four, and Kokoro asks for
+  the core count up to eight instead of a fixed four.** The detector reads 0.06 ms
+  at one, two and four threads alike, so the extra three bought nothing on every
+  chunk the microphone captured. Kokoro does scale: one utterance measured 484 ms
+  at one thread and 155 at eight on a 24-thread machine, and 1001 at one, 388 at
+  four and 243 at eight on a 15-thread one. It now asks for no more threads than
+  the machine holds, so a dual-core laptop is no longer oversubscribed either.
+
+- **A request whose `jsonrpc` field is not `"2.0"` is not answered.** The
+  daemon read the field as free text and answered any value. It now parses only
+  the version it speaks, as its replies already declared.
+
+- **The window and the daemon upgrade together.** Banshee no longer carries the
+  paths that let a new `banshee` command read an older running daemon. Upgrade
+  and then run `banshee start`, which every install path already does. A daemon
+  older than 0.8.0 left running now reports that its checklist cannot be read,
+  rather than reporting a shorter one.
+
+### Removed
+
+- **A `[logging]` table in `config.toml` is refused by name.** It was parsed and
+  ignored since 0.11.1. Delete the table and the file loads again.
+
 ### Fixed
+
+- **A reply that never starts no longer leaves the daemon deaf.** When a new
+  reply interrupted one already playing and the speaker then refused it, for
+  example a voice that is not installed, Banshee went on believing it was
+  speaking. The hotkey listener drops every sound it captures while that is
+  true, so the microphone stopped answering until the next reply played.
+
+- **A `config.toml` that does not parse names itself.** The message pointed at
+  the line at fault but not at the file it was in, and Banshee reads two toml
+  files.
+
+- **`banshee.speak` with a voice the speaker cannot take answers an
+  invalid-params error, not an internal one.** The system voice and a remote
+  speaker take no per-utterance voice, and Kokoro refuses a voice that is not
+  installed. Each said so under the internal-error code.
+
+- **An error reads as the sentence it was written as.** Every failure that was
+  not a refusal or an answer from the daemon printed `Internal error:` in front
+  of its text, so `config.toml does not parse` and `home dir not found` each
+  called themselves internal. A typing failure on dictation printed its Rust
+  form in the daemon log; it prints the sentence now.
+
+- **`banshee start` writes its login service file whole, and finds `launchctl`,
+  `systemctl` and `open` under a supervisor's short PATH.** The launchd plist
+  and the systemd unit were written in place, so a crash mid-write left a file
+  the next login could not start. Every file Banshee writes now lands on disk
+  before it replaces the old one.
+
+- **`banshee status` reports a `credentials.toml` that others can read, with
+  the `chmod` that fixes it.** Banshee writes the file owner-only, but a copy
+  made by hand or restored from a backup kept whatever mode it came with.
+
+- **A Kokoro sentence that fails to synthesise sounds the error cue and shows
+  in `banshee status`, as a remote speaker's failure already did.** It wrote
+  one line to the daemon log and the reply went silent with no other sign.
+
+- **A `banshee` command that fails exits with status 1 and prints the reason
+  as a sentence.** `stop`, `listen`, `speak`, `history`, `clear-history` and
+  `record` reported a failure and exited 0, so a script could not see it. An
+  error that reached the top printed its Rust form, such as
+  `Error: Rejected("...")`; it now prints the text alone.
+
+- **The MCP shim answers an unknown tool and stays silent on a notification.**
+  A call to a tool name the shim does not serve got no reply at all, so the
+  agent waited until its own timeout. It now answers an invalid-params error
+  that names the tool. A notification such as `notifications/cancelled` got a
+  method-not-found error with no id, which JSON-RPC forbids. The shim now
+  sends nothing for any message without an id. A tool call the daemon refuses
+  comes back as a tool result marked as an error, with the daemon's own words,
+  so the agent reads why; it was a protocol error with an internal-error code
+  before. A line that is not a JSON-RPC request gets a parse error from the
+  shim and from the daemon's socket, where both dropped it in silence. The
+  shim's own log lines carry a clock and a level like the daemon's, and
+  `BANSHEE_LOG=debug` in the MCP server's environment names each tool call.
 
 - **A version number, a decimal and a year are spoken as what they are.**
   `0.12.1` reads "zero twelve one" instead of "zero one two one", `1.2` reads

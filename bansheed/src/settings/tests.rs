@@ -1,6 +1,18 @@
-use super::{Assignments, edit, startup_only};
+use super::{Assignments, Outcome, edit, startup_only};
 use crate::config::Config;
 use crate::credentials::RemoteKey;
+use banshee_common::error::BansheeError;
+
+/// A write against a config.toml of this test's own, so whose machine runs the
+/// suite decides nothing.
+fn configure_in_scratch(
+    state: Option<&crate::state::DaemonState>,
+    assignments: Assignments,
+    persist: bool,
+) -> Result<Outcome, BansheeError> {
+    let dir = crate::test_support::unique_scratch("settings");
+    super::configure_at(&dir.join("config.toml"), state, assignments, persist)
+}
 
 fn assignments(pairs: &[(&str, serde_json::Value)]) -> Assignments {
     pairs
@@ -100,7 +112,7 @@ fn the_spoken_language_applies_without_a_restart() {
 /// file written before the field was read cannot stop the daemon.
 #[test]
 fn a_language_the_engine_does_not_know_is_refused_at_the_boundary() {
-    let error = super::configure(
+    let error = configure_in_scratch(
         None,
         assignments(&[("stt.language", "klingon".into())]),
         false,
@@ -112,7 +124,7 @@ fn a_language_the_engine_does_not_know_is_refused_at_the_boundary() {
 
 #[test]
 fn a_language_the_engine_knows_is_written() {
-    super::configure(None, assignments(&[("stt.language", "de".into())]), false)
+    configure_in_scratch(None, assignments(&[("stt.language", "de".into())]), false)
         .expect("de is a language whisper knows");
 }
 
@@ -136,7 +148,7 @@ fn a_barge_in_write_reaches_the_running_daemon() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
     assert!(matches!(state.barge_in(), crate::config::BargeInMode::Stop));
 
-    let outcome = super::configure(
+    let outcome = configure_in_scratch(
         Some(&state),
         assignments(&[("audio.barge_in", "none".into())]),
         false,
@@ -156,7 +168,7 @@ fn a_cues_write_reaches_the_running_daemon() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
     assert!(!state.cues_enabled());
 
-    let outcome = super::configure(
+    let outcome = configure_in_scratch(
         Some(&state),
         assignments(&[("audio.cues.enabled", true.into())]),
         false,
@@ -179,7 +191,7 @@ fn a_save_history_write_reaches_the_running_daemon() {
     let state = crate::test_support::daemon_state_with_history(&["one"]);
     assert!(state.history_enabled());
 
-    let outcome = super::configure(
+    let outcome = configure_in_scratch(
         Some(&state),
         assignments(&[("daemon.save_history", false.into())]),
         false,
@@ -199,7 +211,7 @@ fn a_voice_write_reaches_the_running_daemon() {
     let (state, spoken) = crate::test_support::daemon_state_recording_tts();
     assert_eq!(state.tts_voice(), None);
 
-    let outcome = super::configure(
+    let outcome = configure_in_scratch(
         Some(&state),
         assignments(&[("tts.voice", "am_adam".into())]),
         false,
@@ -228,7 +240,7 @@ fn a_voice_write_reaches_the_running_daemon() {
 fn a_speed_write_reaches_the_running_daemon() {
     let (state, spoken) = crate::test_support::daemon_state_recording_tts();
 
-    let outcome = super::configure(
+    let outcome = configure_in_scratch(
         Some(&state),
         assignments(&[("tts.speed", 1.5.into())]),
         false,
@@ -249,7 +261,7 @@ fn a_speed_write_reaches_the_running_daemon() {
 fn a_backend_that_refuses_the_voice_is_not_reported_as_applied() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
 
-    let outcome = super::configure(
+    let outcome = configure_in_scratch(
         Some(&state),
         assignments(&[("tts.voice", "am_adam".into())]),
         false,
@@ -272,7 +284,7 @@ fn a_backend_that_refuses_the_voice_is_not_reported_as_applied() {
 fn the_voice_and_the_speed_together_reach_the_backend_once() {
     let (state, spoken) = crate::test_support::daemon_state_recording_tts();
 
-    let outcome = super::configure(
+    let outcome = configure_in_scratch(
         Some(&state),
         assignments(&[("tts.voice", "am_adam".into()), ("tts.speed", 1.5.into())]),
         false,
@@ -292,7 +304,7 @@ fn a_vocabulary_write_reaches_the_listener_that_holds_the_engine() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
 
-    let outcome = super::configure(
+    let outcome = configure_in_scratch(
         Some(&state),
         assignments(&[("stt.vocabulary", vec!["banshee", "tokio"].into())]),
         false,
@@ -308,26 +320,32 @@ fn a_vocabulary_write_reaches_the_listener_that_holds_the_engine() {
     assert_eq!(outcome.applied, vec!["stt.vocabulary".to_string()]);
 }
 
-// These ask `apply_preset` directly: `configure` reads the config.toml this
-// machine holds, so a write driven through it decides by whose machine runs the
-// test.
+/// Puts an empty stand-in for `name` in the state's model directory, so the
+/// preset reads as downloaded.
+fn pretend_downloaded(state: &crate::state::DaemonState, name: &str) {
+    std::fs::create_dir_all(state.models_dir()).unwrap();
+    std::fs::write(state.models_dir().join(name), b"").unwrap();
+}
+
+// These ask `apply_preset` directly, against the model directory the state
+// holds, which starts empty.
 #[test]
 fn a_preset_write_reaches_the_listener_that_holds_the_engine() {
     let (commands, taken) = std::sync::mpsc::channel();
     let mut running = Config::default();
     running.stt.preset = crate::config::STTPreset::Fast;
     let state = crate::test_support::daemon_state_running(running, commands);
+    let wanted = Config::default();
+    pretend_downloaded(&state, wanted.stt.preset.model_name());
 
-    let applied = super::apply_preset(&state, &Config::default());
+    let applied = super::apply_preset(&state, &wanted);
 
-    // The model is the one the daemon already runs on a real machine, so
-    // this asserts what the arm decided rather than what is on this disk.
-    match (taken.try_recv(), applied) {
-        (Ok(crate::state::ConsumerCommand::Reload(preset)), true) => {
-            assert_eq!(preset.model_name(), "ggml-large-v3-turbo-q5_0.bin");
+    assert!(applied, "a downloaded preset loads live");
+    match taken.try_recv() {
+        Ok(crate::state::ConsumerCommand::Reload(preset)) => {
+            assert_eq!(preset, wanted.stt.preset);
         }
-        (Err(_), false) => {}
-        _ => panic!("the arm handed over a model and reported nothing, or the reverse"),
+        other => panic!("the listener was handed no model: {:?}", other.is_ok()),
     }
 }
 
@@ -349,7 +367,7 @@ fn a_preset_write_under_a_remote_listener_is_applied_and_loads_nothing() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
     let mut file = Config::default();
-    file.stt.provider = crate::config::SttProvider::Remote;
+    file.stt.provider = crate::config::Provider::Remote;
     file.stt.preset = crate::config::STTPreset::Fast;
 
     assert!(super::apply_preset(&state, &file));
@@ -365,11 +383,10 @@ fn a_preset_write_under_a_remote_listener_is_applied_and_loads_nothing() {
 fn a_preset_written_for_a_listener_that_is_not_running_yet_loads_nothing() {
     let (commands, taken) = std::sync::mpsc::channel();
     let mut running = Config::default();
-    running.stt.provider = crate::config::SttProvider::Remote;
+    running.stt.provider = crate::config::Provider::Remote;
     let state = crate::test_support::daemon_state_running(running, commands);
     let mut file = Config::default();
     file.stt.preset = crate::config::STTPreset::Fast;
-    let model = file.stt.preset.model_name();
 
     let applied = super::apply_preset(&state, &file);
 
@@ -377,14 +394,10 @@ fn a_preset_written_for_a_listener_that_is_not_running_yet_loads_nothing() {
         taken.try_recv().is_err(),
         "a remote listener holds no engine to load into"
     );
-    // Whether the file is on this disk decides the answer, so the download
-    // nudge is asserted only on a machine that has not downloaded it.
-    if !crate::models::missing(&[model]).is_empty() {
-        assert!(
-            !applied,
-            "a model that is not downloaded leaves the preset waiting"
-        );
-    }
+    assert!(
+        !applied,
+        "a model that is not downloaded leaves the preset waiting"
+    );
 }
 
 #[test]
@@ -406,7 +419,7 @@ fn a_provider_write_is_kept_by_the_file() {
         rendered.contains("provider = \"local\""),
         "the key must land under [stt]: {rendered}"
     );
-    assert_eq!(config.stt.provider, crate::config::SttProvider::Local);
+    assert_eq!(config.stt.provider, crate::config::Provider::Local);
 }
 
 /// The provider keys are startup-only too, so the same rule holds for them.
@@ -510,17 +523,12 @@ fn a_setting_that_was_waiting_on_a_file_applies_once_the_download_ends() {
 #[test]
 fn a_setting_whose_file_is_still_missing_keeps_waiting() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    let running = state.config().stt.preset.model_name();
-    let models = banshee_common::utils::get_models_path().expect("a home directory");
-    let absent = [
-        crate::config::STTPreset::Fast,
-        crate::config::STTPreset::Balanced,
-        crate::config::STTPreset::Quality,
-    ]
-    .into_iter()
-    .find(|preset| preset.model_name() != running && !models.join(preset.model_name()).exists());
-    // Every model downloaded leaves nothing that can be missing.
-    let Some(preset) = absent else { return };
+    let preset = crate::config::STTPreset::Fast;
+    assert_ne!(
+        preset,
+        state.config().stt.preset,
+        "the fixture must ask for a model the daemon does not run"
+    );
     let mut next = Config::default();
     next.stt.preset = preset;
     state.set_config(std::sync::Arc::new(next));

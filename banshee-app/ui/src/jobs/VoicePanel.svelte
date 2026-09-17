@@ -23,7 +23,7 @@
   ];
 
   $: tts = ($daemon.status?.config?.tts ?? {}) as Record<string, unknown>;
-  $: speed = shownFloat(Number(tts.speed ?? 1));
+  $: speed = shownFloat(Number(tts.speed ?? 1.2));
   // The config leads, so the mark moves to the voice a write just chose.
   $: current = String(tts.voice ?? voices.current ?? '');
   $: provider = String(tts.provider ?? 'local');

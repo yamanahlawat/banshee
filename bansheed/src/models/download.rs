@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use banshee_common::{
     DownloadProgress, DownloadState, FileRole, KokoroTTSConfig, SileroVADConfig, WhisperConfig,
-    error::BansheeError, utils::get_models_path,
+    error::BansheeError, utils::models_path,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -104,7 +104,7 @@ pub fn still_missing(wanted: &[Download], dir: &Path) -> Vec<Download> {
 }
 
 pub fn models_dir() -> Result<std::path::PathBuf, BansheeError> {
-    get_models_path()
+    models_path()
         .ok_or_else(|| BansheeError::Other("Could not find the models directory".to_string()))
 }
 
@@ -289,7 +289,7 @@ pub async fn download_all(
 #[cfg(test)]
 mod size_tests {
     use super::{pending_megabytes, wanted};
-    use crate::config::{Config, STTPreset, SttProvider};
+    use crate::config::{Config, Provider, STTPreset};
 
     /// The window shows this instead of summing a file list it does not hold,
     /// so it has to follow the preset rather than a fixed total.
@@ -309,7 +309,7 @@ mod size_tests {
     #[test]
     fn a_remote_listener_downloads_no_whisper_file() {
         let mut config = Config::default();
-        config.stt.provider = SttProvider::Remote;
+        config.stt.provider = Provider::Remote;
         let names: Vec<String> = wanted(&config).into_iter().map(|d| d.name).collect();
         assert!(
             !names.iter().any(|name| name.starts_with("ggml-")),
@@ -373,40 +373,5 @@ mod tests {
         assert_eq!(label("silero_vad.onnx"), "Voice detection model");
         assert_eq!(label("af_sky.bin"), "Voice");
         assert_eq!(label("kokoro-v1.0.onnx"), "Speech engine");
-    }
-
-    #[test]
-    fn a_progress_report_names_the_file_its_place_and_its_size() {
-        use banshee_common::DownloadState;
-        let reported = super::progress(
-            "ggml-large-v3-turbo-q5_0.bin",
-            1,
-            3,
-            356,
-            Some(574),
-            DownloadState::Downloading,
-        );
-        assert_eq!(reported.label, "Speech model");
-        assert_eq!(reported.index, 1);
-        assert_eq!(reported.count, 3);
-        assert_eq!(reported.bytes, 356);
-        assert_eq!(reported.total, Some(574));
-        assert_eq!(super::percent(reported.bytes, reported.total), Some(62));
-    }
-
-    #[test]
-    fn an_unknown_length_stays_none() {
-        use banshee_common::DownloadState;
-        let reported = super::progress(
-            "silero_vad.onnx",
-            2,
-            3,
-            10,
-            None,
-            DownloadState::Downloading,
-        );
-        assert_eq!(reported.label, "Voice detection model");
-        assert_eq!(reported.total, None);
-        assert_eq!(super::percent(reported.bytes, reported.total), None);
     }
 }

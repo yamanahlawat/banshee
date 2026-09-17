@@ -14,7 +14,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 
     let config = match config {
         Ok(config) => {
-            let exists = utils::get_config_path().is_some_and(|p| p.exists());
+            let exists = utils::config_path().is_some_and(|p| p.exists());
             if exists {
                 pass("config.toml parsed");
             } else {
@@ -23,7 +23,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             config
         }
         Err(e) => {
-            let path = utils::get_config_path()
+            let path = utils::config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "config.toml".to_string());
             // First line only: toml's diagnostic runs five lines with a caret,
@@ -42,7 +42,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     let daemon = probe_daemon().await;
     report_settings(&config, &daemon);
 
-    let Some(models_dir) = utils::get_models_path() else {
+    let Some(models_dir) = utils::models_path() else {
         fail("home directory not found", "set $HOME");
         return false;
     };
@@ -52,6 +52,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     // Read once for the two sides below: one checklist must not report two
     // states of the file.
     let credentials = crate::credentials::Credentials::load();
+    healthy &= check_credentials_mode();
     let (stt_answer, tts_answer) = probe_remote_sides(&config, credentials.as_ref().ok());
     if config.stt.provider.is_remote() {
         healthy &= check_remote_side(
@@ -155,6 +156,21 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         println!("Problems found. Work down from the top.");
     }
     healthy
+}
+
+/// The writer sets 0600; a file made by hand or restored from a backup keeps
+/// whatever mode it came with.
+fn check_credentials_mode() -> bool {
+    let Ok(path) = crate::credentials::Credentials::path() else {
+        return true;
+    };
+    match crate::credentials::Credentials::exposed(&path) {
+        Some(mode) => fail(
+            &format!("credentials.toml is readable by others (mode {mode:o})"),
+            &format!("run: chmod 600 {}", path.display()),
+        ),
+        None => true,
+    }
 }
 
 /// What `banshee tell` would run. A note and never a failure: a machine with
@@ -356,30 +372,21 @@ pub enum Daemon {
         status: serde_json::Value,
         blockers: Vec<Blocker>,
     },
-    /// Answered, but from a build before it reported blockers
-    Legacy(serde_json::Value),
     Silent(String),
     Stale,
     Missing,
 }
 
-/// An absent blockers field is an older daemon; one that will not decode is a
-/// daemon this build cannot read, which is not the same answer.
+/// A reply this build cannot read the blockers of answers nothing the checklist
+/// can act on, whether the field is absent or will not decode.
 fn classify(status: serde_json::Value) -> Daemon {
     let Some(listed) = status.get("blockers") else {
-        return Daemon::Legacy(status);
+        return Daemon::Silent("it reported no blockers field".to_string());
     };
     match serde_json::from_value::<Vec<Blocker>>(listed.clone()) {
         Ok(blockers) => Daemon::Running { status, blockers },
         Err(error) => Daemon::Silent(format!("its blockers could not be read: {error}")),
     }
-}
-
-fn unreported(what: &str) -> bool {
-    note(&format!(
-        "{what} unchecked: this daemon is older than this command and does not report it"
-    ));
-    true
 }
 
 #[cfg(target_os = "macos")]
@@ -394,13 +401,12 @@ fn check_permissions(daemon: &Daemon) -> bool {
 fn report_key_presses(daemon: &Daemon) {
     let reported = match daemon {
         Daemon::Running { status, .. } => banshee_common::key_press_access(status),
-        Daemon::Legacy(_) => None,
         // A read from here answers for the terminal, so with no daemon the
         // checklist says nothing rather than saying it under Banshee's name.
         _ => return,
     };
     let Some(word) = reported else {
-        unreported("key press access");
+        note("key press access unchecked: the daemon reported none");
         return;
     };
     match Access::from_wire(word) {
@@ -442,7 +448,6 @@ fn check_grants(daemon: &Daemon) -> bool {
             }
             denied
         }
-        Daemon::Legacy(_) => return unreported("permissions"),
         // A read from here answers for the terminal that ran the command.
         _ => {
             note("a grant cannot be read from here: only the daemon speaks for the daemon");
@@ -466,7 +471,7 @@ fn field<'a>(status: &'a serde_json::Value, key: &str, fallback: &'a str) -> &'a
 }
 
 pub async fn probe_daemon() -> Daemon {
-    match utils::get_socket_path() {
+    match utils::socket_path() {
         Some(socket) if socket.exists() => {
             if !crate::daemon::socket_answers(&socket) {
                 return Daemon::Stale;
@@ -559,7 +564,6 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
                 &blocker.fix,
             ),
         },
-        Daemon::Legacy(_) => unreported("recording"),
         Daemon::Silent(_) => {
             note("microphone unchecked: a daemon holds it but did not answer status");
             true
@@ -573,7 +577,7 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
 
 fn report_daemon(daemon: &Daemon) -> bool {
     match daemon {
-        Daemon::Running { status, .. } | Daemon::Legacy(status) => {
+        Daemon::Running { status, .. } => {
             let version = field(status, "version", "unknown");
             pass(&format!("daemon running (version {version})"));
             if version != env!("CARGO_PKG_VERSION") {
@@ -712,7 +716,7 @@ fn speech_line(host: &str, started: bool) -> String {
 /// answers, so the caller falls back to the file.
 fn live<T>(daemon: &Daemon, read: impl Fn(&serde_json::Value) -> Option<T>) -> Option<T> {
     match daemon {
-        Daemon::Running { status, .. } | Daemon::Legacy(status) => read(status),
+        Daemon::Running { status, .. } => read(status),
         _ => None,
     }
 }

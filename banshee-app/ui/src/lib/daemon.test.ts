@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import ready from '../mocks/ready.json';
 import remote from '../mocks/remote.json';
 import permissions from '../mocks/permissions.json';
-import recording from '../mocks/recording.json';
-import armed from '../mocks/armed.json';
-import transcribing from '../mocks/transcribing.json';
-import speaking from '../mocks/speaking.json';
+import recordingJson from '../mocks/recording.json';
+import armedJson from '../mocks/armed.json';
+import transcribingJson from '../mocks/transcribing.json';
+import speakingJson from '../mocks/speaking.json';
 import notRunning from '../mocks/not-running.json';
 import pendingCues from '../mocks/pending-cues.json';
 import {
@@ -27,8 +27,17 @@ import {
   speechFacts,
   type Blocker,
   type BlockerKind,
+  type Live,
   type Status,
 } from './daemon';
+
+// A push captured from the daemon. JSON cannot carry the `activity` union, so
+// the four are named once here rather than cast at each use.
+const asLive = (captured: unknown) => captured as Partial<Live>;
+const recording = asLive(recordingJson);
+const armed = asLive(armedJson);
+const transcribing = asLive(transcribingJson);
+const speaking = asLive(speakingJson);
 
 describe('the state word', () => {
   it('is Ready on a clear machine', () => {
@@ -57,35 +66,26 @@ describe('the state word', () => {
     expect(lampForm('Working')).toBe('busy');
   });
   it('is Working while an agent a tell started still runs', () => {
-    const state = reduceLive(reduceStatus(empty(), ready), { telling: true });
+    const state = reduceLive(reduceStatus(empty(), ready), { telling: true, activity: 'busy' });
     expect(stateWord(state)).toBe('Working');
     expect(lampForm('Working')).toBe('busy');
   });
-  it('is Listening, not Working, when armed and telling both hold', () => {
-    // A `banshee tell` run that calls ask_user is armed and telling at once;
-    // waiting on the answer outranks the run still open behind it.
+  // Which flag outranks which is `Activity::of`, tested in banshee-common.
+  it.each([
+    ['listening', 'Listening'],
+    ['recording', 'Recording'],
+    ['speaking', 'Speaking'],
+    ['busy', 'Working'],
+  ] as const)('says %s as %s, whatever the flags beside it hold', (said, shown) => {
     const state = reduceLive(reduceStatus(empty(), ready), {
-      armed: true,
+      activity: said,
       recording: true,
+      armed: true,
       telling: true,
-    });
-    expect(stateWord(state)).toBe('Listening');
-  });
-  it('is Listening, not Working, when armed and transcribing both hold', () => {
-    const state = reduceLive(reduceStatus(empty(), ready), {
-      armed: true,
-      recording: true,
       transcribing: true,
+      speaking: true,
     });
-    expect(stateWord(state)).toBe('Listening');
-  });
-  it('is Recording, not Working, when recording and telling both hold', () => {
-    const state = reduceLive(reduceStatus(empty(), ready), { recording: true, telling: true });
-    expect(stateWord(state)).toBe('Recording');
-  });
-  it('is Speaking, not Working, when speaking and telling both hold', () => {
-    const state = reduceLive(reduceStatus(empty(), ready), { speaking: true, telling: true });
-    expect(stateWord(state)).toBe('Speaking');
+    expect(stateWord(state)).toBe(shown);
   });
   it('is Speaking when the daemon says so', () => {
     const state = reduceLive(reduceStatus(empty(), ready), speaking);
@@ -124,7 +124,9 @@ describe('pending', () => {
 
 describe('the status reply carries the live flags', () => {
   it('reports Speaking from a status read alone', () => {
-    expect(stateWord(reduceStatus(empty(), { ...ready, speaking: true }))).toBe('Speaking');
+    expect(
+      stateWord(reduceStatus(empty(), { ...ready, speaking: true, activity: 'speaking' })),
+    ).toBe('Speaking');
   });
   it('keeps what it holds for a flag the reply omits', () => {
     const held = reduceLive(empty(), { speaking: true });

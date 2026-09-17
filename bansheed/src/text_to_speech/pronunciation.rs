@@ -172,49 +172,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "audit helper: cargo test audit_fixup_phonemes -- --ignored --nocapture"]
-    fn audit_fixup_phonemes() {
-        use misaki_rs::{G2P, Language};
-        let g2p = G2P::new(Language::EnglishUS);
-        for (word, spoken) in super::FIXUP_PAIRS {
-            let via = g2p.g2p(spoken).map(|(p, _)| p).unwrap_or_default();
-            println!("{word:<12} \"{spoken}\" -> [{via}]");
-        }
-    }
-
-    #[test]
-    #[ignore = "helper: edit the pair, then cargo test emit_dictionary_entry -- --ignored --nocapture"]
-    fn emit_dictionary_entry() {
-        use misaki_rs::{G2P, Language};
-        // Prints a ready-to-paste DICTIONARY row from misaki's g2p of a respelling.
-        // Edit this pair for the word you're adding:
-        let (word, respelling) = ("webhook", "web hook");
-        let g2p = G2P::new(Language::EnglishUS);
-        let p = g2p.g2p(respelling).map(|(p, _)| p).unwrap_or_default();
-        println!("    (\"{word}\", \"{}\"), // {respelling}", p.trim());
-    }
-
-    #[test]
-    #[ignore = "audit helper: cargo test audit_all_caps_phonemes -- --ignored --nocapture"]
-    fn audit_all_caps_phonemes() {
-        use misaki_rs::{G2P, Language};
-        // Every term as a user would write it shouting, through the real pipeline.
-        // Uppercase A I O Q S T W Y in the output are kokoro diphthongs, not
-        // unmapped letters.
-        let mut g2p = G2P::new(Language::EnglishUS);
-        super::install_dictionary(&mut g2p);
-        let words = super::FIXUP_PAIRS
-            .iter()
-            .map(|(w, _)| *w)
-            .chain(super::DICTIONARY.iter().map(|(w, _)| *w));
-        for word in words {
-            let normalized = normalize(&format!("the {} file", word.to_uppercase()));
-            let (phonemes, _) = g2p.g2p(&normalized).unwrap();
-            println!("{word:<12} -> {normalized:<28} [{phonemes}]");
-        }
-    }
-
-    #[test]
     fn dictionary_overrides_are_installed() {
         use misaki_rs::{G2P, Language};
         let mut g2p = G2P::new(Language::EnglishUS);

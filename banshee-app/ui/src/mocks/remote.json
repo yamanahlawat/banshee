@@ -1,5 +1,13 @@
 {
   "running": true,
+  "bindable_modifiers": [
+    "RightOption",
+    "LeftOption",
+    "LeftControl",
+    "LeftCommand",
+    "RightCommand",
+    "Fn"
+  ],
   "version": "0.12.2",
   "stt_model": null,
   "vad_model": "silero_vad.onnx",
@@ -101,5 +109,7 @@
       "key_present": false
     }
   },
-  "key_press_access": "granted"
+  "key_press_access": "granted",
+  "activity": "idle",
+  "hotkey_listens": true
 }

@@ -15,7 +15,8 @@
 - **The default key** is `audio.hotkey`. A lone modifier falls back to `F9`,
   because Hyprland fires its binds only on the release.
 - **It saves both answers** as `audio.hotkey` and `audio.hotkey_mode`.
-- **`--yes`** skips the questions and binds the saved key and mode.
+- **`--yes`** skips the questions and binds the key the prompt would have
+  offered, with the saved mode.
 - **Bind owns only the lines** between `BEGIN BANSHEE MANAGED BLOCK` and
   `END BANSHEE MANAGED BLOCK`, and replaces only those.
 - **A bind of your own** outside the markers stays as it is.

@@ -24,12 +24,13 @@
 
   // The daemon binds no key on Wayland, so the capture control below would
   // write a setting nobody reads. The compositor holds the binding instead.
-  $: listens = $daemon.status?.hotkey_listens !== false;
+  $: listens = $daemon.status?.hotkey_listens === true;
+  $: bindable = $daemon.status?.bindable_modifiers ?? [];
   $: audio = ($daemon.status?.config?.audio ?? {}) as Record<string, unknown>;
   $: key = String(audio.hotkey ?? '');
   $: mode = String(audio.hotkey_mode ?? 'hold');
   $: bargeIn = String(audio.barge_in ?? 'stop');
-  $: cues = ((audio.cues ?? {}) as Record<string, unknown>).enabled === true;
+  $: cues = ((audio.cues ?? {}) as Record<string, unknown>).enabled !== false;
 
   function stop() {
     recording = false;
@@ -53,14 +54,14 @@
       stop();
       return;
     }
-    const next = hotkeyFrom(event);
+    const next = hotkeyFrom(event, bindable);
     if (next === null) {
       refusal = 'Banshee cannot bind that key.';
       return;
     }
     // A chord begins with its modifiers, so committing on the first press
     // would bind the modifier and never see the key it was held for.
-    if (isModifier(event.code)) {
+    if (isModifier(event.code, bindable)) {
       heldModifier = next;
       return;
     }
@@ -72,7 +73,7 @@
   function onKeyUp(event: KeyboardEvent) {
     if (!recording || heldModifier === null) return;
     event.preventDefault();
-    if (isModifier(event.code)) commit(heldModifier);
+    if (isModifier(event.code, bindable)) commit(heldModifier);
   }
 </script>
 
@@ -145,7 +146,7 @@ banshee record stop</pre>
 <style>
   .compositor {
     margin: 0 0 12px;
-    color: var(--ink-dim);
+    color: var(--dim);
     font-size: 13px;
     line-height: 1.5;
   }
@@ -153,7 +154,7 @@ banshee record stop</pre>
   .commands {
     margin: 0 0 12px;
     padding: 10px 12px;
-    background: var(--sunk, rgba(255, 255, 255, 0.04));
+    background: var(--foot);
     border-radius: 4px;
     font-family: var(--mono);
     font-size: 12px;
