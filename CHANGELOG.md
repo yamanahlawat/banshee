@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`banshee start` starts, and downloads nothing.** A first run no longer
+  spends ~860 MB before you have seen that speech models come in three sizes.
+  `banshee start` names the models that are missing and stops; `banshee setup`
+  fetches them. In the window, the download box asks first and carries the
+  preset chooser, so `fast` or `quality` is picked before the bytes move. A
+  daemon that was already running built its pipeline without those files, so
+  `banshee setup` now says when a restart is what loads them.
+
 - **Every line in the daemon log carries a clock and a level, and a dictated
   sentence reaches it only when asked for.** Lines read
   `12:00:01.500 INFO  hotkey: Transcribed 3.2s of audio in 0.41s`. The text

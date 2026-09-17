@@ -28,6 +28,12 @@ fn show_progress(progress: banshee_common::DownloadProgress) {
 
 // One writer at a time: the `.part` file that makes resume possible has a
 // stable name, so this process must not fetch alongside a daemon already doing it
+/// What `setup` says once files arrive through a running daemon: its pipeline
+/// was built without them, so only a restart loads them.
+fn restart_note(fetched: usize) -> Option<&'static str> {
+    (fetched > 0).then_some("Restart Banshee to use what just arrived: banshee start")
+}
+
 async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(), BansheeError> {
     let reply = utils::call_daemon(
         banshee_common::BANSHEE_DOWNLOAD_MODELS,
@@ -45,6 +51,7 @@ async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(),
         return Ok(());
     }
 
+    let asked = pending;
     let mut failed = Vec::new();
     while pending > 0 {
         let Some(params) = progress
@@ -59,7 +66,11 @@ async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(),
         note_progress(&reported, &mut pending, &mut failed);
         show_progress(reported);
     }
-    downloads_settled(&failed)
+    downloads_settled(&failed)?;
+    if let Some(note) = restart_note(asked - failed.len()) {
+        println!("{note}");
+    }
+    Ok(())
 }
 
 fn note_progress(
@@ -676,6 +687,17 @@ pub async fn record(action: args::RecordAction) -> Result<(), BansheeError> {
     Ok(())
 }
 
+/// What `start` says about models that are not on disk. `None` when they are
+/// all here. Starting never downloads; `setup` does.
+fn missing_models_note(missing: &[String]) -> Option<String> {
+    (!missing.is_empty()).then(|| {
+        format!(
+            "Recording waits on {}: run banshee setup",
+            missing.join(", ")
+        )
+    })
+}
+
 pub async fn start(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
     let log = service::install(service::Agent::Daemon)?;
     println!("Banshee is running, and starts again at login.");
@@ -684,18 +706,10 @@ pub async fn start(config_result: Result<Config, BansheeError>) -> Result<(), Ba
     let mut blocked = false;
     let binding = match &config_result {
         Ok(config) => {
-            let missing = models::missing(&models::required(config));
-            if !missing.is_empty() {
+            if let Some(note) = missing_models_note(&models::missing(&models::required(config))) {
+                blocked = true;
                 println!();
-                println!(
-                    "Downloading the models it needs (~860 MB): {}.",
-                    missing.join(", ")
-                );
-                println!("Ctrl-C leaves the daemon running; banshee setup resumes the download.");
-                download_missing(Some(config)).await?;
-                println!("Restarting the daemon so it loads the models.");
-                // The daemon builds its pipeline once at start, so the models it lacked need a restart to load.
-                service::install(service::Agent::Daemon)?;
+                println!("{note}");
             }
             // A remote listener downloads nothing, so the models say nothing
             // about whether it can hear.

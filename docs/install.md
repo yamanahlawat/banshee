@@ -73,18 +73,25 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/yamanahlawat/banshee/re
 - **The window** does all of this for you.
 - **These steps** do the same work without it.
 
-**1. Start it:**
+**1. Download the models:**
+
+```bash
+banshee setup
+```
+
+- **It fetches** what is missing: Whisper, Silero VAD, Kokoro, about 860 MB.
+- **An interrupted download** resumes, and a re-run fetches only what is still missing.
+
+**2. Start it:**
 
 ```bash
 banshee start
 ```
 
 - **`banshee start`** runs the daemon at once, and at every login.
-- **It downloads** the models it misses: Whisper, Silero VAD, Kokoro.
-- **An interrupted download** resumes.
-- **`banshee setup`** re-runs the download, and fetches only what is missing.
+- **It downloads nothing.** A model that is missing is named, and `banshee setup` fetches it.
 
-**2. Grant the macOS permissions:**
+**3. Grant the macOS permissions:**
 
 - **Banshee needs two,** or it quietly fails to record or type.
 - **Microphone** captures the audio.
@@ -92,7 +99,7 @@ banshee start
 - **macOS asks** for each one the first time Banshee needs it.
 - **Approve it,** and the daemon restarts itself to pick the grant up.
 
-**3. Check it:**
+**4. Check it:**
 
 ```bash
 banshee status
