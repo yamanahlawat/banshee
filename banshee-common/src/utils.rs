@@ -186,12 +186,19 @@ async fn call(
     stream.write_all(request_string.as_bytes()).await?;
 
     let mut lines = BufReader::new(stream).lines();
-    // Empty when the daemon closed without answering. Deliberately not guarded
-    // here: callers read the decode failure that follows as an orphaned socket
     let response = lines.next_line().await?.unwrap_or_default();
+    Ok((decode(&response)?, lines))
+}
 
-    match serde_json::from_str::<JsonRpcResponse>(&response)? {
-        JsonRpcResponse::Success { result, .. } => Ok((result, lines)),
+/// One line off the socket, read as a reply. Nothing at all is the daemon
+/// closing without answering, which a decoder reports as a parse failure at
+/// line 1 column 0 and no reader can act on.
+fn decode(response: &str) -> Result<Value, BansheeError> {
+    if response.trim().is_empty() {
+        return Err(BansheeError::NoAnswer);
+    }
+    match serde_json::from_str::<JsonRpcResponse>(response)? {
+        JsonRpcResponse::Success { result, .. } => Ok(result),
         JsonRpcResponse::Error { error, .. } => Err(BansheeError::Rpc {
             code: error.code,
             message: error.message,
@@ -202,6 +209,34 @@ async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_that_closes_without_a_reply_is_not_a_parse_failure() {
+        for nothing in ["", "   ", "\t"] {
+            assert!(
+                matches!(decode(nothing), Err(BansheeError::NoAnswer)),
+                "{nothing:?} is a daemon that went away"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reply_that_is_not_json_is_still_a_parse_failure() {
+        assert!(matches!(decode("{not json"), Err(BansheeError::Serde(_))));
+    }
+
+    #[test]
+    fn a_reply_carries_its_result_and_an_error_carries_its_code() {
+        let ok = decode(r#"{"jsonrpc":"2.0","result":{"running":true},"id":1}"#).expect("a result");
+        assert_eq!(ok["running"], true);
+
+        let refused =
+            decode(r#"{"jsonrpc":"2.0","error":{"code":-32004,"message":"busy"},"id":1}"#);
+        assert!(matches!(
+            refused,
+            Err(BansheeError::Rpc { code: -32004, .. })
+        ));
+    }
 
     #[test]
     fn the_daemon_label_names_its_own_unit() {

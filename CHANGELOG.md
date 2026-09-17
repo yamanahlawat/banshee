@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`banshee status` says what happened instead of quoting a JSON parser.** A
+  daemon that closed the connection was reported as `EOF while parsing a value
+  at line 1 column 0`, and a socket file left behind was called a crash, though
+  a clean stop leaves the same file. The checklist now names the state it found
+  and offers a second look before a restart, since a daemon that is still
+  starting answers nothing and restarting only starts the wait again.
+
 - **Granting Accessibility no longer kills a running download.** Banshee has
   to start again for a grant to reach it, and it used to leave the moment one
   landed, taking the first-run download with it and leaving the socket file

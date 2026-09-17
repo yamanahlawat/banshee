@@ -32,6 +32,11 @@ pub enum BansheeError {
     #[error("{0}")]
     Rejected(String),
 
+    // The socket took the request and closed with no reply. A daemon that is
+    // starting or stopping, not a reply this side failed to read.
+    #[error("the connection closed with no reply")]
+    NoAnswer,
+
     // No prefix: most of these are sentences a person acts on
     #[error("{0}")]
     Other(String),
@@ -65,6 +70,7 @@ impl BansheeError {
             | BansheeError::File { .. }
             | BansheeError::Serde(_)
             | BansheeError::Toml(_)
+            | BansheeError::NoAnswer
             | BansheeError::Other(_) => rpc_code::INTERNAL,
         }
     }

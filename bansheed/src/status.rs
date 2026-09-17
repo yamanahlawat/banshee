@@ -484,7 +484,7 @@ pub async fn probe_daemon() -> Daemon {
             {
                 Ok(Ok(status)) => classify(status),
                 Ok(Err(e)) => Daemon::Silent(e.to_string()),
-                Err(_) => Daemon::Silent("no answer within 2s".to_string()),
+                Err(_) => Daemon::Silent("nothing within 2s".to_string()),
             }
         }
         _ => Daemon::Missing,
@@ -587,6 +587,28 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     }
 }
 
+/// What to say about a daemon that is not answering, and the fix beside it.
+/// `None` while one is: `report_daemon` answers for that with the version it
+/// reported. A socket file left behind is not called a crash, because a clean
+/// `kill` and a deliberate exit leave the same one.
+fn absence(daemon: &Daemon) -> Option<(String, &'static str)> {
+    match daemon {
+        Daemon::Running { .. } => None,
+        Daemon::Silent(reason) => Some((
+            format!("the daemon holds the socket but did not answer: {reason}"),
+            "it may still be starting: run this again, and restart it if it persists: banshee start",
+        )),
+        Daemon::Stale => Some((
+            "the daemon is not running, and the socket file it left is still there".to_string(),
+            "start it: banshee start",
+        )),
+        Daemon::Missing => Some((
+            "the daemon is not running".to_string(),
+            "start it: banshee start",
+        )),
+    }
+}
+
 fn report_daemon(daemon: &Daemon) -> bool {
     match daemon {
         Daemon::Running { status, .. } => {
@@ -601,17 +623,10 @@ fn report_daemon(daemon: &Daemon) -> bool {
             }
             true
         }
-        Daemon::Silent(e) => fail(
-            &format!("daemon answered the socket but status failed: {e}"),
-            "restart it: banshee start",
-        ),
-        // Not notes: nothing records without a daemon, and a checklist that
-        // passes here reports a green check it cannot back
-        Daemon::Stale => fail(
-            "the daemon is not running; a stale socket is left from a crash",
-            "start it: banshee start",
-        ),
-        Daemon::Missing => fail("the daemon is not running", "start it: banshee start"),
+        _ => match absence(daemon) {
+            Some((line, fix)) => fail(&line, fix),
+            None => true,
+        },
     }
 }
 

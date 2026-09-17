@@ -291,3 +291,31 @@ fn a_daemon_still_opening_its_microphone_is_healthy() {
         "waiting is not a failed check"
     );
 }
+
+// A clean `kill` leaves the same file a crash does, so the word states more
+// than the file can carry.
+#[test]
+fn a_socket_left_behind_is_not_called_a_crash() {
+    let (line, fix) = super::absence(&Daemon::Stale).expect("a stale socket is an absence");
+    assert!(!line.contains("crash"), "{line}");
+    assert!(fix.contains("banshee start"), "{fix}");
+}
+
+// The daemon binds its socket before it can answer, so silence is usually a
+// start in progress. Restarting it first only starts that wait again.
+#[test]
+fn a_daemon_that_does_not_answer_is_offered_the_retry_before_the_restart() {
+    let reason = "nothing within 2s".to_string();
+    let (line, fix) = super::absence(&Daemon::Silent(reason)).expect("silence is an absence");
+    assert!(line.contains("nothing within 2s"), "{line}");
+    assert!(fix.contains("again"), "{fix}");
+}
+
+#[test]
+fn a_daemon_that_answers_is_no_absence() {
+    let running = Daemon::Running {
+        status: serde_json::json!({}),
+        blockers: Vec::new(),
+    };
+    assert!(super::absence(&running).is_none());
+}
