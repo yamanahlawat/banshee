@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A box that stands above the record lines up with the boxes beside it.** A
+  drawn absence is indented to the turn text column, which is right where it
+  stands in for a turn. "Banshee is not running" stands above the record, where
+  the indent aligned it to a column no turn was drawing and broke the left edge
+  it shares with the blocker above it. It now takes the band gutter.
+
 - **A question no longer outlives the agent that asked it.** `ask_user` holds
   the microphone until someone answers, and an agent that died in the meantime
   went unnoticed, so the session listened on to its timeout and every other

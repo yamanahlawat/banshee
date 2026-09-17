@@ -510,16 +510,19 @@
         {/if}
       {:else if needle}
         <Absence
+          inRecord
           label="No match"
           detail={`Nothing said so far contains \u201c${query.trim()}\u201d.`}
         />
       {:else if !savingHistory}
         <Absence
+          inRecord
           label="Nothing is kept"
           detail="Dictation still works and still lands in whatever app has focus. Banshee is simply not writing any of it down."
         />
       {:else if nothingYet && blockers.length === 0}
         <Absence
+          inRecord
           label="Nothing said yet"
           detail={!hotkeyListens
             ? 'Your compositor starts dictation here. What you say lands in whatever app you are using, and shows up here.'

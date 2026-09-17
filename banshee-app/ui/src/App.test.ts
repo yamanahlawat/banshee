@@ -106,6 +106,17 @@ it('draws an empty history rather than leaving the body blank', async () => {
   await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
 });
 
+// It stands where the turns would be, so it takes the column they would have
+// taken. The two absences differ because their places differ.
+it('puts the empty record in the column the turns would have used', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
+
+  const box = screen.getByText('Nothing said yet').closest('.absence');
+  expect(box?.classList.contains('in-record')).toBe(true);
+});
+
 it('says what a blocker stops and offers the pane that clears it', async () => {
   vi.mocked(status).mockResolvedValue({
     ...permissions,
@@ -295,6 +306,19 @@ it('offers a way back when the daemon has stopped', async () => {
   expect(screen.getByRole('button', { name: 'Start Banshee' })).toBeTruthy();
   // What was said before is still readable.
   expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
+});
+
+// The box the person sees under the blockers band. It aligns with the bands
+// it stands among, not with a text column that no turn is drawing beside it.
+it('aligns the stopped-daemon box with the bands above it', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  daemon.update((s) => ({ ...s, down: 'not running' }));
+  await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
+
+  const box = screen.getByText('Banshee is not running').closest('.absence');
+  expect(box?.classList.contains('in-record')).toBe(false);
 });
 
 it('stops naming a microphone once the daemon has stopped', async () => {
