@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Accessibility advice covers a switch that is already on.** macOS keys
+  that grant to the signature of the build that asked for it, so a reinstall or
+  an update can leave a row that is listed and switched on while the grant
+  reaches nothing, and no prompt appears because a record already exists.
+  Banshee now names the repair: remove Banshee from the list with the minus
+  button and add it back.
+
 - **`banshee status` says what happened instead of quoting a JSON parser.** A
   daemon that closed the connection was reported as `EOF while parsing a value
   at line 1 column 0`, and a socket file left behind was called a crash, though

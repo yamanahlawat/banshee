@@ -51,7 +51,8 @@ pub const ACCESSIBILITY: Grant = Grant {
     name: "Accessibility",
     anchor: "Privacy_Accessibility",
     consequence: "dictation cannot type and the hotkey stays inert",
-    fix: "grant it in System Settings > Privacy & Security > Accessibility",
+    fix: "grant it in System Settings > Privacy & Security > Accessibility. \
+If Banshee is already listed and switched on, remove it with the minus button and add it back",
 };
 
 /// TCC credits this read to the process macOS holds responsible, so from a CLI
@@ -336,6 +337,19 @@ mod tests {
     #[test]
     fn input_monitoring_is_not_a_pane_a_client_can_open() {
         assert_eq!(pane_anchor("input_monitoring"), None);
+    }
+
+    // A row can be listed and switched on while macOS no longer matches it to
+    // this build, so the grant does nothing and no prompt appears. Naming only
+    // the switch sends the reader back to a switch that is already on.
+    #[test]
+    fn the_grant_fix_names_the_repair_for_an_entry_that_is_already_there() {
+        let fix = blocker(&ACCESSIBILITY).fix;
+        assert!(fix.contains("System Settings"), "{fix}");
+        assert!(
+            fix.contains("remove it") && fix.contains("add it back"),
+            "the switch alone is not the repair: {fix}"
+        );
     }
 
     // The one blocker the daemon sends for a grant. A client routes on `remedy`
