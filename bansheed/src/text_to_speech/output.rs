@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -37,6 +38,9 @@ fn output_died(queued: usize, since_last_pull: Duration) -> bool {
 /// mixer, so two of them never fight for the device.
 pub struct Output {
     mixer: Mixer,
+    /// One step for every 20 ms of audio the device took. A device that stops
+    /// taking audio is the only thing that stops this.
+    pulls: Arc<AtomicU64>,
 }
 
 impl Output {
@@ -47,7 +51,10 @@ impl Output {
         // The !Send sink only has to stay alive, never move; leaking it
         // keeps the output stream open for the daemon's lifetime
         std::mem::forget(sink);
-        Ok(Self { mixer })
+        Ok(Self {
+            mixer,
+            pulls: Arc::new(AtomicU64::new(0)),
+        })
     }
 
     /// A mixer nobody reads: the output device is gone, so no sample is ever
@@ -55,7 +62,10 @@ impl Output {
     #[cfg(test)]
     pub fn silent() -> Self {
         let (mixer, _never_read) = rodio::mixer::mixer(CHANNELS, SAMPLE_RATE);
-        Self { mixer }
+        Self {
+            mixer,
+            pulls: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// An output whose mixer a test reads, which is what a device does. The
@@ -64,7 +74,17 @@ impl Output {
     #[cfg(test)]
     pub fn readable() -> (Self, rodio::mixer::MixerSource) {
         let (mixer, source) = rodio::mixer::mixer(CHANNELS, SAMPLE_RATE);
-        (Self { mixer }, source)
+        (
+            Self {
+                mixer,
+                pulls: Arc::new(AtomicU64::new(0)),
+            },
+            source,
+        )
+    }
+
+    pub fn pulls(&self) -> u64 {
+        self.pulls.load(Ordering::Relaxed)
     }
 
     /// One player per utterance: rodio's `append` sleeps until a stopped player
@@ -74,6 +94,7 @@ impl Output {
         let cancelled = Arc::new(Mutex::new(false));
         let thread_player = Arc::clone(&player);
         let thread_cancelled = Arc::clone(&cancelled);
+        let thread_pulls = Arc::clone(&self.pulls);
         #[cfg(test)]
         let heard: Arc<Mutex<Vec<Chunk>>> = Arc::default();
         #[cfg(test)]
@@ -91,10 +112,13 @@ impl Output {
                 }
                 #[cfg(test)]
                 lock(&thread_heard).push(chunk.clone());
-                thread_player.append(SamplesBuffer::new(
-                    chunk.channels,
-                    chunk.rate,
-                    chunk.samples,
+                let stamp = Arc::clone(&thread_pulls);
+                thread_player.append(rodio::Source::periodic_access(
+                    SamplesBuffer::new(chunk.channels, chunk.rate, chunk.samples),
+                    Duration::from_millis(20),
+                    move |_| {
+                        stamp.fetch_add(1, Ordering::Relaxed);
+                    },
                 ));
             }
         });
@@ -177,6 +201,34 @@ mod tests {
     fn a_device_that_took_audio_within_the_bound_is_alive() {
         assert!(!super::output_died(1, super::DEAD_OUTPUT));
         assert!(!super::output_died(3, Duration::from_millis(279)));
+    }
+
+    // A device proves it is alive by taking samples. Nothing else in the daemon
+    // can see that, because the device consumes them.
+    #[test]
+    fn the_counter_rises_only_when_a_device_takes_the_audio() {
+        let (output, mut mixed) = Output::readable();
+        let utterance = output.play(one_second_of_silence());
+        wait_until("the chunk is queued", || utterance.queued() == 1);
+        assert_eq!(output.pulls(), 0, "nothing has been taken yet");
+
+        // A tenth of a second of audio, which is five of the counter's steps
+        for _ in 0..2_400 {
+            mixed.next();
+        }
+        assert!(
+            output.pulls() > 0,
+            "the device took audio and the counter stood still"
+        );
+    }
+
+    #[test]
+    fn a_dead_device_never_moves_the_counter() {
+        let output = Output::silent();
+        let utterance = output.play(one_second_of_silence());
+        wait_until("the chunk is queued", || utterance.queued() == 1);
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(output.pulls(), 0);
     }
 
     fn kokoros_chunk(samples: usize) -> Chunk {
