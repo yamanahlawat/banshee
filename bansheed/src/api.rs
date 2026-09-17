@@ -172,6 +172,23 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
 }
 
+/// `None` while the pipeline is open. A pipeline still being built refuses the
+/// same way a broken one does: nothing records either way.
+fn not_recording(
+    id: Option<serde_json::Value>,
+    pipeline: &crate::state::Pipeline,
+) -> Option<Box<JsonRpcResponse>> {
+    match pipeline {
+        crate::state::Pipeline::Open => None,
+        crate::state::Pipeline::Opening => Some(Box::new(JsonRpcResponse::error(
+            id,
+            rpc_code::MICROPHONE,
+            "Recording is unavailable: the microphone is still opening",
+        ))),
+        crate::state::Pipeline::Broken(error) => Some(Box::new(unavailable(id, error))),
+    }
+}
+
 pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     let blockers = readiness::blockers(daemon_state);
     let running = daemon_state.running_config();
@@ -203,6 +220,7 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             .is_some_and(crate::speech_to_text::english_only),
         // False where the compositor holds the binding, so the window does not
         // name a key the daemon never listens for.
+        "pipeline": daemon_state.pipeline().as_str(),
         "hotkey_listens": crate::hotkey::listens(),
         "bindable_modifiers": crate::binding::bindable_modifiers(),
         // Stated, so no client invents a narrower definition of ready
@@ -346,8 +364,8 @@ fn record_start(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcR
         Err(response) => return *response,
     };
     // Checked before the transition, so -32004 keeps meaning "busy"
-    if let Some(reason) = daemon_state.recording_error() {
-        return unavailable(params.id(), &reason);
+    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
+        return *response;
     }
     if daemon_state.record_start(action) {
         JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
@@ -370,8 +388,8 @@ fn record_toggle(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpc
         Ok(value) => value,
         Err(response) => return *response,
     };
-    if let Some(reason) = daemon_state.recording_error() {
-        return unavailable(params.id(), &reason);
+    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
+        return *response;
     }
     let recording = daemon_state.record_toggle(action);
     JsonRpcResponse::success(params.id(), serde_json::json!({"recording": recording}))
@@ -404,8 +422,8 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         Err(response) => return *response,
     };
 
-    if let Some(reason) = daemon_state.recording_error() {
-        return unavailable(params.id(), &reason);
+    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
+        return *response;
     }
 
     // One armed session at a time; the mode is the lock. Armed before the wait

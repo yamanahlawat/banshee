@@ -30,8 +30,8 @@ fn nothing_open_and_no_model_blocker_falls_back_to_the_microphone_fix() {
 fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
     let (commands, _drain) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
-    state.set_recording_error(crate::state::RecordingError::Model(
-        "missing file.".to_string(),
+    state.set_pipeline(crate::state::Pipeline::Broken(
+        crate::state::RecordingError::Model("missing file.".to_string()),
     ));
 
     let blockers = crate::readiness::blockers(&state);
@@ -47,8 +47,8 @@ fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
 fn an_unreadable_key_file_is_a_recording_fault_the_checklist_names() {
     let (commands, _drain) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
-    state.set_recording_error(crate::state::RecordingError::KeyFile(
-        "credentials.toml does not parse".to_string(),
+    state.set_pipeline(crate::state::Pipeline::Broken(
+        crate::state::RecordingError::KeyFile("credentials.toml does not parse".to_string()),
     ));
 
     let daemon = super::Daemon::Running {

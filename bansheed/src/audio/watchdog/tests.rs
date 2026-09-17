@@ -302,7 +302,9 @@ fn a_reverted_setting_still_clears_the_recording_error() {
     ));
 
     // A fault from an earlier attempt must not outlive this one
-    state.set_recording_error(RecordingError::Microphone("gone".to_string()));
+    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
+        "gone".to_string(),
+    )));
     // The corrected setting is served by the open device, so nothing opens
     assert!(already_serving(
         "MacBook Pro Microphone",
@@ -316,7 +318,7 @@ fn a_reverted_setting_still_clears_the_recording_error() {
         None,
     );
     assert!(
-        state.recording_error().is_none(),
+        state.pipeline().fault().is_none(),
         "an attempt that concludes clears the fault"
     );
     assert_eq!(state.missing_device(), None);
@@ -364,7 +366,7 @@ fn a_tick_that_cannot_move_keeps_the_microphone_it_has() {
     );
 
     assert!(
-        state.recording_error().is_none(),
+        state.pipeline().fault().is_none(),
         "the microphone works, so recording is possible"
     );
     assert!(
@@ -389,7 +391,7 @@ fn a_tick_that_cannot_move_keeps_the_microphone_it_has() {
         "a stalled stream that opens nothing is unavailable"
     );
     assert!(matches!(
-        state.recording_error(),
+        state.pipeline().fault(),
         Some(RecordingError::Microphone(_))
     ));
     assert_eq!(state.audio_device(), None);
@@ -413,7 +415,7 @@ fn a_fault_leaves_no_fact_from_the_previous_attempt() {
     // recording_error carries this case, so two fields cannot disagree
     assert_eq!(state.missing_device(), None);
     assert!(matches!(
-        state.recording_error(),
+        state.pipeline().fault(),
         Some(RecordingError::Microphone(_))
     ));
 }

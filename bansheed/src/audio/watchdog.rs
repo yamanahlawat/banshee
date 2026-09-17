@@ -87,7 +87,7 @@ impl Binding {
         };
         self.open_device = Some(open);
         state.set_missing_device(missing);
-        state.clear_recording_error();
+        state.set_pipeline(crate::state::Pipeline::Open);
     }
 
     /// Nothing records. `recording_error` carries the whole fault, so
@@ -97,7 +97,9 @@ impl Binding {
         self.open_device = None;
         state.set_audio_device(None);
         state.set_missing_device(None);
-        state.set_recording_error(RecordingError::Microphone(reason));
+        state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
+            reason,
+        )));
     }
 
     /// Recording is unavailable only when the stream this tick holds is not

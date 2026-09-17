@@ -240,7 +240,7 @@ async fn recording_rpcs_report_the_cause_not_a_busy_mic() {
         ),
     ] {
         let state = test_state(std::sync::mpsc::channel().0);
-        state.set_recording_error(cause);
+        state.set_pipeline(crate::state::Pipeline::Broken(cause));
 
         let start = request(BANSHEE_RECORD_START, None);
         let JsonRpcResponse::Error { error, .. } = dispatch(start, &state).await else {
@@ -327,7 +327,9 @@ async fn record_toggle_starts_then_stops_and_says_which() {
 #[tokio::test]
 async fn record_toggle_is_refused_while_recording_is_unavailable() {
     let state = test_state(std::sync::mpsc::channel().0);
-    state.set_recording_error(RecordingError::Microphone("no device".to_string()));
+    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
+        "no device".to_string(),
+    )));
 
     let toggle = request(BANSHEE_RECORD_TOGGLE, None);
     let JsonRpcResponse::Error { error, .. } = dispatch(toggle, &state).await else {
@@ -878,8 +880,8 @@ async fn speak_passes_the_voice_parameter_to_the_backend() {
 #[tokio::test]
 async fn ask_user_names_the_provider_fault_with_its_own_code() {
     let state = test_state(std::sync::mpsc::channel().0);
-    state.set_recording_error(crate::state::RecordingError::Provider(
-        "the remote listener refused the key".to_string(),
+    state.set_pipeline(crate::state::Pipeline::Broken(
+        crate::state::RecordingError::Provider("the remote listener refused the key".to_string()),
     ));
 
     let request = request(
@@ -1182,4 +1184,44 @@ fn dictate_and_tell_together_are_refused_rather_than_guessed() {
     );
     let params = Params::new(&built);
     assert!(dictate_target(&params).is_err());
+}
+
+// The daemon answers its socket from `claim()`, long before the microphone is
+// open. Saying nothing of that gap leaves a client reporting a healthy daemon
+// that cannot record.
+#[tokio::test]
+async fn status_says_the_pipeline_is_opening_until_it_stands() {
+    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+
+    let opening = dispatch(request(BANSHEE_STATUS, None), &state).await;
+    let JsonRpcResponse::Success { result, .. } = opening else {
+        panic!("status answers");
+    };
+    assert_eq!(result["pipeline"], "opening");
+
+    state.set_pipeline(crate::state::Pipeline::Open);
+    let open = dispatch(request(BANSHEE_STATUS, None), &state).await;
+    let JsonRpcResponse::Success { result, .. } = open else {
+        panic!("status answers");
+    };
+    assert_eq!(result["pipeline"], "open");
+}
+
+#[tokio::test]
+async fn ask_user_is_refused_while_the_pipeline_is_still_opening() {
+    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+
+    let asked = request(
+        BANSHEE_ASK_USER,
+        Some(serde_json::json!({ "question": "ready?" })),
+    );
+    let JsonRpcResponse::Error { error, .. } = dispatch(asked, &state).await else {
+        panic!("a microphone that is not open yet cannot answer a question");
+    };
+    assert_eq!(error.code, rpc_code::MICROPHONE);
+    assert!(
+        error.message.contains("still opening"),
+        "the reason must say it is not broken, only late: {}",
+        error.message
+    );
 }

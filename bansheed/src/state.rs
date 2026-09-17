@@ -118,12 +118,39 @@ struct TranscriptionRing {
 /// Why the recording pipeline did not start. A missing mic, a missing model, an
 /// unreadable key file and a remote listener that will not answer need different
 /// fixes, so they stay distinct out to the RPC error code.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecordingError {
     Microphone(String),
     Model(String),
     Provider(String),
     KeyFile(String),
+}
+
+/// What the recording pipeline is. The daemon builds it on its own thread and
+/// answers clients before it exists, so "not broken" is not the same as "open".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pipeline {
+    Opening,
+    Open,
+    Broken(RecordingError),
+}
+
+impl Pipeline {
+    /// The word this answer takes on the wire, so a rename is a protocol change.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Pipeline::Opening => "opening",
+            Pipeline::Open => "open",
+            Pipeline::Broken(_) => "broken",
+        }
+    }
+
+    pub fn fault(&self) -> Option<&RecordingError> {
+        match self {
+            Pipeline::Broken(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for RecordingError {
@@ -273,7 +300,7 @@ pub struct DaemonState {
     pending: Mutex<std::collections::BTreeSet<String>>,
     // Why recording is off, when it is. The microphone half clears when the
     // watchdog rebinds; the model half still needs a restart.
-    recording_error: RwLock<Option<RecordingError>>,
+    pipeline: RwLock<Pipeline>,
     recording: AtomicU8,
     started_at: Instant,
     db_connection: Mutex<Option<rusqlite::Connection>>,
@@ -346,7 +373,7 @@ impl DaemonState {
             running_config: Arc::clone(&config),
             config: RwLock::new(config),
             pending: Mutex::new(std::collections::BTreeSet::new()),
-            recording_error: RwLock::new(None),
+            pipeline: RwLock::new(Pipeline::Opening),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
             db_connection: Mutex::new(db_connection),
@@ -379,7 +406,7 @@ impl DaemonState {
     pub fn record_start(&self, action: TranscribeTarget) -> bool {
         // The hotkey arrives here too, so a deaf daemon answers a press with the
         // error cue. Arming a session nothing can transcribe would be silent.
-        if self.recording_error.read().unwrap().is_some() {
+        if !matches!(*self.pipeline.read().unwrap(), Pipeline::Open) {
             self.cues.send(Cue::Error);
             return false;
         }
@@ -767,22 +794,18 @@ impl DaemonState {
         self.device_changes.subscribe()
     }
 
-    pub fn recording_error(&self) -> Option<RecordingError> {
-        self.recording_error.read().unwrap().clone()
+    pub fn pipeline(&self) -> Pipeline {
+        self.pipeline.read().unwrap().clone()
     }
 
-    pub fn set_recording_error(&self, reason: RecordingError) {
-        *self.recording_error.write().unwrap() = Some(reason);
-    }
-
-    pub fn clear_recording_error(&self) {
-        *self.recording_error.write().unwrap() = None;
+    pub fn set_pipeline(&self, state: Pipeline) {
+        *self.pipeline.write().unwrap() = state;
     }
 
     /// Takes the armed-listening lock for `ask_user`. Shares the availability
     /// gate with `record_start`, so no caller can arm a mic that cannot record.
     pub fn arm_for_ask(&self) -> bool {
-        self.recording_error.read().unwrap().is_none()
+        matches!(*self.pipeline.read().unwrap(), Pipeline::Open)
             && self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
     }
 

@@ -158,6 +158,7 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
                 started.open,
                 started.missing,
             );
+            daemon_state.set_pipeline(crate::state::Pipeline::Open);
             Some((watchdog, started.thread))
         }
         // A missing mic or model leaves the daemon useful rather than
@@ -169,7 +170,7 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
                      Recording, dictation, and ask_user do not."
             );
             log::info!("Run `banshee status` for the fix.");
-            daemon_state.set_recording_error(error);
+            daemon_state.set_pipeline(crate::state::Pipeline::Broken(error));
             None
         }
     };

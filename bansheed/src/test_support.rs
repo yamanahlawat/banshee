@@ -199,7 +199,35 @@ fn state(
     )
 }
 
+/// A daemon caught before its pipeline stands, which is what the real one is
+/// from `claim()` until the build thread finishes.
+pub fn daemon_state_before_the_pipeline(
+    commands: std::sync::mpsc::Sender<ConsumerCommand>,
+) -> Arc<DaemonState> {
+    fresh(
+        Config::default(),
+        None,
+        SpeechPlayer::new(Box::new(NullBackend)),
+        Speaker::Fallback,
+        commands,
+    )
+}
+
+/// Every other fixture stands for a daemon whose pipeline is up, which is the
+/// premise of any test that records, arms or reports a fault.
 fn state_running(
+    config: Config,
+    history: Option<rusqlite::Connection>,
+    speech: SpeechPlayer,
+    speaker: Speaker,
+    commands: std::sync::mpsc::Sender<ConsumerCommand>,
+) -> Arc<DaemonState> {
+    let state = fresh(config, history, speech, speaker, commands);
+    state.set_pipeline(crate::state::Pipeline::Open);
+    state
+}
+
+fn fresh(
     config: Config,
     history: Option<rusqlite::Connection>,
     speech: SpeechPlayer,
