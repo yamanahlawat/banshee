@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use banshee_common::error::BansheeError;
 use rodio::buffer::SamplesBuffer;
@@ -18,6 +19,18 @@ pub struct Chunk {
     pub samples: Vec<f32>,
     pub rate: std::num::NonZero<u32>,
     pub channels: std::num::NonZero<u16>,
+}
+
+/// How long a live device may go without taking audio. Measured 2026-09-17
+/// across two device changes in the middle of a reply: the longest gap a
+/// working device left was 279 ms, and a dead one never took audio again.
+const DEAD_OUTPUT: Duration = Duration::from_secs(1);
+
+/// True when the device stopped taking the audio that is waiting for it. Audio
+/// must be queued, because a player that is empty between sentences is waiting
+/// for synthesis and no device is late.
+fn output_died(queued: usize, since_last_pull: Duration) -> bool {
+    queued > 0 && since_last_pull > DEAD_OUTPUT
 }
 
 /// The machine's default output, opened once. Every backend appends to this one
@@ -142,6 +155,29 @@ mod tests {
     use super::{CHANNELS, Chunk, Output, SAMPLE_RATE};
     use crate::text_to_speech::ActiveUtterance;
     use std::thread;
+
+    use std::time::Duration;
+
+    // The gaps between sentences are the player running dry while Kokoro
+    // synthesises, and they are not a device fault.
+    #[test]
+    fn an_empty_player_is_never_a_dead_device() {
+        assert!(!super::output_died(0, Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn audio_nobody_takes_for_longer_than_the_bound_is_a_dead_device() {
+        assert!(super::output_died(
+            1,
+            super::DEAD_OUTPUT + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn a_device_that_took_audio_within_the_bound_is_alive() {
+        assert!(!super::output_died(1, super::DEAD_OUTPUT));
+        assert!(!super::output_died(3, Duration::from_millis(279)));
+    }
 
     fn kokoros_chunk(samples: usize) -> Chunk {
         Chunk {
