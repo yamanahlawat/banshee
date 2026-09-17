@@ -42,10 +42,21 @@ fn output_died(queued: usize, since_last_pull: Duration) -> bool {
     queued > 0 && since_last_pull > DEAD_OUTPUT
 }
 
-/// The machine's default output, opened once. Every backend appends to this one
-/// mixer, so two of them never fight for the device.
-pub struct Output {
+/// The device the daemon plays through, and the way to let it go. The sink is
+/// `!Send`, so a thread of its own holds it and leaves when the sender drops.
+pub struct Device {
     mixer: Mixer,
+    _closer: std::sync::mpsc::Sender<()>,
+}
+
+type Opener = Box<dyn Fn() -> Result<Device, BansheeError> + Send + Sync>;
+
+/// The machine's default output. Every backend appends to the mixer this holds,
+/// so two of them never fight for the device, and a device that dies is
+/// replaced underneath them.
+pub struct Output {
+    device: Mutex<Device>,
+    opener: Opener,
     /// One step for every 20 ms of audio the device took. A device that stops
     /// taking audio is the only thing that stops this.
     pulls: Arc<AtomicU64>,
@@ -53,26 +64,50 @@ pub struct Output {
 
 impl Output {
     pub fn open() -> Result<Self, BansheeError> {
-        let sink = DeviceSinkBuilder::open_default_sink()
-            .map_err(|e| BansheeError::Other(format!("No audio output device: {e}")))?;
-        let mixer = sink.mixer().clone();
-        // The !Send sink only has to stay alive, never move; leaking it
-        // keeps the output stream open for the daemon's lifetime
-        std::mem::forget(sink);
+        Self::from_opener(Box::new(default_device))
+    }
+
+    fn from_opener(opener: Opener) -> Result<Self, BansheeError> {
+        let device = opener()?;
         Ok(Self {
-            mixer,
+            device: Mutex::new(device),
+            opener,
             pulls: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    fn mixer(&self) -> Mixer {
+        lock(&self.device).mixer.clone()
+    }
+
+    /// Opens the machine's default output again and plays through that one.
+    /// The old device's thread leaves with its sink, which releases it.
+    pub fn reopen(&self) -> Result<(), BansheeError> {
+        let device = (self.opener)()?;
+        *lock(&self.device) = device;
+        self.pulls.store(0, Ordering::Relaxed);
+        Ok(())
     }
 
     /// A mixer nobody reads: the output device is gone, so no sample is ever
     /// pulled and a queued chunk stays queued for a test to count.
     #[cfg(test)]
     pub fn silent() -> Self {
+        Self::from_opener(Box::new(Self::test_device_ok)).expect("a mixer needs no device")
+    }
+
+    #[cfg(test)]
+    fn test_device_ok() -> Result<Device, BansheeError> {
+        Ok(Self::test_device())
+    }
+
+    #[cfg(test)]
+    pub fn test_device() -> Device {
         let (mixer, _never_read) = rodio::mixer::mixer(CHANNELS, SAMPLE_RATE);
-        Self {
+        let (closer, _closed) = std::sync::mpsc::channel();
+        Device {
             mixer,
-            pulls: Arc::new(AtomicU64::new(0)),
+            _closer: closer,
         }
     }
 
@@ -82,13 +117,16 @@ impl Output {
     #[cfg(test)]
     pub fn readable() -> (Self, rodio::mixer::MixerSource) {
         let (mixer, source) = rodio::mixer::mixer(CHANNELS, SAMPLE_RATE);
-        (
-            Self {
+        let (closer, _closed) = std::sync::mpsc::channel();
+        let output = Self {
+            device: Mutex::new(Device {
                 mixer,
-                pulls: Arc::new(AtomicU64::new(0)),
-            },
-            source,
-        )
+                _closer: closer,
+            }),
+            opener: Box::new(Self::test_device_ok),
+            pulls: Arc::new(AtomicU64::new(0)),
+        };
+        (output, source)
     }
 
     pub fn pulls(&self) -> u64 {
@@ -98,7 +136,7 @@ impl Output {
     /// One player per utterance: rodio's `append` sleeps until a stopped player
     /// drains, and a player whose device is gone never drains.
     pub fn play(&self, chunks: impl Iterator<Item = Chunk> + Send + 'static) -> PlayerUtterance {
-        let player = Arc::new(Player::connect_new(&self.mixer));
+        let player = Arc::new(Player::connect_new(&self.mixer()));
         let cancelled = Arc::new(Mutex::new(false));
         let thread_player = Arc::clone(&player);
         let thread_cancelled = Arc::clone(&cancelled);
@@ -214,10 +252,45 @@ impl ActiveUtterance for PlayerUtterance {
     }
 }
 
+/// Opens the machine's default output on a thread that keeps it alive. The
+/// thread leaves when the `Device` it answers with is dropped, which closes the
+/// stream and releases the device.
+fn default_device() -> Result<Device, BansheeError> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (closer, closed) = std::sync::mpsc::channel::<()>();
+    thread::spawn(move || {
+        let sink = match DeviceSinkBuilder::open_default_sink() {
+            Ok(sink) => sink,
+            Err(e) => {
+                let _ = ready_tx.send(Err(BansheeError::Other(format!(
+                    "No audio output device: {e}"
+                ))));
+                return;
+            }
+        };
+        if ready_tx.send(Ok(sink.mixer().clone())).is_err() {
+            return;
+        }
+        // Parks holding the !Send sink. Dropping it here closes the stream, and
+        // the only way out is the Device at the other end going away.
+        let _ = closed.recv();
+    });
+    let mixer = ready_rx
+        .recv()
+        .map_err(|_| BansheeError::Other("No audio output device".to_string()))??;
+    Ok(Device {
+        mixer,
+        _closer: closer,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CHANNELS, Chunk, Output, SAMPLE_RATE};
     use crate::text_to_speech::ActiveUtterance;
+    use banshee_common::error::BansheeError;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
 
     use std::time::Duration;
@@ -317,6 +390,34 @@ mod tests {
         }
         assert_eq!(utterance.queued(), 0, "the device took every sentence");
         assert!(utterance.held().is_empty());
+    }
+
+    // The swap has to give the next player a different mixer, or an utterance
+    // would reconnect to the device that is gone.
+    #[test]
+    fn reopening_asks_for_the_default_device_again() {
+        let opened = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&opened);
+        let output = Output::from_opener(Box::new(move || {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Ok(Output::test_device())
+        }))
+        .expect("the first open");
+        assert_eq!(opened.load(Ordering::Relaxed), 1);
+
+        output.reopen().expect("the second open");
+        assert_eq!(opened.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn an_output_that_cannot_open_says_so() {
+        let output = Output::from_opener(Box::new(|| {
+            Err(BansheeError::Other("no device".to_string()))
+        }));
+        assert!(
+            output.is_err(),
+            "an output with no device carries the fault"
+        );
     }
 
     fn kokoros_chunk(samples: usize) -> Chunk {
