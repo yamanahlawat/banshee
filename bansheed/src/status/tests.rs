@@ -263,3 +263,31 @@ fn an_install_inside_a_bundle_is_named_as_one() {
     assert_eq!(super::install_shape(bundled), "Banshee.app");
     assert_eq!(super::install_shape(loose), "a loose binary");
 }
+
+// The socket answers from `claim()`, before the device is open. Calling that
+// gap a missing microphone sends the reader after a fault that is not there.
+#[test]
+fn a_pipeline_still_opening_is_not_a_missing_microphone() {
+    let opening = serde_json::json!({ "pipeline": "opening" });
+    assert!(super::still_opening(&opening).is_some());
+
+    for settled in ["open", "broken"] {
+        let status = serde_json::json!({ "pipeline": settled });
+        assert!(
+            super::still_opening(&status).is_none(),
+            "{settled} is answered by the lines below, not by a wait"
+        );
+    }
+}
+
+#[test]
+fn a_daemon_still_opening_its_microphone_is_healthy() {
+    let daemon = super::Daemon::Running {
+        status: serde_json::json!({ "pipeline": "opening" }),
+        blockers: Vec::new(),
+    };
+    assert!(
+        super::check_recording(&daemon, "default"),
+        "waiting is not a failed check"
+    );
+}

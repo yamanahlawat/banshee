@@ -148,41 +148,55 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         text_to_speech::drain_faults(draining_state, draining_cues, fault_reports)
     });
 
-    // The watchdog owns the stream past daemon::run: stopping it stops
-    // capture, and the thread is the only thing left to join
-    let recording = match start_recording(&daemon_state, &config, command_receiver, cues) {
-        Ok(started) => {
-            let watchdog = audio::watchdog::spawn(
-                Arc::clone(&daemon_state),
-                started.stream,
-                started.open,
-                started.missing,
-            );
-            daemon_state.set_pipeline(crate::state::Pipeline::Open);
-            Some((watchdog, started.thread))
-        }
-        // A missing mic or model leaves the daemon useful rather than
-        // exiting, which the supervisor reads as a crash and retries
-        Err(error) => {
-            log::error!("Recording is unavailable: {error}");
-            log::info!(
-                "The daemon is up: speak, status, and history still work. \
-                     Recording, dictation, and ask_user do not."
-            );
-            log::info!("Run `banshee status` for the fix.");
-            daemon_state.set_pipeline(crate::state::Pipeline::Broken(error));
-            None
-        }
+    // Off this thread, because the socket is already bound and `run` below is
+    // what answers it. The device walk enters Core Audio, which stalls for
+    // minutes on a virtual device whose plugin stops answering, and a stall
+    // here leaves every client connected to a daemon that says nothing.
+    let building = {
+        let state = Arc::clone(&daemon_state);
+        let config = Arc::clone(&config);
+        std::thread::spawn(move || {
+            // The watchdog owns the stream past daemon::run: stopping it stops
+            // capture, and the thread is the only thing left to join
+            match start_recording(&state, &config, command_receiver, cues) {
+                Ok(started) => {
+                    let watchdog = audio::watchdog::spawn(
+                        Arc::clone(&state),
+                        started.stream,
+                        started.open,
+                        started.missing,
+                    );
+                    state.set_pipeline(crate::state::Pipeline::Open);
+                    Some((watchdog, started.thread))
+                }
+                // A missing mic or model leaves the daemon useful rather than
+                // exiting, which the supervisor reads as a crash and retries
+                Err(error) => {
+                    log::error!("Recording is unavailable: {error}");
+                    log::info!(
+                        "The daemon is up: speak, status, and history still work. \
+                             Recording, dictation, and ask_user do not."
+                    );
+                    log::info!("Run `banshee status` for the fix.");
+                    state.set_pipeline(crate::state::Pipeline::Broken(error));
+                    None
+                }
+            }
+        })
     };
-    // After the pipeline, so a press always reaches record_start: with
-    // no pipeline it answers with the error cue rather than nothing
+    // A press that lands before the pipeline stands answers with the error cue:
+    // record_start refuses anything but an open pipeline.
     hotkey::start_global_hotkey(
         Arc::clone(&daemon_state),
         config.audio.hotkey,
         config.audio.hotkey_mode,
     );
     let result = run(&daemon_state, socket_path, listener).await;
-    if let Some((watchdog, consumer_thread)) = recording {
+    // A build still parked in Core Audio cannot be woken, so the process leaves
+    // without it rather than never leaving at all.
+    if building.is_finished()
+        && let Ok(Some((watchdog, consumer_thread))) = building.join()
+    {
         // Capture stops first, so no Rebind arrives at a thread that
         // has already left its loop
         watchdog.stop();

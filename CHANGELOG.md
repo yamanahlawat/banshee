@@ -51,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A slow microphone no longer makes Banshee unreachable.** The daemon opens
+  its socket before it touches the audio devices, so a device whose driver
+  stops answering leaves Banshee answering. Walking the devices enters Core
+  Audio, which was measured stalling for minutes on this machine, and every
+  client that connected in that window waited with it: `banshee status` said
+  the daemon answered the socket but not the call, and restarting only started
+  the wait again. `banshee status` now reports "the microphone is still
+  opening" while it waits, and a press before it opens answers with the error
+  cue.
+
 - **A reply that never starts no longer leaves the daemon deaf.** When a new
   reply interrupted one already playing and the speaker then refused it, for
   example a voice that is not installed, Banshee went on believing it was

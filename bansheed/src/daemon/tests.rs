@@ -301,3 +301,16 @@ async fn a_line_that_is_not_a_request_is_answered_with_a_parse_error() {
         "a request that did not parse has no id to answer on"
     );
 }
+
+// The socket is bound in `claim()`, before the microphone is open. A client
+// that connects in that gap must be answered, not left waiting for a device.
+#[tokio::test]
+async fn a_client_is_answered_while_the_pipeline_is_still_opening() {
+    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+
+    let (mut lines, mut writer) = connect(&state);
+    send(&mut writer, BANSHEE_STATUS, serde_json::json!({})).await;
+
+    let reply = next_message(&mut lines).await;
+    assert_eq!(reply["result"]["pipeline"], "opening");
+}

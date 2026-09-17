@@ -543,6 +543,14 @@ fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
     }
 }
 
+/// A daemon still building its pipeline has no device to name and no fault to
+/// report. `None` once it is open or broken, which the lines below answer for.
+/// The word is the daemon's own, so the two sides cannot spell it differently.
+fn still_opening(status: &serde_json::Value) -> Option<&'static str> {
+    (status["pipeline"].as_str() == Some(crate::state::Pipeline::Opening.as_str()))
+        .then_some("the microphone is still opening")
+}
+
 // Opening a second stream fails on backends that allow only one, which would
 // report a broken microphone on a healthy machine, so ask the daemon instead.
 // `Silent` counts as live: something answered the socket, so something owns the
@@ -552,6 +560,10 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
         // A listener that will not answer takes capture down with it, so every
         // kind here leaves the daemon unable to record and each names its own
         // fix.
+        Daemon::Running { status, .. } if let Some(waiting) = still_opening(status) => {
+            note(waiting);
+            true
+        }
         Daemon::Running { status, blockers } => match blockers.iter().find(|blocker| {
             matches!(
                 blocker.kind,
