@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -21,6 +22,13 @@ pub struct Chunk {
     pub rate: std::num::NonZero<u32>,
     pub channels: std::num::NonZero<u16>,
 }
+
+/// Sentences queued ahead of the one playing. One ahead keeps speech smooth,
+/// and the bound is what keeps a dead device from holding a whole reply.
+const LOOK_AHEAD: usize = 2;
+
+/// How often the worker asks the player for room.
+const ROOM_POLL: Duration = Duration::from_millis(20);
 
 /// How long a live device may go without taking audio. Measured 2026-09-17
 /// across two device changes in the middle of a reply: the longest gap a
@@ -95,6 +103,8 @@ impl Output {
         let thread_player = Arc::clone(&player);
         let thread_cancelled = Arc::clone(&cancelled);
         let thread_pulls = Arc::clone(&self.pulls);
+        let held: Arc<Mutex<VecDeque<Chunk>>> = Arc::default();
+        let thread_held = Arc::clone(&held);
         #[cfg(test)]
         let heard: Arc<Mutex<Vec<Chunk>>> = Arc::default();
         #[cfg(test)]
@@ -104,12 +114,30 @@ impl Output {
                 if chunk.samples.is_empty() {
                     continue;
                 }
+                // The device decides the pace. Running ahead of it would hand a
+                // whole reply to a device that may be gone by the next sentence.
+                loop {
+                    {
+                        let mut queue = lock(&thread_held);
+                        while queue.len() > thread_player.len() {
+                            queue.pop_front();
+                        }
+                        if queue.len() < LOOK_AHEAD {
+                            break;
+                        }
+                    }
+                    if *lock(&thread_cancelled) {
+                        return;
+                    }
+                    thread::sleep(ROOM_POLL);
+                }
                 // Append under the lock so stop() can never race a chunk into a
                 // stopped player, where append would sleep
                 let guard = lock(&thread_cancelled);
                 if *guard {
                     break;
                 }
+                lock(&thread_held).push_back(chunk.clone());
                 #[cfg(test)]
                 lock(&thread_heard).push(chunk.clone());
                 let stamp = Arc::clone(&thread_pulls);
@@ -126,6 +154,7 @@ impl Output {
             cancelled,
             worker,
             player,
+            held,
             #[cfg(test)]
             heard,
         }
@@ -134,6 +163,9 @@ impl Output {
 
 pub struct PlayerUtterance {
     cancelled: Arc<Mutex<bool>>,
+    /// The sentences the player has been given and the device has not finished.
+    /// A device that dies owes exactly these.
+    held: Arc<Mutex<VecDeque<Chunk>>>,
     // is_finished after a panic too, unlike a hand-rolled done flag
     worker: thread::JoinHandle<()>,
     player: Arc<Player>,
@@ -144,6 +176,14 @@ pub struct PlayerUtterance {
 }
 
 impl PlayerUtterance {
+    pub fn held(&self) -> Vec<Chunk> {
+        let mut queue = lock(&self.held);
+        while queue.len() > self.player.len() {
+            queue.pop_front();
+        }
+        queue.iter().cloned().collect()
+    }
+
     #[cfg(test)]
     pub fn queued(&self) -> usize {
         self.player.len()
@@ -229,6 +269,54 @@ mod tests {
         wait_until("the chunk is queued", || utterance.queued() == 1);
         thread::sleep(Duration::from_millis(100));
         assert_eq!(output.pulls(), 0);
+    }
+
+    // What a swap re-appends. A device that took nothing still owes the whole
+    // look-ahead; one that finished a sentence owes the rest.
+    #[test]
+    fn a_device_that_took_nothing_holds_every_sentence_it_was_given() {
+        let output = Output::silent();
+        let utterance = output.play(std::iter::repeat_with(|| kokoros_chunk(240)).take(5));
+        wait_until("the look-ahead fills", || {
+            utterance.queued() == super::LOOK_AHEAD
+        });
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            utterance.held().len(),
+            super::LOOK_AHEAD,
+            "a dead device may not be given the whole reply"
+        );
+    }
+
+    // A swap re-appends what the player still owes, so the held set may never
+    // outlive what the player holds, whatever the device has taken.
+    #[test]
+    fn a_sentence_the_device_finished_is_no_longer_held() {
+        let (output, mut mixed) = Output::readable();
+        let utterance =
+            output.play(std::iter::repeat_with(|| kokoros_chunk(240)).take(super::LOOK_AHEAD));
+        wait_until("both sentences are queued", || {
+            utterance.queued() == super::LOOK_AHEAD
+        });
+
+        for taken in 1..=480 {
+            mixed.next();
+            assert_eq!(
+                utterance.held().len(),
+                utterance.queued(),
+                "the held set and the player disagreed after {taken} samples"
+            );
+        }
+        // The player reports a sentence done on a later poll than its last
+        // sample, so keep taking audio until it says the queue is empty.
+        for _ in 0..2_000 {
+            if utterance.queued() == 0 {
+                break;
+            }
+            mixed.next();
+        }
+        assert_eq!(utterance.queued(), 0, "the device took every sentence");
+        assert!(utterance.held().is_empty());
     }
 
     fn kokoros_chunk(samples: usize) -> Chunk {
