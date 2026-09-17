@@ -366,7 +366,7 @@ impl RemoteSpeechBackend {
         });
 
         RemoteUtterance {
-            player: self.output.play(chunks),
+            player: self.output.play(chunks, self.faults.clone()),
             handover,
         }
     }

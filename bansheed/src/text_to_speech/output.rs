@@ -9,7 +9,7 @@ use rodio::buffer::SamplesBuffer;
 use rodio::mixer::Mixer;
 use rodio::{DeviceSinkBuilder, Player};
 
-use crate::text_to_speech::{ActiveUtterance, lock};
+use crate::text_to_speech::{ActiveUtterance, Fault, lock};
 
 /// The rate the mixer runs at, and the rate Kokoro synthesises at.
 pub const SAMPLE_RATE: std::num::NonZero<u32> = std::num::NonZero::new(24_000).unwrap();
@@ -40,6 +40,17 @@ const DEAD_OUTPUT: Duration = Duration::from_secs(1);
 /// for synthesis and no device is late.
 fn output_died(queued: usize, since_last_pull: Duration) -> bool {
     queued > 0 && since_last_pull > DEAD_OUTPUT
+}
+
+/// One sentence, wrapped so the device's own consumption is counted.
+fn stamped(chunk: Chunk, pulls: Arc<AtomicU64>) -> impl rodio::Source + Send + 'static {
+    rodio::Source::periodic_access(
+        SamplesBuffer::new(chunk.channels, chunk.rate, chunk.samples),
+        Duration::from_millis(20),
+        move |_| {
+            pulls.fetch_add(1, Ordering::Relaxed);
+        },
+    )
 }
 
 /// The device the daemon plays through, and the way to let it go. The sink is
@@ -133,10 +144,33 @@ impl Output {
         self.pulls.load(Ordering::Relaxed)
     }
 
+    fn stamp(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.pulls)
+    }
+
+    /// An output that opens once and never again, for the case where a reply
+    /// is playing and the machine has no device left to take it.
+    #[cfg(test)]
+    pub fn dead_after_first() -> Self {
+        let first = std::sync::atomic::AtomicBool::new(true);
+        Self::from_opener(Box::new(move || {
+            if first.swap(false, Ordering::Relaxed) {
+                Ok(Self::test_device())
+            } else {
+                Err(BansheeError::Other("no device".to_string()))
+            }
+        }))
+        .expect("the first open")
+    }
+
     /// One player per utterance: rodio's `append` sleeps until a stopped player
     /// drains, and a player whose device is gone never drains.
-    pub fn play(&self, chunks: impl Iterator<Item = Chunk> + Send + 'static) -> PlayerUtterance {
-        let player = Arc::new(Player::connect_new(&self.mixer()));
+    pub fn play(
+        self: &Arc<Self>,
+        chunks: impl Iterator<Item = Chunk> + Send + 'static,
+        faults: std::sync::mpsc::Sender<Fault>,
+    ) -> PlayerUtterance {
+        let player = Arc::new(Mutex::new(Arc::new(Player::connect_new(&self.mixer()))));
         let cancelled = Arc::new(Mutex::new(false));
         let thread_player = Arc::clone(&player);
         let thread_cancelled = Arc::clone(&cancelled);
@@ -157,7 +191,8 @@ impl Output {
                 loop {
                     {
                         let mut queue = lock(&thread_held);
-                        while queue.len() > thread_player.len() {
+                        let player = lock(&thread_player).clone();
+                        while queue.len() > player.len() {
                             queue.pop_front();
                         }
                         if queue.len() < LOOK_AHEAD {
@@ -175,17 +210,14 @@ impl Output {
                 if *guard {
                     break;
                 }
-                lock(&thread_held).push_back(chunk.clone());
+                // Held and the player move together, so a swap never re-appends
+                // the sentence this thread is appending.
+                let mut queue = lock(&thread_held);
+                let player = lock(&thread_player).clone();
+                queue.push_back(chunk.clone());
                 #[cfg(test)]
                 lock(&thread_heard).push(chunk.clone());
-                let stamp = Arc::clone(&thread_pulls);
-                thread_player.append(rodio::Source::periodic_access(
-                    SamplesBuffer::new(chunk.channels, chunk.rate, chunk.samples),
-                    Duration::from_millis(20),
-                    move |_| {
-                        stamp.fetch_add(1, Ordering::Relaxed);
-                    },
-                ));
+                player.append(stamped(chunk, Arc::clone(&thread_pulls)));
             }
         });
         PlayerUtterance {
@@ -193,6 +225,10 @@ impl Output {
             worker,
             player,
             held,
+            output: Arc::clone(self),
+            faults,
+            seen: (self.pulls(), std::time::Instant::now()),
+            gave_up: false,
             #[cfg(test)]
             heard,
         }
@@ -206,7 +242,15 @@ pub struct PlayerUtterance {
     held: Arc<Mutex<VecDeque<Chunk>>>,
     // is_finished after a panic too, unlike a hand-rolled done flag
     worker: thread::JoinHandle<()>,
-    player: Arc<Player>,
+    player: Arc<Mutex<Arc<Player>>>,
+    output: Arc<Output>,
+    faults: std::sync::mpsc::Sender<Fault>,
+    /// The counter, and when it was last seen to move. A counter that stands
+    /// still while audio waits is a device that is gone.
+    seen: (u64, std::time::Instant),
+    /// Set when there is nowhere left to play. A stopped player on a device
+    /// that is gone never empties, because emptying is the device's own doing.
+    gave_up: bool,
     /// Every chunk the player took, for a test that reads what was heard. The
     /// device consumes the samples themselves, so nothing else can.
     #[cfg(test)]
@@ -214,9 +258,13 @@ pub struct PlayerUtterance {
 }
 
 impl PlayerUtterance {
+    /// The sentences a swap would re-append. The swap reads the same deque
+    /// under the same lock; this is how a test sees it.
+    #[cfg(test)]
     pub fn held(&self) -> Vec<Chunk> {
         let mut queue = lock(&self.held);
-        while queue.len() > self.player.len() {
+        let player = lock(&self.player).clone();
+        while queue.len() > player.len() {
             queue.pop_front();
         }
         queue.iter().cloned().collect()
@@ -224,7 +272,25 @@ impl PlayerUtterance {
 
     #[cfg(test)]
     pub fn queued(&self) -> usize {
-        self.player.len()
+        lock(&self.player).len()
+    }
+
+    /// Moves what is left of this reply to the device that is there now. The
+    /// player and its queue belong to the dead device, so both are replaced.
+    fn swap_device(&mut self) -> Result<(), BansheeError> {
+        self.output.reopen()?;
+        let fresh = Arc::new(Player::connect_new(&self.output.mixer()));
+        {
+            let queue = lock(&self.held);
+            for chunk in queue.iter() {
+                fresh.append(stamped(chunk.clone(), self.output.stamp()));
+            }
+            let mut player = lock(&self.player);
+            player.stop();
+            *player = fresh;
+        }
+        self.seen = (self.output.pulls(), std::time::Instant::now());
+        Ok(())
     }
 
     #[cfg(test)]
@@ -241,14 +307,34 @@ impl PlayerUtterance {
 impl ActiveUtterance for PlayerUtterance {
     fn is_finished(&mut self) -> bool {
         // empty() only drops when the device pulls samples; a dead device keeps
-        // an utterance unfinished until stop()
-        self.worker.is_finished() && self.player.empty()
+        // an utterance unfinished until keep_playing swaps it or gives up
+        self.gave_up || (self.worker.is_finished() && lock(&self.player).empty())
     }
 
     fn stop(&mut self) {
         let mut guard = lock(&self.cancelled);
         *guard = true;
-        self.player.stop();
+        lock(&self.player).stop();
+    }
+
+    fn keep_playing(&mut self) {
+        let pulls = self.output.pulls();
+        if pulls != self.seen.0 {
+            self.seen = (pulls, std::time::Instant::now());
+            return;
+        }
+        let queued = lock(&self.player).len();
+        if !output_died(queued, self.seen.1.elapsed()) {
+            return;
+        }
+        log::warn!("the speaker stopped taking audio; opening the default device again");
+        if let Err(error) = self.swap_device() {
+            let _ = self.faults.send(Fault::Failed(format!(
+                "the speaker went away and no other could be opened: {error}"
+            )));
+            self.stop();
+            self.gave_up = true;
+        }
     }
 }
 
@@ -287,7 +373,7 @@ fn default_device() -> Result<Device, BansheeError> {
 #[cfg(test)]
 mod tests {
     use super::{CHANNELS, Chunk, Output, SAMPLE_RATE};
-    use crate::text_to_speech::ActiveUtterance;
+    use crate::text_to_speech::{ActiveUtterance, Fault};
     use banshee_common::error::BansheeError;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -321,7 +407,8 @@ mod tests {
     #[test]
     fn the_counter_rises_only_when_a_device_takes_the_audio() {
         let (output, mut mixed) = Output::readable();
-        let utterance = output.play(one_second_of_silence());
+        let output = Arc::new(output);
+        let utterance = output.play(one_second_of_silence(), ignored_faults());
         wait_until("the chunk is queued", || utterance.queued() == 1);
         assert_eq!(output.pulls(), 0, "nothing has been taken yet");
 
@@ -337,8 +424,8 @@ mod tests {
 
     #[test]
     fn a_dead_device_never_moves_the_counter() {
-        let output = Output::silent();
-        let utterance = output.play(one_second_of_silence());
+        let output = Arc::new(Output::silent());
+        let utterance = output.play(one_second_of_silence(), ignored_faults());
         wait_until("the chunk is queued", || utterance.queued() == 1);
         thread::sleep(Duration::from_millis(100));
         assert_eq!(output.pulls(), 0);
@@ -348,8 +435,11 @@ mod tests {
     // look-ahead; one that finished a sentence owes the rest.
     #[test]
     fn a_device_that_took_nothing_holds_every_sentence_it_was_given() {
-        let output = Output::silent();
-        let utterance = output.play(std::iter::repeat_with(|| kokoros_chunk(240)).take(5));
+        let output = Arc::new(Output::silent());
+        let utterance = output.play(
+            std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
+            ignored_faults(),
+        );
         wait_until("the look-ahead fills", || {
             utterance.queued() == super::LOOK_AHEAD
         });
@@ -366,8 +456,11 @@ mod tests {
     #[test]
     fn a_sentence_the_device_finished_is_no_longer_held() {
         let (output, mut mixed) = Output::readable();
-        let utterance =
-            output.play(std::iter::repeat_with(|| kokoros_chunk(240)).take(super::LOOK_AHEAD));
+        let output = Arc::new(output);
+        let utterance = output.play(
+            std::iter::repeat_with(|| kokoros_chunk(240)).take(super::LOOK_AHEAD),
+            ignored_faults(),
+        );
         wait_until("both sentences are queued", || {
             utterance.queued() == super::LOOK_AHEAD
         });
@@ -420,6 +513,89 @@ mod tests {
         );
     }
 
+    // The device is gone and the reply has to carry on somewhere. The sentences
+    // it never took are the ones the new device starts with.
+    #[test]
+    fn a_dead_device_hands_its_sentences_to_the_new_one() {
+        let output = Arc::new(Output::silent());
+        let (faults, heard) = std::sync::mpsc::channel();
+        let mut utterance = output.play(
+            std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
+            faults,
+        );
+        wait_until("the look-ahead fills", || {
+            utterance.queued() == super::LOOK_AHEAD
+        });
+
+        let owed = utterance.held().len();
+        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
+        utterance.keep_playing();
+
+        assert_eq!(
+            utterance.queued(),
+            owed,
+            "the held sentences moved to the new player"
+        );
+        assert!(heard.try_recv().is_err(), "a swap that worked is no fault");
+    }
+
+    // Kokoro takes its time over a long sentence, and the player is empty until
+    // it answers. Reading that quiet as a dead device would swap the speaker in
+    // the middle of a reply that is only waiting for words.
+    #[test]
+    fn a_player_waiting_for_the_next_sentence_swaps_nothing() {
+        let opened = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&opened);
+        let output = Arc::new(
+            Output::from_opener(Box::new(move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+                Ok(Output::test_device())
+            }))
+            .expect("the first open"),
+        );
+        let mut utterance = output.play(std::iter::empty(), ignored_faults());
+        wait_until("the worker ends with nothing to play", || {
+            utterance.is_finished()
+        });
+
+        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
+        utterance.keep_playing();
+
+        assert_eq!(
+            opened.load(Ordering::Relaxed),
+            1,
+            "a quiet player is not a dead device"
+        );
+    }
+
+    #[test]
+    fn an_utterance_with_nowhere_to_play_ends_and_says_why() {
+        let output = Arc::new(Output::dead_after_first());
+        let (faults, heard) = std::sync::mpsc::channel();
+        let mut utterance = output.play(
+            std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
+            faults,
+        );
+        wait_until("the look-ahead fills", || {
+            utterance.queued() == super::LOOK_AHEAD
+        });
+
+        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
+        utterance.keep_playing();
+
+        wait_until("the utterance concludes", || utterance.is_finished());
+        match heard.try_recv() {
+            Ok(Fault::Failed(reason)) => assert!(reason.contains("speaker"), "{reason}"),
+            other => panic!("a reply that was cut must be reported: {other:?}"),
+        }
+    }
+
+    /// A fault channel a test does not read. The daemon's own runs on a thread
+    /// that drains it.
+    fn ignored_faults() -> std::sync::mpsc::Sender<Fault> {
+        std::sync::mpsc::channel().0
+    }
+
     fn kokoros_chunk(samples: usize) -> Chunk {
         Chunk {
             samples: vec![0.0; samples],
@@ -445,12 +621,12 @@ mod tests {
 
     #[test]
     fn a_stopped_utterance_on_a_dead_device_does_not_block_the_next_one() {
-        let output = Output::silent();
-        let mut first = output.play(one_second_of_silence());
+        let output = Arc::new(Output::silent());
+        let mut first = output.play(one_second_of_silence(), ignored_faults());
         wait_until("the first sentence is queued", || first.queued() == 1);
         first.stop();
 
-        let second = output.play(one_second_of_silence());
+        let second = output.play(one_second_of_silence(), ignored_faults());
         wait_until("the second utterance's thread finishes", || {
             second.worker_finished()
         });
@@ -463,13 +639,13 @@ mod tests {
 
     #[test]
     fn a_sentence_after_stop_is_never_appended() {
-        let output = Output::silent();
+        let output = Arc::new(Output::silent());
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let chunks = std::iter::once(kokoros_chunk(240)).chain(std::iter::once_with(move || {
             let _ = release_rx.recv();
             kokoros_chunk(240)
         }));
-        let mut utterance = output.play(chunks);
+        let mut utterance = output.play(chunks, ignored_faults());
         wait_until("the first chunk is queued", || utterance.queued() == 1);
         utterance.stop();
         release_tx.send(()).unwrap();
@@ -481,11 +657,15 @@ mod tests {
     #[test]
     fn a_chunk_at_another_rate_reaches_the_mixer_as_the_same_length_of_audio() {
         let (output, mut mixed) = Output::readable();
-        let utterance = output.play(std::iter::once(Chunk {
-            samples: vec![0.5; 6_000],
-            rate: std::num::NonZero::new(12_000).unwrap(),
-            channels: CHANNELS,
-        }));
+        let output = Arc::new(output);
+        let utterance = output.play(
+            std::iter::once(Chunk {
+                samples: vec![0.5; 6_000],
+                rate: std::num::NonZero::new(12_000).unwrap(),
+                channels: CHANNELS,
+            }),
+            ignored_faults(),
+        );
         wait_until("the chunk is queued", || utterance.queued() == 1);
 
         let heard = (0..30_000)

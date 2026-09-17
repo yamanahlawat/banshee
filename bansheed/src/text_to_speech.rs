@@ -74,6 +74,9 @@ pub trait TtsBackend: Send + Sync {
 pub trait ActiveUtterance: Send {
     fn is_finished(&mut self) -> bool;
     fn stop(&mut self);
+    /// Called on every poll while this utterance plays. A backend that owns no
+    /// device has nothing to keep alive.
+    fn keep_playing(&mut self) {}
 }
 
 /// Which speaker started, said by the branch that built it. `Configured` is the
@@ -372,6 +375,7 @@ impl SpeechPlayer {
                 return;
             };
             if !active.is_finished() {
+                active.keep_playing();
                 continue;
             }
             playback.active = None;
@@ -567,6 +571,51 @@ mod tests {
             .fault
             .expect("the Kokoro start failure must be reported");
         assert_eq!(reason, expected);
+    }
+
+    /// An utterance that never ends by itself and counts how often the watcher
+    /// gave it the chance to keep itself alive.
+    struct Counts(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl ActiveUtterance for Counts {
+        fn is_finished(&mut self) -> bool {
+            false
+        }
+        fn stop(&mut self) {}
+        fn keep_playing(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    struct CountingBackend(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl TtsBackend for CountingBackend {
+        fn start(
+            &self,
+            _text: &str,
+            _voice: Option<&str>,
+        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+            Ok(Box::new(Counts(Arc::clone(&self.0))))
+        }
+    }
+
+    // The swap that saves a reply from a dead speaker runs on this poll and
+    // nowhere else, so a watcher that stops asking is the bug.
+    #[tokio::test]
+    async fn the_watcher_lets_a_playing_utterance_keep_itself_alive() {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let player = Arc::new(SpeechPlayer::new(Box::new(CountingBackend(Arc::clone(
+            &asked,
+        )))));
+
+        player.speak("A reply that plays on.", false, None).unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        player.stop();
+
+        assert!(
+            asked.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the watcher never asked the utterance to keep playing"
+        );
     }
 
     /// A voice that goes missing between two replies, which `installed` refuses
