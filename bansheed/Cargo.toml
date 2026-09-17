@@ -10,19 +10,21 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Installed from a release archive or a tap, never from crates.io. No
+# `publish = false` for that: dist reads it as a workspace with nothing to
+# release, and nothing here runs `cargo publish` for it to guard.
 
-[[bin]]
-name = "banshee"
-path = "src/main.rs"
+[lints]
+workspace = true
 
 [dependencies]
-arboard = "3.6.1"
+arboard.workspace = true
 audioadapter-buffers = "3.0.0"
-banshee-common = { version = "0.14.0", path = "../banshee-common" }
-chrono = "0.4"
+banshee-common = { path = "../banshee-common" }
+chrono.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
 cpal = "0.17.3"
-dirs = "6.0.0"
+dirs.workspace = true
 json5 = "0.4"
 # Default "espeak" feature is off on purpose: it links espeak-ng via cmake and
 # needs an espeak-ng-data dir next to the binary at runtime, which a single-file
@@ -38,31 +40,31 @@ rodio = { version = "0.22.2", default-features = false, features = ["playback"] 
 rpassword = "7.5.4"
 rubato = "3.0.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0.150", features = ["preserve_order"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 similar = "2"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "signal", "fs"] }
-toml = "1.1.2"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "signal", "fs"] }
+toml.workspace = true
 toml_edit = { version = "0.25", features = ["serde"] }
-whisper-rs = "0.16.0"
+whisper-rs.workspace = true
 # The mark is a png on every platform. winit is macOS only, below.
 png = "0.18.1"
+log.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies.tray-icon]
-version = "0.24.2"
+workspace = true
 
 # `libxdo` is a default feature, and muda uses it only to work the predefined
 # Copy, Cut, Paste and SelectAll menu items. This menu has none of them, so the
 # feature would buy a build dependency on xdotool and nothing else.
 [target.'cfg(not(target_os = "macos"))'.dependencies.tray-icon]
-version = "0.24.2"
-default-features = false
+workspace = true
 features = ["gtk"]
 
 # arboard talks X11 by default. A Wayland session has no X11 clipboard of its
 # own, so without this feature the text is set where nothing reads it.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies.arboard]
-version = "3.6.1"
+workspace = true
 features = ["wayland-data-control"]
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
@@ -81,13 +83,11 @@ core-foundation = "0.10"
 core-graphics = "0.25"
 # Metal + CoreML are always on for macOS (including prebuilt release binaries);
 # whisper.cpp falls back to CPU at runtime if the GPU path is unavailable.
-whisper-rs = { version = "0.16.0", features = ["metal", "coreml"] }
+whisper-rs = { workspace = true, features = ["metal", "coreml"] }
 
 [dev-dependencies]
 hound = "3.5"
 
 [features]
-default = []
-
 # NVIDIA GPUs on Linux/Windows; opt-in because CUDA needs the toolkit installed.
 nvidia = ["whisper-rs/cuda"]

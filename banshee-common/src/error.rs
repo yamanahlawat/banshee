@@ -32,7 +32,8 @@ pub enum BansheeError {
     #[error("{0}")]
     Rejected(String),
 
-    #[error("Internal error: {0}")]
+    // No prefix: most of these are sentences a person acts on
+    #[error("{0}")]
     Other(String),
 }
 
@@ -54,16 +55,17 @@ impl BansheeError {
     }
 
     pub fn rpc_code(&self) -> i32 {
+        use crate::rpc_code;
         match self {
-            BansheeError::HistoryNotEnabled => -32003,
+            BansheeError::HistoryNotEnabled => rpc_code::HISTORY_OFF,
             BansheeError::Rpc { code, .. } => *code,
-            BansheeError::Rejected(_) => -32602,
+            BansheeError::Rejected(_) => rpc_code::INVALID_PARAMS,
             BansheeError::Transcription(_)
             | BansheeError::Io(_)
             | BansheeError::File { .. }
             | BansheeError::Serde(_)
             | BansheeError::Toml(_)
-            | BansheeError::Other(_) => -32603,
+            | BansheeError::Other(_) => rpc_code::INTERNAL,
         }
     }
 }
@@ -86,6 +88,16 @@ mod tests {
             named.to_string(),
             format!("/home/ada/.config/hypr: {bare}"),
             "status reads this sentence out, so it must name the file"
+        );
+    }
+
+    #[test]
+    fn an_other_error_reads_as_it_was_written() {
+        let error = BansheeError::Other("config.toml does not parse: line 3".into());
+        assert_eq!(
+            error.to_string(),
+            "config.toml does not parse: line 3",
+            "the text is the sentence a person reads, so nothing goes in front of it"
         );
     }
 }

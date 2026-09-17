@@ -65,3 +65,55 @@ it('states that the agent connected when the list cannot be read afterwards', as
   await waitFor(() => expect(getByText(/Claude Code is connected/)).toBeTruthy());
   expect(getByText(/may be out of date/)).toBeTruthy();
 });
+
+// Each of the three below destroys the control that was just pressed. axe
+// cannot see a lost focus, so it is asserted here.
+const CONNECTED: AgentRow = { ...CLAUDE, presence: 'connected', note: '' };
+
+it('moves focus into the review when the plan opens', async () => {
+  vi.mocked(detectAgents).mockResolvedValueOnce([CLAUDE]);
+  vi.mocked(planConnect).mockResolvedValue([{ path: '~/.claude.json', diff: '+ banshee' }]);
+  const { getByRole, getByText } = render(AgentsPanel);
+
+  await waitFor(() => expect(getByText('Claude Code')).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: 'Connect' }));
+
+  await waitFor(() => expect(document.activeElement).toBe(getByRole('button', { name: 'Apply' })));
+});
+
+it('puts focus back on the connect button the cancel came from', async () => {
+  vi.mocked(detectAgents).mockResolvedValueOnce([CLAUDE]);
+  vi.mocked(planConnect).mockResolvedValue([{ path: '~/.claude.json', diff: '+ banshee' }]);
+  const { getByRole, getByText } = render(AgentsPanel);
+
+  await waitFor(() => expect(getByText('Claude Code')).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: 'Connect' }));
+  await waitFor(() => expect(getByRole('button', { name: 'Cancel' })).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: 'Cancel' }));
+
+  await waitFor(() =>
+    expect(document.activeElement).toBe(getByRole('button', { name: 'Connect' })),
+  );
+});
+
+// The agent is connected now, so its Connect button is gone.
+it('moves focus onto the row an apply just changed', async () => {
+  vi.mocked(detectAgents).mockResolvedValueOnce([CLAUDE]);
+  vi.mocked(planConnect).mockResolvedValue([{ path: '~/.claude.json', diff: '+ banshee' }]);
+  vi.mocked(applyConnect).mockResolvedValue(undefined);
+  const { getByRole, getByText } = render(AgentsPanel);
+
+  await waitFor(() => expect(getByText('Claude Code')).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: 'Connect' }));
+  await waitFor(() => expect(getByRole('button', { name: 'Apply' })).toBeTruthy());
+
+  vi.mocked(detectAgents).mockResolvedValueOnce([CONNECTED]);
+  await fireEvent.click(getByRole('button', { name: 'Apply' }));
+
+  await waitFor(() => expect(getByText('Connected')).toBeTruthy());
+  // `body` holds the whole panel, so its text matches anything: name the node.
+  const landed = document.activeElement as HTMLElement;
+  expect(landed).not.toBe(document.body);
+  expect(landed.classList.contains('row')).toBe(true);
+  expect(landed.textContent).toMatch(/Claude Code/);
+});

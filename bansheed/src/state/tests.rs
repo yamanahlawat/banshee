@@ -67,7 +67,7 @@ fn the_model_reported_is_the_one_the_listener_loaded() {
 #[test]
 fn a_remote_listener_reports_no_loaded_model() {
     let mut config = Config::default();
-    config.stt.provider = crate::config::SttProvider::Remote;
+    config.stt.provider = crate::config::Provider::Remote;
     let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
     assert_eq!(state.stt_model(), None);
 }
@@ -148,6 +148,7 @@ fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<Consume
         crate::text_to_speech::Speaker::Fallback,
         commands,
         crate::audio::cues::Cues::silent(),
+        crate::test_support::scratch("state-models"),
     );
     (state, requests)
 }

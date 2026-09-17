@@ -1,11 +1,11 @@
 use banshee_common::error::BansheeError;
-use banshee_common::utils::get_db_path;
+use banshee_common::utils::db_path;
 use rusqlite::{Connection, Result};
 
 /// Startup and a live daemon.save_history both open through this, so the schema is created once.
 pub fn open() -> std::result::Result<Connection, BansheeError> {
-    let path = get_db_path()
-        .ok_or_else(|| BansheeError::Other("Failed to get database path".to_string()))?;
+    let path =
+        db_path().ok_or_else(|| BansheeError::Other("Failed to get database path".to_string()))?;
     let connection = Connection::open(path).map_err(|e| BansheeError::Other(e.to_string()))?;
     TranscriptionHistory::create_table(&connection)
         .map_err(|e| BansheeError::Other(e.to_string()))?;

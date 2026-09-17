@@ -2,18 +2,14 @@ use std::collections::HashSet;
 use std::fs;
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
-use banshee_common::{
-    KokoroTTSConfig,
-    error::BansheeError,
-    utils::{get_models_path, get_oov_log_path},
-};
+use banshee_common::{KokoroTTSConfig, error::BansheeError, utils::oov_log_path};
 use misaki_rs::lexicon::{Lexicon, PhonemeEntry};
 use misaki_rs::{G2P, Language, MToken};
-use ort::session::{Session, builder::GraphOptimizationLevel};
+use ort::session::Session;
 
 use super::oov::OovFallback;
 use crate::text_to_speech::output::{CHANNELS, Chunk, Output, SAMPLE_RATE};
-use crate::text_to_speech::{ActiveUtterance, TtsBackend, lock};
+use crate::text_to_speech::{ActiveUtterance, Fault, TtsBackend, lock};
 
 // Voice files hold one style row per input token count: 510 rows x 256 floats
 const STYLE_DIM: usize = 256;
@@ -161,10 +157,6 @@ fn read_voice_file(voice_path: &std::path::Path) -> Result<Vec<f32>, BansheeErro
     Ok(voice)
 }
 
-fn to_io_error(e: BansheeError) -> std::io::Error {
-    std::io::Error::other(e.to_string())
-}
-
 fn strip_bin_suffix(voice_name: &str) -> &str {
     voice_name.strip_suffix(".bin").unwrap_or(voice_name)
 }
@@ -176,7 +168,7 @@ fn installed(voice: &str) -> Result<(), BansheeError> {
     {
         Ok(())
     } else {
-        Err(BansheeError::Other(format!(
+        Err(BansheeError::Rejected(format!(
             "Voice {voice} is not installed on this machine."
         )))
     }
@@ -224,33 +216,17 @@ pub struct KokoroEngine {
 
 impl KokoroEngine {
     pub fn new(kokoro_config: &KokoroTTSConfig, speed: f32) -> Result<Self, BansheeError> {
-        let models_path = get_models_path().ok_or_else(|| {
-            BansheeError::Other(
-                "Could not find home directory. Cannot initialize Kokoro engine.".to_string(),
-            )
-        })?;
-
-        let model_path = models_path.join(&kokoro_config.model_name);
-        let voice_path = models_path.join(&kokoro_config.voice_name);
-
-        if !model_path.exists() {
-            return Err(BansheeError::Other(format!(
-                "Kokoro model not found at {model_path:?}. Run 'banshee setup' to download it."
-            )));
-        }
+        let threads = crate::models::kokoro_threads();
+        let model_path = crate::models::model_path(&kokoro_config.model_name)?;
+        let voice_path = crate::models::model_path(&kokoro_config.voice_name)?;
 
         // Pre-packed weights cost 32 MB of resident memory and bought no synthesis
         // time: three timed runs each way of a two-sentence utterance all took 1.2 s.
-        let session = Session::builder()
-            .map_err(|e| BansheeError::Other(e.to_string()))?
-            .with_optimization_level(GraphOptimizationLevel::All)
-            .map_err(|e| BansheeError::Other(e.to_string()))?
-            .with_intra_threads(4)
-            .map_err(|e| BansheeError::Other(e.to_string()))?
-            .with_config_entry("session.disable_prepacking", "1")
-            .map_err(|e| BansheeError::Other(e.to_string()))?
-            .commit_from_file(&model_path)
-            .map_err(|e| BansheeError::Other(e.to_string()))?;
+        let session = crate::models::onnx_session(
+            &model_path,
+            threads,
+            &[("session.disable_prepacking", "1")],
+        )?;
 
         let voice = read_voice_file(&voice_path)?;
 
@@ -259,7 +235,7 @@ impl KokoroEngine {
 
         let oov = OovFallback::detect();
         if oov.is_none() {
-            eprintln!(
+            log::warn!(
                 "espeak-ng not found; unknown words will be spelled out. \
                  Install espeak-ng for better pronunciation (run 'banshee status')."
             );
@@ -278,13 +254,8 @@ impl KokoroEngine {
 
     pub fn set_voice(&mut self, voice_name: &str) -> Result<(), BansheeError> {
         installed(voice_name)?;
-        let models_path = get_models_path().ok_or_else(|| {
-            BansheeError::Other(
-                "Could not find home directory. Cannot initialize Kokoro engine.".to_string(),
-            )
-        })?;
         let voice_config = KokoroTTSConfig::new(voice_name);
-        let voice_path = models_path.join(&voice_config.voice_name);
+        let voice_path = crate::models::model_path(&voice_config.voice_name)?;
         self.voice = read_voice_file(&voice_path)?;
         self.loaded_voice = voice_name.to_string();
         Ok(())
@@ -425,7 +396,7 @@ fn lock_read<T>(value: &RwLock<T>) -> RwLockReadGuard<'_, T> {
 
 /// The voice a live `[tts]` write puts in effect, or `None` when this machine
 /// does not hold it. A voice accepted here but missing fails later inside the
-/// chunk iterator, where nothing can refuse it and every reply goes silent.
+/// chunk iterator, which can only report the fault after the reply went silent.
 fn voice_to_take(wanted: &str, held: &[String]) -> Option<String> {
     held.iter()
         .any(|id| id == wanted)
@@ -436,21 +407,53 @@ fn voice_for(requested: Option<&str>, configured: &str) -> String {
     requested.unwrap_or(configured).to_string()
 }
 
+/// One sentence's audio, or the fault that ends the utterance. The first
+/// sentence that plays clears the last speech error, like the remote speaker's.
+fn chunk_or_fault(
+    synthesized: Result<Vec<f32>, BansheeError>,
+    played: &mut bool,
+    faults: &std::sync::mpsc::Sender<Fault>,
+) -> Option<Chunk> {
+    match synthesized {
+        Ok(samples) => {
+            if !*played {
+                *played = true;
+                let _ = faults.send(Fault::Played);
+            }
+            Some(Chunk {
+                samples,
+                rate: SAMPLE_RATE,
+                channels: CHANNELS,
+            })
+        }
+        Err(error) => {
+            let _ = faults.send(Fault::Failed(format!("Kokoro synthesis failed: {error}")));
+            None
+        }
+    }
+}
+
 pub struct KokoroBackend {
     engine: Arc<Mutex<KokoroEngine>>,
     output: Arc<Output>,
     // What an utterance that names no voice speaks in. A live `tts.voice`
     // moves it, so it cannot be fixed at construction.
     configured_voice: RwLock<String>,
+    faults: std::sync::mpsc::Sender<Fault>,
 }
 
 impl KokoroBackend {
-    pub fn new(engine: KokoroEngine, output: Arc<Output>) -> Self {
+    pub fn new(
+        engine: KokoroEngine,
+        output: Arc<Output>,
+        faults: std::sync::mpsc::Sender<Fault>,
+    ) -> Self {
         let configured_voice = engine.loaded_voice().to_string();
         Self {
             engine: Arc::new(Mutex::new(engine)),
             output,
             configured_voice: RwLock::new(configured_voice),
+            faults,
         }
     }
 }
@@ -466,12 +469,18 @@ impl TtsBackend for KokoroBackend {
         Some(taken)
     }
 
-    fn start(&self, text: &str, voice: Option<&str>) -> std::io::Result<Box<dyn ActiveUtterance>> {
+    fn start(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
         if let Some(requested) = voice {
-            installed(requested).map_err(to_io_error)?;
+            installed(requested)?;
         }
         let desired = voice_for(voice, &lock_read(&self.configured_voice));
         let engine = Arc::clone(&self.engine);
+        let faults = self.faults.clone();
+        let mut played = false;
         let mut sentences = sentences(text)
             .map(str::to_string)
             .collect::<Vec<_>>()
@@ -480,22 +489,13 @@ impl TtsBackend for KokoroBackend {
         // rest are still synthesizing
         let chunks = std::iter::from_fn(move || {
             let sentence = sentences.next()?;
-            let mut engine = lock(&engine);
-            if let Err(e) = engine.ensure_voice(&desired) {
-                eprintln!("Kokoro synthesis failed: {e}");
-                return None;
-            }
-            match engine.synthesize(&sentence) {
-                Ok(samples) => Some(Chunk {
-                    samples,
-                    rate: SAMPLE_RATE,
-                    channels: CHANNELS,
-                }),
-                Err(e) => {
-                    eprintln!("Kokoro synthesis failed: {e}");
-                    None
-                }
-            }
+            let synthesized = {
+                let mut engine = lock(&engine);
+                engine
+                    .ensure_voice(&desired)
+                    .and_then(|()| engine.synthesize(&sentence))
+            };
+            chunk_or_fault(synthesized, &mut played, &faults)
         });
         Ok(Box::new(self.output.play(chunks)))
     }
@@ -517,7 +517,7 @@ fn is_letter_spelled(tk: &MToken) -> bool {
 
 // Dedup is per run, so a word can repeat across restarts; sort -u at read time
 fn append_oov(word: &str) {
-    let Some(path) = get_oov_log_path() else {
+    let Some(path) = oov_log_path() else {
         return;
     };
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {

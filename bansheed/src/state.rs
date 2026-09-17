@@ -315,6 +315,8 @@ pub struct DaemonState {
     // Zero means it has never run, which reads as stalled.
     capture_tick: AtomicU64,
     shutdown: tokio::sync::Notify,
+    // Handed in, so a test decides what is on disk.
+    models_dir: std::path::PathBuf,
 }
 
 impl DaemonState {
@@ -325,9 +327,11 @@ impl DaemonState {
         speaker: crate::text_to_speech::Speaker,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
         cues: Cues,
+        models_dir: std::path::PathBuf,
     ) -> Self {
         let wanted_downloads = crate::models::download::wanted(&config);
         Self {
+            models_dir,
             version: env!("CARGO_PKG_VERSION"),
             stt_model: RwLock::new(crate::models::stt_file(&config)),
             vad_model: crate::models::VAD_MODEL,
@@ -398,7 +402,7 @@ impl DaemonState {
             self.pending_target
                 .store(action.as_u8(), std::sync::atomic::Ordering::Release);
             self.cues.send(Cue::RecordStart);
-            println!("Recording started...");
+            log::info!("Recording started...");
             true
         } else {
             false
@@ -409,7 +413,7 @@ impl DaemonState {
     // unconditionally.
     pub fn record_stop(&self) {
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
-            println!("Recording stopped");
+            log::info!("Recording stopped");
             self.cues.send(Cue::RecordStop);
             let action = TranscribeTarget::from_u8(
                 self.pending_target
@@ -440,7 +444,7 @@ impl DaemonState {
     // push-to-talk: the start cue was already noise, a second cue doubles it.
     pub fn record_cancel(&self) {
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
-            println!("Recording cancelled");
+            log::info!("Recording cancelled");
             let _ = self.commands.send(ConsumerCommand::Discard);
         } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
             // The armed session keeps its audio; only the manual hold ends.
@@ -470,7 +474,7 @@ impl DaemonState {
         if (self.started_at.elapsed().as_millis() as u64) < deadline {
             return false;
         }
-        eprintln!(
+        log::warn!(
             "Push-to-talk ran past {}s with no stop; releasing the microphone.",
             MAX_PUSH_TO_TALK.as_secs()
         );
@@ -681,6 +685,10 @@ impl DaemonState {
 
     pub fn uptime(&self) -> std::time::Duration {
         self.started_at.elapsed()
+    }
+
+    pub fn models_dir(&self) -> &std::path::Path {
+        &self.models_dir
     }
 
     pub fn version(&self) -> &'static str {

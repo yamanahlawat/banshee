@@ -24,7 +24,7 @@ async fn next_message(lines: &mut Incoming) -> serde_json::Value {
 // fails to compile rather than going quietly unanswered
 async fn send(writer: &mut OwnedWriteHalf, method: &str, params: serde_json::Value) {
     let request = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
+        jsonrpc: banshee_common::Version::V2,
         method: method.to_string(),
         params: Some(params),
         id: Some(serde_json::json!(1)),
@@ -281,4 +281,23 @@ async fn live_socket_refuses_second_instance() {
     let error = claim_socket(&path).expect_err("second instance not refused");
     assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
     let _ = fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn a_line_that_is_not_a_request_is_answered_with_a_parse_error() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+
+    writer
+        .write_all(b"{\"jsonrpc\": \"2.0\", \"method\": 3\n")
+        .await
+        .unwrap();
+
+    let reply = next_message(&mut lines).await;
+    assert_eq!(reply["error"]["code"], banshee_common::rpc_code::PARSE);
+    assert_eq!(
+        reply["id"],
+        serde_json::Value::Null,
+        "a request that did not parse has no id to answer on"
+    );
 }

@@ -1,0 +1,22 @@
+# Dependency updates arrive as pull requests, so CI meets a new version before
+# a release does. One group per ecosystem keeps the queue readable.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /banshee-app/ui
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

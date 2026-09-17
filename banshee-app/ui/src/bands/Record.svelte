@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { getContext, tick } from 'svelte';
+  import { getContext } from 'svelte';
+  import { land } from '../lib/focus';
   import { forget, formatCount, table } from '../lib/history';
   import { PANEL, type PanelFocus } from './panel';
   import { clearHistory } from '../lib/tauri';
@@ -19,13 +20,9 @@
   let clearer: HTMLButtonElement;
   let deleting = false;
 
-  // Each branch destroys the control that was just pressed. Without a move the
-  // focus falls to the body, and a reader who cannot see the screen has to Tab
-  // from the top of the document to reach the question they asked for.
-  async function show(next: boolean, land: () => HTMLElement | undefined) {
+  async function show(next: boolean, on: () => HTMLElement | undefined) {
     confirming = next;
-    await tick();
-    land()?.focus();
+    return land(on);
   }
 
   /// Not `disabled`: `clear` closes the question and puts focus back on this

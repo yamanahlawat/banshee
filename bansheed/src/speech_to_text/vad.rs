@@ -1,9 +1,16 @@
-use banshee_common::{SileroVADConfig, error::BansheeError, utils::get_models_path};
-use ort::session::{Session, builder::GraphOptimizationLevel};
+use banshee_common::{SileroVADConfig, error::BansheeError};
+use ort::session::Session;
 
 // Silero v5 expects each 512-sample chunk prefixed with the previous chunk's
 // last 64 samples. Without it the model returns ~0 probability for everything.
 const CONTEXT_SIZE: usize = 64;
+
+// The model takes no other count, and a wrong one reaches ort as an opaque
+// shape error.
+pub const VAD_CHUNK: usize = 512;
+
+/// Silero v5's recurrent state: two layers, one batch, 128 hidden units.
+const STATE_SHAPE: (usize, usize, usize) = (2, 1, 128);
 
 pub struct VADEngine {
     session: Session,
@@ -13,38 +20,11 @@ pub struct VADEngine {
 
 impl VADEngine {
     pub fn new(vad_config: SileroVADConfig) -> Result<Self, BansheeError> {
-        let model_path = get_models_path().ok_or_else(|| {
-            BansheeError::Other(
-                "Could not find home directory. Cannot initialize VAD engine.".to_string(),
-            )
-        })?;
+        let vad_model_path = crate::models::model_path(&vad_config.model_name)?;
+        let session =
+            crate::models::onnx_session(&vad_model_path, crate::models::VAD_THREADS, &[])?;
 
-        let vad_model_path = model_path.join(&vad_config.model_name);
-
-        if !vad_model_path.exists() {
-            return Err(BansheeError::Other(format!(
-                "VAD model not found at {:?}. Cannot initialize VAD engine.",
-                vad_model_path
-            )));
-        }
-
-        let vad_model_path_str = vad_model_path.to_str().ok_or_else(|| {
-            BansheeError::Other(format!(
-                "Failed to convert VAD model path {:?} to string.",
-                vad_model_path
-            ))
-        })?;
-
-        let session = Session::builder()
-            .map_err(|e| BansheeError::Other(e.to_string()))?
-            .with_optimization_level(GraphOptimizationLevel::All)
-            .map_err(|e| BansheeError::Other(e.to_string()))?
-            .with_intra_threads(4)
-            .map_err(|e| BansheeError::Other(e.to_string()))?
-            .commit_from_file(vad_model_path_str)
-            .map_err(|e| BansheeError::Other(e.to_string()))?;
-
-        let state = ndarray::Array3::<f32>::zeros((2, 1, 128));
+        let state = ndarray::Array3::<f32>::zeros(STATE_SHAPE);
         let context = vec![0.0f32; CONTEXT_SIZE];
         Ok(Self {
             session,
@@ -58,6 +38,13 @@ impl VADEngine {
         audio_data: &[f32],
         target_sample_rate: u32,
     ) -> Result<f32, BansheeError> {
+        if audio_data.len() != VAD_CHUNK {
+            return Err(BansheeError::Other(format!(
+                "The VAD reads {VAD_CHUNK} samples at a time, not {}.",
+                audio_data.len()
+            )));
+        }
+
         let mut input = Vec::with_capacity(CONTEXT_SIZE + audio_data.len());
         input.extend_from_slice(&self.context);
         input.extend_from_slice(audio_data);
@@ -94,7 +81,7 @@ impl VADEngine {
             .try_extract_tensor::<f32>()
             .map_err(|e| BansheeError::Other(e.to_string()))?;
 
-        self.state = ndarray::Array3::from_shape_vec((2, 1, 128), state_data.to_vec())
+        self.state = ndarray::Array3::from_shape_vec(STATE_SHAPE, state_data.to_vec())
             .map_err(|e| BansheeError::Other(e.to_string()))?;
 
         self.context = audio_data[audio_data.len() - CONTEXT_SIZE..].to_vec();
@@ -103,7 +90,7 @@ impl VADEngine {
     }
 
     pub fn reset_state(&mut self) {
-        self.state = ndarray::Array3::<f32>::zeros((2, 1, 128));
+        self.state = ndarray::Array3::<f32>::zeros(STATE_SHAPE);
         self.context = vec![0.0f32; CONTEXT_SIZE];
     }
 }
@@ -119,10 +106,11 @@ mod tests {
     fn load_test_audio() -> Vec<f32> {
         let mut reader = hound::WavReader::new(Cursor::new(TEST_WAV)).expect("invalid test wav");
         assert_eq!(reader.spec().sample_rate, 16000);
-        reader
-            .samples::<i16>()
-            .map(|s| s.unwrap() as f32 / i16::MAX as f32)
-            .collect()
+        crate::speech_to_text::remote::wav::pcm16_samples(
+            reader
+                .samples::<i16>()
+                .map(|sample| sample.expect("a sample")),
+        )
     }
 
     #[test]
@@ -132,8 +120,8 @@ mod tests {
 
         let mut speech = 0;
         let mut total = 0;
-        for chunk in samples.chunks(512) {
-            if chunk.len() < 512 {
+        for chunk in samples.chunks(VAD_CHUNK) {
+            if chunk.len() < VAD_CHUNK {
                 continue;
             }
             if vad.check_speech(chunk, 16000).unwrap() > 0.5 {
@@ -153,11 +141,21 @@ mod tests {
     }
 
     #[test]
+    fn a_chunk_that_is_not_the_model_size_is_refused() {
+        let mut vad = VADEngine::new(SileroVADConfig::new("silero_vad.onnx")).unwrap();
+        let error = vad.check_speech(&[0.0f32; 256], 16000).unwrap_err();
+        assert!(
+            error.to_string().contains(&VAD_CHUNK.to_string()),
+            "the refusal names the size the model needs, got: {error}"
+        );
+    }
+
+    #[test]
     fn rejects_silence() {
-        let silence = vec![0.0f32; 512 * 20];
+        let silence = vec![0.0f32; VAD_CHUNK * 20];
         let mut vad = VADEngine::new(SileroVADConfig::new("silero_vad.onnx")).unwrap();
 
-        for chunk in silence.chunks(512) {
+        for chunk in silence.chunks(VAD_CHUNK) {
             let p = vad.check_speech(chunk, 16000).unwrap();
             assert!(p < 0.5, "silence flagged as speech with probability {p}");
         }

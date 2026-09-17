@@ -2,7 +2,6 @@
   import type { LampForm } from '../lib/daemon';
 
   export let form: LampForm = 'idle';
-  export let size = 34;
 
   // Copied from `assets/banshee-mark.svg`. The menu bar draws that file, so the
   // two must stay one silhouette.
@@ -26,8 +25,8 @@
 {#key form}
   <svg
     class="mark"
-    width={size}
-    height={size}
+    width="34"
+    height="34"
     viewBox="0 0 100 100"
     aria-hidden="true"
     focusable="false"

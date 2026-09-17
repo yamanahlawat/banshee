@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use banshee_common::{error::BansheeError, utils::get_credentials_path};
+use banshee_common::{error::BansheeError, utils::credentials_path};
 use serde::{Deserialize, Serialize};
 
 // Nested so each key reads as `[stt.remote] api_key`, the way config.toml
@@ -99,7 +99,7 @@ impl std::fmt::Debug for Credentials {
 
 impl Credentials {
     pub fn path() -> Result<PathBuf, BansheeError> {
-        get_credentials_path()
+        credentials_path()
             .ok_or_else(|| BansheeError::Other("Failed to get the credentials path".to_string()))
     }
 
@@ -126,6 +126,14 @@ impl Credentials {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "~/.banshee/credentials.toml".to_string());
         format!("rm {path}, then set the keys again")
+    }
+
+    /// The mode of a key file others can read, or `None` for a file its owner
+    /// alone reads, and for no file at all.
+    pub fn exposed(path: &Path) -> Option<u32> {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).ok()?.permissions().mode() & 0o777;
+        (mode & 0o077 != 0).then_some(mode)
     }
 
     pub(crate) fn read(path: &Path) -> Result<Self, BansheeError> {
@@ -561,5 +569,30 @@ mod tests {
     fn each_side_names_its_own_base_url_setting() {
         assert_eq!(RemoteKey::Stt.base_url_setting(), "stt.remote.base_url");
         assert_eq!(RemoteKey::Tts.base_url_setting(), "tts.remote.base_url");
+    }
+
+    #[test]
+    fn a_key_file_others_can_read_is_reported_with_its_mode() {
+        let path = scratch("exposed");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(Credentials::exposed(&path), Some(0o644));
+
+        // The group alone is still others
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(Credentials::exposed(&path), Some(0o640));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            Credentials::exposed(&path),
+            None,
+            "owner-only is the mode the writer sets, so it raises nothing"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_missing_key_file_exposes_nothing() {
+        assert_eq!(Credentials::exposed(&scratch("absent-mode")), None);
     }
 }

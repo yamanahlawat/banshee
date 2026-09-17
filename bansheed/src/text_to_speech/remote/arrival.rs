@@ -16,7 +16,8 @@ const MONO: NonZero<u16> = NonZero::new(1).unwrap();
 /// longest signature, so a magic split across two reads is not misread.
 const ENOUGH: usize = 12;
 
-/// The bound stops a server that never declares itself from filling memory.
+/// Unmeasured. A ceiling on a server that never declares itself, far past any
+/// header this reads.
 const HEADER_BOUND: usize = 64 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

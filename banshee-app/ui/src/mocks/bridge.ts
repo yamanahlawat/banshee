@@ -1,11 +1,22 @@
 // Reached only under `import.meta.env.DEV` and only when Tauri is absent, so
 // it cannot ship.
-import ready from './ready.json';
-import permissions from './permissions.json';
-import notRunning from './not-running.json';
-import remote from './remote.json';
-import remoteSpeech from './remote-speech.json';
-import type { HistoryRow } from '../lib/tauri';
+import readyJson from './ready.json';
+import permissionsJson from './permissions.json';
+import notRunningJson from './not-running.json';
+import remoteJson from './remote.json';
+import remoteSpeechJson from './remote-speech.json';
+import type { AgentRow, Devices, HistoryRow, Languages, PlannedChange, Voices } from '../lib/tauri';
+import type { Status } from '../lib/daemon';
+
+// A fixture is a captured reply, and JSON cannot carry the unions the type
+// states, `Blocker['kind']` among them. Named once here, so every state built
+// out of one below is still checked against `Status`.
+const asStatus = (captured: unknown) => captured as Status;
+const ready = asStatus(readyJson);
+const permissions = asStatus(permissionsJson);
+const notRunning = asStatus(notRunningJson);
+const remote = asStatus(remoteJson);
+const remoteSpeech = asStatus(remoteSpeechJson);
 
 // A write changes what `status` answers next, as the daemon's would.
 const written: Record<string, unknown> = {};
@@ -18,7 +29,7 @@ const OPENAI = `https://${HOST}/v1`;
 function inForce(
   listener: { remote: boolean; key: boolean },
   speaker: { remote: boolean; started: boolean; key: boolean },
-) {
+): NonNullable<Status['remote']> {
   return {
     stt: {
       remote: listener.remote,
@@ -38,17 +49,20 @@ function inForce(
 // window shows neither `response_format` nor `sample_rate`, so this names them
 // no value to look at.
 function asks(provider: string, model: string, voice: string) {
+  // Every fixture carries a config; the type leaves it optional because a
+  // reply from a daemon that is not running does not.
+  const base = remote.config ?? {};
   return {
-    ...remote.config,
+    ...base,
     tts: {
-      ...remote.config.tts,
+      ...base.tts,
       provider,
       remote: { base_url: OPENAI, model, voice, instructions: '' },
     },
   };
 }
 
-const STATES: Record<string, unknown> = {
+const STATES: Record<string, Status> = {
   ready,
   permissions,
   remote,
@@ -74,7 +88,7 @@ const STATES: Record<string, unknown> = {
   },
   'to-local': {
     ...remote,
-    config: { ...remote.config, stt: { ...remote.config.stt, provider: 'local' } },
+    config: { ...remote.config, stt: { ...remote.config?.stt, provider: 'local' } },
     pending: ['stt.provider'],
   },
   'no-key': {
@@ -199,7 +213,7 @@ const ANSWERS: Record<string, () => unknown> = {
     if (chosen() === 'copy-fails') throw new Error('the clipboard refused it');
     return undefined;
   },
-  list_devices: () => ({
+  list_devices: (): Devices => ({
     devices: [
       { name: 'MacBook Pro Microphone', default: true },
       { name: 'OnePlus Buds 3', default: false },
@@ -208,7 +222,7 @@ const ANSWERS: Record<string, () => unknown> = {
   }),
   // Whisper's own order: English first, the rest by how much training data each
   // had. A short slice of it, because a mock needs a list and not the list.
-  list_languages: () => ({
+  list_languages: (): Languages => ({
     languages: [
       { code: 'en', name: 'English' },
       { code: 'zh', name: 'Chinese' },
@@ -221,17 +235,18 @@ const ANSWERS: Record<string, () => unknown> = {
       { code: 'hi', name: 'Hindi' },
     ],
   }),
-  list_voices: () => ({
+  list_voices: (): Voices => ({
     voices: [
-      { id: 'af_sky', name: 'Sky', description: 'American, clear' },
-      { id: 'af_heart', name: 'Heart', description: 'American, warm' },
-      { id: 'am_adam', name: 'Adam', description: 'American, low' },
+      { id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true },
+      { id: 'af_heart', name: 'Heart', description: 'American, warm', downloaded: true },
+      // Not on the machine, so the panel's fetch path has something to show.
+      { id: 'am_adam', name: 'Adam', description: 'American, low', downloaded: false },
     ],
     current: 'af_sky',
   }),
   // The home screen's agent absence needs a state with none connected, or it
   // cannot be looked at.
-  detect_agents: () =>
+  detect_agents: (): AgentRow[] =>
     chosen() === 'no-agents'
       ? [
           { id: 'claude', name: 'Claude Code', presence: 'found', note: '' },
@@ -245,7 +260,7 @@ const ANSWERS: Record<string, () => unknown> = {
           { id: 'antigravity', name: 'Antigravity', presence: 'absent', note: '' },
           { id: 'pi', name: 'Pi', presence: 'absent', note: '' },
         ],
-  plan_connect: () => [
+  plan_connect: (): PlannedChange[] => [
     {
       path: '~/.cursor/mcp.json',
       diff: '+  "banshee": {\n+    "command": "banshee-mcp-shim"\n+  }',

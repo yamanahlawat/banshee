@@ -75,7 +75,7 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
                 true
             }
             Err(error) => {
-                eprintln!("Failed to open the history file: {error}");
+                log::error!("Failed to open the history file: {error}");
                 false
             }
         },
@@ -99,9 +99,9 @@ fn apply_preset(state: &DaemonState, config: &Config) -> bool {
     if state.stt_model() == Some(model) {
         return true;
     }
-    let absent = crate::models::missing(&[model]);
+    let absent = crate::models::missing_in(state.models_dir(), &[model]);
     if !absent.is_empty() {
-        eprintln!("banshee: {model} is not downloaded yet, so the preset is unchanged");
+        log::warn!("{model} is not downloaded yet, so the preset is unchanged");
         return false;
     }
     // The engine that loads this starts on the pending restart, and a listener
@@ -297,6 +297,16 @@ fn apply_each<'a>(
 /// second writer to race with.
 pub fn configure(
     state: Option<&DaemonState>,
+    assignments: Assignments,
+    persist: bool,
+) -> Result<Outcome, BansheeError> {
+    configure_at(&Config::path()?, state, assignments, persist)
+}
+
+/// `path` is the config.toml the write reads and, with `persist`, replaces.
+fn configure_at(
+    path: &std::path::Path,
+    state: Option<&DaemonState>,
     mut assignments: Assignments,
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
@@ -314,8 +324,7 @@ pub fn configure(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let path = Config::path()?;
-    let existing = Config::read(&path)?;
+    let existing = Config::read(path)?;
 
     let (rendered, config) = edit(&existing, &assignments)?;
 
@@ -332,7 +341,7 @@ pub fn configure(
 
     // The key alone changes nothing in config.toml, so there is nothing to write
     if persist && !assignments.is_empty() {
-        banshee_common::utils::write_atomically(&path, rendered.as_bytes(), None)?;
+        banshee_common::utils::write_atomically(path, rendered.as_bytes(), None)?;
     }
 
     // A live key needs a restart too when no daemon runs, so with no state

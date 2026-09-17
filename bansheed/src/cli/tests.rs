@@ -1,22 +1,9 @@
-use super::{progress_line, state_word, watch_line, waybar_line};
+use super::{failure_line, progress_line, state_word, watch_line, waybar_line};
 use banshee_common::InputDevice;
+use banshee_common::error::BansheeError;
 
 #[test]
-fn a_message_from_a_daemon_that_predates_these_fields_still_shows_progress() {
-    let old_format = serde_json::json!({
-        "model": "silero_vad.onnx",
-        "bytes": 356,
-        "total": 574,
-        "state": "downloading",
-    });
-    let reported: banshee_common::DownloadProgress =
-        serde_json::from_value(old_format).expect("old-format messages must still deserialize");
-
-    let line = progress_line(&reported);
-    assert!(!line.contains("of 0"), "{line}");
-    assert!(!line.contains("  "), "{line}");
-    assert_eq!(line, "silero_vad.onnx 62%");
-
+fn a_download_line_names_the_file_and_its_place_in_the_run() {
     let new_format = banshee_common::DownloadProgress {
         model: "silero_vad.onnx".to_string(),
         label: "Voice detection model".to_string(),
@@ -274,4 +261,47 @@ fn a_failed_download_ends_the_wait_and_is_named_in_the_error() {
     assert!(error.to_string().contains("b.onnx"), "{error}");
     assert!(error.to_string().contains("banshee setup"), "{error}");
     assert!(super::downloads_settled(&[]).is_ok());
+}
+
+#[test]
+fn a_rejection_reads_as_the_daemon_wrote_it() {
+    let error = BansheeError::Rejected("say what to tell it, or pass --undo".into());
+    assert_eq!(
+        failure_line(&error),
+        "say what to tell it, or pass --undo",
+        "the caller's own mistake needs no wrapper and no Debug form"
+    );
+}
+
+#[test]
+fn a_socket_failure_names_the_daemon_as_the_thing_not_reached() {
+    let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+    let line = failure_line(&BansheeError::Io(refused));
+    assert!(
+        line.starts_with("Could not reach the daemon"),
+        "an io failure on the socket is the daemon being away: {line}"
+    );
+}
+
+#[test]
+fn a_config_failure_does_not_blame_the_daemon() {
+    let broken = toml::from_str::<toml::Table>("stt = ").unwrap_err();
+    let line = failure_line(&BansheeError::Toml(broken));
+    assert!(
+        !line.contains("daemon"),
+        "config.toml failing to parse says nothing about the daemon: {line}"
+    );
+}
+
+#[test]
+fn an_io_failure_away_from_the_socket_is_not_blamed_on_the_daemon() {
+    let taken = std::io::Error::new(
+        std::io::ErrorKind::AddrInUse,
+        "another banshee daemon is already running",
+    );
+    let line = failure_line(&BansheeError::Io(taken));
+    assert_eq!(
+        line, "another banshee daemon is already running",
+        "only a socket the CLI could not reach is the daemon being away"
+    );
 }

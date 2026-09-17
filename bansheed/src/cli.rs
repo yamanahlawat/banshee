@@ -81,7 +81,6 @@ fn downloads_settled(failed: &[String]) -> Result<(), BansheeError> {
     if failed.is_empty() {
         return Ok(());
     }
-    // `fail` prefixes Other as an unreachable daemon, and this daemon answered.
     Err(BansheeError::Rejected(format!(
         "{} failed to download; run: banshee setup",
         failed.join(", ")
@@ -95,14 +94,10 @@ fn progress_line(progress: &banshee_common::DownloadProgress) -> String {
         DownloadState::Failed => format!("{} failed", progress.model),
         DownloadState::Downloading => {
             match models::download::percent(progress.bytes, progress.total) {
-                // A daemon older than this field set sends no count at all,
-                // and a real run always has count >= 1, so 0 marks a message
-                // with no place to report
-                Some(done) if progress.count > 0 => format!(
+                Some(done) => format!(
                     "{}, {} of {}  {done}%",
                     progress.label, progress.index, progress.count
                 ),
-                Some(done) => format!("{} {done}%", progress.model),
                 // No Content-Length, so there is no bar to draw: count what arrived
                 None => format!("{} {} MB", progress.model, progress.bytes / 1_048_576),
             }
@@ -152,13 +147,7 @@ fn watch_line(waybar: bool, word: &str, device: Option<&str>, missing: Option<&s
 }
 
 fn state_word(state: &serde_json::Value) -> &'static str {
-    match banshee_common::Activity::of(state) {
-        banshee_common::Activity::Idle => "idle",
-        banshee_common::Activity::Recording => "recording",
-        banshee_common::Activity::Speaking => "speaking",
-        banshee_common::Activity::Listening => "listening",
-        banshee_common::Activity::Busy => "busy",
-    }
+    banshee_common::Activity::of(state).word()
 }
 
 /// A device can be both, and hiding either label would read as its being false.
@@ -173,16 +162,24 @@ fn device_labels(device: &banshee_common::InputDevice, current: Option<&str>) ->
     labels.join(", ")
 }
 
-/// An answer meant for the caller reads on its own; anything else is this
-/// process failing to ask.
-fn fail(error: &BansheeError) -> ! {
+/// An answer meant for the caller reads on its own, a socket nobody answers
+/// is the daemon being away, and anything else already says what it is.
+pub fn failure_line(error: &BansheeError) -> String {
     match error {
-        BansheeError::Rejected(_) | BansheeError::Rpc { .. } => {
-            eprintln!("{}", error.rpc_message())
-        }
-        other => eprintln!("Could not reach the daemon: {other}"),
+        BansheeError::Rejected(_) | BansheeError::Rpc { .. } => error.rpc_message(),
+        away if daemon_is_down(away) => format!("Could not reach the daemon: {away}"),
+        other => other.to_string(),
     }
-    std::process::exit(1)
+}
+
+/// Asks the daemon and prints its reply as the caller can read it.
+async fn show(method: &str, params: serde_json::Value) -> Result<(), BansheeError> {
+    let result = utils::call_daemon(method, params).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+    );
+    Ok(())
 }
 
 fn daemon_is_down(error: &BansheeError) -> bool {
@@ -194,7 +191,7 @@ fn daemon_is_down(error: &BansheeError) -> bool {
         // A socket orphaned by an unclean exit accepts the connection then
         // closes it. tokio's nonblocking connect cannot tell; a blocking one can.
         BansheeError::Serde(_) => {
-            utils::get_socket_path().is_some_and(|path| !daemon::socket_answers(&path))
+            utils::socket_path().is_some_and(|path| !daemon::socket_answers(&path))
         }
         _ => false,
     }
@@ -204,7 +201,7 @@ pub async fn stop() -> Result<(), BansheeError> {
     match utils::call_daemon(banshee_common::BANSHEE_STOP, serde_json::json!({})).await {
         Ok(_) => println!("Daemon stopped."),
         Err(error) if daemon_is_down(&error) => println!("Daemon is not running."),
-        Err(error) => eprintln!("Failed to stop daemon: {error}"),
+        Err(error) => return Err(error),
     }
     Ok(())
 }
@@ -226,9 +223,7 @@ pub async fn devices() -> Result<(), BansheeError> {
         }
         // You need the names before you can start a daemon on the right one
         Err(error) if daemon_is_down(&error) => (audio::input_devices(), None),
-        Err(error) => {
-            fail(&error);
-        }
+        Err(error) => return Err(error),
     };
 
     if devices.is_empty() {
@@ -276,7 +271,7 @@ pub async fn voices() -> Result<(), BansheeError> {
                 .collect(),
             None,
         ),
-        Err(error) => fail(&error),
+        Err(error) => return Err(error),
     };
 
     // The daemon names every voice it can describe, so what this has to
@@ -311,7 +306,7 @@ pub async fn watch(waybar: bool) -> Result<(), BansheeError> {
                 eprintln!("Daemon is not running.");
                 std::process::exit(1);
             }
-            Err(error) => fail(&error),
+            Err(error) => return Err(error),
         };
     // No real line is empty, so the first one always prints
     let mut shown = String::new();
@@ -339,7 +334,7 @@ pub async fn watch(waybar: bool) -> Result<(), BansheeError> {
                 eprintln!("The daemon closed the connection.");
                 std::process::exit(1);
             }
-            Err(error) => fail(&error),
+            Err(error) => return Err(error),
         };
     }
 }
@@ -422,7 +417,7 @@ async fn config_api_key(
                 println!("Restart to use it: banshee start");
             }
         }
-        Err(error) => fail(&error),
+        Err(error) => return Err(error),
     }
     Ok(())
 }
@@ -432,7 +427,7 @@ pub async fn config(key: String, value: Option<String>) -> Result<(), BansheeErr
         return config_api_key(side, key_change(value, || ask_key(side))?).await;
     }
     let Some(value) = value else {
-        fail(&BansheeError::Rejected(format!("'{key}' needs a value")))
+        return Err(BansheeError::Rejected(format!("'{key}' needs a value")));
     };
     // So `0.6` arrives as a number and `de` as a string
     let value: serde_json::Value =
@@ -446,9 +441,7 @@ pub async fn config(key: String, value: Option<String>) -> Result<(), BansheeErr
                 println!("Restart to use it: banshee start");
             }
         }
-        Err(error) => {
-            fail(&error);
-        }
+        Err(error) => return Err(error),
     }
     Ok(())
 }
@@ -530,7 +523,7 @@ pub async fn config_remote() -> Result<(), BansheeError> {
             }
             println!("Restart to use it: banshee start");
         }
-        Err(error) => fail(&error),
+        Err(error) => return Err(error),
     }
     Ok(())
 }
@@ -559,9 +552,7 @@ pub async fn download_missing(config: Option<&Config>) -> Result<(), BansheeErro
     let watching = utils::Subscription::open(&[banshee_common::EVENT_DOWNLOADS]).await;
     match watching {
         Ok((_, subscription)) => {
-            if let Err(error) = follow_daemon_download(subscription).await {
-                fail(&error);
-            }
+            follow_daemon_download(subscription).await?;
         }
         Err(error) if daemon_is_down(&error) => {
             // No daemon answers, and the daemon never downloads unasked, so this process is the only writer.
@@ -577,8 +568,8 @@ pub async fn download_missing(config: Option<&Config>) -> Result<(), BansheeErro
                 println!("Everything is already downloaded.");
                 return Ok(());
             }
-            // Not `fail`: nothing was asked of a daemon here, so the
-            // reason stands on its own
+            // Printed here: `failure_line` reads a missing file as the daemon
+            // being away, and this one is the model's
             if let Err(error) =
                 models::download::download_all(&dir, &missing, &mut show_progress).await
             {
@@ -586,7 +577,7 @@ pub async fn download_missing(config: Option<&Config>) -> Result<(), BansheeErro
                 std::process::exit(1);
             }
         }
-        Err(error) => fail(&error),
+        Err(error) => return Err(error),
     }
     Ok(())
 }
@@ -604,7 +595,7 @@ pub async fn status(
     // The same probe the checklist uses, so the two halves of one command
     // cannot disagree about whether a daemon is up
     let reply = match status::probe_daemon().await {
-        status::Daemon::Running { status, .. } | status::Daemon::Legacy(status) => status,
+        status::Daemon::Running { status, .. } => status,
         _ => {
             println!("{}", serde_json::json!({"running": false}));
             std::process::exit(1);
@@ -622,35 +613,19 @@ pub async fn status(
 }
 
 pub async fn listen() -> Result<(), BansheeError> {
-    match utils::call_daemon(
+    show(
         banshee_common::BANSHEE_GET_TRANSCRIPTION,
         serde_json::json!({}),
     )
     .await
-    {
-        Ok(result) => println!(
-            "{}",
-            serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
-        ),
-        Err(error) => eprintln!("Failed to get transcription: {error}"),
-    }
-    Ok(())
 }
 
 pub async fn speak(text: String) -> Result<(), BansheeError> {
-    match utils::call_daemon(
+    show(
         banshee_common::BANSHEE_SPEAK,
         serde_json::json!({ "text": text }),
     )
     .await
-    {
-        Ok(result) => println!(
-            "{}",
-            serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
-        ),
-        Err(error) => eprintln!("Failed to send speak command: {error}"),
-    }
-    Ok(())
 }
 
 /// Prints what the agent wrote. A refused `speak_status` leaves this print as
@@ -678,25 +653,11 @@ pub fn tell(
 }
 
 pub async fn history() -> Result<(), BansheeError> {
-    match utils::call_daemon(banshee_common::BANSHEE_HISTORY, serde_json::json!({})).await {
-        Ok(result) => println!(
-            "{}",
-            serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
-        ),
-        Err(error) => eprintln!("Failed to get history: {error}"),
-    }
-    Ok(())
+    show(banshee_common::BANSHEE_HISTORY, serde_json::json!({})).await
 }
 
 pub async fn clear_history() -> Result<(), BansheeError> {
-    match utils::call_daemon(banshee_common::BANSHEE_CLEAR_HISTORY, serde_json::json!({})).await {
-        Ok(result) => println!(
-            "{}",
-            serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
-        ),
-        Err(error) => eprintln!("Failed to clear history: {error}"),
-    }
-    Ok(())
+    show(banshee_common::BANSHEE_CLEAR_HISTORY, serde_json::json!({})).await
 }
 
 pub async fn record(action: args::RecordAction) -> Result<(), BansheeError> {
@@ -711,9 +672,7 @@ pub async fn record(action: args::RecordAction) -> Result<(), BansheeError> {
             serde_json::json!({ "dictate": dictate, "tell": tell }),
         ),
     };
-    if let Err(error) = utils::call_daemon(method, params).await {
-        eprintln!("Failed to send record command: {error}");
-    }
+    utils::call_daemon(method, params).await?;
     Ok(())
 }
 
@@ -754,8 +713,8 @@ pub async fn start(config_result: Result<Config, BansheeError>) -> Result<(), Ba
             }
             Some((config.audio.hotkey, config.audio.hotkey_mode))
         }
-        // main already printed why the config would not load
-        Err(_) => {
+        Err(error) => {
+            eprintln!("Failed to load config: {error}");
             blocked = true;
             None
         }
@@ -807,8 +766,7 @@ pub async fn bind(
         Err(_) if compositor.is_none() || cfg!(target_os = "macos") => {
             crate::config::AudioConfig::default()
         }
-        // main has printed the load error
-        Err(_) => std::process::exit(1),
+        Err(error) => return Err(error),
     };
     let (hotkey, mode) = crate::compositor::run(compositor, yes, audio.hotkey, audio.hotkey_mode)
         .unwrap_or_else(|error| {

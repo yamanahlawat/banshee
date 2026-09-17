@@ -17,18 +17,12 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   the checklist can name a typer the daemon cannot run. `connect` resolves an agent CLI and
   hands the child the `PATH` it searched; dictation does neither. Not reproduced: this
   machine is macOS.
-- `daemon.log` carries no timestamps, so no interval in it can be measured.
 - Past eight queued utterances the oldest is dropped silently, and `speak` still answers with
   an id for it.
-
 - `banshee status` one second after `banshee start` reports "the daemon is not running": the
   socket is not bound yet while Whisper loads. Measured on a fresh 0.12.0 install; the same
   command a few seconds later reports running. `start` should wait for the socket, or `status`
   should say the daemon is starting.
-- A release published by the release workflow raises no event another workflow can see. The
-  bundle workflow's `release: published` trigger never fired for 0.12.0, and the bundle came
-  from a hand dispatch. #84 chains the bundle after announce; until it merges, a release needs
-  the dispatch by hand.
 - The remote speaker takes one shape only: an OpenAI-compatible `/audio/speech` endpoint.
   ElevenLabs and any other API shape need a backend of their own.
 - The remote speaker's voice is a plain field the person fills in. The endpoint has no call
@@ -45,6 +39,12 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   costs the full 15 s.
 - A stop does not drop the in-flight request. The worker ends at the next byte or the bound,
   whichever comes first.
+- Under `response_format = "wav"` a configured `tts.remote.sample_rate` still goes out in the
+  request, and Groq's Orpheus writes it into the WAV header without resampling. Measured
+  2026-09-17 against `api.groq.com`: three requests for one sentence answered the same 142,072
+  bytes of 24 kHz samples, and the one that asked for 44100 said 44100 in its header, so the
+  reply played 1.8 times too fast. Groq ignored `speed` in the same three requests: the bytes
+  were identical. The field should not be sent under `wav`, where the header is the rate.
 - `speed` goes out on every speech request, since it is part of the original OpenAI schema. A
   server that refuses the field refuses every utterance, not only the ones where speed changed.
 - Both remote keys live in `~/.banshee/credentials.toml`, which only the owner can read. The
@@ -59,13 +59,60 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   `host_of` parses it again with an empty-host path the config can no longer reach. One
   `RemoteUrl` newtype with an infallible `host()` would remove the second parse and the dead
   path; it touches config, both remote backends, status and the CLI.
+- The three model loads at daemon start run one after another, and none depends on the others.
+  All three build through `models::onnx_session`, so starting them together is cheap to try.
 - `compositor` imports `Change`, `render`, `apply_all` and `confirm` from `connect`, so a key
   binding depends on the agent connector. The plan-show-apply machinery deserves a module of
   its own with `connect` and `compositor` as two users; the move touches `api.rs`, the connect
   tests and the app crate's imports.
+- The supervisor's short PATH is answered with one absolute path per tool at three call sites,
+  while about eleven other `Command::new` sites still resolve through PATH. The deeper fix is one
+  `PATH` in the launchd plist and the systemd unit that `service.rs` writes.
+- `failure_line` in `cli.rs` decides at the top of the program whether an io error was the socket,
+  and `download_missing` prints its own failure to escape that guess. Only `utils::call_daemon`
+  knows a failure was a daemon call; a `DaemonUnreachable` variant raised there would let the
+  top match a variant, and the guess and the workaround go.
+- The "first chunk clears the last speech error, a failure raises a fault" rule lives twice, in
+  `kokoro::chunk_or_fault` and in the remote speaker's worker. `Output::play` is the one seam both
+  pass through; an iterator of `Result<Chunk, String>` would let `Output` own the fault sender.
+- The models directory is injected into `DaemonState` for the settings path, while `model_path`,
+  `installed_voices` and the engines still read it from the home directory. One reader or the
+  other, not both.
+- `Other` carries both internal faults and sentences a person acts on, and answers `INTERNAL` for
+  either. The sites that moved to `Rejected` show the split; the rest of the 60-odd `Other`
+  sites want the same sorting.
+- `banshee status` reports a key file others can read; `Credentials::load` could repair the
+  mode to 0600 or refuse the file, and status would report what the loader decided.
+- `banshee setup` with a config that does not parse says the models to fetch are unknown, but not
+  which line is at fault: `setup` drops the reason with `.ok()` before it calls `download_missing`.
+  Passing the error through is three lines, and the seam has no test because `download_missing`
+  opens the daemon socket. `banshee status` and `banshee start` both name the line.
+- A request whose `jsonrpc` is not `"2.0"` is answered on a null id with `-32700`. JSON-RPC allows
+  a null id here, but `-32600` on the id the request carried would say more. No compliant client
+  sends another version.
+- `write_atomically` calls `sync_all`, and `banshee.configure` reaches it on a tokio worker,
+  twice when the call also sets a key. The runtime is multi-threaded and the call is rare, so this
+  is added latency on a pattern the dispatch already had, not a new kind of blocking.
+- Two socket clients speak the one protocol: `banshee-common::utils::call` opens a connection
+  per call with a fixed id and no deadline, and `banshee-app::socket::Client` keeps one, matches
+  ids and applies a 30 s deadline. One client in the shared crate needs a per-call deadline
+  first: `ask_user` waits up to 120 s and `listen` up to 30 s.
+- Thirteen private functions answer `Result<_, String>`; each string becomes a spoken or
+  printed sentence, so none has a caller that matches on it.
+- The MCP shim matches a tool name by suffix, so `task_user` reaches the ask handler. Nothing on
+  the wire has been seen to carry a prefix. The shim logs each tool name at `debug`; run one
+  session with `BANSHEE_LOG=debug` in the MCP server's environment, read the log, and switch to
+  an exact match if no prefix ever arrives.
+- A request with an explicit `"id": null` is read as a notification and gets no reply. MCP
+  forbids a null id, so no compliant client sends one.
+- `DaemonState` holds 37 fields and 78 methods, and every module takes the whole `Arc`. A split
+  into owned pieces is its own design.
 
 ## The window
 
+- `banshee-app/ui/src/lib/daemon.ts` maps `activity` to a `Word`, and `lampForm` maps that
+  `Word` back to the same string. One table could go, at the cost of churn across the window's
+  display type.
 - A segmented control reports `aria-checked` from the daemon's answer, so a
   screen-reader user arrows to a cell and hears nothing become checked until the
   round trip lands. The tab stop already moves at once.
@@ -88,6 +135,16 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
 - The remote key row is duplicated whole between the Microphone panel and the Voice panel:
   about 40 lines of script and markup, plus the `.held` style rule, in each of them. Only the
   setting name differs.
+- The Voice panel edits a remote speaker's server, model, voice, instructions and key, and shows
+  the last speech error, but has no control for `tts.remote.response_format` or
+  `tts.remote.sample_rate`. A person whose server answers PCM, or who hears a reply at the wrong
+  speed, reads an error naming a format the panel cannot change and has to edit `config.toml`.
+  Decided 2026-09-17, for a later phase: a `wav`/`pcm` choice beside the error, a rate field
+  shown only under `pcm`, the daemon never sending `sample_rate` under `wav`, and the reply's
+  rate and channels in the "First audio" log line.
+- The window writes `-32000` for its own transport failures, which `rpc_code` names `MICROPHONE`.
+  Inert today: nothing in the window or the UI routes on the code, and the retry decision reads the
+  `transport` and `sent` flags. It is one number for two facts on one socket.
 
 ## banshee tell
 
@@ -193,3 +250,15 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   a mock holds, so an aliased import of `not-running.json` ships unseen. Every other mock
   file holds a guarded literal, and `{"running": false}` is harmless, so the route needs a
   visible config change to be worth anything. Left open on purpose.
+- The window's `connection_recovery` tests hold two hand-rolled fake daemons beside the shared
+  one in `tests/common`, which accepts one connection and cannot drop the first unread.
+- The daemon is a binary-only crate, so nothing in `tests/` can reach it and the tray and shim
+  are tested from inside their own files. A `lib.rs` with a thin `main.rs` is the usual shape.
+- The Kokoro voice-swap rules are covered only by `#[ignore]`d tests that need the model.
+
+## Build and dependencies
+
+- No `rust-version` is declared. The code uses let-chains, so the floor is at least 1.88, but no
+  toolchain below the one on this machine has built it, so no number is stated.
+- `rdev 0.5.3` pulls `cocoa 0.22` and `block 0.1.6`, which the compiler reports as
+  future-incompatible. No newer `rdev` release exists.

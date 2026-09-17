@@ -1,4 +1,4 @@
-use banshee_common::utils::get_socket_path;
+use banshee_common::utils::socket_path;
 use banshee_common::{
     BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_STATE_CHANGED, BANSHEE_SUBSCRIBE, DownloadProgress,
     JsonRpcNotification, JsonRpcRequest, SileroVADConfig, error::BansheeError,
@@ -23,7 +23,7 @@ use crate::{audio, history, hotkey, models, permissions, text_to_speech};
 
 // Claimed before model loading, so a lost single-instance race stays cheap
 pub fn claim() -> Result<(std::path::PathBuf, UnixListener), BansheeError> {
-    let socket_path = get_socket_path().ok_or_else(|| {
+    let socket_path = socket_path().ok_or_else(|| {
         BansheeError::Other("could not find home directory for the socket path".to_string())
     })?;
 
@@ -71,11 +71,11 @@ fn start_recording(
     let capture = audio::open_capture(Arc::clone(daemon_state), &selection)
         .map_err(|e| RecordingError::Microphone(e.to_string()))?;
     match &selection.missing {
-        Some(name) => println!(
+        Some(name) => log::info!(
             "Capture opened {}, still waiting for {name}",
             selection.open
         ),
-        None => println!("Capture opened {}", selection.open),
+        None => log::info!("Capture opened {}", selection.open),
     }
     let speech_to_text =
         crate::speech_to_text::select_transcriber(&config.stt).inspect_err(|_| {
@@ -134,6 +134,7 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         speech.speaker,
         commands,
         cues.clone(),
+        models::download::models_dir()?,
     ));
 
     if let Some(reason) = speech.fault {
@@ -162,12 +163,12 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         // A missing mic or model leaves the daemon useful rather than
         // exiting, which the supervisor reads as a crash and retries
         Err(error) => {
-            eprintln!("Recording is unavailable: {error}");
-            eprintln!(
+            log::error!("Recording is unavailable: {error}");
+            log::info!(
                 "The daemon is up: speak, status, and history still work. \
                      Recording, dictation, and ask_user do not."
             );
-            eprintln!("Run `banshee status` for the fix.");
+            log::info!("Run `banshee status` for the fix.");
             daemon_state.set_recording_error(error);
             None
         }
@@ -198,7 +199,7 @@ pub async fn run(
     socket_path: std::path::PathBuf,
     listener: UnixListener,
 ) -> Result<(), std::io::Error> {
-    println!("Listening on {}", socket_path.display());
+    log::info!("Listening on {}", socket_path.display());
 
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -219,15 +220,15 @@ pub async fn run(
             }
             accepted = listener.accept() => match accepted {
                 Ok((stream, _addr)) => {
-                    println!("New client connected!");
+                    log::debug!("New client connected!");
                     tokio::spawn(serve(stream, Arc::clone(daemon_state)));
                 }
-                Err(error) => println!("Connection failed, Error: {error}"),
+                Err(error) => log::warn!("Connection failed, Error: {error}"),
             }
         }
     }
 
-    println!("Shutting down.");
+    log::info!("Shutting down.");
     daemon_state.speech().stop();
     let _ = fs::remove_file(&socket_path);
     Ok(())
@@ -353,8 +354,18 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
     let mut pushing_downloads: Option<tokio::task::JoinHandle<()>> = None;
 
     while let Ok(Some(line)) = lines.next_line().await {
-        let Ok(request) = serde_json::from_str::<JsonRpcRequest>(&line) else {
-            continue;
+        let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                let refusal = banshee_common::JsonRpcResponse::parse_error(&error);
+                if write_line(&mut *writer.lock().await, &refusal)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
         };
         // Taken before the reply is built: a change landing in between then
         // costs a duplicate push, where the other order would lose it
@@ -425,7 +436,7 @@ fn claim_socket(socket_path: &Path) -> io::Result<UnixListener> {
             ));
         }
         // nobody answered: stale socket left by an unclean exit
-        println!("Removing stale socket at {}", socket_path.display());
+        log::info!("Removing stale socket at {}", socket_path.display());
         fs::remove_file(socket_path)?;
     }
     UnixListener::bind(socket_path)

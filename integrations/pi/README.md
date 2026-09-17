@@ -8,6 +8,19 @@ Pi has its own extension API, so it talks to the Banshee daemon directly over
 `~/.banshee/banshee.sock` rather than going through `banshee-mcp-shim`. Nothing
 extra to install or configure.
 
+## Checking it
+
+`banshee.ts` is compiled into the daemon by `bansheed/src/connect.rs` and
+written to `~/.pi/agent/extensions/banshee.ts`, so a fault in it ships. CI type
+checks it, and so can you:
+
+```bash
+cd banshee-app/ui && npm run check:pi
+```
+
+Pi's own packages are not installed here, so `runtime.d.ts` declares them
+loosely. The check reads what this file gets wrong about itself, not Pi's API.
+
 ## Demo
 
 <https://github.com/user-attachments/assets/006132bd-9710-4322-a35a-4a5e5004371c>

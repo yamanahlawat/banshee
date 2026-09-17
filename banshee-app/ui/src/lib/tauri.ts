@@ -25,15 +25,13 @@ export function listen<T>(event: string, handler: EventCallback<T>): Promise<Unl
   return tauriListen<T>(event, handler);
 }
 
-export type InputDevice = { name: string; default: boolean };
+type InputDevice = { name: string; default: boolean };
 export type Devices = { devices: InputDevice[]; current: string | null };
 export type Voice = {
   id: string;
   name: string;
   description: string;
-  /// A daemon older than this field listed only the voices it held, so anything
-  /// it names is here.
-  downloaded?: boolean;
+  downloaded: boolean;
 };
 export type Voices = { voices: Voice[]; current: string | null };
 export type AgentRow = { id: string; name: string; presence: string; note: string };

@@ -7,17 +7,22 @@ for the states it builds itself. `daemon.test.ts` reads the other five files.
 
 Real daemon replies, captured on macOS 25.6.0: Banshee 0.11.1 on 2026-08-27,
 `permissions.json` again on 2026-09-01, `remote.json` from Banshee 0.12.2 on
-2026-09-09, and `remote-speech.json` on 2026-09-10. Nothing here is hand-typed
-except `not-running.json`, which the
-daemon cannot produce because a stopped daemon answers nothing, two objects
-in `remote.json` that the capture predates: `remote.tts` and
-`config.tts.remote`, `ready.json`'s `remote` block, which that capture
-predates too, and `remote.json`'s `telling: false`, added by hand because the
-daemon did not report that flag when the reply was captured. `remote-speech.json` holds both of the `remote.json` objects
-from a real reply, so it is the one to read for the speaker's shape.
-`daemon.always_on` and `cues.start`, `cues.stop`, `cues.ready`, `cues.error`
-were removed from every mock by hand, because the daemon stopped sending
-them.
+2026-09-09, and `remote-speech.json` on 2026-09-10. `not-running.json` is
+constructed, because a stopped daemon answers nothing.
+
+Each capture has since been repaired by hand to the shape the daemon writes
+today, rather than recaptured. Three tests in `bansheed/src/api/tests.rs` hold
+them there, and each one names what is missing or invented when it fails:
+
+- `the_window_mocks_carry_every_config_key_the_reply_writes` holds the `config`
+  half of all five status mocks to `Config::default()`.
+- `the_window_mocks_carry_every_live_key_the_push_writes` holds the four
+  `banshee.state_changed` mocks to what `live_state` writes.
+- `each_live_mock_names_the_activity_its_flags_rank` holds each live mock's
+  `activity` to what `Activity::of` ranks from its own flags.
+
+The top level of a status mock is not guarded, so `english_only`,
+`download_megabytes` and `hotkey_listens` were added by hand and can drift.
 
 | File | What it is | How it was captured |
 | --- | --- | --- |
@@ -29,7 +34,7 @@ them.
 | `transcribing.json` | `banshee.state_changed` params | Same subscription, after `banshee record stop` |
 | `speaking.json` | `banshee.state_changed` params | Same subscription, during `banshee speak` |
 | `armed.json` | `banshee.state_changed` params | Same subscription, while an agent held the microphone open through `ask_user` |
-| `remote.json` | `banshee.status` with a remote listener set and its key present | `banshee config set stt.provider remote`, `stt.remote.model` set to `gpt-4o-transcribe`, `base_url` left at the OpenAI default so no private host enters the repo, the key set, daemon restarted, `banshee status --json`. The `remote.tts` object and the `config.tts.remote` table were filled in by hand on 2026-09-10, with the values the daemon answers for a local speaker. `the_window_mocks_carry_every_config_key_the_reply_writes` in `bansheed/src/api/tests.rs` holds the `config` half to the shape the daemon serialises |
+| `remote.json` | `banshee.status` with a remote listener set and its key present | `banshee config set stt.provider remote`, `stt.remote.model` set to `gpt-4o-transcribe`, `base_url` left at the OpenAI default so no private host enters the repo, the key set, daemon restarted, `banshee status --json`. The `remote.tts` object and the `config.tts.remote` table were filled in by hand on 2026-09-10, with the values the daemon answers for a local speaker |
 | `remote-speech.json` | `banshee.status` with a remote listener and a remote speaker, both keys present and the speaker started | `banshee config remote` for both sides, `tts.remote.base_url` left at the OpenAI default so no private host enters the repo, daemon restarted, `banshee status --json` |
 
 ## Two of these carry the discriminating case
