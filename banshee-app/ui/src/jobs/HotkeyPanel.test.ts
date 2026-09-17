@@ -4,7 +4,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTauri());
 
 import { setSetting } from '../lib/tauri';
-import { daemon, type Status } from '../lib/daemon';
+import { daemon, empty, type Status } from '../lib/daemon';
 import HotkeyPanel from './HotkeyPanel.svelte';
 
 // The set the parser reports on Linux, from bansheed/src/binding.rs.
@@ -76,4 +76,13 @@ it('offers the compositor commands instead of a capture on Wayland', () => {
 
   expect(panel.queryByRole('button', { name: /change the hotkey/ })).toBeNull();
   expect(panel.getByText(/banshee record start --dictate/)).toBeTruthy();
+});
+
+// The window is opened most often when Banshee has stopped. Hiding the key and
+// naming a compositor leaves a macOS user with no way to see their own hotkey.
+it('still offers the key when no daemon has answered', () => {
+  daemon.set(empty());
+  const panel = render(HotkeyPanel);
+  expect(panel.getByRole('button', { name: /change the hotkey/ })).toBeTruthy();
+  expect(panel.queryByText(/Wayland grants no global hotkey/)).toBeNull();
 });

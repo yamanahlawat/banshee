@@ -128,6 +128,11 @@ export function reduceLive(state: Daemon, live: Partial<Live>): Daemon {
 export function markPending(state: Daemon, keys: string[]): Daemon {
   return { ...state, pending: new Set([...state.pending, ...keys]) };
 }
+// Absent is not false. A daemon that has not answered binds the key everywhere
+// but Wayland, and the window is read most while Banshee is stopped.
+export function hotkeyListens(state: Daemon): boolean {
+  return state.status?.hotkey_listens !== false;
+}
 export function isDown(state: Daemon): boolean {
   return state.down !== null || state.status?.running === false;
 }

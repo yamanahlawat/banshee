@@ -5,6 +5,7 @@
     daemon,
     downloadLine,
     endsTheRun,
+    hotkeyListens as listensForHotkey,
     isDown,
     lampForm,
     listeningFacts,
@@ -128,7 +129,7 @@
   $: live = !isDown($daemon);
   $: connected = $agents.filter((a) => a.presence === 'connected').length;
   // Wayland grants no global grab, so the daemon binds nothing and says so.
-  $: hotkeyListens = $daemon.status?.hotkey_listens === true;
+  $: hotkeyListens = listensForHotkey($daemon);
   // The window names no key it has not been told. `audio.hotkey_mode` decides
   // the verb, because "Hold" is a lie when a tap is what starts it.
   $: boundKey = humanize(String(config.audio?.hotkey ?? ''));

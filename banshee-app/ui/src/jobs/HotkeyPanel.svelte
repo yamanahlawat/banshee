@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { daemon } from '../lib/daemon';
+  import { daemon, hotkeyListens } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { hotkeyFrom, humanize, isModifier } from '../lib/hotkey';
   import { claimKeys } from '../lib/keys';
@@ -24,7 +24,7 @@
 
   // The daemon binds no key on Wayland, so the capture control below would
   // write a setting nobody reads. The compositor holds the binding instead.
-  $: listens = $daemon.status?.hotkey_listens === true;
+  $: listens = hotkeyListens($daemon);
   $: bindable = $daemon.status?.bindable_modifiers ?? [];
   $: audio = ($daemon.status?.config?.audio ?? {}) as Record<string, unknown>;
   $: key = String(audio.hotkey ?? '');
