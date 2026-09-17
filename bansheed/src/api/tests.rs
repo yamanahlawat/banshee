@@ -1225,3 +1225,47 @@ async fn ask_user_is_refused_while_the_pipeline_is_still_opening() {
         error.message
     );
 }
+
+// An agent that dies mid-question leaves the microphone armed for the rest of
+// the session, and every other ask is refused as busy until it ends. Dropping
+// the call has to close the session the way a stop does.
+#[tokio::test]
+async fn a_dropped_ask_closes_the_session_it_armed() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+
+    let asking = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            let asked = request(
+                BANSHEE_ASK_USER,
+                Some(serde_json::json!({"question": "Ready to ship?"})),
+            );
+            dispatch(asked, &state).await
+        }
+    });
+
+    // The session is armed once the consumer has the command
+    let ask = tokio::task::spawn_blocking(move || command_receiver.recv())
+        .await
+        .expect("the blocking read")
+        .expect("the consumer is asked");
+    assert_eq!(state.recording_mode(), RecordingMode::Armed);
+
+    asking.abort();
+
+    // Generous next to the 30 ms the consumer polls at: a bound for the test,
+    // not a limit the daemon promises.
+    for _ in 0..100 {
+        if state.recording_mode() == RecordingMode::Idle {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        state.recording_mode(),
+        RecordingMode::Idle,
+        "the microphone belongs to nobody once the caller is gone"
+    );
+    drop(ask);
+}

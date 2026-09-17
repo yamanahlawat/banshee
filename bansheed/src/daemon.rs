@@ -386,8 +386,18 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
     // that has none
     let mut pushing_state: Option<tokio::task::JoinHandle<()>> = None;
     let mut pushing_downloads: Option<tokio::task::JoinHandle<()>> = None;
+    // A request that arrived while an earlier call was still running. The
+    // connection is read throughout a call, so a pipelined one cannot be lost.
+    let mut queued: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = match queued.pop_front() {
+            Some(line) => line,
+            None => match lines.next_line().await {
+                Ok(Some(line)) => line,
+                _ => break,
+            },
+        };
         let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
             Ok(request) => request,
             Err(error) => {
@@ -428,7 +438,20 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         let opening_downloads =
             (asked.downloads && pushing_downloads.is_none()).then(|| state.subscribe_downloads());
 
-        let response = dispatch(request, &state).await;
+        // Watched while it runs: `ask_user` parks here for minutes holding the
+        // microphone, and a client that goes away in the meantime is asking
+        // for none of it. Dropping the call is what ends the work.
+        let mut call = std::pin::pin!(dispatch(request, &state));
+        let answered = loop {
+            tokio::select! {
+                response = &mut call => break Some(response),
+                next = lines.next_line() => match next {
+                    Ok(Some(line)) => queued.push_back(line),
+                    _ => break None,
+                },
+            }
+        };
+        let Some(response) = answered else { break };
         if write_line(&mut *writer.lock().await, &response)
             .await
             .is_err()

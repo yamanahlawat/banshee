@@ -172,6 +172,34 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
 }
 
+/// Closes the listening session if the call is dropped before its answer
+/// arrives, which is what a client going away looks like from here. The
+/// consumer polls the mode, so clearing it ends the listen and disarms the
+/// microphone. `kept` marks a session that ended on its own: clearing the mode
+/// then could close a session someone else has since armed.
+struct EndsTheSession<'a> {
+    state: &'a DaemonState,
+    kept: bool,
+}
+
+impl<'a> EndsTheSession<'a> {
+    fn new(state: &'a DaemonState) -> Self {
+        Self { state, kept: false }
+    }
+
+    fn kept(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for EndsTheSession<'_> {
+    fn drop(&mut self) {
+        if !self.kept {
+            self.state.set_recording_mode(RecordingMode::Idle);
+        }
+    }
+}
+
 /// `None` while the pipeline is open. A pipeline still being built refuses the
 /// same way a broken one does: nothing records either way.
 fn not_recording(
@@ -474,7 +502,11 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         );
     }
 
-    match answer.await {
+    let ends_the_session = EndsTheSession::new(daemon_state);
+    let answered = answer.await;
+    ends_the_session.kept();
+
+    match answered {
         Ok(Ok(text)) => JsonRpcResponse::success(params.id(), serde_json::json!({ "text": text })),
         // Distinct from silence, which answers empty text
         Ok(Err(reason)) => JsonRpcResponse::error(

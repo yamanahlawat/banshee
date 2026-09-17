@@ -337,3 +337,54 @@ async fn a_requested_shutdown_takes_the_socket_file_with_it() {
         "a clean exit leaves no socket to be called stale"
     );
 }
+
+// A call can park for minutes inside dispatch, and the loop reads no more of
+// the connection while it does. A client that leaves must not be waited for.
+#[tokio::test]
+async fn a_client_that_leaves_ends_the_call_it_parked() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (client, server) = UnixStream::pair().expect("no socket pair");
+    let serving = tokio::spawn(serve(server, Arc::clone(&state)));
+
+    let (reader, mut writer) = client.into_split();
+    send(
+        &mut writer,
+        banshee_common::BANSHEE_GET_TRANSCRIPTION,
+        serde_json::json!({ "wait_ms": 5000 }),
+    )
+    .await;
+    drop(writer);
+    drop(reader);
+
+    // Well inside the five seconds the call would otherwise hold: a bound for
+    // the test, not a limit the daemon promises.
+    tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+        .await
+        .expect("the loop ends when the client does")
+        .expect("no panic");
+}
+
+// The loop now reads the connection while a call runs, so a request sent
+// before the first one answered must be held and served, never swallowed.
+#[tokio::test]
+async fn a_request_sent_during_a_call_is_still_answered() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (client, server) = UnixStream::pair().expect("no socket pair");
+    tokio::spawn(serve(server, Arc::clone(&state)));
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    // The first parks; the second arrives while it does
+    send(
+        &mut writer,
+        banshee_common::BANSHEE_GET_TRANSCRIPTION,
+        serde_json::json!({ "wait_ms": 300 }),
+    )
+    .await;
+    send(&mut writer, BANSHEE_STATUS, serde_json::json!({})).await;
+
+    let first = next_message(&mut lines).await;
+    assert!(first["result"]["transcriptions"].is_array(), "{first}");
+    let second = next_message(&mut lines).await;
+    assert_eq!(second["result"]["running"], true, "{second}");
+}

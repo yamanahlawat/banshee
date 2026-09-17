@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A question no longer outlives the agent that asked it.** `ask_user` holds
+  the microphone until someone answers, and an agent that died in the meantime
+  went unnoticed, so the session listened on to its timeout and every other
+  question was refused as busy. The daemon now watches the connection while a
+  call runs and closes the session when the caller goes, while a request sent
+  during a call is still held and answered.
+
 - **The Accessibility advice covers a switch that is already on.** macOS keys
   that grant to the signature of the build that asked for it, so a reinstall or
   an update can leave a row that is listed and switched on while the grant
