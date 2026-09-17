@@ -114,7 +114,6 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
     let config = Arc::new(config);
     let (socket_path, listener) = claim()?;
     permissions::ask_for_accessibility();
-    permissions::restart_when_granted();
     let db_connection = if config.daemon.save_history {
         Some(history::open()?)
     } else {
@@ -140,6 +139,20 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
     if let Some(reason) = speech.fault {
         daemon_state.set_last_speech_error(Some(reason));
     }
+
+    permissions::restart_when_granted(
+        {
+            let state = Arc::clone(&daemon_state);
+            move || state.is_downloading()
+        },
+        {
+            let state = Arc::clone(&daemon_state);
+            move || {
+                state.request_restart();
+                state.shutdown().notify_one();
+            }
+        },
+    );
 
     // After the state, which the drain writes
     let draining_state = Arc::clone(&daemon_state);
@@ -206,6 +219,11 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         let _ = consumer_thread.join();
     }
     result?;
+    if daemon_state.restart_wanted() {
+        return Err(BansheeError::Other(
+            "the Accessibility grant landed; starting again to pick it up".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -246,6 +264,7 @@ pub async fn run(
     log::info!("Shutting down.");
     daemon_state.speech().stop();
     let _ = fs::remove_file(&socket_path);
+
     Ok(())
 }
 

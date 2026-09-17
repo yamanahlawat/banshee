@@ -314,3 +314,26 @@ async fn a_client_is_answered_while_the_pipeline_is_still_opening() {
     let reply = next_message(&mut lines).await;
     assert_eq!(reply["result"]["pipeline"], "opening");
 }
+
+// The grant path leaves this way rather than through `exit`, so the file that
+// doubles as the single-instance lock cannot outlive the process that held it.
+#[tokio::test]
+async fn a_requested_shutdown_takes_the_socket_file_with_it() {
+    let path = test_socket_path("shutdown");
+    let _ = std::fs::remove_file(&path);
+    let listener = tokio::net::UnixListener::bind(&path).expect("bind");
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+    let serving = tokio::spawn({
+        let state = Arc::clone(&state);
+        let path = path.clone();
+        async move { super::run(&state, path, listener).await }
+    });
+    state.shutdown().notify_one();
+    serving.await.expect("the loop ends").expect("no io error");
+
+    assert!(
+        !path.exists(),
+        "a clean exit leaves no socket to be called stale"
+    );
+}

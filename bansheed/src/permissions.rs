@@ -254,10 +254,22 @@ pub fn grant_note() {
     }
 }
 
-/// Exit once the grant lands, so the supervisor restarts us with it: launchd
-/// re-runs on nonzero exit (`KeepAlive`/`SuccessfulExit`), systemd on
-/// `Restart=on-failure`.
-pub fn restart_when_granted() {
+/// Whether the daemon goes now. It has to go for the grant to reach it, and a
+/// download in flight dies with the process and starts that file over, while
+/// waiting for one costs no more than an inert hotkey for a few minutes.
+pub fn leaves_for_the_grant(granted: bool, downloading: bool) -> bool {
+    granted && !downloading
+}
+
+/// Leaves once the grant lands, so the supervisor starts us again with it:
+/// launchd re-runs on nonzero exit (`KeepAlive`/`SuccessfulExit`), systemd on
+/// `Restart=on-failure`. `leave` ends the daemon the way a signal does, rather
+/// than by `exit`, which would leave the socket file behind for the next run
+/// to call a crash.
+pub fn restart_when_granted(
+    downloading: impl Fn() -> bool + Send + 'static,
+    leave: impl FnOnce() + Send + 'static,
+) {
     #[cfg(target_os = "macos")]
     {
         use std::thread;
@@ -269,21 +281,37 @@ pub fn restart_when_granted() {
             return;
         }
         log::warn!("the Accessibility grant is missing; the hotkey is inert until it lands");
-        thread::spawn(|| {
+        thread::spawn(move || {
             loop {
                 thread::sleep(POLL);
-                if accessibility_granted() {
+                if leaves_for_the_grant(accessibility_granted(), downloading()) {
                     log::info!("the Accessibility grant landed, restarting to pick it up");
-                    std::process::exit(1);
+                    leave();
+                    return;
                 }
             }
         });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (downloading, leave);
     }
 }
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    // The grant reaches only a process started after it lands, so the daemon
+    // has to go. A download dies with it and the next run starts that file
+    // over, while waiting costs no more than an inert hotkey.
+    #[test]
+    fn the_daemon_leaves_for_a_grant_but_not_through_a_download() {
+        assert!(leaves_for_the_grant(true, false));
+        assert!(!leaves_for_the_grant(true, true), "a download outranks it");
+        assert!(!leaves_for_the_grant(false, false));
+        assert!(!leaves_for_the_grant(false, true));
+    }
 
     #[test]
     fn each_pane_id_has_an_anchor_and_an_unknown_one_is_refused() {

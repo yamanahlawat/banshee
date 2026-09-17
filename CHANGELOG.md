@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Granting Accessibility no longer kills a running download.** Banshee has
+  to start again for a grant to reach it, and it used to leave the moment one
+  landed, taking the first-run download with it and leaving the socket file
+  behind for the next run to report as a crash. It now waits for the download
+  to finish, then leaves the way a stop does, with nothing left behind.
+
 - **A slow microphone no longer makes Banshee unreachable.** The daemon opens
   its socket before it touches the audio devices, so a device whose driver
   stops answering leaves Banshee answering. Walking the devices enters Core

@@ -325,6 +325,9 @@ pub struct DaemonState {
     device_changes: watch::Sender<u64>,
     downloads: broadcast::Sender<DownloadProgress>,
     downloading: AtomicBool,
+    /// Set when the daemon leaves to be started again, so the supervisor reads
+    /// a nonzero exit rather than a stop it would not undo.
+    restart_wanted: AtomicBool,
     speech: Arc<SpeechPlayer>,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
     cues: Cues,
@@ -391,6 +394,7 @@ impl DaemonState {
             device_changes: watch::channel(0).0,
             downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
             downloading: AtomicBool::new(false),
+            restart_wanted: AtomicBool::new(false),
             speech: Arc::new(speech),
             commands,
             cues,
@@ -680,6 +684,20 @@ impl DaemonState {
 
     pub fn report_download(&self, progress: DownloadProgress) {
         let _ = self.downloads.send(progress);
+    }
+
+    pub fn is_downloading(&self) -> bool {
+        self.downloading.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn request_restart(&self) {
+        self.restart_wanted
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn restart_wanted(&self) -> bool {
+        self.restart_wanted
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Takes the download slot, or `None` when one is already running. The
