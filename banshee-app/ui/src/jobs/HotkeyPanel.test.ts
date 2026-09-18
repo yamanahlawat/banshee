@@ -78,6 +78,18 @@ it('offers the compositor commands instead of a capture on Wayland', () => {
   expect(panel.getByText(/banshee record start --dictate/)).toBeTruthy();
 });
 
+// With no daemon the window is told no modifier binds, which is not the same
+// as a key Banshee refuses.
+it('says what is really wrong when no daemon has answered', async () => {
+  daemon.set(empty());
+  const panel = render(HotkeyPanel);
+  await fireEvent.click(panel.getByRole('button', { name: /change the hotkey/ }));
+  await fireEvent.keyDown(window, { code: 'ControlLeft' });
+
+  expect(panel.getByText(/has to be running/)).toBeTruthy();
+  expect(panel.queryByText(/cannot bind that key/)).toBeNull();
+});
+
 // The window is opened most often when Banshee has stopped. Hiding the key and
 // naming a compositor leaves a macOS user with no way to see their own hotkey.
 it('still offers the key when no daemon has answered', () => {

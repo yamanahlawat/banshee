@@ -44,6 +44,13 @@ describe('the state word', () => {
   it('is Ready on a clear machine', () => {
     expect(stateWord(reduceStatus(empty(), ready))).toBe('Ready');
   });
+
+  // The daemon raises no blocker while its microphone is still opening, because
+  // waiting is nobody's to fix. It says so in `ready`, and the window says it.
+  it('a daemon that says it is not ready is not called ready', () => {
+    const opening = { ...ready, ready: false, blockers: [] } as Status;
+    expect(stateWord(reduceStatus(empty(), opening))).toBe('Not ready');
+  });
   it('is Not ready while a permission is missing', () => {
     expect(
       stateWord(

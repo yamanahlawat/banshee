@@ -20,6 +20,9 @@ export type Status = Record<string, unknown> & {
   english_only?: boolean;
   download_megabytes?: number;
   running: boolean;
+  /// The daemon's own word for "nothing stops Banshee working". Absent from a
+  /// daemon older than the field, which the blocker count answered for.
+  ready?: boolean;
   blockers?: Blocker[];
   hotkey_listens?: boolean;
   bindable_modifiers?: string[];
@@ -151,6 +154,9 @@ export function stateWord(state: Daemon): Word {
   const said = SAYS[state.live.activity];
   if (said !== undefined) return said;
   if (state.download !== null) return 'Downloading';
+  // The daemon's definition, not a narrower one: a pipeline still opening
+  // raises no blocker and is not ready either.
+  if (state.status !== null && state.status.ready === false) return 'Not ready';
   if ((state.status?.blockers?.length ?? 0) > 0) return 'Not ready';
   return 'Ready';
 }

@@ -56,7 +56,13 @@
     }
     const next = hotkeyFrom(event, bindable);
     if (next === null) {
-      refusal = 'Banshee cannot bind that key.';
+      // Which modifiers bind is the daemon's answer, and a daemon that has not
+      // answered refuses all of them. Saying Banshee cannot bind a key it binds
+      // every day sends the reader after the wrong thing.
+      refusal =
+        bindable.length === 0
+          ? 'Banshee has to be running before a key can be bound.'
+          : 'Banshee cannot bind that key.';
       return;
     }
     // A chord begins with its modifiers, so committing on the first press
