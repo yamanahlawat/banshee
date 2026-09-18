@@ -229,6 +229,7 @@ impl Output {
             faults,
             seen: (self.pulls(), std::time::Instant::now()),
             gave_up: false,
+            earned: true,
             #[cfg(test)]
             heard,
         }
@@ -251,6 +252,9 @@ pub struct PlayerUtterance {
     /// Set when there is nowhere left to play. A stopped player on a device
     /// that is gone never empties, because emptying is the device's own doing.
     gave_up: bool,
+    /// A swap is earned by audio that was taken since the last one. Without it
+    /// a device nobody can play through is reopened for ever.
+    earned: bool,
     /// Every chunk the player took, for a test that reads what was heard. The
     /// device consumes the samples themselves, so nothing else can.
     #[cfg(test)]
@@ -273,6 +277,15 @@ impl PlayerUtterance {
     #[cfg(test)]
     pub fn queued(&self) -> usize {
         lock(&self.player).len()
+    }
+
+    /// Ends a reply nothing can play. `speaking` clears with it, so the next
+    /// reply is not queued behind this one.
+    fn give_up(&mut self, reason: String) {
+        log::error!("{reason}");
+        let _ = self.faults.send(Fault::Failed(reason));
+        self.stop();
+        self.gave_up = true;
     }
 
     /// Moves what is left of this reply to the device that is there now. The
@@ -321,19 +334,23 @@ impl ActiveUtterance for PlayerUtterance {
         let pulls = self.output.pulls();
         if pulls != self.seen.0 {
             self.seen = (pulls, std::time::Instant::now());
+            self.earned = true;
             return;
         }
         let queued = lock(&self.player).len();
         if !output_died(queued, self.seen.1.elapsed()) {
             return;
         }
+        if !self.earned {
+            self.give_up("the speaker went away and the next one took nothing".to_string());
+            return;
+        }
         log::warn!("the speaker stopped taking audio; opening the default device again");
+        self.earned = false;
         if let Err(error) = self.swap_device() {
-            let _ = self.faults.send(Fault::Failed(format!(
+            self.give_up(format!(
                 "the speaker went away and no other could be opened: {error}"
-            )));
-            self.stop();
-            self.gave_up = true;
+            ));
         }
     }
 }
@@ -571,6 +588,89 @@ mod tests {
             opened.load(Ordering::Relaxed),
             1,
             "a quiet player is not a dead device"
+        );
+    }
+
+    // A swap that changes nothing must not be tried again for ever. Measured
+    // 2026-09-18: without this the daemon reopened the device about forty times
+    // a minute, for hours, and stayed mute the whole time.
+    #[test]
+    fn a_second_device_that_takes_nothing_ends_the_reply() {
+        let opened = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&opened);
+        let output = Arc::new(
+            Output::from_opener(Box::new(move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+                Ok(Output::test_device())
+            }))
+            .expect("the first open"),
+        );
+        let (faults, heard) = std::sync::mpsc::channel();
+        let mut utterance = output.play(
+            std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
+            faults,
+        );
+        wait_until("the look-ahead fills", || {
+            utterance.queued() == super::LOOK_AHEAD
+        });
+
+        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
+        utterance.keep_playing();
+        assert_eq!(
+            opened.load(Ordering::Relaxed),
+            2,
+            "the first swap is allowed"
+        );
+
+        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
+        utterance.keep_playing();
+        assert_eq!(
+            opened.load(Ordering::Relaxed),
+            2,
+            "a device that took nothing earns no second swap"
+        );
+        assert!(utterance.is_finished(), "the reply ends instead of looping");
+        match heard.try_recv() {
+            Ok(Fault::Failed(reason)) => assert!(reason.contains("speaker"), "{reason}"),
+            other => panic!("a reply that was cut must be reported: {other:?}"),
+        }
+    }
+
+    // Buds that go, come back and go again are two deaths, not one. A device
+    // that took audio has earned the reply another move.
+    #[test]
+    fn a_device_that_played_earns_the_next_swap() {
+        let opened = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&opened);
+        let output = Arc::new(
+            Output::from_opener(Box::new(move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+                Ok(Output::test_device())
+            }))
+            .expect("the first open"),
+        );
+        let mut utterance = output.play(
+            std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
+            ignored_faults(),
+        );
+        wait_until("the look-ahead fills", || {
+            utterance.queued() == super::LOOK_AHEAD
+        });
+
+        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
+        utterance.keep_playing();
+        assert_eq!(opened.load(Ordering::Relaxed), 2, "the first swap");
+
+        // The new device takes audio, which is what the counter is for
+        output.pulls.fetch_add(1, Ordering::Relaxed);
+        utterance.keep_playing();
+
+        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
+        utterance.keep_playing();
+        assert_eq!(
+            opened.load(Ordering::Relaxed),
+            3,
+            "a device that played earns another swap"
         );
     }
 
