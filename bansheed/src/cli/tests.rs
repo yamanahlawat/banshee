@@ -335,3 +335,25 @@ fn a_file_that_arrived_through_a_running_daemon_names_the_restart() {
 fn a_run_that_fetched_nothing_asks_for_no_restart() {
     assert_eq!(super::restart_note(0), None);
 }
+
+// Both halves of what an orphaned socket answers with: nothing at all, and a
+// line that is not a reply. A fault that misses either one leaves `banshee
+// stop` reporting a failure where a daemon is simply not running.
+#[test]
+fn an_empty_reply_and_an_unparsable_one_are_both_worth_probing_the_socket_for() {
+    assert!(super::may_be_an_orphaned_socket(&BansheeError::NoAnswer));
+    assert!(super::may_be_an_orphaned_socket(&BansheeError::Serde(
+        serde_json::from_str::<serde_json::Value>("{").expect_err("not json")
+    )));
+}
+
+#[test]
+fn a_daemon_that_answered_is_never_read_as_an_orphaned_socket() {
+    assert!(!super::may_be_an_orphaned_socket(&BansheeError::Rpc {
+        code: -32004,
+        message: "busy".to_string(),
+    }));
+    assert!(!super::may_be_an_orphaned_socket(&BansheeError::Other(
+        "anything else".to_string()
+    )));
+}

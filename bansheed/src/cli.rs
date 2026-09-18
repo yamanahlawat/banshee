@@ -193,15 +193,22 @@ async fn show(method: &str, params: serde_json::Value) -> Result<(), BansheeErro
     Ok(())
 }
 
+/// True for a fault that a socket left behind by an unclean exit produces: it
+/// accepts the connection, then closes it with no reply or with one that will
+/// not parse. Every other fault came from a daemon that answered.
+fn may_be_an_orphaned_socket(error: &BansheeError) -> bool {
+    matches!(error, BansheeError::NoAnswer | BansheeError::Serde(_))
+}
+
 fn daemon_is_down(error: &BansheeError) -> bool {
     match error {
         BansheeError::Io(io) => matches!(
             io.kind(),
             std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
         ),
-        // A socket orphaned by an unclean exit accepts the connection then
-        // closes it. tokio's nonblocking connect cannot tell; a blocking one can.
-        BansheeError::Serde(_) => {
+        // tokio's nonblocking connect cannot tell an orphan from a daemon; a
+        // blocking one can.
+        other if may_be_an_orphaned_socket(other) => {
             utils::socket_path().is_some_and(|path| !daemon::socket_answers(&path))
         }
         _ => false,
