@@ -51,6 +51,15 @@ pub fn default_input_name() -> Option<String> {
         .map(|description| description.name().to_string())
 }
 
+/// The name the OS calls its default output device, and the rate it runs at.
+/// One read answers both, so the name and the rate cannot name two moments.
+pub fn default_output() -> Option<(String, u32)> {
+    let device = cpal::default_host().default_output_device()?;
+    let name = device.description().ok()?.name().to_string();
+    let rate = device.default_output_config().ok()?.sample_rate();
+    Some((name, rate))
+}
+
 /// One walk of the input devices, with the name the OS calls its default. It
 /// costs about 176 ms, so one open pays for it once.
 ///

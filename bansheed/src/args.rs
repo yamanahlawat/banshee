@@ -70,6 +70,15 @@ pub enum CommandType {
         #[clap(subcommand)]
         action: ServiceAction,
     },
+    /// Remove Banshee: stops it, takes it out of login, and names what owns the rest
+    Uninstall {
+        /// Also delete ~/.banshee: the models, the history and the keys
+        #[clap(long)]
+        data: bool,
+        /// Remove without asking
+        #[clap(long)]
+        yes: bool,
+    },
     /// Connect a coding agent to Banshee: Antigravity, Claude Code, Codex, Cursor, OpenCode or Pi
     Connect {
         /// Which agent; omit to list what is installed and connected

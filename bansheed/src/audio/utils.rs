@@ -2,6 +2,13 @@ use audioadapter_buffers::direct::InterleavedSlice;
 use banshee_common::error::BansheeError;
 use rubato::{Fft, FixedSync, Resampler};
 
+/// One 16-bit sample as the mixer takes it. The scale is `32_768` while
+/// `pcm16_wav` encodes by `i16::MAX`, so that `+1.0` cannot overflow; the
+/// asymmetry is deliberate and lives in one place.
+pub fn from_pcm16(sample: i16) -> f32 {
+    f32::from(sample) / 32_768.0
+}
+
 /// Unmeasured. Shared so both resamplers cut on the same seams.
 const WINDOW: usize = 1024;
 

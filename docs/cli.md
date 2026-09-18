@@ -11,7 +11,7 @@
 
 | Command                         | What it does                                               |
 | ------------------------------- | ---------------------------------------------------------- |
-| `banshee start`                 | Start the daemon, now and at every login, and download the models it is missing |
+| `banshee start`                 | Start the daemon, now and at every login; it names any model that is missing |
 | `banshee stop`                  | Stop the running daemon                                    |
 | `banshee setup`                 | Download the required models; a re-run fetches only what is missing         |
 | `banshee status`                | What Banshee is doing, and what stops it working           |

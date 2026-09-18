@@ -111,9 +111,10 @@ pub struct Selection {
 pub fn select_backend(
     tts_config: &TTSConfig,
     faults: std::sync::mpsc::Sender<Fault>,
+    output: Arc<Output>,
 ) -> Result<Selection, BansheeError> {
     match tts_config.provider {
-        Provider::Local => select_local_backend(tts_config, faults),
+        Provider::Local => select_local_backend(tts_config, faults, output),
         Provider::Remote => {
             // Not propagated: a credentials file that will not parse holds no
             // key the speaker can use, so it takes the path a missing key takes
@@ -123,7 +124,7 @@ pub fn select_backend(
                     .key(crate::credentials::RemoteKey::Tts)
                     .map(str::to_string)
             });
-            select_remote_backend(tts_config, faults, api_key, Output::open)
+            select_remote_backend(tts_config, faults, api_key, output)
         }
     }
 }
@@ -133,23 +134,21 @@ fn select_remote_backend(
     tts_config: &TTSConfig,
     faults: std::sync::mpsc::Sender<Fault>,
     api_key: Result<Option<String>, BansheeError>,
-    open_output: impl FnOnce() -> Result<Output, BansheeError>,
+    output: Arc<Output>,
 ) -> Result<Selection, BansheeError> {
     let built = match api_key {
         Err(unreadable) => Err(unreadable),
         Ok(None) => Err(BansheeError::Other(
             crate::credentials::RemoteKey::Tts.no_key(),
         )),
-        Ok(Some(key)) => open_output().and_then(|output| {
-            RemoteSpeechBackend::new(
-                &tts_config.remote,
-                key,
-                tts_config.speed,
-                fallback_for(tts_config),
-                std::sync::Arc::new(output),
-                faults.clone(),
-            )
-        }),
+        Ok(Some(key)) => RemoteSpeechBackend::new(
+            &tts_config.remote,
+            key,
+            tts_config.speed,
+            fallback_for(tts_config),
+            output,
+            faults.clone(),
+        ),
     };
     match built {
         Ok(backend) => {
@@ -216,11 +215,11 @@ impl TtsBackend for Silent {
 fn select_local_backend(
     tts_config: &TTSConfig,
     faults: std::sync::mpsc::Sender<Fault>,
+    output: Arc<Output>,
 ) -> Result<Selection, BansheeError> {
     let kokoro_config = KokoroTTSConfig::new(&tts_config.voice);
-    let loaded = KokoroEngine::new(&kokoro_config, tts_config.speed).and_then(|engine| {
-        Output::open().map(|output| KokoroBackend::new(engine, std::sync::Arc::new(output), faults))
-    });
+    let loaded = KokoroEngine::new(&kokoro_config, tts_config.speed)
+        .map(|engine| KokoroBackend::new(engine, output, faults));
     match loaded {
         Ok(backend) => {
             log::info!("TTS: Kokoro (voice {})", tts_config.voice);
@@ -244,7 +243,7 @@ fn select_local_backend(
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -467,7 +466,7 @@ mod tests {
         let (faults, _reports) = std::sync::mpsc::channel();
 
         let selected =
-            select_remote_backend(&tts, faults, Ok(None), || Ok(Output::silent())).unwrap();
+            select_remote_backend(&tts, faults, Ok(None), Arc::new(Output::silent())).unwrap();
         assert!(
             !selected.speaker.started(),
             "the system voice is not the speaker the config names"
@@ -497,7 +496,7 @@ mod tests {
         ));
 
         let selected =
-            select_remote_backend(&tts, faults, unreadable, || Ok(Output::silent())).unwrap();
+            select_remote_backend(&tts, faults, unreadable, Arc::new(Output::silent())).unwrap();
         assert!(
             !selected.speaker.started(),
             "the system voice is not the speaker the config names"
@@ -520,7 +519,7 @@ mod tests {
         let (faults, _reasons) = std::sync::mpsc::channel();
 
         let selected =
-            select_remote_backend(&tts, faults, Ok(None), || Ok(Output::silent())).unwrap();
+            select_remote_backend(&tts, faults, Ok(None), Arc::new(Output::silent())).unwrap();
         let reason = refusal_of(selected.backend.as_ref());
         assert!(
             reason.contains("banshee config set tts.remote.api_key"),
@@ -537,9 +536,12 @@ mod tests {
         };
         let (faults, _reasons) = std::sync::mpsc::channel();
 
-        let selected = select_remote_backend(&tts, faults, Ok(Some("sk-test".to_string())), || {
-            Ok(Output::silent())
-        })
+        let selected = select_remote_backend(
+            &tts,
+            faults,
+            Ok(Some("sk-test".to_string())),
+            Arc::new(Output::silent()),
+        )
         .unwrap();
         let reason = refusal_of(selected.backend.as_ref());
         assert!(reason.contains("tts.remote.voice"), "{reason}");
@@ -558,7 +560,12 @@ mod tests {
             .expect("a nonexistent voice must not load")
             .to_string();
 
-        let selected = select_local_backend(&tts, std::sync::mpsc::channel().0).unwrap();
+        let selected = select_local_backend(
+            &tts,
+            std::sync::mpsc::channel().0,
+            Arc::new(Output::silent()),
+        )
+        .unwrap();
         assert!(
             !selected.speaker.started(),
             "the system voice is not the speaker the config names"

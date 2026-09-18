@@ -89,18 +89,20 @@ pub fn wanted(config: &Config) -> Vec<Download> {
 
 /// Zero once every file is here, which is what a client shows after setup.
 pub fn pending_megabytes(wanted: &[Download], dir: &Path) -> u64 {
-    still_missing(wanted, dir)
-        .iter()
+    missing(wanted, dir)
         .map(|download| download.megabytes)
         .sum()
 }
 
 pub fn still_missing(wanted: &[Download], dir: &Path) -> Vec<Download> {
+    missing(wanted, dir).cloned().collect()
+}
+
+/// The one test for what is still to fetch. A sum over it copies nothing.
+fn missing<'a>(wanted: &'a [Download], dir: &'a Path) -> impl Iterator<Item = &'a Download> {
     wanted
         .iter()
-        .filter(|download| !dir.join(&download.name).exists())
-        .cloned()
-        .collect()
+        .filter(move |download| !dir.join(&download.name).exists())
 }
 
 pub fn models_dir() -> Result<std::path::PathBuf, BansheeError> {

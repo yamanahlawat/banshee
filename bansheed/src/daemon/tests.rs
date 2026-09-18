@@ -301,3 +301,90 @@ async fn a_line_that_is_not_a_request_is_answered_with_a_parse_error() {
         "a request that did not parse has no id to answer on"
     );
 }
+
+// The socket is bound in `claim()`, before the microphone is open. A client
+// that connects in that gap must be answered, not left waiting for a device.
+#[tokio::test]
+async fn a_client_is_answered_while_the_pipeline_is_still_opening() {
+    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+
+    let (mut lines, mut writer) = connect(&state);
+    send(&mut writer, BANSHEE_STATUS, serde_json::json!({})).await;
+
+    let reply = next_message(&mut lines).await;
+    assert_eq!(reply["result"]["pipeline"], "opening");
+}
+
+// The grant path leaves this way rather than through `exit`, so the file that
+// doubles as the single-instance lock cannot outlive the process that held it.
+#[tokio::test]
+async fn a_requested_shutdown_takes_the_socket_file_with_it() {
+    let path = test_socket_path("shutdown");
+    let _ = std::fs::remove_file(&path);
+    let listener = tokio::net::UnixListener::bind(&path).expect("bind");
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+    let serving = tokio::spawn({
+        let state = Arc::clone(&state);
+        let path = path.clone();
+        async move { super::run(&state, path, listener).await }
+    });
+    state.shutdown().notify_one();
+    serving.await.expect("the loop ends").expect("no io error");
+
+    assert!(
+        !path.exists(),
+        "a clean exit leaves no socket to be called stale"
+    );
+}
+
+// A call can park for minutes inside dispatch, and the loop reads no more of
+// the connection while it does. A client that leaves must not be waited for.
+#[tokio::test]
+async fn a_client_that_leaves_ends_the_call_it_parked() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (client, server) = UnixStream::pair().expect("no socket pair");
+    let serving = tokio::spawn(serve(server, Arc::clone(&state)));
+
+    let (reader, mut writer) = client.into_split();
+    send(
+        &mut writer,
+        banshee_common::BANSHEE_GET_TRANSCRIPTION,
+        serde_json::json!({ "wait_ms": 5000 }),
+    )
+    .await;
+    drop(writer);
+    drop(reader);
+
+    // Well inside the five seconds the call would otherwise hold: a bound for
+    // the test, not a limit the daemon promises.
+    tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+        .await
+        .expect("the loop ends when the client does")
+        .expect("no panic");
+}
+
+// The loop now reads the connection while a call runs, so a request sent
+// before the first one answered must be held and served, never swallowed.
+#[tokio::test]
+async fn a_request_sent_during_a_call_is_still_answered() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (client, server) = UnixStream::pair().expect("no socket pair");
+    tokio::spawn(serve(server, Arc::clone(&state)));
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    // The first parks; the second arrives while it does
+    send(
+        &mut writer,
+        banshee_common::BANSHEE_GET_TRANSCRIPTION,
+        serde_json::json!({ "wait_ms": 300 }),
+    )
+    .await;
+    send(&mut writer, BANSHEE_STATUS, serde_json::json!({})).await;
+
+    let first = next_message(&mut lines).await;
+    assert!(first["result"]["transcriptions"].is_array(), "{first}");
+    let second = next_message(&mut lines).await;
+    assert_eq!(second["result"]["running"], true, "{second}");
+}

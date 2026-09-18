@@ -61,7 +61,7 @@ async fn a_flag_that_is_not_a_boolean_is_refused() {
         else {
             panic!("a string {flag} must not be read as a flag by {method}");
         };
-        assert_eq!(error.code, -32602, "{method}");
+        assert_eq!(error.code, rpc_code::INVALID_PARAMS, "{method}");
         assert!(error.message.contains(flag), "{method}: {}", error.message);
     }
 }
@@ -99,7 +99,7 @@ async fn a_history_limit_that_does_not_fit_is_refused() {
     let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
         panic!("a limit past 32 bits must not truncate");
     };
-    assert_eq!(error.code, -32602);
+    assert_eq!(error.code, rpc_code::INVALID_PARAMS);
 }
 
 #[tokio::test]
@@ -200,7 +200,7 @@ async fn concurrent_ask_user_is_refused_while_armed() {
     let JsonRpcResponse::Error { error, .. } = response else {
         panic!("expected error response");
     };
-    assert_eq!(error.code, -32004);
+    assert_eq!(error.code, rpc_code::BUSY);
     // The refused call must not disturb the session that owns the mic
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
 }
@@ -240,7 +240,7 @@ async fn recording_rpcs_report_the_cause_not_a_busy_mic() {
         ),
     ] {
         let state = test_state(std::sync::mpsc::channel().0);
-        state.set_recording_error(cause);
+        state.set_pipeline(crate::state::Pipeline::Broken(cause));
 
         let start = request(BANSHEE_RECORD_START, None);
         let JsonRpcResponse::Error { error, .. } = dispatch(start, &state).await else {
@@ -281,7 +281,7 @@ async fn record_start_and_stop_drive_push_to_talk() {
     let JsonRpcResponse::Error { error, .. } = dispatch(again, &state).await else {
         panic!("expected error response");
     };
-    assert_eq!(error.code, -32004);
+    assert_eq!(error.code, rpc_code::BUSY);
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
     let stop = request(BANSHEE_RECORD_STOP, None);
@@ -327,13 +327,15 @@ async fn record_toggle_starts_then_stops_and_says_which() {
 #[tokio::test]
 async fn record_toggle_is_refused_while_recording_is_unavailable() {
     let state = test_state(std::sync::mpsc::channel().0);
-    state.set_recording_error(RecordingError::Microphone("no device".to_string()));
+    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
+        "no device".to_string(),
+    )));
 
     let toggle = request(BANSHEE_RECORD_TOGGLE, None);
     let JsonRpcResponse::Error { error, .. } = dispatch(toggle, &state).await else {
         panic!("expected error response");
     };
-    assert_eq!(error.code, -32000);
+    assert_eq!(error.code, rpc_code::MICROPHONE);
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
 }
 
@@ -689,7 +691,7 @@ async fn a_second_download_is_refused_while_one_runs() {
     else {
         panic!("expected the busy error");
     };
-    assert_eq!(error.code, -32005);
+    assert_eq!(error.code, rpc_code::DOWNLOAD_RUNNING);
 
     drop(slot);
     assert!(state.start_downloading().is_some(), "the slot came back");
@@ -878,8 +880,8 @@ async fn speak_passes_the_voice_parameter_to_the_backend() {
 #[tokio::test]
 async fn ask_user_names_the_provider_fault_with_its_own_code() {
     let state = test_state(std::sync::mpsc::channel().0);
-    state.set_recording_error(crate::state::RecordingError::Provider(
-        "the remote listener refused the key".to_string(),
+    state.set_pipeline(crate::state::Pipeline::Broken(
+        crate::state::RecordingError::Provider("the remote listener refused the key".to_string()),
     ));
 
     let request = request(
@@ -891,7 +893,7 @@ async fn ask_user_names_the_provider_fault_with_its_own_code() {
     let JsonRpcResponse::Error { error, .. } = response else {
         panic!("expected error response");
     };
-    assert_eq!(error.code, -32006);
+    assert_eq!(error.code, rpc_code::PROVIDER);
     assert!(
         error.message.contains("remote listener"),
         "{}",
@@ -926,7 +928,7 @@ async fn ask_user_answers_an_error_when_the_listen_failed() {
     let JsonRpcResponse::Error { error, .. } = response else {
         panic!("expected error response");
     };
-    assert_eq!(error.code, -32007);
+    assert_eq!(error.code, rpc_code::LISTENING_FAILED);
     assert!(
         error.message.contains("refused the key"),
         "{}",
@@ -1182,4 +1184,165 @@ fn dictate_and_tell_together_are_refused_rather_than_guessed() {
     );
     let params = Params::new(&built);
     assert!(dictate_target(&params).is_err());
+}
+
+// The daemon answers its socket from `claim()`, long before the microphone is
+// open. Saying nothing of that gap leaves a client reporting a healthy daemon
+// that cannot record.
+#[tokio::test]
+async fn status_says_the_pipeline_is_opening_until_it_stands() {
+    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+
+    let opening = dispatch(request(BANSHEE_STATUS, None), &state).await;
+    let JsonRpcResponse::Success { result, .. } = opening else {
+        panic!("status answers");
+    };
+    assert_eq!(result["pipeline"], "opening");
+
+    state.set_pipeline(crate::state::Pipeline::Open);
+    let open = dispatch(request(BANSHEE_STATUS, None), &state).await;
+    let JsonRpcResponse::Success { result, .. } = open else {
+        panic!("status answers");
+    };
+    assert_eq!(result["pipeline"], "open");
+}
+
+// The window draws its word from this. A daemon that answers "ready" while it
+// cannot record sends a person to a hotkey that plays the error cue.
+#[test]
+fn a_daemon_still_opening_its_microphone_is_not_ready() {
+    assert!(super::ready(&[], &crate::state::Pipeline::Open));
+    assert!(!super::ready(&[], &crate::state::Pipeline::Opening));
+    assert!(!super::ready(
+        &[],
+        &crate::state::Pipeline::Broken(crate::state::RecordingError::Microphone(
+            "no device".to_string()
+        ))
+    ));
+}
+
+#[test]
+fn anything_that_stops_banshee_working_is_not_ready() {
+    let blocker = banshee_common::Blocker {
+        kind: banshee_common::BlockerKind::Permission,
+        role: None,
+        remedy: None,
+        id: "accessibility".to_string(),
+        name: "Accessibility".to_string(),
+        consequence: "dictation cannot type".to_string(),
+        fix: "grant it".to_string(),
+        command: None,
+    };
+    assert!(!super::ready(&[blocker], &crate::state::Pipeline::Open));
+}
+
+#[tokio::test]
+async fn ask_user_is_refused_while_the_pipeline_is_still_opening() {
+    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+
+    let asked = request(
+        BANSHEE_ASK_USER,
+        Some(serde_json::json!({ "question": "ready?" })),
+    );
+    let JsonRpcResponse::Error { error, .. } = dispatch(asked, &state).await else {
+        panic!("a microphone that is not open yet cannot answer a question");
+    };
+    assert_eq!(error.code, rpc_code::MICROPHONE);
+    assert!(
+        error.message.contains("still opening"),
+        "the reason must say it is not broken, only late: {}",
+        error.message
+    );
+}
+
+// An agent that dies mid-question leaves the microphone armed for the rest of
+// the session, and every other ask is refused as busy until it ends. Dropping
+// the call has to close the session the way a stop does.
+// The question is still being spoken when the agent dies. The microphone was
+// armed before the first word, so nothing but the guard can give it back.
+#[tokio::test]
+async fn an_ask_dropped_while_it_speaks_closes_the_session_it_armed() {
+    let (state, _cut_short) = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_secs(30),
+        std::sync::mpsc::channel().0,
+    );
+
+    let asking = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            let asked = request(
+                BANSHEE_ASK_USER,
+                Some(serde_json::json!({"question": "Ready to ship?"})),
+            );
+            dispatch(asked, &state).await
+        }
+    });
+    wait_for(&state, "the session arms", |state| {
+        state.recording_mode() == RecordingMode::Armed
+    })
+    .await;
+
+    asking.abort();
+
+    wait_for(&state, "the session closes", |state| {
+        state.recording_mode() == RecordingMode::Idle
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_dropped_ask_closes_the_session_it_armed() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+
+    let asking = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            let asked = request(
+                BANSHEE_ASK_USER,
+                Some(serde_json::json!({"question": "Ready to ship?"})),
+            );
+            dispatch(asked, &state).await
+        }
+    });
+
+    // The session is armed once the consumer has the command
+    let ask = tokio::task::spawn_blocking(move || command_receiver.recv())
+        .await
+        .expect("the blocking read")
+        .expect("the consumer is asked");
+    assert_eq!(state.recording_mode(), RecordingMode::Armed);
+
+    asking.abort();
+
+    // Generous next to the 30 ms the consumer polls at: a bound for the test,
+    // not a limit the daemon promises.
+    for _ in 0..100 {
+        if state.recording_mode() == RecordingMode::Idle {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        state.recording_mode(),
+        RecordingMode::Idle,
+        "the microphone belongs to nobody once the caller is gone"
+    );
+    drop(ask);
+}
+
+/// Polls the state until it holds, or the test fails. Generous next to the
+/// intervals the daemon polls at: a bound for the test, not a promise.
+async fn wait_for(
+    state: &crate::state::DaemonState,
+    what: &str,
+    holds: impl Fn(&crate::state::DaemonState) -> bool,
+) {
+    for _ in 0..200 {
+        if holds(state) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("{what} did not happen within 2s");
 }

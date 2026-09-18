@@ -497,7 +497,7 @@ impl TtsBackend for KokoroBackend {
             };
             chunk_or_fault(synthesized, &mut played, &faults)
         });
-        Ok(Box::new(self.output.play(chunks)))
+        Ok(Box::new(self.output.play(chunks, self.faults.clone())?))
     }
 }
 

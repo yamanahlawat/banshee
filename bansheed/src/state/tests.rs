@@ -150,6 +150,9 @@ fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<Consume
         crate::audio::cues::Cues::silent(),
         crate::test_support::scratch("state-models"),
     );
+    // These stand for a daemon whose pipeline is up: the tests below record,
+    // arm and fault, none of which a daemon still opening its microphone does.
+    state.set_pipeline(Pipeline::Open);
     (state, requests)
 }
 
@@ -162,7 +165,9 @@ fn test_state() -> DaemonState {
 #[test]
 fn record_start_is_refused_without_a_pipeline() {
     let (state, transcribe_requests) = test_state_with_commands();
-    state.set_recording_error(RecordingError::Microphone("no device".to_string()));
+    state.set_pipeline(Pipeline::Broken(RecordingError::Microphone(
+        "no device".to_string(),
+    )));
 
     assert!(!state.record_start(TranscribeTarget::Mailbox));
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
@@ -177,14 +182,16 @@ fn record_start_is_refused_without_a_pipeline() {
 #[test]
 fn recording_error_keeps_the_cause_it_was_given() {
     let state = test_state();
-    assert!(state.recording_error().is_none());
+    assert!(state.pipeline().fault().is_none());
     // An armed session is available while nothing is wrong
     assert!(state.arm_for_ask());
     state.set_recording_mode(RecordingMode::Idle);
 
-    state.set_recording_error(RecordingError::Model("missing file".to_string()));
+    state.set_pipeline(Pipeline::Broken(RecordingError::Model(
+        "missing file".to_string(),
+    )));
     assert!(matches!(
-        state.recording_error(),
+        state.pipeline().fault(),
         Some(RecordingError::Model(_))
     ));
     // The same gate record_start uses, so ask_user cannot arm a deaf mic
@@ -220,7 +227,7 @@ fn missing_device_names_what_the_config_waits_for() {
     assert_eq!(state.missing_device().as_deref(), Some("yeti"));
 
     // A substitute does not block recording, so no blocker appears with it
-    assert!(state.recording_error().is_none());
+    assert!(state.pipeline().fault().is_none());
     assert!(state.record_start(TranscribeTarget::Mailbox));
     state.record_stop();
 
@@ -285,16 +292,20 @@ fn a_rewritten_device_name_is_not_a_change() {
 #[test]
 fn recording_error_clears_when_capture_recovers() {
     let (state, _requests) = test_state_with_commands();
-    state.set_recording_error(RecordingError::Microphone("gone".to_string()));
-    assert!(state.recording_error().is_some());
+    state.set_pipeline(Pipeline::Broken(RecordingError::Microphone(
+        "gone".to_string(),
+    )));
+    assert!(state.pipeline().fault().is_some());
 
-    state.clear_recording_error();
-    assert!(state.recording_error().is_none());
+    state.set_pipeline(Pipeline::Open);
+    assert!(state.pipeline().fault().is_none());
 
     // A second fault after a recovery must still report
-    state.set_recording_error(RecordingError::Microphone("gone again".to_string()));
+    state.set_pipeline(Pipeline::Broken(RecordingError::Microphone(
+        "gone again".to_string(),
+    )));
     assert!(matches!(
-        state.recording_error(),
+        state.pipeline().fault(),
         Some(RecordingError::Microphone(_))
     ));
 }
@@ -627,4 +638,20 @@ fn the_drain_sounds_the_cue_for_a_failure_and_clears_the_reason_when_one_plays()
         sounded.is_err(),
         "an utterance that played sounds no cue: {sounded:?}"
     );
+}
+
+// The gate record_start shares with ask_user. A pipeline still being built has
+// no consumer thread, so a press must answer with the cue, not an open session.
+#[test]
+fn record_start_is_refused_while_the_pipeline_is_still_opening() {
+    let (state, transcribe_requests) = test_state_with_commands();
+    state.set_pipeline(Pipeline::Opening);
+
+    assert!(!state.record_start(TranscribeTarget::Mailbox));
+    assert!(!state.arm_for_ask());
+    assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    assert!(transcribe_requests.try_recv().is_err());
+
+    state.set_pipeline(Pipeline::Open);
+    assert!(state.record_start(TranscribeTarget::Mailbox));
 }

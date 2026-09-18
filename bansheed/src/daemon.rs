@@ -49,6 +49,7 @@ pub(crate) fn drop_device_name(daemon_state: &DaemonState) {
 struct Recording {
     stream: cpal::Stream,
     thread: std::thread::JoinHandle<()>,
+    capture: Arc<hotkey::Capture>,
     open: String,
     missing: Option<String>,
 }
@@ -85,12 +86,15 @@ fn start_recording(
         drop_device_name(daemon_state);
         RecordingError::Model(e.to_string())
     })?;
+    // One capture, held by the consumer thread and by the watchdog that
+    // replaces it. A question that is already listening reads it too.
+    let shared_capture = Arc::new(hotkey::Capture::new(hotkey::CaptureSource {
+        consumer: capture.consumer,
+        sample_rate: capture.sample_rate,
+    }));
     let thread = hotkey::hotkey_listener(
         hotkey::Pipeline {
-            source: hotkey::CaptureSource {
-                consumer: capture.consumer,
-                sample_rate: capture.sample_rate,
-            },
+            source: Arc::clone(&shared_capture),
             speech_to_text,
             vad,
             state: Arc::clone(daemon_state),
@@ -105,6 +109,7 @@ fn start_recording(
     Ok(Recording {
         stream: capture.stream,
         thread,
+        capture: shared_capture,
         open: selection.open,
         missing: selection.missing,
     })
@@ -114,7 +119,6 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
     let config = Arc::new(config);
     let (socket_path, listener) = claim()?;
     permissions::ask_for_accessibility();
-    permissions::restart_when_granted();
     let db_connection = if config.daemon.save_history {
         Some(history::open()?)
     } else {
@@ -124,9 +128,12 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
     // Created before the backend, because the backend holds the sender and the
     // drain holds the state the backend must not see
     let (faults, fault_reports) = std::sync::mpsc::channel();
-    let speech = text_to_speech::select_backend(&config.tts, faults)?;
+    // One output for every sound the daemon makes. The voice and the cues on
+    // one device is the point: two holders drift apart the moment one dies.
+    let output = Arc::new(text_to_speech::output::Output::lazy());
+    let speech = text_to_speech::select_backend(&config.tts, faults, Arc::clone(&output))?;
     let (commands, command_receiver) = std::sync::mpsc::channel();
-    let cues = audio::cues::start_cue_player(config.audio.cues.enabled);
+    let cues = audio::cues::start_cue_player(config.audio.cues.enabled, output);
     let daemon_state = Arc::new(DaemonState::new(
         Arc::clone(&config),
         db_connection,
@@ -141,6 +148,20 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         daemon_state.set_last_speech_error(Some(reason));
     }
 
+    permissions::restart_when_granted(
+        {
+            let state = Arc::clone(&daemon_state);
+            move || state.is_downloading()
+        },
+        {
+            let state = Arc::clone(&daemon_state);
+            move || {
+                state.request_restart();
+                state.shutdown().notify_one();
+            }
+        },
+    );
+
     // After the state, which the drain writes
     let draining_state = Arc::clone(&daemon_state);
     let draining_cues = cues.clone();
@@ -148,40 +169,56 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         text_to_speech::drain_faults(draining_state, draining_cues, fault_reports)
     });
 
-    // The watchdog owns the stream past daemon::run: stopping it stops
-    // capture, and the thread is the only thing left to join
-    let recording = match start_recording(&daemon_state, &config, command_receiver, cues) {
-        Ok(started) => {
-            let watchdog = audio::watchdog::spawn(
-                Arc::clone(&daemon_state),
-                started.stream,
-                started.open,
-                started.missing,
-            );
-            Some((watchdog, started.thread))
-        }
-        // A missing mic or model leaves the daemon useful rather than
-        // exiting, which the supervisor reads as a crash and retries
-        Err(error) => {
-            log::error!("Recording is unavailable: {error}");
-            log::info!(
-                "The daemon is up: speak, status, and history still work. \
-                     Recording, dictation, and ask_user do not."
-            );
-            log::info!("Run `banshee status` for the fix.");
-            daemon_state.set_recording_error(error);
-            None
-        }
+    // Off this thread, because the socket is already bound and `run` below is
+    // what answers it. The device walk enters Core Audio, which stalls for
+    // minutes on a virtual device whose plugin stops answering, and a stall
+    // here leaves every client connected to a daemon that says nothing.
+    let building = {
+        let state = Arc::clone(&daemon_state);
+        let config = Arc::clone(&config);
+        std::thread::spawn(move || {
+            // The watchdog owns the stream past daemon::run: stopping it stops
+            // capture, and the thread is the only thing left to join
+            match start_recording(&state, &config, command_receiver, cues) {
+                Ok(started) => {
+                    let watchdog = audio::watchdog::spawn(
+                        Arc::clone(&state),
+                        started.stream,
+                        started.capture,
+                        started.open,
+                        started.missing,
+                    );
+                    state.set_pipeline(crate::state::Pipeline::Open);
+                    Some((watchdog, started.thread))
+                }
+                // A missing mic or model leaves the daemon useful rather than
+                // exiting, which the supervisor reads as a crash and retries
+                Err(error) => {
+                    log::error!("Recording is unavailable: {error}");
+                    log::info!(
+                        "The daemon is up: speak, status, and history still work. \
+                             Recording, dictation, and ask_user do not."
+                    );
+                    log::info!("Run `banshee status` for the fix.");
+                    state.set_pipeline(crate::state::Pipeline::Broken(error));
+                    None
+                }
+            }
+        })
     };
-    // After the pipeline, so a press always reaches record_start: with
-    // no pipeline it answers with the error cue rather than nothing
+    // A press that lands before the pipeline stands answers with the error cue:
+    // record_start refuses anything but an open pipeline.
     hotkey::start_global_hotkey(
         Arc::clone(&daemon_state),
         config.audio.hotkey,
         config.audio.hotkey_mode,
     );
     let result = run(&daemon_state, socket_path, listener).await;
-    if let Some((watchdog, consumer_thread)) = recording {
+    // A build still parked in Core Audio cannot be woken, so the process leaves
+    // without it rather than never leaving at all.
+    if building.is_finished()
+        && let Ok(Some((watchdog, consumer_thread))) = building.join()
+    {
         // Capture stops first, so no Rebind arrives at a thread that
         // has already left its loop
         watchdog.stop();
@@ -191,6 +228,11 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         let _ = consumer_thread.join();
     }
     result?;
+    if daemon_state.restart_wanted() {
+        return Err(BansheeError::Other(
+            "the Accessibility grant landed; starting again to pick it up".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -231,6 +273,7 @@ pub async fn run(
     log::info!("Shutting down.");
     daemon_state.speech().stop();
     let _ = fs::remove_file(&socket_path);
+
     Ok(())
 }
 
@@ -352,8 +395,18 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
     // that has none
     let mut pushing_state: Option<tokio::task::JoinHandle<()>> = None;
     let mut pushing_downloads: Option<tokio::task::JoinHandle<()>> = None;
+    // A request that arrived while an earlier call was still running. The
+    // connection is read throughout a call, so a pipelined one cannot be lost.
+    let mut queued: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = match queued.pop_front() {
+            Some(line) => line,
+            None => match lines.next_line().await {
+                Ok(Some(line)) => line,
+                _ => break,
+            },
+        };
         let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
             Ok(request) => request,
             Err(error) => {
@@ -394,7 +447,20 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         let opening_downloads =
             (asked.downloads && pushing_downloads.is_none()).then(|| state.subscribe_downloads());
 
-        let response = dispatch(request, &state).await;
+        // Watched while it runs: `ask_user` parks here for minutes holding the
+        // microphone, and a client that goes away in the meantime is asking
+        // for none of it. Dropping the call is what ends the work.
+        let mut call = std::pin::pin!(dispatch(request, &state));
+        let answered = loop {
+            tokio::select! {
+                response = &mut call => break Some(response),
+                next = lines.next_line() => match next {
+                    Ok(Some(line)) => queued.push_back(line),
+                    _ => break None,
+                },
+            }
+        };
+        let Some(response) = answered else { break };
         if write_line(&mut *writer.lock().await, &response)
             .await
             .is_err()

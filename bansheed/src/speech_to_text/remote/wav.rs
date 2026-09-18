@@ -5,7 +5,7 @@
 /// overflow, and that asymmetry is deliberate.
 #[cfg(test)]
 pub fn pcm16_samples(samples: impl Iterator<Item = i16>) -> Vec<f32> {
-    samples.map(|sample| f32::from(sample) / 32_768.0).collect()
+    samples.map(crate::audio::utils::from_pcm16).collect()
 }
 
 pub fn pcm16_wav(audio: &[f32], sample_rate: u32) -> Vec<u8> {

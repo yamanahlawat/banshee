@@ -484,7 +484,7 @@ pub async fn probe_daemon() -> Daemon {
             {
                 Ok(Ok(status)) => classify(status),
                 Ok(Err(e)) => Daemon::Silent(e.to_string()),
-                Err(_) => Daemon::Silent("no answer within 2s".to_string()),
+                Err(_) => Daemon::Silent("nothing within 2s".to_string()),
             }
         }
         _ => Daemon::Missing,
@@ -532,15 +532,53 @@ fn open_fix(blockers: &[Blocker]) -> &str {
         .map_or(MICROPHONE_FIX, |blocker| blocker.fix.as_str())
 }
 
+/// The rate a Bluetooth headset runs at while anything holds its microphone.
+/// Measured on a OnePlus Buds 3: 16000 Hz in and out while Banshee records, and
+/// 44100 Hz in stereo out the moment it stops.
+const HANDS_FREE: u32 = 16_000;
+
+/// What the speaker costs when it is the microphone's own device. A person who
+/// hears a dull voice has no other way to learn that Banshee holding the
+/// microphone is the reason.
+///
+/// The speaker is the machine's default, which is the one Banshee plays
+/// through unless rodio fell back to another, and it names neither. The line
+/// says "default" rather than claiming to describe the device the voice came
+/// out of.
+fn shared_device(open: &str, speaker: Option<(String, u32)>) -> Option<String> {
+    let (speaker, rate) = speaker?;
+    (open == speaker && rate <= HANDS_FREE).then(|| {
+        format!(
+            "the default speaker is this microphone's own device, and it plays at {rate} Hz while Banshee listens"
+        )
+    })
+}
+
 fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
     match banshee_common::audio_device(status) {
-        Some(open) => pass(&microphone_line(
-            "daemon has the microphone",
-            Some(open),
-            banshee_common::missing_device(status),
-        )),
+        Some(open) => {
+            let held = pass(&microphone_line(
+                "daemon has the microphone",
+                Some(open),
+                banshee_common::missing_device(status),
+            ));
+            // After the line it annotates, or it reads as a note on the check
+            // above it.
+            if let Some(cost) = shared_device(open, crate::audio::default_output()) {
+                note(&cost);
+            }
+            held
+        }
         None => fail("the daemon has no microphone open", open_fix(blockers)),
     }
+}
+
+/// A daemon still building its pipeline has no device to name and no fault to
+/// report. `None` once it is open or broken, which the lines below answer for.
+/// The word is the daemon's own, so the two sides cannot spell it differently.
+fn still_opening(status: &serde_json::Value) -> Option<&'static str> {
+    (banshee_common::pipeline(status) == Some(crate::state::Pipeline::Opening.as_str()))
+        .then_some("the microphone is still opening")
 }
 
 // Opening a second stream fails on backends that allow only one, which would
@@ -552,6 +590,10 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
         // A listener that will not answer takes capture down with it, so every
         // kind here leaves the daemon unable to record and each names its own
         // fix.
+        Daemon::Running { status, .. } if let Some(waiting) = still_opening(status) => {
+            note(waiting);
+            true
+        }
         Daemon::Running { status, blockers } => match blockers.iter().find(|blocker| {
             matches!(
                 blocker.kind,
@@ -575,6 +617,28 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     }
 }
 
+/// What to say about a daemon that is not answering, and the fix beside it.
+/// `None` while one is: `report_daemon` answers for that with the version it
+/// reported. A socket file left behind is not called a crash, because a clean
+/// `kill` and a deliberate exit leave the same one.
+fn absence(daemon: &Daemon) -> Option<(String, &'static str)> {
+    match daemon {
+        Daemon::Running { .. } => None,
+        Daemon::Silent(reason) => Some((
+            format!("the daemon holds the socket but did not answer: {reason}"),
+            "it may still be starting: run this again, and restart it if it persists: banshee start",
+        )),
+        Daemon::Stale => Some((
+            "the daemon is not running, and the socket file it left is still there".to_string(),
+            "start it: banshee start",
+        )),
+        Daemon::Missing => Some((
+            "the daemon is not running".to_string(),
+            "start it: banshee start",
+        )),
+    }
+}
+
 fn report_daemon(daemon: &Daemon) -> bool {
     match daemon {
         Daemon::Running { status, .. } => {
@@ -589,17 +653,8 @@ fn report_daemon(daemon: &Daemon) -> bool {
             }
             true
         }
-        Daemon::Silent(e) => fail(
-            &format!("daemon answered the socket but status failed: {e}"),
-            "restart it: banshee start",
-        ),
-        // Not notes: nothing records without a daemon, and a checklist that
-        // passes here reports a green check it cannot back
-        Daemon::Stale => fail(
-            "the daemon is not running; a stale socket is left from a crash",
-            "start it: banshee start",
-        ),
-        Daemon::Missing => fail("the daemon is not running", "start it: banshee start"),
+        // Every kind but Running is an absence, and Running is taken above.
+        away => absence(away).is_none_or(|(line, fix)| fail(&line, fix)),
     }
 }
 

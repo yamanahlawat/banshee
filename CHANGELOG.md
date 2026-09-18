@@ -7,7 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`banshee uninstall` undoes what Banshee installed.** It stops the daemon,
+  takes both login entries out, and names the tool that owns the rest:
+  Homebrew's copy stays Homebrew's, because deleting files it records leaves the
+  records pointing at nothing. A copy from the shell installer or the tarball is
+  removed here. `~/.banshee` holds the models, the history and the keys, and it
+  stays unless `--data` asks for it. Nothing is removed without a yes, and a
+  script with no terminal is told to pass `--yes` rather than asked a question
+  nobody will see.
+
+- **`banshee status` says why a headset sounds dull.** A Bluetooth headset gives
+  macOS its microphone or its speaker in full quality, never both, so while
+  Banshee holds the microphone the same device plays at 16 kHz. The line appears
+  when the open microphone and the default speaker are the same device and its
+  rate has dropped, and it names the rate. Pinning `[audio] input_device` to
+  another microphone is the way out.
+
+- **`banshee-update` comes with the shell installer.** That route had no update
+  path at all: Homebrew has `brew upgrade`, and the downloaded app is replaced by
+  running its own command again, but the installer's route had nothing.
+
 ### Changed
+
+- **`banshee start` starts, and downloads nothing.** A first run no longer
+  spends ~860 MB before you have seen that speech models come in three sizes.
+  `banshee start` names the models that are missing and stops; `banshee setup`
+  fetches them. In the window, the download box asks first and carries the
+  preset chooser, so `fast` or `quality` is picked before the bytes move. A
+  daemon that was already running built its pipeline without those files, so
+  `banshee setup` now says when a restart is what loads them.
 
 - **Every line in the daemon log carries a clock and a level, and a dictated
   sentence reaches it only when asked for.** Lines read
@@ -42,6 +72,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored since 0.11.1. Delete the table and the file loads again.
 
 ### Fixed
+
+- **A quarantined Banshee says so instead of dying silently.** macOS kills the
+  `banshee` command with no message at all when the app still carries Homebrew's
+  quarantine flag, which made a blocked install look like a broken daemon. The
+  cask now writes `banshee` and `banshee-mcp-shim` as small wrappers outside the
+  app, because macOS kills anything run from inside a quarantined bundle, a
+  shell script included. They name what happened, and in a terminal offer to
+  clear the flag. They ask first, they only ever ask a person, and a hook or an
+  agent gets the line to run rather than a prompt nobody can answer. The flag
+  returns with every `brew upgrade`, which the caveat and the docs now say.
+
+- **The earcons come out of the same speaker as the voice.** The cue player held
+  an audio device of its own, opened once and never again, so a device that went
+  away left every later beep unheard while the voice carried on elsewhere. Every
+  sound the daemon makes now goes through one output, which follows the device
+  and is opened only when there is something to play, so cues turned off still
+  hold no audio hardware.
+
+- **A question follows the microphone.** A device that changed while Banshee was
+  already listening left the answer unheard: the new microphone arrived as a
+  command, and the question itself was holding the thread that reads commands,
+  so it went on reading a device that no longer existed until it timed out. The
+  capture is now shared, so a question already listening reads whatever
+  microphone is there, keeps what was said before the change, and rebuilds only
+  what belonged to the old device.
+
+- **A reply follows the speaker.** When the device Banshee was playing through
+  disappeared, the rest of the reply went into it and was never heard, the daemon
+  believed it was still speaking, and every later reply queued behind a device
+  that was gone until it was restarted. Banshee now notices that nothing is
+  taking the audio, opens the device that is default now, and carries on,
+  repeating at most the sentence that was cut.
+
+- **A box that stands above the record lines up with the boxes beside it.** A
+  drawn absence is indented to the turn text column, which is right where it
+  stands in for a turn. "Banshee is not running" stands above the record, where
+  the indent aligned it to a column no turn was drawing and broke the left edge
+  it shares with the blocker above it. It now takes the band gutter.
+
+- **A question no longer outlives the agent that asked it.** `ask_user` holds
+  the microphone until someone answers, and an agent that died in the meantime
+  went unnoticed, so the session listened on to its timeout and every other
+  question was refused as busy. The daemon now watches the connection while a
+  call runs and closes the session when the caller goes, while a request sent
+  during a call is still held and answered.
+
+- **The Accessibility advice covers a switch that is already on.** macOS keys
+  that grant to the signature of the build that asked for it, so a reinstall or
+  an update can leave a row that is listed and switched on while the grant
+  reaches nothing, and no prompt appears because a record already exists.
+  Banshee now names the repair: remove Banshee from the list with the minus
+  button and add it back.
+
+- **`banshee status` says what happened instead of quoting a JSON parser.** A
+  daemon that closed the connection was reported as `EOF while parsing a value
+  at line 1 column 0`, and a socket file left behind was called a crash, though
+  a clean stop leaves the same file. The checklist now names the state it found
+  and offers a second look before a restart, since a daemon that is still
+  starting answers nothing and restarting only starts the wait again.
+
+- **Granting Accessibility no longer kills a running download.** Banshee has
+  to start again for a grant to reach it, and it used to leave the moment one
+  landed, taking the first-run download with it and leaving the socket file
+  behind for the next run to report as a crash. It now waits for the download
+  to finish, then leaves the way a stop does, with nothing left behind.
+
+- **A slow microphone no longer makes Banshee unreachable.** The daemon opens
+  its socket before it touches the audio devices, so a device whose driver
+  stops answering leaves Banshee answering. Walking the devices enters Core
+  Audio, which was measured stalling for minutes on this machine, and every
+  client that connected in that window waited with it: `banshee status` said
+  the daemon answered the socket but not the call, and restarting only started
+  the wait again. `banshee status` now reports "the microphone is still
+  opening" while it waits, and a press before it opens answers with the error
+  cue.
 
 - **A reply that never starts no longer leaves the daemon deaf.** When a new
   reply interrupted one already playing and the speaker then refused it, for

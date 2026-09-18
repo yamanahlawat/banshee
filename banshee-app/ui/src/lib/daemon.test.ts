@@ -14,6 +14,7 @@ import {
   empty,
   endsTheRun,
   fixGroups,
+  hotkeyListens,
   lampForm,
   liveFrom,
   markPending,
@@ -42,6 +43,13 @@ const speaking = asLive(speakingJson);
 describe('the state word', () => {
   it('is Ready on a clear machine', () => {
     expect(stateWord(reduceStatus(empty(), ready))).toBe('Ready');
+  });
+
+  // The daemon raises no blocker while its microphone is still opening, because
+  // waiting is nobody's to fix. It says so in `ready`, and the window says it.
+  it('a daemon that says it is not ready is not called ready', () => {
+    const opening = { ...ready, ready: false, blockers: [] } as Status;
+    expect(stateWord(reduceStatus(empty(), opening))).toBe('Not ready');
   });
   it('is Not ready while a permission is missing', () => {
     expect(
@@ -420,5 +428,24 @@ describe('the facts each side reports', () => {
     });
     expect(ungranted.status?.blockers).toHaveLength(1);
     expect(listeningFacts(ungranted, NO_KEYS).stoppedBy).toBeNull();
+  });
+});
+
+// A window with no answer yet must not tell a macOS or X11 user that their
+// compositor owns the key: the daemon binds it everywhere but Wayland, and the
+// window is read most while the daemon is stopped.
+describe('hotkeyListens', () => {
+  it('a daemon that has not answered is assumed to bind the key', () => {
+    expect(hotkeyListens(empty())).toBe(true);
+  });
+
+  it('a daemon too old to report the field is assumed to bind the key', () => {
+    expect(hotkeyListens(reduceStatus(empty(), { running: true } as Status))).toBe(true);
+  });
+
+  it('a compositor that holds the binding is believed', () => {
+    expect(
+      hotkeyListens(reduceStatus(empty(), { running: true, hotkey_listens: false } as Status)),
+    ).toBe(false);
   });
 });

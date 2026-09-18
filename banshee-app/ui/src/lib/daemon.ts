@@ -20,6 +20,8 @@ export type Status = Record<string, unknown> & {
   english_only?: boolean;
   download_megabytes?: number;
   running: boolean;
+  /// The daemon's own word for "nothing stops Banshee working".
+  ready?: boolean;
   blockers?: Blocker[];
   hotkey_listens?: boolean;
   bindable_modifiers?: string[];
@@ -128,6 +130,17 @@ export function reduceLive(state: Daemon, live: Partial<Live>): Daemon {
 export function markPending(state: Daemon, keys: string[]): Daemon {
   return { ...state, pending: new Set([...state.pending, ...keys]) };
 }
+// Absent is not false. A daemon that has not answered binds the key everywhere
+// but Wayland, and the window is read most while Banshee is stopped.
+export function hotkeyListens(state: Daemon): boolean {
+  return state.status?.hotkey_listens !== false;
+}
+// The daemon's own definition, not a narrower one: a pipeline still opening
+// raises no blocker and is not ready either. Absent from a daemon that has not
+// answered, which `isDown` speaks for.
+export function isReady(state: Daemon): boolean {
+  return state.status?.ready !== false;
+}
 export function isDown(state: Daemon): boolean {
   return state.down !== null || state.status?.running === false;
 }
@@ -146,7 +159,7 @@ export function stateWord(state: Daemon): Word {
   const said = SAYS[state.live.activity];
   if (said !== undefined) return said;
   if (state.download !== null) return 'Downloading';
-  if ((state.status?.blockers?.length ?? 0) > 0) return 'Not ready';
+  if (!isReady(state)) return 'Not ready';
   return 'Ready';
 }
 export function lampForm(word: Word): LampForm {

@@ -30,11 +30,11 @@ fn nothing_open_and_no_model_blocker_falls_back_to_the_microphone_fix() {
 fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
     let (commands, _drain) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
-    state.set_recording_error(crate::state::RecordingError::Model(
-        "missing file.".to_string(),
+    state.set_pipeline(crate::state::Pipeline::Broken(
+        crate::state::RecordingError::Model("missing file.".to_string()),
     ));
 
-    let blockers = crate::readiness::blockers(&state);
+    let blockers = crate::readiness::blockers(&state, &state.pipeline());
     let model = blockers
         .iter()
         .find(|blocker| blocker.kind == banshee_common::BlockerKind::Model)
@@ -47,13 +47,13 @@ fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
 fn an_unreadable_key_file_is_a_recording_fault_the_checklist_names() {
     let (commands, _drain) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
-    state.set_recording_error(crate::state::RecordingError::KeyFile(
-        "credentials.toml does not parse".to_string(),
+    state.set_pipeline(crate::state::Pipeline::Broken(
+        crate::state::RecordingError::KeyFile("credentials.toml does not parse".to_string()),
     ));
 
     let daemon = super::Daemon::Running {
         status: serde_json::json!({ "audio_device": "MacBook Pro Microphone" }),
-        blockers: crate::readiness::blockers(&state),
+        blockers: crate::readiness::blockers(&state, &state.pipeline()),
     };
 
     assert!(!super::check_recording(&daemon, ""));
@@ -262,4 +262,100 @@ fn an_install_inside_a_bundle_is_named_as_one() {
 
     assert_eq!(super::install_shape(bundled), "Banshee.app");
     assert_eq!(super::install_shape(loose), "a loose binary");
+}
+
+// The socket answers from `claim()`, before the device is open. Calling that
+// gap a missing microphone sends the reader after a fault that is not there.
+#[test]
+fn a_pipeline_still_opening_is_not_a_missing_microphone() {
+    let opening = serde_json::json!({ "pipeline": "opening" });
+    assert!(super::still_opening(&opening).is_some());
+
+    for settled in ["open", "broken"] {
+        let status = serde_json::json!({ "pipeline": settled });
+        assert!(
+            super::still_opening(&status).is_none(),
+            "{settled} is answered by the lines below, not by a wait"
+        );
+    }
+}
+
+#[test]
+fn a_daemon_still_opening_its_microphone_is_healthy() {
+    let daemon = super::Daemon::Running {
+        status: serde_json::json!({ "pipeline": "opening" }),
+        blockers: Vec::new(),
+    };
+    assert!(
+        super::check_recording(&daemon, "default"),
+        "waiting is not a failed check"
+    );
+}
+
+// A clean `kill` leaves the same file a crash does, so the word states more
+// than the file can carry.
+#[test]
+fn a_socket_left_behind_is_not_called_a_crash() {
+    let (line, fix) = super::absence(&Daemon::Stale).expect("a stale socket is an absence");
+    assert!(!line.contains("crash"), "{line}");
+    assert!(fix.contains("banshee start"), "{fix}");
+}
+
+// The daemon binds its socket before it can answer, so silence is usually a
+// start in progress. Restarting it first only starts that wait again.
+#[test]
+fn a_daemon_that_does_not_answer_is_offered_the_retry_before_the_restart() {
+    let reason = "nothing within 2s".to_string();
+    let (line, fix) = super::absence(&Daemon::Silent(reason)).expect("silence is an absence");
+    assert!(line.contains("nothing within 2s"), "{line}");
+    assert!(fix.contains("again"), "{fix}");
+}
+
+#[test]
+fn a_daemon_that_answers_is_no_absence() {
+    let running = Daemon::Running {
+        status: serde_json::json!({}),
+        blockers: Vec::new(),
+    };
+    assert!(super::absence(&running).is_none());
+}
+
+#[test]
+fn a_speaker_that_shares_the_microphone_device_says_what_it_costs() {
+    assert_eq!(
+        super::shared_device("OnePlus Buds 3", Some(("OnePlus Buds 3".to_string(), 16_000))),
+        Some(
+            "the default speaker is this microphone's own device, and it plays at 16000 Hz while Banshee listens"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn a_speaker_of_its_own_costs_the_microphone_nothing() {
+    assert_eq!(
+        super::shared_device(
+            "MacBook Pro Microphone",
+            Some(("MacBook Pro Speakers".to_string(), 48_000))
+        ),
+        None
+    );
+}
+
+// A device that records and plays without dropping its rate has nothing to
+// report, and a line that fires anyway is noise on every headset that works.
+#[test]
+fn one_device_at_full_rate_is_not_worth_a_line() {
+    assert_eq!(
+        super::shared_device(
+            "Studio Display",
+            Some(("Studio Display".to_string(), 48_000))
+        ),
+        None
+    );
+}
+
+#[test]
+fn nothing_is_said_when_no_speaker_answers() {
+    assert_eq!(super::shared_device("Buds", None), None);
 }

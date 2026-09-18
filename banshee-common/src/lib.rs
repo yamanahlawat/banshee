@@ -191,6 +191,12 @@ pub fn key_press_access(status: &Value) -> Option<&str> {
     status.get("key_press_access").and_then(Value::as_str)
 }
 
+/// Whether the daemon's recording pipeline is `opening`, `open` or `broken`.
+/// The daemon writes the word; this is the one place a client reads it.
+pub fn pipeline(status: &Value) -> Option<&str> {
+    status.get("pipeline").and_then(Value::as_str)
+}
+
 /// The sentence every surface shows for these two fields. Each client adds its
 /// own lead-in and nothing else, so all of them spell the absent case alike.
 /// Nothing open is not an absent device: a model that fails to load closes capture.

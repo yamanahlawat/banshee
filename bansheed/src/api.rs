@@ -172,8 +172,63 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
 }
 
+/// Closes the listening session if the call is dropped before its answer
+/// arrives, which is what a client going away looks like from here. The
+/// consumer polls the mode, so clearing it ends the listen and disarms the
+/// microphone. `kept` marks a session that ended on its own: clearing the mode
+/// then could close a session someone else has since armed.
+struct EndsTheSession<'a> {
+    state: &'a DaemonState,
+    kept: bool,
+}
+
+impl<'a> EndsTheSession<'a> {
+    fn new(state: &'a DaemonState) -> Self {
+        Self { state, kept: false }
+    }
+
+    fn kept(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for EndsTheSession<'_> {
+    fn drop(&mut self) {
+        if !self.kept {
+            self.state.set_recording_mode(RecordingMode::Idle);
+        }
+    }
+}
+
+/// `None` while the pipeline is open. A pipeline still being built refuses the
+/// same way a broken one does: nothing records either way.
+fn not_recording(
+    id: Option<serde_json::Value>,
+    pipeline: &crate::state::Pipeline,
+) -> Option<Box<JsonRpcResponse>> {
+    match pipeline {
+        crate::state::Pipeline::Open => None,
+        crate::state::Pipeline::Opening => Some(Box::new(JsonRpcResponse::error(
+            id,
+            rpc_code::MICROPHONE,
+            "Recording is unavailable: the microphone is still opening",
+        ))),
+        crate::state::Pipeline::Broken(error) => Some(Box::new(unavailable(id, error))),
+    }
+}
+
+/// Nothing stops Banshee working. A pipeline still opening raises no blocker,
+/// because waiting is nobody's to fix, and it is not ready either: nothing
+/// records until the microphone is open.
+fn ready(blockers: &[banshee_common::Blocker], pipeline: &crate::state::Pipeline) -> bool {
+    blockers.is_empty() && matches!(pipeline, crate::state::Pipeline::Open)
+}
+
 pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
-    let blockers = readiness::blockers(daemon_state);
+    // Read once for every answer below, so one reply cannot report two states
+    // of the pipeline.
+    let pipeline = daemon_state.pipeline();
+    let blockers = readiness::blockers(daemon_state, &pipeline);
     let running = daemon_state.running_config();
     // Read once for the two sides below, so one reply cannot answer from two
     // states of the file. A file that will not parse holds no key either way.
@@ -203,10 +258,11 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             .is_some_and(crate::speech_to_text::english_only),
         // False where the compositor holds the binding, so the window does not
         // name a key the daemon never listens for.
+        "pipeline": pipeline.as_str(),
         "hotkey_listens": crate::hotkey::listens(),
         "bindable_modifiers": crate::binding::bindable_modifiers(),
         // Stated, so no client invents a narrower definition of ready
-        "ready": blockers.is_empty(),
+        "ready": ready(&blockers, &pipeline),
         "blockers": blockers,
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
@@ -346,8 +402,8 @@ fn record_start(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcR
         Err(response) => return *response,
     };
     // Checked before the transition, so -32004 keeps meaning "busy"
-    if let Some(reason) = daemon_state.recording_error() {
-        return unavailable(params.id(), &reason);
+    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
+        return *response;
     }
     if daemon_state.record_start(action) {
         JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
@@ -370,8 +426,8 @@ fn record_toggle(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpc
         Ok(value) => value,
         Err(response) => return *response,
     };
-    if let Some(reason) = daemon_state.recording_error() {
-        return unavailable(params.id(), &reason);
+    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
+        return *response;
     }
     let recording = daemon_state.record_toggle(action);
     JsonRpcResponse::success(params.id(), serde_json::json!({"recording": recording}))
@@ -404,8 +460,8 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         Err(response) => return *response,
     };
 
-    if let Some(reason) = daemon_state.recording_error() {
-        return unavailable(params.id(), &reason);
+    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
+        return *response;
     }
 
     // One armed session at a time; the mode is the lock. Armed before the wait
@@ -418,13 +474,17 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         );
     }
 
+    // From here the mode is held, and every way out of this call gives it back:
+    // the question is spoken before anyone listens, and a client that dies
+    // while it plays would otherwise hold the microphone until a restart.
+    let ends_the_session = EndsTheSession::new(daemon_state);
+
     // A status outruns any budget short of the stalled-backend bound.
     let settled = silence_within(daemon_state, Duration::from_millis(MAX_PLAYBACK_WAIT_MS)).await;
 
     // Interrupts only what outran the wait, so a stalled backend costs one budget.
     let clean_question = sanitize(question);
     if let Err(e) = daemon_state.speech().speak(&clean_question, !settled, None) {
-        daemon_state.set_recording_mode(RecordingMode::Idle);
         return JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
@@ -434,7 +494,6 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
 
     if !playback_ended(daemon_state, &clean_question).await {
         daemon_state.speech().stop();
-        daemon_state.set_recording_mode(RecordingMode::Idle);
         return JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
@@ -448,7 +507,6 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         timeout: Duration::from_millis(timeout_ms),
     });
     if daemon_state.commands().send(command).is_err() {
-        daemon_state.set_recording_mode(RecordingMode::Idle);
         return JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
@@ -456,7 +514,15 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         );
     }
 
-    match answer.await {
+    let answered = answer.await;
+    // The consumer disarms every session it finishes, so the guard steps aside
+    // for those. A sender that was dropped finished nothing, and the guard
+    // still owes the microphone back.
+    if answered.is_ok() {
+        ends_the_session.kept();
+    }
+
+    match answered {
         Ok(Ok(text)) => JsonRpcResponse::success(params.id(), serde_json::json!({ "text": text })),
         // Distinct from silence, which answers empty text
         Ok(Err(reason)) => JsonRpcResponse::error(
@@ -464,14 +530,11 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
             rpc_code::LISTENING_FAILED,
             format!("Listening failed: {reason}"),
         ),
-        Err(_) => {
-            daemon_state.set_recording_mode(RecordingMode::Idle);
-            JsonRpcResponse::error(
-                params.id(),
-                rpc_code::INTERNAL,
-                "Listening session ended unexpectedly.",
-            )
-        }
+        Err(_) => JsonRpcResponse::error(
+            params.id(),
+            rpc_code::INTERNAL,
+            "Listening session ended unexpectedly.",
+        ),
     }
 }
 
