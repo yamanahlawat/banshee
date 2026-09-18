@@ -218,7 +218,7 @@ where
 {
     let stream = device
         .build_input_stream(
-            &config.into(),
+            config.into(),
             data,
             |error| log::error!("Audio Error: {error}"),
             None,

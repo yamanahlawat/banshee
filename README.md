@@ -14,11 +14,15 @@
 
 ## Demo
 
+<https://github.com/user-attachments/assets/7ec3eaa1-33d6-4cdd-8e5b-10ae11871918>
+
+On Omarchy, one spoken request sets the desktop up for a recording: no screen lock, no top bar, no window gaps. A second request puts the gaps back, and `show me` opens the diffs.
+
 <https://github.com/user-attachments/assets/912c94af-baac-4385-b135-07a4eeb11b0e>
 
-Claude Code finds a first-run bug in Banshee's own code, says out loud what it would change, and asks how far to take the fix. The answer is spoken back. Nothing was typed.
+On macOS, Claude Code finds a first-run bug in Banshee's own code, says out loud what it would change, and asks how far to take the fix. The answer is spoken back. Nothing was typed.
 
-[More demos](docs/demos.md): a focus mode built by voice on Omarchy, and a desktop set up for recording.
+[More demos](docs/demos.md): a focus mode built by voice on Omarchy.
 
 ## Quickstart on Linux
 
