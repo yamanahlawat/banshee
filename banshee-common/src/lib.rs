@@ -1,7 +1,15 @@
+//! What a Banshee client and the daemon agree on: the JSON-RPC 2.0 request,
+//! response and notification shapes, the method names, the reply codes, the
+//! blocker and progress records the status carries, and where the daemon keeps
+//! its socket and files, and the log sink every Banshee process installs. The
+//! daemon depends on this crate by path; a client that speaks the protocol from
+//! another process depends on the same types.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod error;
+pub mod logging;
 pub mod utils;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -13,7 +21,7 @@ pub enum Version {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct JsonRpcRequest {
-    pub jsonrpc: String,
+    pub jsonrpc: Version,
     pub method: String,
     #[serde(default)]
     pub params: Option<Value>,
@@ -61,6 +69,17 @@ impl JsonRpcResponse {
             id,
         }
     }
+
+    /// The answer to a line that is not a request. It has no id to answer on,
+    /// and JSON-RPC answers it on a null one rather than leaving the client
+    /// waiting.
+    pub fn parse_error(error: &serde_json::Error) -> Self {
+        Self::error(
+            None,
+            rpc_code::PARSE,
+            format!("not a JSON-RPC request: {error}"),
+        )
+    }
 }
 
 /// A message the daemon sends unprompted. JSON-RPC marks these by the absent
@@ -107,6 +126,28 @@ pub const BANSHEE_OPEN_PERMISSION: &str = "banshee.open_permission";
 pub const BANSHEE_STATE_CHANGED: &str = "banshee.state_changed";
 pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
 
+/// The codes a reply carries. JSON-RPC reserves -32700 to -32600; the
+/// -32000 block is this daemon's, one code per fix a client can offer.
+pub mod rpc_code {
+    pub const PARSE: i32 = -32700;
+    pub const METHOD_NOT_FOUND: i32 = -32601;
+    pub const INVALID_PARAMS: i32 = -32602;
+    pub const INTERNAL: i32 = -32603;
+    /// Recording is unavailable: no microphone.
+    pub const MICROPHONE: i32 = -32000;
+    /// Recording is unavailable: the transcription model did not load.
+    pub const MODEL: i32 = -32002;
+    pub const HISTORY_OFF: i32 = -32003;
+    /// A recording or a question is already in progress.
+    pub const BUSY: i32 = -32004;
+    pub const DOWNLOAD_RUNNING: i32 = -32005;
+    /// Recording is unavailable: the remote listener did not start.
+    pub const PROVIDER: i32 = -32006;
+    pub const LISTENING_FAILED: i32 = -32007;
+    /// Recording is unavailable: the key file does not parse.
+    pub const KEY_FILE: i32 = -32008;
+}
+
 // What `banshee.subscribe` accepts in `events`, spelled once for both sides
 pub const EVENT_STATE: &str = "state";
 pub const EVENT_DOWNLOADS: &str = "downloads";
@@ -127,8 +168,6 @@ pub fn missing_device(status: &Value) -> Option<&str> {
 
 /// Where a remote listener sends the audio. `None` for a local one.
 pub fn remote_stt_host(status: &Value) -> Option<&str> {
-    // A daemon older than the nested shape answers a boolean at `remote.stt`,
-    // and indexing a `Value::Bool` gives `Null`, so it reads as local.
     status["remote"]["stt"]["host"].as_str()
 }
 
@@ -141,15 +180,21 @@ pub fn remote_tts_host(status: &Value) -> Option<&str> {
 /// a voice only for a backend that started, so this is false whenever the
 /// system voice took over: a key that is missing, a voice that is not named,
 /// a server the daemon cannot reach at startup, or a local Kokoro that failed
-/// to load. False from a daemon older than the field.
+/// to load.
 pub fn speaker_started(status: &Value) -> bool {
     status["remote"]["tts"]["speaker_started"].as_bool() == Some(true)
 }
 
 /// What `IOHIDCheckAccess` answered in the daemon: `granted`, `denied` or
-/// `undetermined`. `None` from a daemon older than the field.
+/// `undetermined`. `None` on every platform but macOS, which alone reports it.
 pub fn key_press_access(status: &Value) -> Option<&str> {
     status.get("key_press_access").and_then(Value::as_str)
+}
+
+/// Whether the daemon's recording pipeline is `opening`, `open` or `broken`.
+/// The daemon writes the word; this is the one place a client reads it.
+pub fn pipeline(status: &Value) -> Option<&str> {
+    status.get("pipeline").and_then(Value::as_str)
 }
 
 /// The sentence every surface shows for these two fields. Each client adds its
@@ -200,6 +245,18 @@ impl Activity {
             Activity::Idle
         }
     }
+
+    /// Beside the ranking, so a client that shows a word does not rank the
+    /// flags again to pick it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Activity::Idle => "idle",
+            Activity::Recording => "recording",
+            Activity::Speaking => "speaking",
+            Activity::Listening => "listening",
+            Activity::Busy => "busy",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,12 +271,9 @@ pub enum DownloadState {
 pub struct DownloadProgress {
     pub model: String,
     /// What the file is, in the user's words. `model` stays the filename.
-    #[serde(default)]
     pub label: String,
     /// One-based place in this run, and how many files the run has.
-    #[serde(default)]
     pub index: usize,
-    #[serde(default)]
     pub count: usize,
     pub bytes: u64,
     /// None when the server sends no `Content-Length`, so a client shows a
@@ -256,7 +310,8 @@ pub struct Blocker {
     /// Absent on a blocker that names no file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<FileRole>,
-    /// What clears it. A daemon older than this field names only a `command`.
+    /// What clears it, where anything does. Absent on a blocker the user clears
+    /// some other way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remedy: Option<Remedy>,
     pub consequence: String,
@@ -303,14 +358,7 @@ pub struct Voice {
     pub description: String,
     /// Whether the file is on this machine. A client that can fetch one offers
     /// every voice; one that cannot shows only the voices that work today.
-    /// Absent from a daemon older than this field, which listed only what it
-    /// held, so the voices it names are all installed.
-    #[serde(default = "yes")]
     pub downloaded: bool,
-}
-
-fn yes() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,7 +441,7 @@ impl KokoroTTSConfig {
 mod wire_tests {
     use super::{
         Activity, BANSHEE_STATE_CHANGED, Blocker, BlockerKind, DownloadProgress, DownloadState,
-        InputDevice, JsonRpcNotification,
+        InputDevice, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Version,
     };
 
     /// The window's `BlockerKind` union spells this one `keyfile`, so the wire
@@ -526,7 +574,6 @@ mod wire_tests {
         assert_eq!(Activity::of(&idle), Activity::Idle);
     }
 
-    // An older daemon says less than this build reads
     #[test]
     fn a_payload_missing_its_fields_reads_as_idle() {
         assert_eq!(Activity::of(&serde_json::json!({})), Activity::Idle);
@@ -597,6 +644,34 @@ mod wire_tests {
             serde_json::json!({"name": "Blue Yeti", "default": true})
         );
     }
+
+    #[test]
+    fn a_line_that_is_not_a_request_is_answered_on_a_null_id() {
+        let failure = serde_json::from_str::<JsonRpcRequest>("{\"jsonrpc\": 3").unwrap_err();
+        match JsonRpcResponse::parse_error(&failure) {
+            JsonRpcResponse::Error { error, id, .. } => {
+                assert_eq!(error.code, super::rpc_code::PARSE);
+                assert_eq!(id, None);
+            }
+            other => panic!("a parse failure is an error reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_request_names_the_protocol_version_or_does_not_parse() {
+        let request: JsonRpcRequest =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","method":"banshee.status","id":1}"#)
+                .expect("the version this daemon speaks");
+        assert_eq!(request.jsonrpc, Version::V2);
+
+        let other = serde_json::from_str::<JsonRpcRequest>(
+            r#"{"jsonrpc":"1.0","method":"banshee.status","id":1}"#,
+        );
+        assert!(
+            other.is_err(),
+            "a version the daemon does not speak is refused at the parse, not read as 2.0"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -664,15 +739,5 @@ mod remote_tests {
         assert!(speaker_started(&named(true.into())));
         assert!(!speaker_started(&named(false.into())));
         assert!(!speaker_started(&named(serde_json::Value::Null)));
-    }
-
-    // A daemon older than the nested shape answers a boolean at `remote.tts`,
-    // and indexing a `Value::Bool` gives `Null`, so both read as local.
-    #[test]
-    fn an_older_daemon_reads_as_local_on_both_sides() {
-        let older = serde_json::json!({"remote": {"stt": false, "tts": false}});
-        assert_eq!(remote_stt_host(&older), None);
-        assert_eq!(remote_tts_host(&older), None);
-        assert!(!speaker_started(&older));
     }
 }

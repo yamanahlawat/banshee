@@ -22,17 +22,18 @@ Claude Code finds a first-run bug in Banshee's own code, says out loud what it w
 
 ## Quickstart on Linux
 
-Hyprland, and Omarchy on it. Four commands:
+Hyprland, and Omarchy on it. Five commands:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/yamanahlawat/banshee/releases/latest/download/banshee-installer.sh | sh
+banshee setup
 banshee start
 banshee bind hyprland
 banshee connect claude
 ```
 
 - The installer says how to put `banshee` on your PATH. Open a new shell if the next command is not found.
-- `banshee start` downloads the models (~860 MB) the first time.
+- `banshee setup` downloads the models (~860 MB). `banshee start` then finds them and needs no restart.
 - `banshee bind hyprland` shows the block before it writes. Omarchy ships `wtype`, so nothing more is installed.
 - `banshee connect claude` shows the change before it writes.
 - The Claude Code hook needs `jq`. Restart Claude Code.
@@ -51,8 +52,8 @@ xattr -dr com.apple.quarantine /Applications/Banshee.app
 open /Applications/Banshee.app
 ```
 
-- The `xattr` line is needed until Banshee is notarised. [A direct download](docs/install.md#macos-without-homebrew) needs none.
-- Banshee downloads the models (~860 MB) and starts.
+- The `xattr` line is needed until Banshee is notarised, and Homebrew marks every upgrade too. The `banshee` command offers to clear it when you next run it. [A direct download](docs/install.md#macos-without-homebrew) needs none.
+- The window asks before it downloads the models (~860 MB), and lets you pick the speech model first.
 - Approve the **Microphone** and **Accessibility** grants. Without them Banshee cannot record or type.
 - **Hold `Right Option`**, speak, let go. The text is typed into the app you are focused on.
 - `banshee status` names the fix, and changes nothing itself.
@@ -68,7 +69,7 @@ banshee connect claude
 
 ## The keys
 
-The defaults, as `banshee bind hyprland` writes them:
+The defaults. `banshee bind hyprland` writes the Linux column:
 
 |                       | Linux, on Hyprland | macOS                    | What happens                                            |
 | --------------------- | ------------------ | ------------------------ | ------------------------------------------------------- |
@@ -76,7 +77,7 @@ The defaults, as `banshee bind hyprland` writes them:
 | **Tell your agent**   | `Super` + `F9`     | `banshee tell "..."`     | Your agent changes your desktop, and speaks the result. |
 | **Keep, do not type** | `Shift` + `F9`     | `Shift` + `Right Option` | `banshee listen` prints it.                             |
 
-- **The key is yours.** `banshee bind hyprland` asks for it. The [demo videos](docs/demos.md) use `F5`.
+- **The key is yours.** On Linux, `banshee bind hyprland` asks for it. On macOS, run `banshee config set audio.hotkey LeftOption`, then `banshee start`. The [Linux demo videos](docs/demos.md) use `F5`.
 - **Hold the key** while you speak, or [tap it instead](docs/configuration.md#the-hotkey).
 - **Tell takes the first free modifier,** so a key that already holds `Super` gets `Ctrl` instead. [What tell does](docs/cli.md#telling-your-agent-to-change-the-desktop)
 

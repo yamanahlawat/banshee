@@ -1,10 +1,11 @@
 use arboard::Clipboard;
+use banshee_common::error::BansheeError;
 #[cfg(not(target_os = "macos"))]
 use enigo::{
     Direction::{Click, Press, Release},
     Enigo, Key, Keyboard, Settings,
 };
-use std::{error::Error, thread, time::Duration};
+use std::{thread, time::Duration};
 
 const PASTE_SETTLE: Duration = Duration::from_millis(50);
 
@@ -16,7 +17,7 @@ pub fn is_wayland() -> bool {
         || std::env::var("WAYLAND_DISPLAY").is_ok()
 }
 
-pub fn type_text(text: &str) -> Result<(), Box<dyn Error>> {
+pub fn type_text(text: &str) -> Result<(), BansheeError> {
     #[cfg(all(unix, not(target_os = "macos")))]
     if is_wayland() {
         return type_text_wayland(text);
@@ -28,10 +29,9 @@ pub fn type_text(text: &str) -> Result<(), Box<dyn Error>> {
     ensure_accessibility()?;
 
     let mut clipboard = Clipboard::new().map_err(|e| {
-        format!(
-            "Clipboard access failed! Please grant permission in System Settings: {}",
-            e
-        )
+        BansheeError::Other(format!(
+            "Clipboard access failed! Please grant permission in System Settings: {e}"
+        ))
     })?;
 
     let old_clipboard = clipboard.get_text().ok();
@@ -46,15 +46,14 @@ pub fn type_text(text: &str) -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(target_os = "macos")]
-fn ensure_accessibility() -> Result<(), Box<dyn Error>> {
+fn ensure_accessibility() -> Result<(), BansheeError> {
     use crate::permissions::{ACCESSIBILITY, accessibility_granted};
 
     if !accessibility_granted() {
-        return Err(format!(
+        return Err(BansheeError::Other(format!(
             "Accessibility permission missing! To type, {}",
             ACCESSIBILITY.fix
-        )
-        .into());
+        )));
     }
     Ok(())
 }
@@ -63,7 +62,7 @@ fn ensure_accessibility() -> Result<(), Box<dyn Error>> {
 // synthetic Command press desynchronises the system's modifier state, and the
 // next press of that modifier then arrives as a release with no press.
 #[cfg(target_os = "macos")]
-fn send_paste() -> Result<(), Box<dyn Error>> {
+fn send_paste() -> Result<(), BansheeError> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
@@ -71,10 +70,10 @@ fn send_paste() -> Result<(), Box<dyn Error>> {
     const KEY_V: u16 = 0x09;
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-        .map_err(|_| "Could not open an event source to paste with")?;
+        .map_err(|_| BansheeError::Other("Could not open an event source to paste with".into()))?;
     for key_down in [true, false] {
         let event = CGEvent::new_keyboard_event(source.clone(), KEY_V, key_down)
-            .map_err(|_| "Could not build the paste keystroke")?;
+            .map_err(|_| BansheeError::Other("Could not build the paste keystroke".into()))?;
         event.set_flags(CGEventFlags::CGEventFlagCommand);
         event.post(CGEventTapLocation::HID);
     }
@@ -82,12 +81,18 @@ fn send_paste() -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn send_paste() -> Result<(), Box<dyn Error>> {
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("Could not reach the display to type with! {e}"))?;
-    enigo.key(Key::Control, Press)?;
-    enigo.key(Key::Unicode('v'), Click)?;
-    enigo.key(Key::Control, Release)?;
+fn send_paste() -> Result<(), BansheeError> {
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
+        BansheeError::Other(format!("Could not reach the display to type with! {e}"))
+    })?;
+    let key = |enigo: &mut Enigo, key, direction| {
+        enigo
+            .key(key, direction)
+            .map_err(|e| BansheeError::Other(e.to_string()))
+    };
+    key(&mut enigo, Key::Control, Press)?;
+    key(&mut enigo, Key::Unicode('v'), Click)?;
+    key(&mut enigo, Key::Control, Release)?;
     Ok(())
 }
 
@@ -115,11 +120,13 @@ pub(crate) fn resolve_wayland_typer(
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn no_typer_error() -> Box<dyn Error> {
+fn no_typer_error() -> BansheeError {
     // Never Ok here: the caller plays the ready cue on Ok.
-    "could not type into the focused window on wayland (no typer on PATH); \
-     install 'wtype' (or 'ydotool'). the transcription is still in `banshee history`"
-        .into()
+    BansheeError::Other(
+        "could not type into the focused window on wayland (no typer on PATH); \
+         install 'wtype' (or 'ydotool'). the transcription is still in `banshee history`"
+            .into(),
+    )
 }
 
 // GNOME/Mutter denies wtype the virtual-keyboard protocol it needs, so the
@@ -128,7 +135,7 @@ fn no_typer_error() -> Box<dyn Error> {
 fn type_with(
     resolved: &[(std::path::PathBuf, &'static [&'static str])],
     text: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BansheeError> {
     use std::process::Command;
 
     let mut attempts = Vec::new();
@@ -152,16 +159,15 @@ fn type_with(
     if attempts.is_empty() {
         return Err(no_typer_error());
     }
-    Err(format!(
+    Err(BansheeError::Other(format!(
         "could not type into the focused window on wayland ({}); \
          install 'wtype' (or 'ydotool'). the transcription is still in `banshee history`",
         attempts.join("; ")
-    )
-    .into())
+    )))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn type_text_wayland(text: &str) -> Result<(), Box<dyn Error>> {
+fn type_text_wayland(text: &str) -> Result<(), BansheeError> {
     let path = crate::connect::resolved_path();
     type_with(&resolve_wayland_typers(&path), text)
 }
@@ -174,8 +180,10 @@ fn type_text_wayland(text: &str) -> Result<(), Box<dyn Error>> {
 const CLIPBOARD_RESTORE_DELAY: Duration = Duration::from_millis(500);
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]
-fn stage(mut clipboard: Clipboard, text: &str, old: Option<String>) -> Result<(), Box<dyn Error>> {
-    clipboard.set_text(text.to_string())?;
+fn stage(mut clipboard: Clipboard, text: &str, old: Option<String>) -> Result<(), BansheeError> {
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|e| BansheeError::Other(e.to_string()))?;
 
     // Restore off the hot path so the ready cue fires without waiting.
     if let Some(old) = old {
@@ -273,7 +281,10 @@ mod tests {
         let first = write_script("first", 1, "no virtual keyboard protocol");
         let second = write_script("second", 0, "");
 
-        let resolved = [(first.clone(), WAYLAND_TYPERS[0].1), (second.clone(), WAYLAND_TYPERS[1].1)];
+        let resolved = [
+            (first.clone(), WAYLAND_TYPERS[0].1),
+            (second.clone(), WAYLAND_TYPERS[1].1),
+        ];
         let result = type_with(&resolved, "hello");
 
         let _ = std::fs::remove_dir_all(first.parent().unwrap());
@@ -290,7 +301,10 @@ mod tests {
         let first = write_script("alpha", 1, "boom-alpha");
         let second = write_script("beta", 1, "boom-beta");
 
-        let resolved = [(first.clone(), WAYLAND_TYPERS[0].1), (second.clone(), WAYLAND_TYPERS[1].1)];
+        let resolved = [
+            (first.clone(), WAYLAND_TYPERS[0].1),
+            (second.clone(), WAYLAND_TYPERS[1].1),
+        ];
         let message = type_with(&resolved, "hello")
             .expect_err("two failing typers must not report success")
             .to_string();
@@ -307,7 +321,7 @@ mod tests {
 
 // The caller's handle only ever read; ownership belongs to the thread below.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn stage(_clipboard: Clipboard, text: &str, old: Option<String>) -> Result<(), Box<dyn Error>> {
+fn stage(_clipboard: Clipboard, text: &str, old: Option<String>) -> Result<(), BansheeError> {
     use arboard::SetExtLinux;
     use std::time::Instant;
 

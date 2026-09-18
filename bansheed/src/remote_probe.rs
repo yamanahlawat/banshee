@@ -1,7 +1,7 @@
 use reqwest::blocking::Client;
 
 use crate::credentials;
-use crate::speech_to_text::remote::openai_compatible::CONNECT_TIMEOUT;
+use crate::remote::CONNECT_TIMEOUT;
 
 /// What one remote server says when it is asked whether the key works.
 #[derive(Debug, PartialEq)]
@@ -50,7 +50,7 @@ fn ask(base_url: &str, api_key: &str) -> Probe {
 #[cfg(test)]
 mod tests {
     use super::{Probe, probe};
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
 
     /// Shaped like a key and issued by nobody.
@@ -66,22 +66,13 @@ mod tests {
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = Vec::new();
-            let mut chunk = [0u8; 4096];
-            // A GET carries no body, so the blank line ends the request
-            while !buffer.windows(4).any(|window| window == b"\r\n\r\n") {
-                let read = stream.read(&mut chunk).unwrap();
-                if read == 0 {
-                    break;
-                }
-                buffer.extend_from_slice(&chunk[..read]);
-            }
+            let request = crate::test_support::read_request(&mut stream);
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(response.as_bytes()).unwrap();
-            String::from_utf8_lossy(&buffer).to_string()
+            request
         });
         (base_url, handle)
     }

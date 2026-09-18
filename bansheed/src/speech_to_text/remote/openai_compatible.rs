@@ -5,12 +5,11 @@ use banshee_common::error::BansheeError;
 use reqwest::blocking::{Client, multipart};
 
 use crate::config::{RemoteSttConfig, STTPreset};
-use crate::credentials;
+use crate::credentials::{self, RemoteKey};
 use crate::speech_to_text::{SAMPLE_RATE, Speech, Transcriber};
 
 use super::wav::pcm16_wav;
 
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One OpenAI-compatible transcription server. Blocking, because the listener
@@ -33,21 +32,6 @@ fn prompt_for(vocabulary: &[String]) -> Option<String> {
     (!vocabulary.is_empty()).then(|| vocabulary.join(", "))
 }
 
-/// Built on a thread of its own, and joined, because reqwest's blocking builder
-/// makes and drops a temporary runtime, and tokio refuses that drop on a worker.
-/// The daemon selects the transcriber on one.
-fn build_client() -> Result<Client, BansheeError> {
-    std::thread::spawn(|| {
-        Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-    })
-    .join()
-    .map_err(|_| BansheeError::Other("the client for the remote listener panicked".to_string()))?
-    .map_err(|error| BansheeError::Other(error.to_string()))
-}
-
 impl RemoteTranscriber {
     pub fn new(
         remote: &RemoteSttConfig,
@@ -56,7 +40,7 @@ impl RemoteTranscriber {
         speech: Speech,
     ) -> Result<Self, BansheeError> {
         Ok(Self {
-            client: build_client()?,
+            client: crate::remote::build_client(REQUEST_TIMEOUT, "listener")?,
             base_url: remote.base_url.trim_end_matches('/').to_string(),
             model: remote.model.clone(),
             api_key,
@@ -77,27 +61,6 @@ impl RemoteTranscriber {
     /// The name a person recognises, read off the URL.
     fn host(&self) -> String {
         crate::config::host_of(&self.base_url)
-    }
-}
-
-/// What a non-success answer leaves in the daemon log: one line, with every
-/// key-shaped run replaced. `said` is nothing for a body that was never read.
-fn log_line(status: reqwest::StatusCode, said: Option<&str>, api_key: &str) -> String {
-    match said {
-        Some(body) => format!(
-            "banshee: the remote listener answered {status}: {}",
-            credentials::one_line(&credentials::redacted(body, api_key))
-        ),
-        None => format!("banshee: the remote listener answered {status}"),
-    }
-}
-
-fn describe_status(status: reqwest::StatusCode) -> String {
-    match status.as_u16() {
-        401 | 403 => "the remote listener refused the key".to_string(),
-        404 => "the remote listener has no such model or path".to_string(),
-        429 => "the remote listener asked to slow down".to_string(),
-        code => format!("the remote listener answered {code}"),
     }
 }
 
@@ -143,12 +106,18 @@ impl Transcriber for RemoteTranscriber {
         if !status.is_success() {
             // The body may name the fault; it goes to the log, never to a person
             let said = credentials::may_read_body(status).then(|| credentials::read_body(response));
-            eprintln!("{}", log_line(status, said.as_deref(), &self.api_key));
-            return Err(BansheeError::Transcription(describe_status(status)));
+            log::warn!(
+                "{}",
+                crate::remote::log_line(RemoteKey::Stt, status, said.as_deref(), &self.api_key)
+            );
+            return Err(BansheeError::Transcription(crate::remote::describe_status(
+                RemoteKey::Stt,
+                status,
+            )));
         }
         let reply: Reply = response.json().map_err(|error| {
-            eprintln!(
-                "banshee: {} answered something that was not a transcription: {error}",
+            log::error!(
+                "{} answered something that was not a transcription: {error}",
                 self.host()
             );
             BansheeError::Transcription(
@@ -176,11 +145,8 @@ mod tests {
     use super::RemoteTranscriber;
     use crate::config::RemoteSttConfig;
     use crate::speech_to_text::{Speech, Transcriber};
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
-
-    /// Shaped like a key and issued by nobody.
-    const FAKE_KEY: &str = "sk-proj-7Qm4Xb2vR8tL1yWn3cZa";
 
     struct Served {
         request: String,
@@ -196,40 +162,13 @@ mod tests {
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = Vec::new();
-            let mut chunk = [0u8; 4096];
-            let mut content_length = None;
-            let mut header_end = None;
-            loop {
-                let read = stream.read(&mut chunk).unwrap();
-                if read == 0 {
-                    break;
-                }
-                buffer.extend_from_slice(&chunk[..read]);
-                if header_end.is_none()
-                    && let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n")
-                {
-                    header_end = Some(end + 4);
-                    let head = String::from_utf8_lossy(&buffer[..end]).to_lowercase();
-                    content_length = head
-                        .lines()
-                        .find_map(|line| line.strip_prefix("content-length:"))
-                        .and_then(|value| value.trim().parse::<usize>().ok());
-                }
-                if let (Some(end), Some(length)) = (header_end, content_length)
-                    && buffer.len() >= end + length
-                {
-                    break;
-                }
-            }
+            let request = crate::test_support::read_request(&mut stream);
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(response.as_bytes()).unwrap();
-            Served {
-                request: String::from_utf8_lossy(&buffer).to_string(),
-            }
+            Served { request }
         });
         (base_url, handle)
     }
@@ -289,60 +228,6 @@ mod tests {
             "{request}"
         );
         assert!(!request.contains("name=\"language\""));
-    }
-
-    #[test]
-    fn a_body_that_was_never_read_leaves_no_body_in_the_log() {
-        use reqwest::StatusCode;
-        assert_eq!(
-            super::log_line(StatusCode::UNAUTHORIZED, None, FAKE_KEY),
-            "banshee: the remote listener answered 401 Unauthorized"
-        );
-        let gateway = super::log_line(
-            StatusCode::BAD_GATEWAY,
-            Some("the upstream model is down"),
-            FAKE_KEY,
-        );
-        assert!(gateway.contains("the upstream model is down"), "{gateway}");
-    }
-
-    // The daemon log is a surface no key may reach. A server that echoes the
-    // key it was sent, or any other key, is redacted before the line is made.
-    #[test]
-    fn a_key_a_server_echoes_never_reaches_the_log() {
-        let body = format!(
-            r#"{{"error":"/audio/transcriptions: Invalid model name passed in model={FAKE_KEY}. Call `/v1/models`"}}"#
-        );
-        let line = super::log_line(
-            reqwest::StatusCode::BAD_REQUEST,
-            Some(&body),
-            "gsk_8Hn2Qv6Lp0Rt4Ws9",
-        );
-        assert!(!line.contains("sk-proj"), "{line}");
-        assert!(line.contains("model=<redacted>"), "{line}");
-        assert!(line.contains("Invalid model name"), "{line}");
-
-        let held = super::log_line(
-            reqwest::StatusCode::BAD_REQUEST,
-            Some("kokoro-9f3c2ab7d14e5b6079f3 is not a model"),
-            "kokoro-9f3c2ab7d14e5b6079f3",
-        );
-        assert!(!held.contains("kokoro-9f3c"), "{held}");
-        assert!(held.contains("<redacted> is not a model"), "{held}");
-    }
-
-    // One answer leaves one line, so a body cannot forge a line of its own in
-    // the daemon log.
-    #[test]
-    fn a_body_that_arrives_in_lines_leaves_one_line() {
-        let line = super::log_line(
-            reqwest::StatusCode::BAD_GATEWAY,
-            Some("no such model\nbanshee: the listener is fine and idle"),
-            FAKE_KEY,
-        );
-        assert!(!line.chars().any(char::is_control), "{line}");
-        assert_eq!(line.matches("banshee:").count(), 2, "{line}");
-        assert!(line.lines().count() == 1, "{line}");
     }
 
     #[test]

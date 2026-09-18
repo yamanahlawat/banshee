@@ -72,12 +72,6 @@ pub enum ConsumerCommand {
     Retune(Vec<String>),
     Speak(crate::speech_to_text::Speech),
     Reload(crate::config::STTPreset),
-    // A new stream opened, so the old ring is dead. The rate comes with it:
-    // devices do not share one.
-    Rebind {
-        consumer: ringbuf::HeapCons<f32>,
-        sample_rate: u32,
-    },
     Shutdown,
 }
 
@@ -118,12 +112,43 @@ struct TranscriptionRing {
 /// Why the recording pipeline did not start. A missing mic, a missing model, an
 /// unreadable key file and a remote listener that will not answer need different
 /// fixes, so they stay distinct out to the RPC error code.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecordingError {
     Microphone(String),
     Model(String),
     Provider(String),
     KeyFile(String),
+}
+
+/// What the recording pipeline is. The daemon builds it on its own thread and
+/// answers clients before it exists, so "not broken" is not the same as "open".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pipeline {
+    Opening,
+    Open,
+    Broken(RecordingError),
+}
+
+impl Pipeline {
+    /// The word this answer takes on the wire, so a rename is a protocol change.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Pipeline::Opening => "opening",
+            Pipeline::Open => "open",
+            Pipeline::Broken(_) => "broken",
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        matches!(self, Pipeline::Open)
+    }
+
+    pub fn fault(&self) -> Option<&RecordingError> {
+        match self {
+            Pipeline::Broken(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for RecordingError {
@@ -273,7 +298,7 @@ pub struct DaemonState {
     pending: Mutex<std::collections::BTreeSet<String>>,
     // Why recording is off, when it is. The microphone half clears when the
     // watchdog rebinds; the model half still needs a restart.
-    recording_error: RwLock<Option<RecordingError>>,
+    pipeline: RwLock<Pipeline>,
     recording: AtomicU8,
     started_at: Instant,
     db_connection: Mutex<Option<rusqlite::Connection>>,
@@ -298,6 +323,9 @@ pub struct DaemonState {
     device_changes: watch::Sender<u64>,
     downloads: broadcast::Sender<DownloadProgress>,
     downloading: AtomicBool,
+    /// Set when the daemon leaves to be started again, so the supervisor reads
+    /// a nonzero exit rather than a stop it would not undo.
+    restart_wanted: AtomicBool,
     speech: Arc<SpeechPlayer>,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
     cues: Cues,
@@ -315,6 +343,8 @@ pub struct DaemonState {
     // Zero means it has never run, which reads as stalled.
     capture_tick: AtomicU64,
     shutdown: tokio::sync::Notify,
+    // Handed in, so a test decides what is on disk.
+    models_dir: std::path::PathBuf,
 }
 
 impl DaemonState {
@@ -325,9 +355,11 @@ impl DaemonState {
         speaker: crate::text_to_speech::Speaker,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
         cues: Cues,
+        models_dir: std::path::PathBuf,
     ) -> Self {
         let wanted_downloads = crate::models::download::wanted(&config);
         Self {
+            models_dir,
             version: env!("CARGO_PKG_VERSION"),
             stt_model: RwLock::new(crate::models::stt_file(&config)),
             vad_model: crate::models::VAD_MODEL,
@@ -342,7 +374,7 @@ impl DaemonState {
             running_config: Arc::clone(&config),
             config: RwLock::new(config),
             pending: Mutex::new(std::collections::BTreeSet::new()),
-            recording_error: RwLock::new(None),
+            pipeline: RwLock::new(Pipeline::Opening),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
             db_connection: Mutex::new(db_connection),
@@ -360,6 +392,7 @@ impl DaemonState {
             device_changes: watch::channel(0).0,
             downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
             downloading: AtomicBool::new(false),
+            restart_wanted: AtomicBool::new(false),
             speech: Arc::new(speech),
             commands,
             cues,
@@ -375,7 +408,7 @@ impl DaemonState {
     pub fn record_start(&self, action: TranscribeTarget) -> bool {
         // The hotkey arrives here too, so a deaf daemon answers a press with the
         // error cue. Arming a session nothing can transcribe would be silent.
-        if self.recording_error.read().unwrap().is_some() {
+        if !self.pipeline().is_open() {
             self.cues.send(Cue::Error);
             return false;
         }
@@ -398,7 +431,7 @@ impl DaemonState {
             self.pending_target
                 .store(action.as_u8(), std::sync::atomic::Ordering::Release);
             self.cues.send(Cue::RecordStart);
-            println!("Recording started...");
+            log::info!("Recording started...");
             true
         } else {
             false
@@ -409,7 +442,7 @@ impl DaemonState {
     // unconditionally.
     pub fn record_stop(&self) {
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
-            println!("Recording stopped");
+            log::info!("Recording stopped");
             self.cues.send(Cue::RecordStop);
             let action = TranscribeTarget::from_u8(
                 self.pending_target
@@ -440,7 +473,7 @@ impl DaemonState {
     // push-to-talk: the start cue was already noise, a second cue doubles it.
     pub fn record_cancel(&self) {
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
-            println!("Recording cancelled");
+            log::info!("Recording cancelled");
             let _ = self.commands.send(ConsumerCommand::Discard);
         } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
             // The armed session keeps its audio; only the manual hold ends.
@@ -470,7 +503,7 @@ impl DaemonState {
         if (self.started_at.elapsed().as_millis() as u64) < deadline {
             return false;
         }
-        eprintln!(
+        log::warn!(
             "Push-to-talk ran past {}s with no stop; releasing the microphone.",
             MAX_PUSH_TO_TALK.as_secs()
         );
@@ -651,6 +684,20 @@ impl DaemonState {
         let _ = self.downloads.send(progress);
     }
 
+    pub fn is_downloading(&self) -> bool {
+        self.downloading.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn request_restart(&self) {
+        self.restart_wanted
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn restart_wanted(&self) -> bool {
+        self.restart_wanted
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Takes the download slot, or `None` when one is already running. The
     /// slot is released when the returned value drops.
     pub fn start_downloading(self: &Arc<Self>) -> Option<DownloadSlot> {
@@ -681,6 +728,10 @@ impl DaemonState {
 
     pub fn uptime(&self) -> std::time::Duration {
         self.started_at.elapsed()
+    }
+
+    pub fn models_dir(&self) -> &std::path::Path {
+        &self.models_dir
     }
 
     pub fn version(&self) -> &'static str {
@@ -759,23 +810,18 @@ impl DaemonState {
         self.device_changes.subscribe()
     }
 
-    pub fn recording_error(&self) -> Option<RecordingError> {
-        self.recording_error.read().unwrap().clone()
+    pub fn pipeline(&self) -> Pipeline {
+        self.pipeline.read().unwrap().clone()
     }
 
-    pub fn set_recording_error(&self, reason: RecordingError) {
-        *self.recording_error.write().unwrap() = Some(reason);
-    }
-
-    pub fn clear_recording_error(&self) {
-        *self.recording_error.write().unwrap() = None;
+    pub fn set_pipeline(&self, state: Pipeline) {
+        *self.pipeline.write().unwrap() = state;
     }
 
     /// Takes the armed-listening lock for `ask_user`. Shares the availability
     /// gate with `record_start`, so no caller can arm a mic that cannot record.
     pub fn arm_for_ask(&self) -> bool {
-        self.recording_error.read().unwrap().is_none()
-            && self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
+        self.pipeline().is_open() && self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
     }
 
     /// The voice the speech backend actually loaded, which `config.toml` may no

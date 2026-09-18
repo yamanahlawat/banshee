@@ -1,5 +1,13 @@
 /// A 16-bit mono PCM WAV around the pipeline's `f32` samples: 44 bytes of
 /// header and one conversion.
+/// The scale a 16-bit sample decodes by. Full range, so the most negative
+/// sample survives; `pcm16_wav` encodes by `i16::MAX` so that `+1.0` cannot
+/// overflow, and that asymmetry is deliberate.
+#[cfg(test)]
+pub fn pcm16_samples(samples: impl Iterator<Item = i16>) -> Vec<f32> {
+    samples.map(crate::audio::utils::from_pcm16).collect()
+}
+
 pub fn pcm16_wav(audio: &[f32], sample_rate: u32) -> Vec<u8> {
     let data_len = (audio.len() * 2) as u32;
     let mut out = Vec::with_capacity(44 + data_len as usize);

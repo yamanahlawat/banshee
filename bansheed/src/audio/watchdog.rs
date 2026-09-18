@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use cpal::Stream;
 
 use crate::audio::{already_serving, default_input_name, follows_os_default, open_capture, select};
-use crate::state::{ConsumerCommand, DaemonState, RecordingError};
+use crate::state::{DaemonState, RecordingError};
 
 // Reading the liveness stamp is one atomic load, so this can be frequent
 const TICK: Duration = Duration::from_millis(500);
@@ -87,7 +87,7 @@ impl Binding {
         };
         self.open_device = Some(open);
         state.set_missing_device(missing);
-        state.clear_recording_error();
+        state.set_pipeline(crate::state::Pipeline::Open);
     }
 
     /// Nothing records. `recording_error` carries the whole fault, so
@@ -97,18 +97,54 @@ impl Binding {
         self.open_device = None;
         state.set_audio_device(None);
         state.set_missing_device(None);
-        state.set_recording_error(RecordingError::Microphone(reason));
+        state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
+            reason,
+        )));
     }
 
     /// Recording is unavailable only when the stream this tick holds is not
     /// delivering, so a live stream keeps every fact it has. The caller logs
     /// the case it reports.
-    fn attempt_failed(&mut self, state: &DaemonState, stalled: bool, reason: &str) -> bool {
+    fn attempt_failed(
+        &mut self,
+        state: &DaemonState,
+        stalled: bool,
+        reason: &str,
+    ) -> AttemptFailure {
         if !stalled {
-            return false;
+            return AttemptFailure::KeptTheLiveStream;
         }
+        let reported = matches!(
+            state.pipeline().fault(),
+            Some(RecordingError::Microphone(before)) if before == reason
+        );
         self.fault(state, reason.to_string());
-        true
+        if reported {
+            AttemptFailure::SameFault
+        } else {
+            AttemptFailure::NewFault
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AttemptFailure {
+    KeptTheLiveStream,
+    /// Recording is unavailable, for a reason the log has not seen.
+    NewFault,
+    /// Recording is still unavailable, for the reason already reported.
+    SameFault,
+}
+
+impl AttemptFailure {
+    fn log(&self, reason: &str) {
+        match self {
+            AttemptFailure::NewFault => log::error!("Recording is unavailable: {reason}"),
+            AttemptFailure::KeptTheLiveStream => {
+                log::warn!("Capture keeps the device it has: {reason}")
+            }
+            AttemptFailure::SameFault => {}
+        }
     }
 }
 
@@ -130,12 +166,14 @@ impl Handle {
 pub fn spawn(
     state: Arc<DaemonState>,
     stream: Stream,
+    capture: Arc<crate::hotkey::Capture>,
     open: String,
     missing: Option<String>,
 ) -> Handle {
     let (stop_tx, stop_rx) = mpsc::channel();
     let thread = thread::spawn(move || {
         let mut stream = stream;
+        let shared = capture;
         let mut last_wanted = state.wanted_device();
         let mut binding = Binding::seeded(last_wanted.clone(), open, missing);
         let mut next_scan = Instant::now();
@@ -188,11 +226,9 @@ pub fn spawn(
             let selection = match select(&wanted_now) {
                 Ok(selection) => selection,
                 Err(reason) => {
-                    if binding.attempt_failed(&state, stalled, &reason) {
-                        eprintln!("Recording is unavailable: {reason}");
-                    } else {
-                        eprintln!("Capture keeps the device it has: {reason}");
-                    }
+                    binding
+                        .attempt_failed(&state, stalled, &reason)
+                        .log(&reason);
                     continue;
                 }
             };
@@ -206,9 +242,11 @@ pub fn spawn(
 
             match open_capture(Arc::clone(&state), &selection) {
                 Ok(capture) => {
-                    // Sent only after play() succeeded, so the pipeline is
-                    // never handed a ring whose stream failed to play
-                    let _ = state.commands().send(ConsumerCommand::Rebind {
+                    // Written only after play() succeeded, so nothing reads a
+                    // ring whose stream failed to play. Written rather than
+                    // sent: a question that is already listening holds the
+                    // consumer thread, and a command would wait for it.
+                    shared.swap(crate::hotkey::CaptureSource {
                         consumer: capture.consumer,
                         sample_rate: capture.sample_rate,
                     });
@@ -219,9 +257,9 @@ pub fn spawn(
                     // not write a line every RETRY
                     match &selection.missing {
                         Some(name) => {
-                            println!("Capture rebound to {opened}, still waiting for {name}")
+                            log::info!("Capture rebound to {opened}, still waiting for {name}")
                         }
-                        None => println!("Capture rebound to {opened}"),
+                        None => log::info!("Capture rebound to {opened}"),
                     }
                     binding.serving(&state, wanted_now, opened, selection.missing);
                 }
@@ -230,14 +268,9 @@ pub fn spawn(
                     // A fault clears the device name too: open_capture names
                     // the device only after play() succeeds, so the old name
                     // would otherwise stand
-                    if binding.attempt_failed(&state, stalled, &reason) {
-                        eprintln!("Could not open {}: {reason}", selection.open);
-                    } else {
-                        eprintln!(
-                            "Capture keeps the device it has, {} did not open: {reason}",
-                            selection.open
-                        );
-                    }
+                    binding
+                        .attempt_failed(&state, stalled, &reason)
+                        .log(&reason);
                 }
             }
         }

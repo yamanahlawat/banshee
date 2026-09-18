@@ -1,16 +1,24 @@
-// RightControl is absent because rdev never maps it on macOS.
-const MODIFIERS: Record<string, string> = {
+// Which browser code carries which key is a browser fact, so it lives here.
+// Which of them bind is the daemon's, and arrives as `bindable_modifiers`:
+// the set differs per platform and a table of our own drifted from it.
+const NAMES: Record<string, string> = {
   AltRight: 'RightOption',
   AltLeft: 'LeftOption',
   ControlLeft: 'LeftControl',
+  ControlRight: 'RightControl',
   MetaLeft: 'LeftCommand',
   MetaRight: 'RightCommand',
 };
 
+function named(code: string, bindable: readonly string[]): string | null {
+  const name = NAMES[code];
+  return name !== undefined && bindable.includes(name) ? name : null;
+}
+
 // A modifier can be the whole binding or the head of a chord. Only its
 // release tells which, so a caller waits before it commits one.
-export function isModifier(code: string): boolean {
-  return code in MODIFIERS;
+export function isModifier(code: string, bindable: readonly string[]): boolean {
+  return named(code, bindable) !== null;
 }
 
 // The daemon reads a hotkey with no spaces, and a reader needs them.
@@ -21,18 +29,23 @@ export function humanize(hotkey: string): string {
     .join(' + ');
 }
 
-export function hotkeyFrom(event: {
-  code: string;
-  ctrlKey: boolean;
-  altKey: boolean;
-  metaKey: boolean;
-  shiftKey?: boolean;
-}): string | null {
+export function hotkeyFrom(
+  event: {
+    code: string;
+    ctrlKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+    shiftKey?: boolean;
+  },
+  bindable: readonly string[],
+): string | null {
   // The daemon reserves every Shift form, and a chord that silently drops it
   // would bind a key the user never pressed.
   if (event.shiftKey === true) return null;
-  const modifier = MODIFIERS[event.code];
-  if (modifier) return modifier;
+  const modifier = named(event.code, bindable);
+  if (modifier !== null) return modifier;
+  // A modifier the daemon refuses is not a main key either.
+  if (event.code in NAMES) return null;
 
   const main = /^F([1-9]|1[0-2])$/.test(event.code)
     ? event.code

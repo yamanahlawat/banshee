@@ -13,9 +13,9 @@ pub enum CommandType {
     Start,
     /// Stops the running daemon
     Stop,
-    /// Shows the menu bar icon now and at every login (macOS)
+    /// Shows the tray icon now and at every login
     Tray {
-        /// Stop the icon and remove its launch agent
+        /// Stop the icon and remove its start-at-login service
         #[clap(long)]
         uninstall: bool,
     },
@@ -63,12 +63,21 @@ pub enum CommandType {
     History,
     /// Clears all transcriptions in the database
     ClearHistory,
-    /// Runs the daemon in the foreground (what the launch agent executes)
+    /// Runs the daemon in the foreground (what the start-at-login service executes)
     Serve,
-    /// Manage the start-at-login service (macOS launchd)
+    /// Manage the start-at-login service: launchd on macOS, systemd on Linux
     Service {
         #[clap(subcommand)]
         action: ServiceAction,
+    },
+    /// Remove Banshee: stops it, takes it out of login, and names what owns the rest
+    Uninstall {
+        /// Also delete ~/.banshee: the models, the history and the keys
+        #[clap(long)]
+        data: bool,
+        /// Remove without asking
+        #[clap(long)]
+        yes: bool,
     },
     /// Connect a coding agent to Banshee: Antigravity, Claude Code, Codex, Cursor, OpenCode or Pi
     Connect {

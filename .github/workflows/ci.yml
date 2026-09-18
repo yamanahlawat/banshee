@@ -36,6 +36,16 @@ jobs:
           echo "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3  $HOME/.banshee/models/silero_vad.onnx" | shasum -a 256 -c -
       - run: cargo test
 
+  # The advisory database, every crate's licence and every crate's source,
+  # against deny.toml. Ubuntu, because the graph resolves for every target.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   # The window's suite is the only check on the Svelte half, including the
   # accessibility gate. Ubuntu, because none of it touches the app bundle.
   window:
@@ -56,6 +66,9 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm run check
+      # integrations/pi/banshee.ts is compiled into the daemon by connect.rs and
+      # written to the user's Pi config, so a fault in it ships in a release.
+      - run: npm run check:pi
       - run: npm test
       - run: npm run check:bundle
 
@@ -66,9 +79,13 @@ jobs:
         with:
           persist-credentials: false
       # libgtk-3-dev is for the tray, which links gtk on every platform but macOS.
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxtst-dev libxi-dev libxdo-dev libgtk-3-dev
+      # espeak-ng is the out-of-vocabulary fallback the speaker uses, and its
+      # test skips without it.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxtst-dev libxi-dev libxdo-dev libgtk-3-dev espeak-ng
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # rustfmt reads no platform, so one job gates the whole workspace.
+      - run: cargo fmt --all --check
       # The same pinned model the macos job checks; see the reason there.
       - run: |
           mkdir -p ~/.banshee/models
@@ -79,6 +96,9 @@ jobs:
       # This job runs the daemon's own suite, which no job ran on Linux before.
       - run: cargo clippy --workspace --all-targets --exclude banshee-app -- -D warnings
       - run: cargo test --workspace --exclude banshee-app
+        env:
+          # A fixture this job installs must not let a test pass by skipping.
+          BANSHEE_REQUIRE_FIXTURES: "1"
 
   # The window on Linux. Split from `linux` so that job stays fast: only this
   # one pays for the WebKitGTK stack and a frontend build.

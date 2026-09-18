@@ -3,7 +3,7 @@ import { history, type HistoryRow } from './tauri';
 
 // A refresh that cannot find the row it last held reads the whole table again,
 // so too few here is not a wrong answer.
-export const REFRESH_ROWS = 14;
+const REFRESH_ROWS = 14;
 
 // The daemon answers oldest first on both the limited and unlimited paths.
 export function newestFirst(rows: HistoryRow[]): HistoryRow[] {

@@ -1,6 +1,8 @@
 use std::io;
 use std::process::{Child, Command};
 
+use banshee_common::error::BansheeError;
+
 #[cfg(not(target_os = "macos"))]
 use crate::text_to_speech::local::oov::{espeak_install_hint, resolve_espeak};
 use crate::text_to_speech::{ActiveUtterance, TtsBackend};
@@ -14,9 +16,13 @@ pub(crate) const VOICE_NEEDS_KOKORO: &str =
     "choosing a voice needs the Kokoro backend, which is not loaded";
 
 impl TtsBackend for SayBackend {
-    fn start(&self, text: &str, voice: Option<&str>) -> io::Result<Box<dyn ActiveUtterance>> {
+    fn start(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
         if voice.is_some() {
-            return Err(io::Error::other(VOICE_NEEDS_KOKORO));
+            return Err(BansheeError::Rejected(VOICE_NEEDS_KOKORO.into()));
         }
         let child = command_for(text)?.spawn()?;
         Ok(Box::new(SayUtterance { child }))
@@ -76,10 +82,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_voice_this_backend_cannot_apply_is_refused() {
+    fn a_voice_this_backend_cannot_apply_is_refused_as_the_callers_mistake() {
         let Err(error) = SayBackend.start("hello", Some("am_adam")) else {
             panic!("say cannot apply a Kokoro voice, so it must refuse");
         };
+        assert!(
+            matches!(error, BansheeError::Rejected(_)),
+            "the voice is the caller's to change, not a fault of this process: {error:?}"
+        );
         assert!(error.to_string().contains("Kokoro"), "{error}");
     }
 

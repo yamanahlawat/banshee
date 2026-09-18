@@ -1,4 +1,3 @@
-use dirs;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -37,8 +36,10 @@ pub const DAEMON_AGENT: &str = "com.banshee.daemon";
 pub const TRAY_AGENT: &str = "com.banshee.tray";
 
 /// Writes `bytes` to `path` through a staged file and a rename, so a partial
-/// write never truncates a file the user hand-edits. `mode` applies from the
-/// first byte on disk, and the rename carries it with the inode.
+/// write never truncates a file the user hand-edits, and the bytes reach the
+/// disk before the rename, so a power loss leaves the old file or the new one.
+/// `mode` applies from the first byte on disk, and the rename carries it with
+/// the inode.
 pub fn write_atomically(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -55,9 +56,10 @@ pub fn write_atomically(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io
     if let Some(mode) = mode {
         options.mode(mode);
     }
-    let written = options
-        .open(&staged)?
+    let mut file = options.open(&staged)?;
+    let written = file
         .write_all(bytes)
+        .and_then(|()| file.sync_all())
         .and_then(|()| std::fs::rename(&staged, path));
     if written.is_err() {
         let _ = std::fs::remove_file(&staged);
@@ -67,10 +69,10 @@ pub fn write_atomically(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io
 
 /// systemd's name for the daemon's user unit. `bansheed` writes the file and
 /// `banshee-app` starts it, so the spelling is shared.
-pub const DAEMON_UNIT: &str = "banshee.service";
+const DAEMON_UNIT: &str = "banshee.service";
 
 /// systemd's name for the tray's user unit.
-pub const TRAY_UNIT: &str = "banshee-tray.service";
+const TRAY_UNIT: &str = "banshee-tray.service";
 
 /// The unit that runs the job a launchd label names.
 pub fn systemd_unit(label: &str) -> Option<&'static str> {
@@ -90,37 +92,38 @@ pub fn uid() -> u32 {
     unsafe extern "C" {
         fn getuid() -> u32;
     }
+    // SAFETY: getuid takes nothing, cannot fail, and uid_t is a 32-bit unsigned
+    // integer on macOS and Linux, the two platforms this builds for.
     unsafe { getuid() }
 }
 
-pub fn get_socket_path() -> Option<PathBuf> {
-    let base_path = dirs::home_dir()?;
-    Some(base_path.join(".banshee").join("banshee.sock"))
+/// Everything Banshee keeps on this machine lives under one directory.
+pub fn banshee_dir() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".banshee"))
 }
 
-pub fn get_models_path() -> Option<PathBuf> {
-    let base_path = dirs::home_dir()?;
-    Some(base_path.join(".banshee").join("models"))
+pub fn socket_path() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("banshee.sock"))
 }
 
-pub fn get_config_path() -> Option<PathBuf> {
-    let base_path = dirs::home_dir()?;
-    Some(base_path.join(".banshee").join("config.toml"))
+pub fn models_path() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("models"))
 }
 
-pub fn get_credentials_path() -> Option<PathBuf> {
-    let base_path = dirs::home_dir()?;
-    Some(base_path.join(".banshee").join("credentials.toml"))
+pub fn config_path() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("config.toml"))
 }
 
-pub fn get_db_path() -> Option<PathBuf> {
-    let base_path = dirs::home_dir()?;
-    Some(base_path.join(".banshee").join("banshee.db"))
+pub fn credentials_path() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("credentials.toml"))
 }
 
-pub fn get_oov_log_path() -> Option<PathBuf> {
-    let base_path = dirs::home_dir()?;
-    Some(base_path.join(".banshee").join("oov-words.log"))
+pub fn db_path() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("banshee.db"))
+}
+
+pub fn oov_log_path() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("oov-words.log"))
 }
 
 pub async fn call_daemon(method: &str, params: Value) -> Result<Value, BansheeError> {
@@ -165,11 +168,11 @@ async fn call(
     method: &str,
     params: Value,
 ) -> Result<(Value, Lines<BufReader<UnixStream>>), BansheeError> {
-    let socket_path = get_socket_path()
+    let socket_path = socket_path()
         .ok_or_else(|| BansheeError::Other("Could not find home directory".to_string()))?;
 
     let request = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
+        jsonrpc: crate::Version::V2,
         method: method.to_string(),
         params: Some(params),
         id: Some(serde_json::json!(1)),
@@ -183,12 +186,19 @@ async fn call(
     stream.write_all(request_string.as_bytes()).await?;
 
     let mut lines = BufReader::new(stream).lines();
-    // Empty when the daemon closed without answering. Deliberately not guarded
-    // here: callers read the decode failure that follows as an orphaned socket
     let response = lines.next_line().await?.unwrap_or_default();
+    Ok((decode(&response)?, lines))
+}
 
-    match serde_json::from_str::<JsonRpcResponse>(&response)? {
-        JsonRpcResponse::Success { result, .. } => Ok((result, lines)),
+/// One line off the socket, read as a reply. Nothing at all is the daemon
+/// closing without answering, which a decoder reports as a parse failure at
+/// line 1 column 0 and no reader can act on.
+fn decode(response: &str) -> Result<Value, BansheeError> {
+    if response.trim().is_empty() {
+        return Err(BansheeError::NoAnswer);
+    }
+    match serde_json::from_str::<JsonRpcResponse>(response)? {
+        JsonRpcResponse::Success { result, .. } => Ok(result),
         JsonRpcResponse::Error { error, .. } => Err(BansheeError::Rpc {
             code: error.code,
             message: error.message,
@@ -199,6 +209,34 @@ async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_that_closes_without_a_reply_is_not_a_parse_failure() {
+        for nothing in ["", "   ", "\t"] {
+            assert!(
+                matches!(decode(nothing), Err(BansheeError::NoAnswer)),
+                "{nothing:?} is a daemon that went away"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reply_that_is_not_json_is_still_a_parse_failure() {
+        assert!(matches!(decode("{not json"), Err(BansheeError::Serde(_))));
+    }
+
+    #[test]
+    fn a_reply_carries_its_result_and_an_error_carries_its_code() {
+        let ok = decode(r#"{"jsonrpc":"2.0","result":{"running":true},"id":1}"#).expect("a result");
+        assert_eq!(ok["running"], true);
+
+        let refused =
+            decode(r#"{"jsonrpc":"2.0","error":{"code":-32004,"message":"busy"},"id":1}"#);
+        assert!(matches!(
+            refused,
+            Err(BansheeError::Rpc { code: -32004, .. })
+        ));
+    }
 
     #[test]
     fn the_daemon_label_names_its_own_unit() {

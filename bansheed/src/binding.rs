@@ -181,12 +181,18 @@ const MODIFIERS: [Modifier; 11] = [
     },
 ];
 
-fn legal_forms() -> String {
-    let bindable: Vec<&str> = MODIFIERS
+/// The modifiers this platform can bind. The window reads it off the status
+/// reply, so its key capture and this parser answer one table.
+pub fn bindable_modifiers() -> Vec<&'static str> {
+    MODIFIERS
         .iter()
         .filter(|modifier| modifier.refused.is_none())
         .map(|modifier| modifier.name)
-        .collect();
+        .collect()
+}
+
+fn legal_forms() -> String {
+    let bindable = bindable_modifiers();
     format!(
         "an F-key (F1-F12), a modifier alone ({}), or modifiers and a key, as in Ctrl+Alt+D",
         bindable.join(", ")

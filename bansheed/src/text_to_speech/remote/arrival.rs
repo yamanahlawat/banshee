@@ -16,7 +16,8 @@ const MONO: NonZero<u16> = NonZero::new(1).unwrap();
 /// longest signature, so a magic split across two reads is not misread.
 const ENOUGH: usize = 12;
 
-/// The bound stops a server that never declares itself from filling memory.
+/// Unmeasured. A ceiling on a server that never declares itself, far past any
+/// header this reads.
 const HEADER_BOUND: usize = 64 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -124,7 +125,7 @@ impl Arrival {
 }
 
 fn sample(pair: [u8; 2]) -> f32 {
-    f32::from(i16::from_le_bytes(pair)) / 32_768.0
+    crate::audio::utils::from_pcm16(i16::from_le_bytes(pair))
 }
 
 fn refused(what: &str, asked: SpeechFormat) -> Verdict {

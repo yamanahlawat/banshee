@@ -1,26 +1,37 @@
 use super::*;
 
-fn engine_for(voice: &str) -> Option<KokoroEngine> {
+/// A second installed voice, whichever this machine holds. Naming one would fix
+/// the test to a file `banshee setup` does not fetch.
+fn another_voice_than(loaded: &str) -> String {
+    crate::models::installed_voices()
+        .into_iter()
+        .find(|id| id != loaded)
+        .unwrap_or_else(|| {
+            panic!(
+                "this test swaps between two voices and only {loaded} is on this machine. \
+                 `banshee voices` lists what is here. To fetch a second one:\n  \
+                 banshee config set tts.voice af_bella\n  \
+                 banshee setup\n  \
+                 banshee config set tts.voice {loaded}"
+            )
+        })
+}
+
+/// The engine, or the reason it could not load. Every caller is `#[ignore]`d,
+/// so a machine that runs one wants the failure.
+fn engine_for(voice: &str) -> KokoroEngine {
     let config = KokoroTTSConfig::new(voice);
-    match KokoroEngine::new(&config, 1.0) {
-        Ok(engine) => Some(engine),
-        Err(_) => {
-            eprintln!("{voice} model not installed; skipping");
-            None
-        }
-    }
+    KokoroEngine::new(&config, 1.0)
+        .unwrap_or_else(|error| panic!("run `banshee setup` first: {voice} did not load: {error}"))
 }
 
 #[test]
+#[ignore = "needs the Kokoro model and two voices: cargo test kokoro -- --ignored"]
 fn a_voice_swap_changes_the_style_and_swaps_back() {
-    if installed("am_adam").is_err() {
-        return;
-    }
-    let Some(mut engine) = engine_for("af_sky") else {
-        return;
-    };
+    let mut engine = engine_for("af_sky");
+    let other = another_voice_than("af_sky");
     let first = engine.style_fingerprint();
-    engine.set_voice("am_adam").expect("an installed voice");
+    engine.set_voice(&other).expect("an installed voice");
     let second = engine.style_fingerprint();
     assert_ne!(first, second, "the fixture must discriminate");
     engine.set_voice("af_sky").expect("an installed voice");
@@ -28,10 +39,9 @@ fn a_voice_swap_changes_the_style_and_swaps_back() {
 }
 
 #[test]
+#[ignore = "needs the Kokoro model and voices: cargo test kokoro -- --ignored"]
 fn an_uninstalled_voice_is_refused_and_leaves_the_engine_speaking() {
-    let Some(mut engine) = engine_for("af_sky") else {
-        return;
-    };
+    let mut engine = engine_for("af_sky");
     let before = engine.style_fingerprint();
     assert!(engine.set_voice("zz_nobody").is_err());
     assert_eq!(
@@ -42,15 +52,12 @@ fn an_uninstalled_voice_is_refused_and_leaves_the_engine_speaking() {
 }
 
 #[test]
+#[ignore = "needs the Kokoro model and two voices: cargo test kokoro -- --ignored"]
 fn an_ordinary_utterance_returns_the_engine_to_the_configured_voice() {
-    if installed("am_adam").is_err() {
-        return;
-    }
-    let Some(mut engine) = engine_for("af_sky") else {
-        return;
-    };
+    let mut engine = engine_for("af_sky");
+    let other = another_voice_than("af_sky");
     let configured = engine.style_fingerprint();
-    engine.ensure_voice("am_adam").expect("an installed voice");
+    engine.ensure_voice(&other).expect("an installed voice");
     assert_ne!(
         engine.style_fingerprint(),
         configured,
@@ -61,11 +68,10 @@ fn an_ordinary_utterance_returns_the_engine_to_the_configured_voice() {
 }
 
 #[test]
+#[ignore = "needs the Kokoro model and voices: cargo test kokoro -- --ignored"]
 fn a_voice_outside_the_installed_set_is_refused_without_naming_a_path() {
-    let Some(mut engine) = engine_for("af_sky") else {
-        return;
-    };
-    let models = get_models_path().expect("a home directory");
+    let mut engine = engine_for("af_sky");
+    let models = banshee_common::utils::models_path().expect("a home directory");
     let error = engine
         .set_voice("../../../../etc/hosts")
         .unwrap_err()
@@ -98,10 +104,9 @@ fn an_utterance_that_names_no_voice_takes_the_configured_one() {
 }
 
 #[test]
+#[ignore = "needs the Kokoro model and voices: cargo test kokoro -- --ignored"]
 fn ensure_voice_on_the_loaded_voice_reads_nothing() {
-    let Some(mut engine) = engine_for("af_sky") else {
-        return;
-    };
+    let mut engine = engine_for("af_sky");
     let before = engine.voice_ptr();
     engine.ensure_voice("af_sky").expect("already loaded");
     assert_eq!(
@@ -126,10 +131,15 @@ fn flags_letter_spelled_words_only() {
     assert!(!is_letter_spelled(&hyphenated));
 }
 
-// Skips unless espeak-ng is installed.
+// espeak-ng is one apt package, so CI installs it and this runs there. A
+// machine without it skips, unless it asked for the fixtures.
 #[test]
 fn espeak_resolves_a_letter_spelled_word() {
     let Some(oov) = OovFallback::detect() else {
+        assert!(
+            std::env::var_os("BANSHEE_REQUIRE_FIXTURES").is_none(),
+            "espeak-ng is missing where the fixtures were required"
+        );
         eprintln!("espeak-ng not installed; skipping");
         return;
     };
@@ -263,4 +273,45 @@ fn every_closing_bracket_ends_the_sentence_after_it() {
         let chunks = sentences(text).collect::<Vec<_>>();
         assert_eq!(chunks.len(), 2, "{text:?} gave {chunks:?}");
     }
+}
+
+#[test]
+fn a_synthesis_failure_is_reported_as_a_fault() {
+    let (faults, reported) = std::sync::mpsc::channel();
+    let mut played = false;
+
+    let chunk = chunk_or_fault(
+        Err(BansheeError::Other("the style file is gone".into())),
+        &mut played,
+        &faults,
+    );
+
+    assert!(chunk.is_none(), "a failed sentence plays nothing");
+    match reported.try_recv() {
+        Ok(Fault::Failed(reason)) => assert!(
+            reason.contains("the style file is gone"),
+            "the fault carries the cause: {reason}"
+        ),
+        other => panic!("the failure reaches the fault channel, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_first_chunk_reports_the_utterance_played_once() {
+    let (faults, reported) = std::sync::mpsc::channel();
+    let mut played = false;
+
+    let first = chunk_or_fault(Ok(vec![0.1, 0.2]), &mut played, &faults);
+    let second = chunk_or_fault(Ok(vec![0.3]), &mut played, &faults);
+
+    assert_eq!(first.map(|chunk| chunk.samples), Some(vec![0.1, 0.2]));
+    assert_eq!(second.map(|chunk| chunk.samples), Some(vec![0.3]));
+    assert!(
+        matches!(reported.try_recv(), Ok(Fault::Played)),
+        "the first sentence clears the last speech error"
+    );
+    assert!(
+        reported.try_recv().is_err(),
+        "the second sentence reports nothing new"
+    );
 }

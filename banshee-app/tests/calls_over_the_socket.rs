@@ -5,7 +5,8 @@ use banshee_app::socket::Client;
 use banshee_common::{
     BANSHEE_AGENTS, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_CONNECT_APPLY,
     BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES,
-    BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_SPEAK, BANSHEE_STATUS,
+    BANSHEE_LIST_LANGUAGES, BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_SPEAK,
+    BANSHEE_STATUS,
 };
 use common::{recording_daemon, recording_error_daemon};
 use std::io::{BufRead, BufReader, Write};
@@ -86,7 +87,7 @@ async fn list_devices_reads_both_fields() {
 #[tokio::test]
 async fn list_voices_reads_both_fields() {
     let (path, mut seen, _guard) = recording_daemon(serde_json::json!({
-        "voices": [{"id": "am_adam", "name": "Adam", "description": "US male"}],
+        "voices": [{"id": "am_adam", "name": "Adam", "description": "US male", "downloaded": true}],
         "current": "am_adam",
     }))
     .await;
@@ -127,6 +128,11 @@ async fn download_models_sends_no_params_and_returns_nothing() {
 
     let request = seen.recv().await.unwrap();
     assert_eq!(request.method, BANSHEE_DOWNLOAD_MODELS);
+    assert_eq!(
+        request.params,
+        Some(serde_json::json!({})),
+        "the daemon takes no argument, and a stray one would be refused"
+    );
 }
 
 #[tokio::test]
@@ -240,6 +246,23 @@ async fn clear_history_sends_no_params_and_returns_nothing() {
 
     let request = seen.recv().await.unwrap();
     assert_eq!(request.method, BANSHEE_CLEAR_HISTORY);
+    assert_eq!(request.params, Some(serde_json::json!({})));
+}
+
+#[tokio::test]
+async fn list_languages_reads_the_list() {
+    let (path, mut seen, _guard) = recording_daemon(serde_json::json!({
+        "languages": [{"code": "de", "name": "German"}, {"code": "en", "name": "English"}]
+    }))
+    .await;
+    let mut client = Client::connect(&path).await.unwrap();
+
+    let languages = calls::list_languages(&mut client).await.unwrap();
+
+    let request = seen.recv().await.unwrap();
+    assert_eq!(request.method, BANSHEE_LIST_LANGUAGES);
+    assert_eq!(languages.languages.len(), 2);
+    assert_eq!(languages.languages[0].code, "de");
 }
 
 #[tokio::test]

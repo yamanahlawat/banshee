@@ -6,7 +6,7 @@
 mod common;
 
 use banshee_app::calls;
-use banshee_app::commands::{ensure_connected, force_reconnect};
+use banshee_app::commands::{ensure_connected, force_reconnect, retrying};
 use banshee_app::socket::{Client, SOCKET_CLOSED};
 use common::recording_daemon;
 use std::io::{BufRead, BufReader, Write};
@@ -37,12 +37,97 @@ async fn an_already_connected_slot_is_left_alone() {
 
 #[tokio::test]
 async fn force_reconnect_replaces_whatever_was_there() {
-    let (path, _seen, _guard) = recording_daemon(serde_json::json!({"ok": true})).await;
-    let mut slot: Option<Client> = None;
+    let (old_path, mut old_seen, _old_guard) =
+        recording_daemon(serde_json::json!({"running": false})).await;
+    let (path, mut seen, _guard) = recording_daemon(serde_json::json!({"running": true})).await;
+    let mut slot: Option<Client> = Some(Client::connect(&old_path).await.unwrap());
 
     force_reconnect(&mut slot, &path).await.unwrap();
+    let status = calls::status(slot.as_mut().unwrap()).await.unwrap();
 
-    assert!(slot.is_some());
+    assert_eq!(status["running"], true, "the call went to the new daemon");
+    assert!(seen.recv().await.is_some());
+    assert!(
+        old_seen.try_recv().is_err(),
+        "the connection that was there is not asked anything"
+    );
+}
+
+/// A daemon that drops its first connection unread, says so, and answers the
+/// next connection normally: what a client holding a connection to a daemon
+/// that has since restarted sees.
+fn daemon_that_restarted(
+    path: &std::path::Path,
+) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
+    let listener = UnixListener::bind(path).unwrap();
+    let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+    let daemon = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        drop(stream);
+        dropped_tx.send(()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).unwrap();
+        let request: banshee_common::JsonRpcRequest = serde_json::from_str(&line).unwrap();
+        let reply = banshee_common::JsonRpcResponse::success(
+            request.id,
+            serde_json::json!({"running": true}),
+        );
+        let mut text = serde_json::to_string(&reply).unwrap();
+        text.push('\n');
+        writer.write_all(text.as_bytes()).unwrap();
+    });
+    (daemon, dropped_rx)
+}
+
+/// The guarantee the window exists for: a daemon restart between two commands
+/// is invisible to the caller, because the request never reached the old one.
+#[tokio::test]
+async fn a_command_survives_a_daemon_that_restarted_since_the_last_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("banshee.sock");
+    let (daemon, dropped) = daemon_that_restarted(&path);
+    let mut slot: Option<Client> = Some(Client::connect(&path).await.unwrap());
+    dropped.recv().unwrap();
+
+    let status = retrying(&path, &mut slot, |client| Box::pin(calls::status(client)))
+        .await
+        .unwrap();
+
+    assert_eq!(status["running"], true);
+    assert!(
+        slot.is_some(),
+        "the retry's connection is kept for the next call"
+    );
+    daemon.join().unwrap();
+}
+
+/// A replay would speak a preview twice, or write an agent's config twice.
+#[tokio::test]
+async fn a_request_the_daemon_read_is_not_sent_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("banshee.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let daemon = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).unwrap();
+        drop(stream);
+        listener.set_nonblocking(true).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // A second connection would be the replay this test forbids
+        listener.accept().is_ok()
+    });
+    let mut slot: Option<Client> = None;
+
+    let error = retrying(&path, &mut slot, |client| Box::pin(calls::status(client)))
+        .await
+        .unwrap_err();
+
+    assert!(error.transport, "{error:?}");
+    assert!(slot.is_none(), "a dead connection is dropped");
+    assert!(!daemon.join().unwrap(), "no second connection was opened");
 }
 
 /// The core of Finding 1: connecting to a socket nothing is listening on
@@ -54,7 +139,9 @@ async fn a_missing_daemon_is_a_normal_error_not_a_panic() {
     let path = dir.path().join("no-daemon-here.sock");
     let mut slot: Option<Client> = None;
 
-    let error = ensure_connected(&mut slot, &path).await.unwrap_err();
+    let Err(error) = ensure_connected(&mut slot, &path).await else {
+        panic!("nothing listens at {}", path.display());
+    };
 
     assert!(slot.is_none());
     assert!(!error.message.is_empty());

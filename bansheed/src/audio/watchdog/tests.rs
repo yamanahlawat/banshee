@@ -302,7 +302,9 @@ fn a_reverted_setting_still_clears_the_recording_error() {
     ));
 
     // A fault from an earlier attempt must not outlive this one
-    state.set_recording_error(RecordingError::Microphone("gone".to_string()));
+    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
+        "gone".to_string(),
+    )));
     // The corrected setting is served by the open device, so nothing opens
     assert!(already_serving(
         "MacBook Pro Microphone",
@@ -316,7 +318,7 @@ fn a_reverted_setting_still_clears_the_recording_error() {
         None,
     );
     assert!(
-        state.recording_error().is_none(),
+        state.pipeline().fault().is_none(),
         "an attempt that concludes clears the fault"
     );
     assert_eq!(state.missing_device(), None);
@@ -358,13 +360,14 @@ fn a_tick_that_cannot_move_keeps_the_microphone_it_has() {
         false
     ));
 
-    assert!(
-        !binding.attempt_failed(&state, false, "no input device is available"),
+    assert_eq!(
+        binding.attempt_failed(&state, false, "no input device is available"),
+        AttemptFailure::KeptTheLiveStream,
         "a live stream is not a fault"
     );
 
     assert!(
-        state.recording_error().is_none(),
+        state.pipeline().fault().is_none(),
         "the microphone works, so recording is possible"
     );
     assert!(
@@ -384,15 +387,62 @@ fn a_tick_that_cannot_move_keeps_the_microphone_it_has() {
     );
 
     // The same failure with a dead stream loses capture
-    assert!(
+    assert_eq!(
         binding.attempt_failed(&state, true, "no input device is available"),
+        AttemptFailure::NewFault,
         "a stalled stream that opens nothing is unavailable"
     );
     assert!(matches!(
-        state.recording_error(),
+        state.pipeline().fault(),
         Some(RecordingError::Microphone(_))
     ));
     assert_eq!(state.audio_device(), None);
+}
+
+// A microphone that stays gone fails on every RETRY. The log needs the fault
+// once, and again only when its reason changes.
+#[test]
+fn a_fault_is_new_only_when_its_reason_is() {
+    let state = test_state();
+    let mut binding = Binding {
+        opened_for: Some("default".to_string()),
+        open_device: Some("PipeWire Sound Server".to_string()),
+    };
+
+    let attempts = [
+        ("Host is down", AttemptFailure::NewFault),
+        ("Host is down", AttemptFailure::SameFault),
+        ("No such file or directory", AttemptFailure::NewFault),
+    ];
+    for (reason, expected) in attempts {
+        assert_eq!(
+            binding.attempt_failed(&state, true, reason),
+            expected,
+            "{reason}"
+        );
+    }
+}
+
+// A person who picks another microphone while capture is down waits for its
+// answer. The same OS error on another device is news.
+#[test]
+fn another_device_that_fails_the_same_way_is_a_new_fault() {
+    let state = test_state();
+    let mut binding = Binding {
+        opened_for: None,
+        open_device: None,
+    };
+    let yeti = crate::audio::open_failure("Blue Yeti Stereo Microphone", "Host is down");
+    let buds = crate::audio::open_failure("OnePlus Buds 3", "Host is down");
+
+    assert_eq!(
+        binding.attempt_failed(&state, true, &yeti),
+        AttemptFailure::NewFault
+    );
+    assert_eq!(
+        binding.attempt_failed(&state, true, &buds),
+        AttemptFailure::NewFault
+    );
 }
 
 #[test]
@@ -413,7 +463,7 @@ fn a_fault_leaves_no_fact_from_the_previous_attempt() {
     // recording_error carries this case, so two fields cannot disagree
     assert_eq!(state.missing_device(), None);
     assert!(matches!(
-        state.recording_error(),
+        state.pipeline().fault(),
         Some(RecordingError::Microphone(_))
     ));
 }

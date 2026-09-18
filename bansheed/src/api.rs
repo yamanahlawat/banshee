@@ -10,7 +10,7 @@ use banshee_common::{
     BANSHEE_RECORD_TOGGLE, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
     BANSHEE_SUBSCRIBE,
 };
-use banshee_common::{JsonRpcRequest, JsonRpcResponse};
+use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
 use crate::connect;
 use crate::permissions;
@@ -43,9 +43,11 @@ async fn off_the_worker(
     match tokio::task::spawn_blocking(work).await {
         Ok(Ok(result)) => JsonRpcResponse::success(id, result),
         Ok(Err(error)) => from_error(id, error),
-        Err(_) => {
-            JsonRpcResponse::error(id, -32603, "The connect task stopped before it answered.")
-        }
+        Err(_) => JsonRpcResponse::error(
+            id,
+            rpc_code::INTERNAL,
+            "The connect task stopped before it answered.",
+        ),
     }
 }
 
@@ -113,7 +115,7 @@ impl<'a> Params<'a> {
         read(value).map(Some).ok_or_else(|| {
             Box::new(JsonRpcResponse::error(
                 self.id(),
-                -32602,
+                rpc_code::INVALID_PARAMS,
                 format!("'{key}' must be {expected}."),
             ))
         })
@@ -123,7 +125,7 @@ impl<'a> Params<'a> {
         self.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
             Box::new(JsonRpcResponse::error(
                 self.id(),
-                -32602,
+                rpc_code::INVALID_PARAMS,
                 format!("'{key}' is required and must be a string."),
             ))
         })
@@ -136,7 +138,7 @@ impl<'a> Params<'a> {
             Some(value) => value.as_u64().ok_or_else(|| {
                 Box::new(JsonRpcResponse::error(
                     self.id(),
-                    -32602,
+                    rpc_code::INVALID_PARAMS,
                     format!("'{key}' must be a non-negative integer."),
                 ))
             }),
@@ -162,42 +164,92 @@ impl<'a> Params<'a> {
 // client can prompt for a microphone or re-run setup instead of retrying.
 fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpcResponse {
     let code = match error {
-        RecordingError::Microphone(_) => -32000,
-        RecordingError::Model(_) => -32002,
-        RecordingError::Provider(_) => -32006,
-        RecordingError::KeyFile(_) => -32008,
+        RecordingError::Microphone(_) => rpc_code::MICROPHONE,
+        RecordingError::Model(_) => rpc_code::MODEL,
+        RecordingError::Provider(_) => rpc_code::PROVIDER,
+        RecordingError::KeyFile(_) => rpc_code::KEY_FILE,
     };
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
 }
 
+/// Closes the listening session if the call is dropped before its answer
+/// arrives, which is what a client going away looks like from here. The
+/// consumer polls the mode, so clearing it ends the listen and disarms the
+/// microphone. `kept` marks a session that ended on its own: clearing the mode
+/// then could close a session someone else has since armed.
+struct EndsTheSession<'a> {
+    state: &'a DaemonState,
+    kept: bool,
+}
+
+impl<'a> EndsTheSession<'a> {
+    fn new(state: &'a DaemonState) -> Self {
+        Self { state, kept: false }
+    }
+
+    fn kept(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for EndsTheSession<'_> {
+    fn drop(&mut self) {
+        if !self.kept {
+            self.state.set_recording_mode(RecordingMode::Idle);
+        }
+    }
+}
+
+/// `None` while the pipeline is open. A pipeline still being built refuses the
+/// same way a broken one does: nothing records either way.
+fn not_recording(
+    id: Option<serde_json::Value>,
+    pipeline: &crate::state::Pipeline,
+) -> Option<Box<JsonRpcResponse>> {
+    match pipeline {
+        crate::state::Pipeline::Open => None,
+        crate::state::Pipeline::Opening => Some(Box::new(JsonRpcResponse::error(
+            id,
+            rpc_code::MICROPHONE,
+            "Recording is unavailable: the microphone is still opening",
+        ))),
+        crate::state::Pipeline::Broken(error) => Some(Box::new(unavailable(id, error))),
+    }
+}
+
+/// Nothing stops Banshee working. A pipeline still opening raises no blocker,
+/// because waiting is nobody's to fix, and it is not ready either: nothing
+/// records until the microphone is open.
+fn ready(blockers: &[banshee_common::Blocker], pipeline: &crate::state::Pipeline) -> bool {
+    blockers.is_empty() && matches!(pipeline, crate::state::Pipeline::Open)
+}
+
 pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
-    let blockers = readiness::blockers(daemon_state);
+    // Read once for every answer below, so one reply cannot report two states
+    // of the pipeline.
+    let pipeline = daemon_state.pipeline();
+    let blockers = readiness::blockers(daemon_state, &pipeline);
     let running = daemon_state.running_config();
     // Read once for the two sides below, so one reply cannot answer from two
     // states of the file. A file that will not parse holds no key either way.
     let credentials = crate::credentials::Credentials::load().ok();
-    let payload = serde_json::json!({
+    // The same call the `banshee.state_changed` push answers with, so a reply
+    // and a push cannot spell one fact two ways.
+    let mut payload = live_state(daemon_state);
+    let rest = serde_json::json!({
         "running": true,
         "version": daemon_state.version(),
         "stt_model": daemon_state.stt_model(),
         "vad_model": daemon_state.vad_model(),
-        "audio_device": daemon_state.audio_device(),
-        "missing_device": daemon_state.missing_device(),
-        "recording": daemon_state.is_recording(),
-        "armed": daemon_state.is_armed(),
-        "transcribing": daemon_state.is_transcribing(),
-        "telling": daemon_state.is_telling(),
-        "speaking": daemon_state.speech().is_speaking(),
         "uptime_seconds": daemon_state.uptime().as_secs(),
         "vad_threshold": daemon_state.vad_threshold(),
         "history_enabled": daemon_state.history_enabled(),
         // The window shows this rather than summing a file list it does not
         // hold: only the daemon knows which files are already here.
-        "download_megabytes": crate::models::download::models_dir()
-            .map(|dir| {
-                crate::models::download::pending_megabytes(&daemon_state.wanted_downloads(), &dir)
-            })
-            .unwrap_or(0),
+        "download_megabytes": crate::models::download::pending_megabytes(
+            &daemon_state.wanted_downloads(),
+            daemon_state.models_dir(),
+        ),
         // The English-only build reads English whatever `stt.language` says.
         // Read off the model the listener loaded, not the configured preset:
         // a preset applied without persist moves one and not the other.
@@ -206,14 +258,14 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             .is_some_and(crate::speech_to_text::english_only),
         // False where the compositor holds the binding, so the window does not
         // name a key the daemon never listens for.
+        "pipeline": pipeline.as_str(),
         "hotkey_listens": crate::hotkey::listens(),
+        "bindable_modifiers": crate::binding::bindable_modifiers(),
         // Stated, so no client invents a narrower definition of ready
-        "ready": blockers.is_empty(),
+        "ready": ready(&blockers, &pipeline),
         "blockers": blockers,
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
-        "last_error": daemon_state.last_error(),
-        "last_speech_error": daemon_state.last_speech_error(),
         // The providers are read at startup, so the running config answers,
         // not the file a `persist` write has already replaced. The key file is
         // read each time: a key set after startup is "present" before the restart.
@@ -223,6 +275,14 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             daemon_state.speaker_started(),
         ),
     });
+
+    let serde_json::Value::Object(rest) = rest else {
+        unreachable!("an object literal answers an object")
+    };
+    payload
+        .as_object_mut()
+        .expect("live_state answers an object")
+        .extend(rest);
     with_key_press_access(payload)
 }
 
@@ -268,7 +328,7 @@ fn with_key_press_access(payload: serde_json::Value) -> serde_json::Value {
 /// the daemon idles. `vad_threshold` moves at runtime too, but only when a
 /// `configure` call asks it to, and that call already answers.
 pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
-    serde_json::json!({
+    let mut live = serde_json::json!({
         "recording": daemon_state.is_recording(),
         "armed": daemon_state.is_armed(),
         "transcribing": daemon_state.is_transcribing(),
@@ -278,7 +338,10 @@ pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
         "missing_device": daemon_state.missing_device(),
         "last_error": daemon_state.last_error(),
         "last_speech_error": daemon_state.last_speech_error(),
-    })
+    });
+    // Ranked once, in banshee-common, so no client ranks the flags itself.
+    live["activity"] = banshee_common::Activity::of(&live).word().into();
+    live
 }
 
 fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
@@ -302,11 +365,7 @@ fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse
             params.id(),
             serde_json::json!({"ok": true, "utterance_id": utterance_id}),
         ),
-        Err(e) => JsonRpcResponse::error(
-            params.id(),
-            -32603,
-            format!("Failed to start speech playback: {e}"),
-        ),
+        Err(error) => from_error(params.id(), error),
     }
 }
 
@@ -327,7 +386,7 @@ fn dictate_target(params: &Params<'_>) -> Result<TranscribeTarget, Box<JsonRpcRe
         (true, true) => {
             return Err(Box::new(JsonRpcResponse::error(
                 params.id(),
-                -32602,
+                rpc_code::INVALID_PARAMS,
                 "dictate and tell are two destinations. Pass one.",
             )));
         }
@@ -343,15 +402,15 @@ fn record_start(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcR
         Err(response) => return *response,
     };
     // Checked before the transition, so -32004 keeps meaning "busy"
-    if let Some(reason) = daemon_state.recording_error() {
-        return unavailable(params.id(), &reason);
+    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
+        return *response;
     }
     if daemon_state.record_start(action) {
         JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
     } else {
         JsonRpcResponse::error(
             params.id(),
-            -32004,
+            rpc_code::BUSY,
             "Microphone is busy with another recording or listening session.",
         )
     }
@@ -367,8 +426,8 @@ fn record_toggle(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpc
         Ok(value) => value,
         Err(response) => return *response,
     };
-    if let Some(reason) = daemon_state.recording_error() {
-        return unavailable(params.id(), &reason);
+    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
+        return *response;
     }
     let recording = daemon_state.record_toggle(action);
     JsonRpcResponse::success(params.id(), serde_json::json!({"recording": recording}))
@@ -401,8 +460,8 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         Err(response) => return *response,
     };
 
-    if let Some(reason) = daemon_state.recording_error() {
-        return unavailable(params.id(), &reason);
+    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
+        return *response;
     }
 
     // One armed session at a time; the mode is the lock. Armed before the wait
@@ -410,10 +469,15 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     if !daemon_state.arm_for_ask() {
         return JsonRpcResponse::error(
             params.id(),
-            -32004,
+            rpc_code::BUSY,
             "Microphone is busy with another recording or listening session.",
         );
     }
+
+    // From here the mode is held, and every way out of this call gives it back:
+    // the question is spoken before anyone listens, and a client that dies
+    // while it plays would otherwise hold the microphone until a restart.
+    let ends_the_session = EndsTheSession::new(daemon_state);
 
     // A status outruns any budget short of the stalled-backend bound.
     let settled = silence_within(daemon_state, Duration::from_millis(MAX_PLAYBACK_WAIT_MS)).await;
@@ -421,18 +485,20 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     // Interrupts only what outran the wait, so a stalled backend costs one budget.
     let clean_question = sanitize(question);
     if let Err(e) = daemon_state.speech().speak(&clean_question, !settled, None) {
-        daemon_state.set_recording_mode(RecordingMode::Idle);
         return JsonRpcResponse::error(
             params.id(),
-            -32603,
+            rpc_code::INTERNAL,
             format!("Failed to speak question: {e}"),
         );
     }
 
     if !playback_ended(daemon_state, &clean_question).await {
         daemon_state.speech().stop();
-        daemon_state.set_recording_mode(RecordingMode::Idle);
-        return JsonRpcResponse::error(params.id(), -32603, "Question playback did not finish.");
+        return JsonRpcResponse::error(
+            params.id(),
+            rpc_code::INTERNAL,
+            "Question playback did not finish.",
+        );
     }
 
     let (reply, answer) = tokio::sync::oneshot::channel();
@@ -441,20 +507,34 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         timeout: Duration::from_millis(timeout_ms),
     });
     if daemon_state.commands().send(command).is_err() {
-        daemon_state.set_recording_mode(RecordingMode::Idle);
-        return JsonRpcResponse::error(params.id(), -32603, "Audio pipeline is not running.");
+        return JsonRpcResponse::error(
+            params.id(),
+            rpc_code::INTERNAL,
+            "Audio pipeline is not running.",
+        );
     }
 
-    match answer.await {
+    let answered = answer.await;
+    // The consumer disarms every session it finishes, so the guard steps aside
+    // for those. A sender that was dropped finished nothing, and the guard
+    // still owes the microphone back.
+    if answered.is_ok() {
+        ends_the_session.kept();
+    }
+
+    match answered {
         Ok(Ok(text)) => JsonRpcResponse::success(params.id(), serde_json::json!({ "text": text })),
         // Distinct from silence, which answers empty text
-        Ok(Err(reason)) => {
-            JsonRpcResponse::error(params.id(), -32007, format!("Listening failed: {reason}"))
-        }
-        Err(_) => {
-            daemon_state.set_recording_mode(RecordingMode::Idle);
-            JsonRpcResponse::error(params.id(), -32603, "Listening session ended unexpectedly.")
-        }
+        Ok(Err(reason)) => JsonRpcResponse::error(
+            params.id(),
+            rpc_code::LISTENING_FAILED,
+            format!("Listening failed: {reason}"),
+        ),
+        Err(_) => JsonRpcResponse::error(
+            params.id(),
+            rpc_code::INTERNAL,
+            "Listening session ended unexpectedly.",
+        ),
     }
 }
 
@@ -498,7 +578,7 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
     let Some(requested) = params.get("settings") else {
         return JsonRpcResponse::error(
             params.id(),
-            -32602,
+            rpc_code::INVALID_PARAMS,
             "'settings' is required, as in {\"stt.language\": \"de\"}.",
         );
     };
@@ -507,7 +587,7 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
         Err(error) => {
             return JsonRpcResponse::error(
                 params.id(),
-                -32602,
+                rpc_code::INVALID_PARAMS,
                 format!("'settings' must map dotted keys to values: {error}"),
             );
         }
@@ -531,12 +611,7 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
 }
 
 fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let dir = match crate::models::download::models_dir() {
-        Ok(dir) => dir,
-        Err(error) => {
-            return JsonRpcResponse::error(params.id(), -32603, error.to_string());
-        }
-    };
+    let dir = daemon_state.models_dir().to_path_buf();
     let missing = crate::models::download::still_missing(&daemon_state.wanted_downloads(), &dir);
     if missing.is_empty() {
         return JsonRpcResponse::success(
@@ -545,7 +620,11 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
         );
     }
     let Some(slot) = daemon_state.start_downloading() else {
-        return JsonRpcResponse::error(params.id(), -32005, "A download is already running.");
+        return JsonRpcResponse::error(
+            params.id(),
+            rpc_code::DOWNLOAD_RUNNING,
+            "A download is already running.",
+        );
     };
 
     let names: Vec<&str> = missing.iter().map(|d| d.name.as_str()).collect();
@@ -562,7 +641,7 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
             if let Err(error) =
                 crate::models::download::download_all(&dir, &missing, &mut report).await
             {
-                eprintln!("Download failed: {error}");
+                log::error!("Download failed: {error}");
             }
         }
         // The files these settings were waiting for are here now, so a
@@ -626,7 +705,11 @@ fn history(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRespon
         Ok(Some(limit)) => match u32::try_from(limit) {
             Ok(limit) => Some(limit),
             Err(_) => {
-                return JsonRpcResponse::error(params.id(), -32602, "'limit' must fit in 32 bits.");
+                return JsonRpcResponse::error(
+                    params.id(),
+                    rpc_code::INVALID_PARAMS,
+                    "'limit' must fit in 32 bits.",
+                );
             }
         },
         Err(response) => return *response,
@@ -637,10 +720,14 @@ fn history(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRespon
         }
         Some(Err(e)) => JsonRpcResponse::error(
             params.id(),
-            -32603,
+            rpc_code::INTERNAL,
             format!("Failed to retrieve history: {e}"),
         ),
-        None => JsonRpcResponse::error(params.id(), -32003, "History is not enabled."),
+        None => JsonRpcResponse::error(
+            params.id(),
+            rpc_code::HISTORY_OFF,
+            "History is not enabled.",
+        ),
     }
 }
 
@@ -649,10 +736,16 @@ fn clear_history(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpc
         Some(Ok(())) => JsonRpcResponse::success(params.id(), serde_json::json!({})),
         // Not -32003: that code names history being off, and the
         // listing path already answers -32603 for the same failure.
-        Some(Err(e)) => {
-            JsonRpcResponse::error(params.id(), -32603, format!("Failed to clear history: {e}"))
-        }
-        None => JsonRpcResponse::error(params.id(), -32003, "History is not enabled."),
+        Some(Err(e)) => JsonRpcResponse::error(
+            params.id(),
+            rpc_code::INTERNAL,
+            format!("Failed to clear history: {e}"),
+        ),
+        None => JsonRpcResponse::error(
+            params.id(),
+            rpc_code::HISTORY_OFF,
+            "History is not enabled.",
+        ),
     }
 }
 
@@ -671,7 +764,7 @@ async fn connect(
     if disconnect {
         return JsonRpcResponse::error(
             params.id(),
-            -32602,
+            rpc_code::INVALID_PARAMS,
             "Disconnect is not available yet. Remove Banshee from the agent's config by hand.",
         );
     }
@@ -685,7 +778,7 @@ async fn connect(
     else {
         return JsonRpcResponse::error(
             params.id(),
-            -32602,
+            rpc_code::INVALID_PARAMS,
             format!("'{slug}' is not a known agent."),
         );
     };
@@ -731,7 +824,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_OPEN_PERMISSION => open_permission(params),
         _ => JsonRpcResponse::error(
             params.id(),
-            -32601,
+            rpc_code::METHOD_NOT_FOUND,
             format!("Method '{}' not found!", request.method),
         ),
     }

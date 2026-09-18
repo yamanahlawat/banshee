@@ -7,11 +7,11 @@
 - `start`, `serve`, `tray` and `service` manage the daemon.
 - `connect` and `bind` edit another tool's config directly.
 - `tell` runs your coding agent itself, and that agent edits your config.
-- `banshee <command> --help` prints this table in your terminal.
+- `banshee --help` prints this table in your terminal.
 
 | Command                         | What it does                                               |
 | ------------------------------- | ---------------------------------------------------------- |
-| `banshee start`                 | Start the daemon, now and at every login, and download the models it is missing |
+| `banshee start`                 | Start the daemon, now and at every login; it names any model that is missing |
 | `banshee stop`                  | Stop the running daemon                                    |
 | `banshee setup`                 | Download the required models; a re-run fetches only what is missing         |
 | `banshee status`                | What Banshee is doing, and what stops it working           |
@@ -23,11 +23,11 @@
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee config remote`         | Set up the remote listener and speaker in one run, after showing each value |
 | `banshee connect [agent]`       | Connect a coding agent, after showing the change           |
-| `banshee bind [hyprland]`       | Bind F9 in your compositor's config, after showing the change; alone, print the snippet and name the file it would write |
+| `banshee bind [hyprland]`       | Bind the record keys in your compositor's config, after showing the change. It asks for the key and offers `audio.hotkey`, or `F9` when that is a lone modifier; alone, print the snippet and name the file it would write |
 | `banshee serve`                 | Run the daemon in the foreground                           |
-| `banshee tray`                  | Show the menu bar icon, now and at every login (macOS)     |
-| `banshee tray --uninstall`      | Stop the menu bar icon and remove its launch agent         |
-| `banshee service uninstall`     | Remove the start-at-login launch agents                    |
+| `banshee tray`                  | Show the tray icon, now and at every login                 |
+| `banshee tray --uninstall`      | Stop the tray icon and remove its start-at-login service   |
+| `banshee service uninstall`     | Remove the start-at-login service: the launch agents on macOS, the `systemd --user` units on Linux |
 | `banshee listen`                | Print recent transcriptions                                |
 | `banshee record start` / `stop` / `toggle` | Push-to-talk without the hotkey; `toggle` is one key that starts, then stops |
 | `banshee speak "<text>"`        | Speak some text aloud                                      |

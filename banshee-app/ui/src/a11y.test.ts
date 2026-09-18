@@ -75,7 +75,7 @@ beforeEach(async () => {
     ],
   });
   vi.mocked(listVoices).mockResolvedValue({
-    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }],
+    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true }],
     current: 'af_sky',
   });
   vi.mocked(detectAgents).mockResolvedValue([

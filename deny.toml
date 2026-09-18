@@ -1,0 +1,53 @@
+# What `cargo deny check` holds the dependency graph to: the advisory database,
+# the licence of every crate, and where each crate comes from. CI runs it on
+# every pull request; `cargo install cargo-deny --locked` runs it here.
+
+[advisories]
+# A vulnerability fails the check. An unmaintained crate that a dependency this
+# repository cannot replace pulls in is listed with the crate that pulls it.
+# cargo-deny warns when an entry here no longer applies, so a fixed one is
+# removed rather than forgotten.
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error, under gtk 0.18" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, under winit 0.30 through sctk-adwaita and ab_glyph" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property, under tauri-utils through urlpattern" },
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range, under tauri-utils through urlpattern" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common, under tauri-utils through urlpattern" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident, under tauri-utils through urlpattern" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version, under tauri-utils through urlpattern" },
+]
+
+[licenses]
+# Every licence in the graph when this list was written. A crate under a new
+# one fails the check, and the licence is read before it is added.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "WTFPL",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+# The window's tree carries a second version of some thirty crates, and a
+# warning per crate on every run would bury the one that matters.
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The misaki fork the workspace patches in
+allow-git = ["https://github.com/yamanahlawat/misaki-rs"]

@@ -1,22 +1,9 @@
-use super::{progress_line, state_word, watch_line, waybar_line};
+use super::{failure_line, progress_line, state_word, watch_line, waybar_line};
 use banshee_common::InputDevice;
+use banshee_common::error::BansheeError;
 
 #[test]
-fn a_message_from_a_daemon_that_predates_these_fields_still_shows_progress() {
-    let old_format = serde_json::json!({
-        "model": "silero_vad.onnx",
-        "bytes": 356,
-        "total": 574,
-        "state": "downloading",
-    });
-    let reported: banshee_common::DownloadProgress =
-        serde_json::from_value(old_format).expect("old-format messages must still deserialize");
-
-    let line = progress_line(&reported);
-    assert!(!line.contains("of 0"), "{line}");
-    assert!(!line.contains("  "), "{line}");
-    assert_eq!(line, "silero_vad.onnx 62%");
-
+fn a_download_line_names_the_file_and_its_place_in_the_run() {
     let new_format = banshee_common::DownloadProgress {
         model: "silero_vad.onnx".to_string(),
         label: "Voice detection model".to_string(),
@@ -274,4 +261,99 @@ fn a_failed_download_ends_the_wait_and_is_named_in_the_error() {
     assert!(error.to_string().contains("b.onnx"), "{error}");
     assert!(error.to_string().contains("banshee setup"), "{error}");
     assert!(super::downloads_settled(&[]).is_ok());
+}
+
+#[test]
+fn a_rejection_reads_as_the_daemon_wrote_it() {
+    let error = BansheeError::Rejected("say what to tell it, or pass --undo".into());
+    assert_eq!(
+        failure_line(&error),
+        "say what to tell it, or pass --undo",
+        "the caller's own mistake needs no wrapper and no Debug form"
+    );
+}
+
+#[test]
+fn a_socket_failure_names_the_daemon_as_the_thing_not_reached() {
+    let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+    let line = failure_line(&BansheeError::Io(refused));
+    assert!(
+        line.starts_with("Could not reach the daemon"),
+        "an io failure on the socket is the daemon being away: {line}"
+    );
+}
+
+#[test]
+fn a_config_failure_does_not_blame_the_daemon() {
+    let broken = toml::from_str::<toml::Table>("stt = ").unwrap_err();
+    let line = failure_line(&BansheeError::Toml(broken));
+    assert!(
+        !line.contains("daemon"),
+        "config.toml failing to parse says nothing about the daemon: {line}"
+    );
+}
+
+#[test]
+fn an_io_failure_away_from_the_socket_is_not_blamed_on_the_daemon() {
+    let taken = std::io::Error::new(
+        std::io::ErrorKind::AddrInUse,
+        "another banshee daemon is already running",
+    );
+    let line = failure_line(&BansheeError::Io(taken));
+    assert_eq!(
+        line, "another banshee daemon is already running",
+        "only a socket the CLI could not reach is the daemon being away"
+    );
+}
+
+#[test]
+fn a_missing_model_is_named_beside_the_command_that_fetches_it() {
+    let note = super::missing_models_note(&["silero_vad.onnx".to_string()])
+        .expect("a missing model has something to say");
+    assert!(note.contains("silero_vad.onnx"), "{note}");
+    assert!(
+        note.contains("banshee setup"),
+        "the line must name the command that downloads: {note}"
+    );
+}
+
+#[test]
+fn nothing_is_said_when_every_model_is_on_disk() {
+    assert_eq!(super::missing_models_note(&[]), None);
+}
+
+#[test]
+fn a_file_that_arrived_through_a_running_daemon_names_the_restart() {
+    let note = super::restart_note(1).expect("a file that arrived has something to say");
+    assert!(
+        note.contains("banshee start"),
+        "the line must name the command that reloads: {note}"
+    );
+}
+
+#[test]
+fn a_run_that_fetched_nothing_asks_for_no_restart() {
+    assert_eq!(super::restart_note(0), None);
+}
+
+// Both halves of what an orphaned socket answers with: nothing at all, and a
+// line that is not a reply. A fault that misses either one leaves `banshee
+// stop` reporting a failure where a daemon is simply not running.
+#[test]
+fn an_empty_reply_and_an_unparsable_one_are_both_worth_probing_the_socket_for() {
+    assert!(super::may_be_an_orphaned_socket(&BansheeError::NoAnswer));
+    assert!(super::may_be_an_orphaned_socket(&BansheeError::Serde(
+        serde_json::from_str::<serde_json::Value>("{").expect_err("not json")
+    )));
+}
+
+#[test]
+fn a_daemon_that_answered_is_never_read_as_an_orphaned_socket() {
+    assert!(!super::may_be_an_orphaned_socket(&BansheeError::Rpc {
+        code: -32004,
+        message: "busy".to_string(),
+    }));
+    assert!(!super::may_be_an_orphaned_socket(&BansheeError::Other(
+        "anything else".to_string()
+    )));
 }

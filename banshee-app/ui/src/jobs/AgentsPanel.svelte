@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { land } from '../lib/focus';
   import { applyConnect, planConnect, type AgentRow, type PlannedChange } from '../lib/tauri';
   import { agents, refresh } from '../lib/agents';
 
@@ -11,6 +12,10 @@
   /// Whether a read has answered at all. An empty list before the first answer
   /// is a panel still looking; after one, it is a machine with no agents.
   let looked = false;
+
+  let applyButton: HTMLButtonElement;
+  const connectButtons: Record<string, HTMLButtonElement> = {};
+  const rows: Record<string, HTMLElement> = {};
 
   onMount(look);
 
@@ -53,6 +58,7 @@
       // already says whether it is connected.
       if (changes.length === 0) return;
       reviewing = { agent, plan: changes };
+      land(() => applyButton);
     } catch (error) {
       rowErrors = {
         ...rowErrors,
@@ -71,6 +77,9 @@
       await applyConnect(id, false);
       const read = await refresh();
       reviewing = null;
+      // The agent is connected, so its Connect button is gone. The row is what
+      // now says the result.
+      land(() => rows[id]);
       if (!read) {
         listNote = {
           text: `${reviewing_name} is connected. The list could not be read again, so what it shows may be out of date.`,
@@ -83,7 +92,14 @@
         [id]: (error as { message?: string })?.message || 'That failed.',
       };
       reviewing = null;
+      land(() => connectButtons[id] ?? rows[id]);
     }
+  }
+
+  function cancel() {
+    const id = reviewing?.agent.id;
+    reviewing = null;
+    if (id !== undefined) land(() => connectButtons[id]);
   }
 </script>
 
@@ -95,8 +111,8 @@
       <pre class="diff">{change.diff}</pre>
     {/each}
     <div class="actions">
-      <button class="btn" on:click={apply}>Apply</button>
-      <button class="btn btn-ghost" on:click={() => (reviewing = null)}>Cancel</button>
+      <button class="btn" bind:this={applyButton} on:click={apply}>Apply</button>
+      <button class="btn btn-ghost" on:click={cancel}>Cancel</button>
     </div>
   </div>
 {:else}
@@ -108,13 +124,15 @@
   {/if}
   <div class="rows">
     {#each here as agent (agent.id)}
-      <div class="row">
+      <div class="row" tabindex="-1" bind:this={rows[agent.id]}>
         <span class="name">{agent.name}</span>
         <span class="presence caps" class:on={agent.presence === 'connected'}>
           {SAYS[agent.presence] ?? agent.presence}
         </span>
         {#if agent.presence === 'found'}
-          <button class="btn" on:click={() => review(agent)}>Connect</button>
+          <button class="btn" bind:this={connectButtons[agent.id]} on:click={() => review(agent)}>
+            Connect
+          </button>
         {/if}
       </div>
       {#if rowErrors[agent.id]}<p class="error">{rowErrors[agent.id]}</p>{/if}

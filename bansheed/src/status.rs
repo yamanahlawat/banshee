@@ -14,7 +14,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
 
     let config = match config {
         Ok(config) => {
-            let exists = utils::get_config_path().is_some_and(|p| p.exists());
+            let exists = utils::config_path().is_some_and(|p| p.exists());
             if exists {
                 pass("config.toml parsed");
             } else {
@@ -23,7 +23,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             config
         }
         Err(e) => {
-            let path = utils::get_config_path()
+            let path = utils::config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "config.toml".to_string());
             // First line only: toml's diagnostic runs five lines with a caret,
@@ -42,7 +42,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     let daemon = probe_daemon().await;
     report_settings(&config, &daemon);
 
-    let Some(models_dir) = utils::get_models_path() else {
+    let Some(models_dir) = utils::models_path() else {
         fail("home directory not found", "set $HOME");
         return false;
     };
@@ -52,6 +52,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
     // Read once for the two sides below: one checklist must not report two
     // states of the file.
     let credentials = crate::credentials::Credentials::load();
+    healthy &= check_credentials_mode();
     let (stt_answer, tts_answer) = probe_remote_sides(&config, credentials.as_ref().ok());
     if config.stt.provider.is_remote() {
         healthy &= check_remote_side(
@@ -155,6 +156,21 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         println!("Problems found. Work down from the top.");
     }
     healthy
+}
+
+/// The writer sets 0600; a file made by hand or restored from a backup keeps
+/// whatever mode it came with.
+fn check_credentials_mode() -> bool {
+    let Ok(path) = crate::credentials::Credentials::path() else {
+        return true;
+    };
+    match crate::credentials::Credentials::exposed(&path) {
+        Some(mode) => fail(
+            &format!("credentials.toml is readable by others (mode {mode:o})"),
+            &format!("run: chmod 600 {}", path.display()),
+        ),
+        None => true,
+    }
 }
 
 /// What `banshee tell` would run. A note and never a failure: a machine with
@@ -356,30 +372,21 @@ pub enum Daemon {
         status: serde_json::Value,
         blockers: Vec<Blocker>,
     },
-    /// Answered, but from a build before it reported blockers
-    Legacy(serde_json::Value),
     Silent(String),
     Stale,
     Missing,
 }
 
-/// An absent blockers field is an older daemon; one that will not decode is a
-/// daemon this build cannot read, which is not the same answer.
+/// A reply this build cannot read the blockers of answers nothing the checklist
+/// can act on, whether the field is absent or will not decode.
 fn classify(status: serde_json::Value) -> Daemon {
     let Some(listed) = status.get("blockers") else {
-        return Daemon::Legacy(status);
+        return Daemon::Silent("it reported no blockers field".to_string());
     };
     match serde_json::from_value::<Vec<Blocker>>(listed.clone()) {
         Ok(blockers) => Daemon::Running { status, blockers },
         Err(error) => Daemon::Silent(format!("its blockers could not be read: {error}")),
     }
-}
-
-fn unreported(what: &str) -> bool {
-    note(&format!(
-        "{what} unchecked: this daemon is older than this command and does not report it"
-    ));
-    true
 }
 
 #[cfg(target_os = "macos")]
@@ -394,13 +401,12 @@ fn check_permissions(daemon: &Daemon) -> bool {
 fn report_key_presses(daemon: &Daemon) {
     let reported = match daemon {
         Daemon::Running { status, .. } => banshee_common::key_press_access(status),
-        Daemon::Legacy(_) => None,
         // A read from here answers for the terminal, so with no daemon the
         // checklist says nothing rather than saying it under Banshee's name.
         _ => return,
     };
     let Some(word) = reported else {
-        unreported("key press access");
+        note("key press access unchecked: the daemon reported none");
         return;
     };
     match Access::from_wire(word) {
@@ -442,7 +448,6 @@ fn check_grants(daemon: &Daemon) -> bool {
             }
             denied
         }
-        Daemon::Legacy(_) => return unreported("permissions"),
         // A read from here answers for the terminal that ran the command.
         _ => {
             note("a grant cannot be read from here: only the daemon speaks for the daemon");
@@ -466,7 +471,7 @@ fn field<'a>(status: &'a serde_json::Value, key: &str, fallback: &'a str) -> &'a
 }
 
 pub async fn probe_daemon() -> Daemon {
-    match utils::get_socket_path() {
+    match utils::socket_path() {
         Some(socket) if socket.exists() => {
             if !crate::daemon::socket_answers(&socket) {
                 return Daemon::Stale;
@@ -479,7 +484,7 @@ pub async fn probe_daemon() -> Daemon {
             {
                 Ok(Ok(status)) => classify(status),
                 Ok(Err(e)) => Daemon::Silent(e.to_string()),
-                Err(_) => Daemon::Silent("no answer within 2s".to_string()),
+                Err(_) => Daemon::Silent("nothing within 2s".to_string()),
             }
         }
         _ => Daemon::Missing,
@@ -527,15 +532,53 @@ fn open_fix(blockers: &[Blocker]) -> &str {
         .map_or(MICROPHONE_FIX, |blocker| blocker.fix.as_str())
 }
 
+/// The rate a Bluetooth headset runs at while anything holds its microphone.
+/// Measured on a OnePlus Buds 3: 16000 Hz in and out while Banshee records, and
+/// 44100 Hz in stereo out the moment it stops.
+const HANDS_FREE: u32 = 16_000;
+
+/// What the speaker costs when it is the microphone's own device. A person who
+/// hears a dull voice has no other way to learn that Banshee holding the
+/// microphone is the reason.
+///
+/// The speaker is the machine's default, which is the one Banshee plays
+/// through unless rodio fell back to another, and it names neither. The line
+/// says "default" rather than claiming to describe the device the voice came
+/// out of.
+fn shared_device(open: &str, speaker: Option<(String, u32)>) -> Option<String> {
+    let (speaker, rate) = speaker?;
+    (open == speaker && rate <= HANDS_FREE).then(|| {
+        format!(
+            "the default speaker is this microphone's own device, and it plays at {rate} Hz while Banshee listens"
+        )
+    })
+}
+
 fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
     match banshee_common::audio_device(status) {
-        Some(open) => pass(&microphone_line(
-            "daemon has the microphone",
-            Some(open),
-            banshee_common::missing_device(status),
-        )),
+        Some(open) => {
+            let held = pass(&microphone_line(
+                "daemon has the microphone",
+                Some(open),
+                banshee_common::missing_device(status),
+            ));
+            // After the line it annotates, or it reads as a note on the check
+            // above it.
+            if let Some(cost) = shared_device(open, crate::audio::default_output()) {
+                note(&cost);
+            }
+            held
+        }
         None => fail("the daemon has no microphone open", open_fix(blockers)),
     }
+}
+
+/// A daemon still building its pipeline has no device to name and no fault to
+/// report. `None` once it is open or broken, which the lines below answer for.
+/// The word is the daemon's own, so the two sides cannot spell it differently.
+fn still_opening(status: &serde_json::Value) -> Option<&'static str> {
+    (banshee_common::pipeline(status) == Some(crate::state::Pipeline::Opening.as_str()))
+        .then_some("the microphone is still opening")
 }
 
 // Opening a second stream fails on backends that allow only one, which would
@@ -547,6 +590,10 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
         // A listener that will not answer takes capture down with it, so every
         // kind here leaves the daemon unable to record and each names its own
         // fix.
+        Daemon::Running { status, .. } if let Some(waiting) = still_opening(status) => {
+            note(waiting);
+            true
+        }
         Daemon::Running { status, blockers } => match blockers.iter().find(|blocker| {
             matches!(
                 blocker.kind,
@@ -559,7 +606,6 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
                 &blocker.fix,
             ),
         },
-        Daemon::Legacy(_) => unreported("recording"),
         Daemon::Silent(_) => {
             note("microphone unchecked: a daemon holds it but did not answer status");
             true
@@ -571,9 +617,31 @@ fn check_recording(daemon: &Daemon, input_device: &str) -> bool {
     }
 }
 
+/// What to say about a daemon that is not answering, and the fix beside it.
+/// `None` while one is: `report_daemon` answers for that with the version it
+/// reported. A socket file left behind is not called a crash, because a clean
+/// `kill` and a deliberate exit leave the same one.
+fn absence(daemon: &Daemon) -> Option<(String, &'static str)> {
+    match daemon {
+        Daemon::Running { .. } => None,
+        Daemon::Silent(reason) => Some((
+            format!("the daemon holds the socket but did not answer: {reason}"),
+            "it may still be starting: run this again, and restart it if it persists: banshee start",
+        )),
+        Daemon::Stale => Some((
+            "the daemon is not running, and the socket file it left is still there".to_string(),
+            "start it: banshee start",
+        )),
+        Daemon::Missing => Some((
+            "the daemon is not running".to_string(),
+            "start it: banshee start",
+        )),
+    }
+}
+
 fn report_daemon(daemon: &Daemon) -> bool {
     match daemon {
-        Daemon::Running { status, .. } | Daemon::Legacy(status) => {
+        Daemon::Running { status, .. } => {
             let version = field(status, "version", "unknown");
             pass(&format!("daemon running (version {version})"));
             if version != env!("CARGO_PKG_VERSION") {
@@ -585,17 +653,8 @@ fn report_daemon(daemon: &Daemon) -> bool {
             }
             true
         }
-        Daemon::Silent(e) => fail(
-            &format!("daemon answered the socket but status failed: {e}"),
-            "restart it: banshee start",
-        ),
-        // Not notes: nothing records without a daemon, and a checklist that
-        // passes here reports a green check it cannot back
-        Daemon::Stale => fail(
-            "the daemon is not running; a stale socket is left from a crash",
-            "start it: banshee start",
-        ),
-        Daemon::Missing => fail("the daemon is not running", "start it: banshee start"),
+        // Every kind but Running is an absence, and Running is taken above.
+        away => absence(away).is_none_or(|(line, fix)| fail(&line, fix)),
     }
 }
 
@@ -712,7 +771,7 @@ fn speech_line(host: &str, started: bool) -> String {
 /// answers, so the caller falls back to the file.
 fn live<T>(daemon: &Daemon, read: impl Fn(&serde_json::Value) -> Option<T>) -> Option<T> {
     match daemon {
-        Daemon::Running { status, .. } | Daemon::Legacy(status) => read(status),
+        Daemon::Running { status, .. } => read(status),
         _ => None,
     }
 }

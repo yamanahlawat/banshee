@@ -16,6 +16,8 @@ use ringbuf::{
 
 use crate::state::DaemonState;
 
+/// Also the longest push-to-talk. At 48 kHz of `f32` this holds 23 MB for the
+/// daemon's life.
 pub const RING_SECS: usize = 120;
 
 // The name [audio] input_device carries to mean "whatever the OS is set to"
@@ -47,6 +49,15 @@ pub fn default_input_name() -> Option<String> {
         .default_input_device()
         .and_then(|device| device.description().ok())
         .map(|description| description.name().to_string())
+}
+
+/// The name the OS calls its default output device, and the rate it runs at.
+/// One read answers both, so the name and the rate cannot name two moments.
+pub fn default_output() -> Option<(String, u32)> {
+    let device = cpal::default_host().default_output_device()?;
+    let name = device.description().ok()?.name().to_string();
+    let rate = device.default_output_config().ok()?.sample_rate();
+    Some((name, rate))
 }
 
 /// One walk of the input devices, with the name the OS calls its default. It
@@ -209,7 +220,7 @@ where
         .build_input_stream(
             &config.into(),
             data,
-            |error| eprintln!("Audio Error: {error}"),
+            |error| log::error!("Audio Error: {error}"),
             None,
         )
         .map_err(|e| BansheeError::Other(e.to_string()))?;
@@ -217,6 +228,11 @@ where
         .play()
         .map_err(|e| BansheeError::Other(e.to_string()))?;
     Ok(stream)
+}
+
+/// Names the device, because the OS gives two devices the same error.
+pub fn open_failure(device: &str, error: impl std::fmt::Display) -> String {
+    format!("{device}: {error}")
 }
 
 /// Enumeration is not proof: a device can list itself and still fail
@@ -251,7 +267,7 @@ pub fn open_capture(
     let device = &selection.device;
     let config = device
         .default_input_config()
-        .map_err(|e| BansheeError::Other(e.to_string()))?;
+        .map_err(|e| BansheeError::Other(open_failure(&selection.open, e)))?;
 
     let sample_rate = config.sample_rate();
     let channels = config.channels();
@@ -274,7 +290,8 @@ pub fn open_capture(
                 producer.push_slice(data);
             }
         }
-    })?;
+    })
+    .map_err(|e| BansheeError::Other(open_failure(&selection.open, e)))?;
 
     // Set after play() succeeds, so status never names a mic that failed to open
     daemon_state.set_audio_device(Some(selection.open.clone()));
@@ -412,7 +429,8 @@ mod tests {
         serving: bool,
     }
 
-    // A rescan that reopens the device it already holds rebuilds a 23 MB ring
+    // A rescan that reopens the device it already holds rebuilds the whole ring,
+    // which RING_SECS sizes at 23 MB
     #[test]
     fn an_open_device_is_reopened_only_when_it_must_be() {
         let cases = [

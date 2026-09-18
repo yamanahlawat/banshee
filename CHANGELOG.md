@@ -7,7 +7,219 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`banshee uninstall` undoes what Banshee installed.** It stops the daemon,
+  takes both login entries out, and names the tool that owns the rest:
+  Homebrew's copy stays Homebrew's, because deleting files it records leaves the
+  records pointing at nothing. A copy from the shell installer or the tarball is
+  removed here. A source build records nothing, so its files stay, and the
+  command names the binary it runs from. `~/.banshee` holds the models, the
+  history and the keys, and it stays unless `--data` asks for it. Nothing is
+  removed without a yes, and a script with no terminal is told to pass `--yes`
+  rather than asked a question nobody will see.
+
+- **`banshee status` says why a headset sounds dull.** A Bluetooth headset gives
+  macOS its microphone or its speaker in full quality, never both, so while
+  Banshee holds the microphone the same device plays at 16 kHz. The line appears
+  when the open microphone and the default speaker are the same device and its
+  rate has dropped, and it names the rate. Pinning `[audio] input_device` to
+  another microphone is the way out.
+
+- **`banshee-update` comes with the shell installer.** That route had no update
+  path at all: Homebrew has `brew upgrade`, and the downloaded app is replaced by
+  running its own command again, but the installer's route had nothing.
+
+### Changed
+
+- **`banshee start` starts, and downloads nothing.** A first run no longer
+  spends ~860 MB before you have seen that speech models come in three sizes.
+  `banshee start` names the models that are missing and stops; `banshee setup`
+  fetches them. In the window, the download box asks first and carries the
+  preset chooser, so `fast` or `quality` is picked before the bytes move. A
+  daemon that was already running built its pipeline without those files, so
+  `banshee setup` now says when a restart is what loads them.
+
+- **Every line in the daemon log carries a clock and a level, and a dictated
+  sentence reaches it only when asked for.** Lines read
+  `12:00:01.500 INFO  hotkey: Transcribed 3.2s of audio in 0.41s`. The text
+  Banshee heard, typed or told the agent is logged at `debug`. A supervisor
+  hands the daemon an environment of its own, so `BANSHEE_LOG=debug banshee
+  start` writes the level into the login service file and the daemon runs at
+  it. Use `BANSHEE_LOG=warn banshee start` for failures alone, and
+  `banshee start` on its own to go back to the default.
+
+- **The voice detector asks for one thread instead of four, and Kokoro asks for
+  the core count up to eight instead of a fixed four.** The detector reads 0.06 ms
+  at one, two and four threads alike, so the extra three bought nothing on every
+  chunk the microphone captured. Kokoro does scale: one utterance measured 484 ms
+  at one thread and 155 at eight on a 24-thread machine, and 1001 at one, 388 at
+  four and 243 at eight on a 15-thread one. It now asks for no more threads than
+  the machine holds, so a dual-core laptop is no longer oversubscribed either.
+
+- **A request whose `jsonrpc` field is not `"2.0"` is not answered.** The
+  daemon read the field as free text and answered any value. It now parses only
+  the version it speaks, as its replies already declared.
+
+- **The window and the daemon upgrade together.** Banshee no longer carries the
+  paths that let a new `banshee` command read an older running daemon. Upgrade
+  and then run `banshee start`, which every install path already does. A daemon
+  older than 0.8.0 left running now reports that its checklist cannot be read,
+  rather than reporting a shorter one.
+
+### Removed
+
+- **A `[logging]` table in `config.toml` is refused by name.** It was parsed and
+  ignored since 0.11.1. Delete the table and the file loads again.
+
 ### Fixed
+
+- **A reply never plays into a sound card that PipeWire does not hold.** When
+  the default output would not open, Banshee opened whatever other device
+  would. On Linux, with PipeWire restarting or stopped, that was a raw sound
+  card. The card took the audio, so every later reply played into it, and the
+  headset stayed silent until the daemon restarted. On Linux, Banshee now opens
+  the default output only. A reply that meets no output ends, and it says why. The
+  next reply opens the default again, and while there is still no output,
+  `banshee speak` fails with the reason and does not answer `ok`.
+
+- **The window opens at its own height on Hyprland.** Hyprland sized the new
+  window as a tile before it read the window's size limits, so the window
+  floated at the full height of the screen. The window now asks for its
+  configured size when it opens.
+
+- **A microphone that stays gone is logged once.** Banshee tries it again
+  every 5 seconds and wrote an error line each time, 720 lines an hour for one
+  fault. It now writes the fault once, and again only when the reason changes.
+
+- **A quarantined Banshee says so instead of dying silently.** macOS kills the
+  `banshee` command with no message at all when the app still carries Homebrew's
+  quarantine flag, which made a blocked install look like a broken daemon. The
+  cask now writes `banshee` and `banshee-mcp-shim` as small wrappers outside the
+  app, because macOS kills anything run from inside a quarantined bundle, a
+  shell script included. They name what happened, and in a terminal offer to
+  clear the flag. They ask first, they only ever ask a person, and a hook or an
+  agent gets the line to run rather than a prompt nobody can answer. The flag
+  returns with every `brew upgrade`, which the caveat and the docs now say.
+
+- **The earcons come out of the same speaker as the voice.** The cue player held
+  an audio device of its own, opened once and never again, so a device that went
+  away left every later beep unheard while the voice carried on elsewhere. Every
+  sound the daemon makes now goes through one output, which follows the device
+  and is opened only when there is something to play, so cues turned off still
+  hold no audio hardware.
+
+- **A question follows the microphone.** A device that changed while Banshee was
+  already listening left the answer unheard: the new microphone arrived as a
+  command, and the question itself was holding the thread that reads commands,
+  so it went on reading a device that no longer existed until it timed out. The
+  capture is now shared, so a question already listening reads whatever
+  microphone is there, keeps what was said before the change, and rebuilds only
+  what belonged to the old device.
+
+- **A reply follows the speaker.** When the device Banshee was playing through
+  disappeared, the rest of the reply went into it and was never heard, the daemon
+  believed it was still speaking, and every later reply queued behind a device
+  that was gone until it was restarted. Banshee now notices that nothing is
+  taking the audio, opens the device that is default now, and carries on,
+  repeating at most the sentence that was cut.
+
+- **A box that stands above the record lines up with the boxes beside it.** A
+  drawn absence is indented to the turn text column, which is right where it
+  stands in for a turn. "Banshee is not running" stands above the record, where
+  the indent aligned it to a column no turn was drawing and broke the left edge
+  it shares with the blocker above it. It now takes the band gutter.
+
+- **A question no longer outlives the agent that asked it.** `ask_user` holds
+  the microphone until someone answers, and an agent that died in the meantime
+  went unnoticed, so the session listened on to its timeout and every other
+  question was refused as busy. The daemon now watches the connection while a
+  call runs and closes the session when the caller goes, while a request sent
+  during a call is still held and answered.
+
+- **The Accessibility advice covers a switch that is already on.** macOS keys
+  that grant to the signature of the build that asked for it, so a reinstall or
+  an update can leave a row that is listed and switched on while the grant
+  reaches nothing, and no prompt appears because a record already exists.
+  Banshee now names the repair: remove Banshee from the list with the minus
+  button and add it back.
+
+- **`banshee status` says what happened instead of quoting a JSON parser.** A
+  daemon that closed the connection was reported as `EOF while parsing a value
+  at line 1 column 0`, and a socket file left behind was called a crash, though
+  a clean stop leaves the same file. The checklist now names the state it found
+  and offers a second look before a restart, since a daemon that is still
+  starting answers nothing and restarting only starts the wait again.
+
+- **Granting Accessibility no longer kills a running download.** Banshee has
+  to start again for a grant to reach it, and it used to leave the moment one
+  landed, taking the first-run download with it and leaving the socket file
+  behind for the next run to report as a crash. It now waits for the download
+  to finish, then leaves the way a stop does, with nothing left behind.
+
+- **A slow microphone no longer makes Banshee unreachable.** The daemon opens
+  its socket before it touches the audio devices, so a device whose driver
+  stops answering leaves Banshee answering. Walking the devices enters Core
+  Audio, which was measured stalling for minutes on this machine, and every
+  client that connected in that window waited with it: `banshee status` said
+  the daemon answered the socket but not the call, and restarting only started
+  the wait again. `banshee status` now reports "the microphone is still
+  opening" while it waits, and a press before it opens answers with the error
+  cue.
+
+- **A reply that never starts no longer leaves the daemon deaf.** When a new
+  reply interrupted one already playing and the speaker then refused it, for
+  example a voice that is not installed, Banshee went on believing it was
+  speaking. The hotkey listener drops every sound it captures while that is
+  true, so the microphone stopped answering until the next reply played.
+
+- **A `config.toml` that does not parse names itself.** The message pointed at
+  the line at fault but not at the file it was in, and Banshee reads two toml
+  files.
+
+- **`banshee.speak` with a voice the speaker cannot take answers an
+  invalid-params error, not an internal one.** The system voice and a remote
+  speaker take no per-utterance voice, and Kokoro refuses a voice that is not
+  installed. Each said so under the internal-error code.
+
+- **An error reads as the sentence it was written as.** Every failure that was
+  not a refusal or an answer from the daemon printed `Internal error:` in front
+  of its text, so `config.toml does not parse` and `home dir not found` each
+  called themselves internal. A typing failure on dictation printed its Rust
+  form in the daemon log; it prints the sentence now.
+
+- **`banshee start` writes its login service file whole, and finds `launchctl`,
+  `systemctl` and `open` under a supervisor's short PATH.** The launchd plist
+  and the systemd unit were written in place, so a crash mid-write left a file
+  the next login could not start. Every file Banshee writes now lands on disk
+  before it replaces the old one.
+
+- **`banshee status` reports a `credentials.toml` that others can read, with
+  the `chmod` that fixes it.** Banshee writes the file owner-only, but a copy
+  made by hand or restored from a backup kept whatever mode it came with.
+
+- **A Kokoro sentence that fails to synthesise sounds the error cue and shows
+  in `banshee status`, as a remote speaker's failure already did.** It wrote
+  one line to the daemon log and the reply went silent with no other sign.
+
+- **A `banshee` command that fails exits with status 1 and prints the reason
+  as a sentence.** `stop`, `listen`, `speak`, `history`, `clear-history` and
+  `record` reported a failure and exited 0, so a script could not see it. An
+  error that reached the top printed its Rust form, such as
+  `Error: Rejected("...")`; it now prints the text alone.
+
+- **The MCP shim answers an unknown tool and stays silent on a notification.**
+  A call to a tool name the shim does not serve got no reply at all, so the
+  agent waited until its own timeout. It now answers an invalid-params error
+  that names the tool. A notification such as `notifications/cancelled` got a
+  method-not-found error with no id, which JSON-RPC forbids. The shim now
+  sends nothing for any message without an id. A tool call the daemon refuses
+  comes back as a tool result marked as an error, with the daemon's own words,
+  so the agent reads why; it was a protocol error with an internal-error code
+  before. A line that is not a JSON-RPC request gets a parse error from the
+  shim and from the daemon's socket, where both dropped it in silence. The
+  shim's own log lines carry a clock and a level like the daemon's, and
+  `BANSHEE_LOG=debug` in the MCP server's environment names each tool call.
 
 - **A version number, a decimal and a year are spoken as what they are.**
   `0.12.1` reads "zero twelve one" instead of "zero one two one", `1.2` reads

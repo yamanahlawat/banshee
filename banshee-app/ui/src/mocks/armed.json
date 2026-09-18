@@ -2,7 +2,11 @@
   "recording": true,
   "armed": true,
   "transcribing": false,
+  "telling": false,
   "speaking": false,
   "audio_device": "MacBook Pro Microphone",
-  "missing_device": null
+  "missing_device": null,
+  "last_error": null,
+  "last_speech_error": null,
+  "activity": "listening"
 }

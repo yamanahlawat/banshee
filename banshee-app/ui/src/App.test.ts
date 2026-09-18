@@ -79,7 +79,7 @@ beforeEach(async () => {
     ],
   });
   vi.mocked(listVoices).mockResolvedValue({
-    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }],
+    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true }],
     current: 'af_sky',
   });
   vi.mocked(detectAgents).mockResolvedValue([]);
@@ -104,6 +104,17 @@ it('draws an empty history rather than leaving the body blank', async () => {
   vi.mocked(history).mockResolvedValue([]);
   render(App);
   await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
+});
+
+// It stands where the turns would be, so it takes the column they would have
+// taken. The two absences differ because their places differ.
+it('puts the empty record in the column the turns would have used', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
+
+  const box = screen.getByText('Nothing said yet').closest('.absence');
+  expect(box?.classList.contains('in-record')).toBe(true);
 });
 
 it('says what a blocker stops and offers the pane that clears it', async () => {
@@ -295,6 +306,19 @@ it('offers a way back when the daemon has stopped', async () => {
   expect(screen.getByRole('button', { name: 'Start Banshee' })).toBeTruthy();
   // What was said before is still readable.
   expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
+});
+
+// The box the person sees under the blockers band. It aligns with the bands
+// it stands among, not with a text column that no turn is drawing beside it.
+it('aligns the stopped-daemon box with the bands above it', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  daemon.update((s) => ({ ...s, down: 'not running' }));
+  await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
+
+  const box = screen.getByText('Banshee is not running').closest('.absence');
+  expect(box?.classList.contains('in-record')).toBe(false);
 });
 
 it('stops naming a microphone once the daemon has stopped', async () => {
@@ -864,7 +888,7 @@ it('reads the voices again once their files have landed', async () => {
 
   vi.mocked(status).mockResolvedValue({ ...ready, blockers: [] });
   vi.mocked(listVoices).mockResolvedValue({
-    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear' }],
+    voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true }],
     current: 'af_sky',
   });
   pushes.get('daemon:downloads')?.({
@@ -1983,12 +2007,4 @@ it('sends the answerer to the compositor binding while an agent waits', async ()
     expect(screen.getByText(/compositor's Banshee binding to answer/)).toBeTruthy(),
   );
   expect(screen.queryByText(/Tap Right Command to answer/)).toBeNull();
-});
-
-// A daemon older than the field sends none, and that daemon did bind the key.
-it('still names the key when the daemon reports nothing either way', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  expect(screen.getByRole('button', { name: /^Hotkey/ }).textContent).toMatch(/Right Command/);
 });

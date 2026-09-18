@@ -21,8 +21,10 @@ publish-jobs = ["homebrew"]
 install-path = "CARGO_HOME"
 # Where to host releases
 hosting = "github"
-# Whether to install an updater program
-install-updater = false
+# Whether to install an updater program. The shell installer's route has no
+# package manager behind it, so `banshee-update` is what a person there runs.
+# Homebrew has `brew upgrade`, and the tarball is re-downloaded in place.
+install-updater = true
 # TCC keys Accessibility and Input Monitoring to the code signature, and an
 # ad-hoc one changes every build, so users would re-grant on every upgrade.
 # The certificate is self-signed and lives in repo secrets; no Apple membership

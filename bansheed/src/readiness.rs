@@ -1,20 +1,16 @@
 use banshee_common::{Blocker, BlockerKind};
 
-use crate::state::{DaemonState, RecordingError};
+use crate::state::{DaemonState, Pipeline, RecordingError};
 use crate::{models, permissions};
 
-pub fn blockers(state: &DaemonState) -> Vec<Blocker> {
+pub fn blockers(state: &DaemonState, pipeline: &Pipeline) -> Vec<Blocker> {
     // The loaded model, not the configured one, and none for a remote listener
     let names: Vec<&str> = state
         .stt_model()
         .into_iter()
         .chain([state.vad_model()])
         .collect();
-    assemble(
-        permissions::blockers(),
-        models::blockers(&names),
-        state.recording_error().as_ref(),
-    )
+    assemble(permissions::blockers(), models::blockers(&names), pipeline)
 }
 
 /// Split out so the present-but-dead branch is testable: a test daemon's model
@@ -23,8 +19,9 @@ pub fn blockers(state: &DaemonState) -> Vec<Blocker> {
 fn assemble(
     mut grants: Vec<Blocker>,
     missing_models: Vec<Blocker>,
-    recording_error: Option<&RecordingError>,
+    pipeline: &Pipeline,
 ) -> Vec<Blocker> {
+    let recording_error = pipeline.fault();
     let models_explain_it =
         !missing_models.is_empty() && matches!(recording_error, Some(RecordingError::Model(_)));
     grants.extend(missing_models);
@@ -64,7 +61,7 @@ mod tests {
     use super::assemble;
     use banshee_common::{Blocker, BlockerKind};
 
-    use crate::state::RecordingError;
+    use crate::state::{Pipeline, RecordingError};
 
     fn blocker(kind: BlockerKind, id: &str) -> Blocker {
         Blocker {
@@ -79,9 +76,16 @@ mod tests {
         }
     }
 
+    // A pipeline being built is not a fault, and a blocker asks the reader to
+    // fix something. Waiting is not theirs to fix.
+    #[test]
+    fn a_pipeline_that_is_still_opening_raises_no_blocker() {
+        assert!(assemble(vec![], vec![], &Pipeline::Opening).is_empty());
+    }
+
     #[test]
     fn a_healthy_daemon_reports_nothing() {
-        assert!(assemble(vec![], vec![], None).is_empty());
+        assert!(assemble(vec![], vec![], &Pipeline::Open).is_empty());
     }
 
     /// A client that routes by kind sends a model fault to its models step.
@@ -91,21 +95,21 @@ mod tests {
     #[test]
     fn a_dead_pipeline_names_the_command_a_client_routes_on() {
         let error = RecordingError::Model("missing file.".to_string());
-        let blockers = assemble(vec![], vec![], Some(&error));
+        let blockers = assemble(vec![], vec![], &Pipeline::Broken(error.clone()));
         assert_eq!(blockers[0].command.as_deref(), Some("banshee start"));
     }
 
     #[test]
     fn a_model_that_will_not_load_reports_as_a_model_fault() {
         let error = RecordingError::Model("missing file.".to_string());
-        let blockers = assemble(vec![], vec![], Some(&error));
+        let blockers = assemble(vec![], vec![], &Pipeline::Broken(error.clone()));
         assert_eq!(blockers[0].kind, BlockerKind::Model);
     }
 
     #[test]
     fn a_dead_microphone_reports_as_a_pipeline_fault() {
         let error = RecordingError::Microphone("no device".to_string());
-        let blockers = assemble(vec![], vec![], Some(&error));
+        let blockers = assemble(vec![], vec![], &Pipeline::Broken(error.clone()));
         assert_eq!(blockers[0].kind, BlockerKind::Pipeline);
     }
 
@@ -113,7 +117,11 @@ mod tests {
     /// pipeline" says nothing a reader can act on.
     #[test]
     fn each_fault_names_itself_rather_than_the_pipeline_they_share() {
-        let named = |error: RecordingError| assemble(vec![], vec![], Some(&error))[0].name.clone();
+        let named = |error: RecordingError| {
+            assemble(vec![], vec![], &Pipeline::Broken(error.clone()))[0]
+                .name
+                .clone()
+        };
         assert_eq!(
             named(RecordingError::Microphone("no device".to_string())),
             "The microphone is not working"
@@ -131,7 +139,7 @@ mod tests {
     #[test]
     fn a_model_that_will_not_load_asks_for_a_restart() {
         let error = RecordingError::Model("missing file.".to_string());
-        let blockers = assemble(vec![], vec![], Some(&error));
+        let blockers = assemble(vec![], vec![], &Pipeline::Broken(error.clone()));
         let [blocker] = &blockers[..] else {
             panic!("expected exactly one blocker, got {blockers:?}");
         };
@@ -154,7 +162,7 @@ mod tests {
         let blockers = assemble(
             vec![],
             vec![blocker(BlockerKind::Model, "ggml.bin")],
-            Some(&error),
+            &Pipeline::Broken(error.clone()),
         );
         let [blocker] = &blockers[..] else {
             panic!("the download is the whole fix, got {blockers:?}");
@@ -169,7 +177,7 @@ mod tests {
         let blockers = assemble(
             vec![],
             vec![blocker(BlockerKind::Model, "ggml.bin")],
-            Some(&error),
+            &Pipeline::Broken(error.clone()),
         );
         let kinds: Vec<_> = blockers.iter().map(|b| b.kind).collect();
         assert_eq!(
@@ -182,7 +190,7 @@ mod tests {
     #[test]
     fn a_microphone_is_not_told_to_just_restart() {
         let error = RecordingError::Microphone("no device".to_string());
-        let blockers = assemble(vec![], vec![], Some(&error));
+        let blockers = assemble(vec![], vec![], &Pipeline::Broken(error.clone()));
         let fix = &blockers[0].fix;
         assert!(
             fix.contains("microphone"),
@@ -196,7 +204,7 @@ mod tests {
     #[test]
     fn a_dead_remote_listener_reports_as_a_provider_fault_with_the_key_command() {
         let error = RecordingError::Provider("no key for the remote listener".to_string());
-        let blockers = assemble(vec![], vec![], Some(&error));
+        let blockers = assemble(vec![], vec![], &Pipeline::Broken(error.clone()));
         let [blocker] = &blockers[..] else {
             panic!("expected exactly one blocker, got {blockers:?}");
         };
@@ -218,7 +226,7 @@ mod tests {
             "credentials.toml does not parse; fix it or delete it and set the keys again"
                 .to_string(),
         );
-        let blockers = assemble(vec![], vec![], Some(&error));
+        let blockers = assemble(vec![], vec![], &Pipeline::Broken(error.clone()));
         let [blocker] = &blockers[..] else {
             panic!("expected exactly one blocker, got {blockers:?}");
         };
@@ -242,7 +250,7 @@ mod tests {
         let blockers = assemble(
             vec![blocker(BlockerKind::Permission, "accessibility")],
             vec![blocker(BlockerKind::Model, "ggml.bin")],
-            None,
+            &Pipeline::Open,
         );
         let kinds: Vec<_> = blockers.iter().map(|b| b.kind).collect();
         assert_eq!(

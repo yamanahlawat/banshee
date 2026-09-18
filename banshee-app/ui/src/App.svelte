@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
+  import { land } from './lib/focus';
   import {
     daemon,
     downloadLine,
     endsTheRun,
+    hotkeyListens as listensForHotkey,
     isDown,
     lampForm,
     listeningFacts,
@@ -71,8 +73,7 @@
     cameFrom = next === null ? cameFrom : from;
     job = next;
     if (next !== null) return;
-    await tick();
-    document.getElementById(cameFrom)?.focus();
+    await land(() => document.getElementById(cameFrom));
     cameFrom = '';
   }
   let query = '';
@@ -128,8 +129,7 @@
   $: live = !isDown($daemon);
   $: connected = $agents.filter((a) => a.presence === 'connected').length;
   // Wayland grants no global grab, so the daemon binds nothing and says so.
-  // A daemon older than the field sends nothing, and it did bind the key.
-  $: hotkeyListens = $daemon.status?.hotkey_listens !== false;
+  $: hotkeyListens = listensForHotkey($daemon);
   // The window names no key it has not been told. `audio.hotkey_mode` decides
   // the verb, because "Hold" is a lie when a tap is what starts it.
   $: boundKey = humanize(String(config.audio?.hotkey ?? ''));
@@ -510,16 +510,19 @@
         {/if}
       {:else if needle}
         <Absence
+          inRecord
           label="No match"
           detail={`Nothing said so far contains \u201c${query.trim()}\u201d.`}
         />
       {:else if !savingHistory}
         <Absence
+          inRecord
           label="Nothing is kept"
           detail="Dictation still works and still lands in whatever app has focus. Banshee is simply not writing any of it down."
         />
       {:else if nothingYet && blockers.length === 0}
         <Absence
+          inRecord
           label="Nothing said yet"
           detail={!hotkeyListens
             ? 'Your compositor starts dictation here. What you say lands in whatever app you are using, and shows up here.'

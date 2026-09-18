@@ -582,8 +582,6 @@ fn undo_in(state: &Path, config: &TellConfig) -> Result<String, BansheeError> {
     let restored = restore(&from, &watched);
     let sentence = describe(&restored);
     if failed_outright(&restored) {
-        // Rejected, not Other: Other prints "Internal error:" in front of the
-        // text, and this sentence is the one the user reads.
         return Err(BansheeError::Rejected(sentence));
     }
     Ok(sentence)
@@ -672,8 +670,6 @@ fn clear_thread(state: &Path) -> Result<Told, BansheeError> {
     if let Err(e) = std::fs::remove_file(&file)
         && e.kind() != std::io::ErrorKind::NotFound
     {
-        // Rejected, not Other: Other prints "Internal error:" in front of the
-        // text, and this sentence is the one the user hears.
         return Err(BansheeError::Rejected(format!(
             "the thread is still there. Banshee could not remove {}: {e}",
             file.display()

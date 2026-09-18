@@ -5,7 +5,12 @@ use std::thread;
 use std::time::Duration;
 
 use rodio::source::{SineWave, Source};
-use rodio::{DeviceSinkBuilder, Player};
+
+use crate::text_to_speech::ActiveUtterance;
+use crate::text_to_speech::output::{Chunk, Output};
+
+/// How often a cue that is playing is given the chance to follow the device.
+const CUE_POLL: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Copy, Debug)]
 pub enum Cue {
@@ -20,7 +25,7 @@ pub enum Cue {
 
 impl Cue {
     // (frequency Hz, duration ms) pairs played back to back
-    fn tones(self) -> &'static [(f32, u64)] {
+    const fn tones(self) -> &'static [(f32, u64)] {
         match self {
             Cue::RecordStart => &[(660.0, 70), (880.0, 90)],
             Cue::RecordStop => &[(880.0, 70), (660.0, 90)],
@@ -29,6 +34,18 @@ impl Cue {
             Cue::Arm => &[(523.0, 70), (1046.0, 120)],
             Cue::Disarm => &[(1046.0, 70), (523.0, 120)],
         }
+    }
+
+    /// For a caller that waits for the cue to finish.
+    pub const fn duration_ms(self) -> u64 {
+        let tones = self.tones();
+        let mut total = 0;
+        let mut index = 0;
+        while index < tones.len() {
+            total += tones[index].1;
+            index += 1;
+        }
+        total
     }
 }
 
@@ -93,7 +110,7 @@ fn next_playable(receiver: &mpsc::Receiver<Cue>, enabled: &AtomicBool) -> Option
 /// The player holds the receiver whether or not cues sound, so turning them on
 /// reaches a thread that is already listening. It opens no output device until
 /// the first cue it must play, so cues left off hold no audio hardware.
-pub fn start_cue_player(enabled: bool) -> Cues {
+pub fn start_cue_player(enabled: bool, output: Arc<Output>) -> Cues {
     let (sender, receiver) = mpsc::channel::<Cue>();
     let cues = Cues {
         sender,
@@ -105,21 +122,13 @@ pub fn start_cue_player(enabled: bool) -> Cues {
         let Some(mut cue) = next_playable(&receiver, &enabled) else {
             return;
         };
-        // The device sink is !Send, so it must live on this thread
-        let sink = match DeviceSinkBuilder::open_default_sink() {
-            Ok(sink) => sink,
-            Err(e) => {
-                eprintln!("Audio cues disabled, no output device: {e}");
-                return;
-            }
-        };
-        // Player queues tones back to back; the mixer alone would overlap them
-        let player = Player::connect_new(sink.mixer());
-
+        // A cue that cannot play is not a reply that was not spoken, so its
+        // faults stay out of `last_speech_error`, and the receiver goes rather
+        // than buffering them for the life of the daemon. `play` logs them.
+        let (faults, unread) = mpsc::channel();
+        drop(unread);
         loop {
-            for &(frequency, ms) in cue.tones() {
-                player.append(tone(frequency, ms));
-            }
+            play(&output, cue, &faults);
             cue = match next_playable(&receiver, &enabled) {
                 Some(next) => next,
                 None => return,
@@ -130,10 +139,44 @@ pub fn start_cue_player(enabled: bool) -> Cues {
     cues
 }
 
+/// Plays one cue through the daemon's output and stays with it to the end, so a
+/// device that dies mid-cue is replaced the way it is mid-sentence. The wait is
+/// what keeps two cues from overlapping.
+fn play(output: &Arc<Output>, cue: Cue, faults: &mpsc::Sender<crate::text_to_speech::Fault>) {
+    let tones: Vec<Chunk> = cue
+        .tones()
+        .iter()
+        .map(|&(frequency, ms)| chunk(frequency, ms))
+        .collect();
+    let mut playing = match output.play(tones.into_iter(), faults.clone()) {
+        Ok(playing) => playing,
+        Err(e) => {
+            log::warn!("no cue was played, there is no output device: {e}");
+            return;
+        }
+    };
+    while !playing.is_finished() {
+        thread::sleep(CUE_POLL);
+    }
+}
+
+/// The same tone the cue player has always sounded, as samples the output takes.
+fn chunk(frequency: f32, ms: u64) -> Chunk {
+    let source = tone(frequency, ms);
+    let rate = source.sample_rate();
+    let channels = source.channels();
+    Chunk {
+        samples: source.collect(),
+        rate,
+        channels,
+    }
+}
+
 fn tone(frequency: f32, ms: u64) -> impl Source + Send {
     let mut tone = SineWave::new(frequency).take_duration(Duration::from_millis(ms));
     // Fade the tail to avoid an audible click at the cut
     tone.set_filter_fadeout();
+    // Measured at 7.1 dB above the voice it plays beside.
     tone.amplify(0.20)
 }
 
@@ -158,11 +201,50 @@ mod tests {
         }
     }
 
+    // The cue and the voice must come out of one device, which they can only do
+    // by going through one output.
+    #[test]
+    fn a_cue_plays_through_the_daemon_output() {
+        let (output, mut mixed) = Output::readable();
+        let cues = start_cue_player(true, Arc::new(output));
+        cues.send(Cue::Ready);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut loudest = 0.0f32;
+        while std::time::Instant::now() < deadline && loudest == 0.0 {
+            if let Some(sample) = mixed.next() {
+                loudest = loudest.max(sample.abs());
+            }
+        }
+        assert!(loudest > 0.0, "no cue reached the device");
+    }
+
+    // A cue is as long as a sentence is short, and a speaker can die inside it.
+    // Then the cue moves to the device that is there, like everything else.
+    #[test]
+    fn a_cue_follows_a_device_that_dies_under_it() {
+        let (output, opened) = Output::counting();
+        let cues = start_cue_player(true, Arc::new(output));
+        cues.send(Cue::Ready);
+
+        // Nothing takes the audio from a counting output, so the cue stalls
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < deadline
+            && opened.load(std::sync::atomic::Ordering::Relaxed) < 2
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            opened.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+            "a cue that nothing plays must open the device again"
+        );
+    }
+
     // Cues off must not end the player, or turning them on would need a
     // restart to get a thread back.
     #[test]
     fn a_player_that_starts_off_still_takes_cues() {
-        let cues = start_cue_player(false);
+        let cues = start_cue_player(false, Arc::new(Output::silent()));
         assert!(
             cues.sender.send(Cue::Ready).is_ok(),
             "the player must still hold the receiver, or turning cues on would \

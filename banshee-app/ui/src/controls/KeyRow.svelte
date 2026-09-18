@@ -1,7 +1,7 @@
 <script lang="ts">
   // Write-only. The daemon says whether a key is set and never what it is, so
   // this row draws presence and the two acts on it, in one place for both sides.
-  import { tick } from 'svelte';
+  import { land } from '../lib/focus';
   import { write } from '../lib/settings';
   import { announce } from '../lib/copy';
   import Field from './Field.svelte';
@@ -23,8 +23,7 @@
   let field: HTMLInputElement | undefined;
   async function replaceKey() {
     replacing = true;
-    await tick();
-    field?.focus();
+    return land(() => field);
   }
 </script>
 

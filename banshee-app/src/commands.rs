@@ -1,7 +1,9 @@
 use crate::calls::{self, CommandError, Devices, Voices};
 use crate::socket::Client;
-use banshee_common::{AgentRow, PlannedChange, utils};
+use banshee_common::{AgentRow, PlannedChange, rpc_code, utils};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use tauri::State;
 use tokio::sync::Mutex;
 
@@ -16,7 +18,7 @@ pub struct Daemon {
 impl Daemon {
     pub fn new() -> Self {
         Daemon {
-            path: utils::get_socket_path(),
+            path: utils::socket_path(),
             client: Mutex::new(None),
         }
     }
@@ -32,6 +34,17 @@ impl Daemon {
             transport: false,
             sent: false,
         })
+    }
+
+    /// One call to the daemon, over a connection held for the call. A dead
+    /// connection is repaired once.
+    async fn call<T>(
+        &self,
+        body: impl for<'client> FnMut(&'client mut Client) -> Attempt<'client, T>,
+    ) -> Result<T, CommandError> {
+        let path = self.path_or_error()?;
+        let mut client = self.client.lock().await;
+        retrying(path, &mut client, body).await
     }
 }
 
@@ -49,46 +62,56 @@ fn is_safe_to_retry(error: &CommandError) -> bool {
 }
 
 /// The one function that opens a connection; first use and a dead connection's retry both run it.
-pub async fn force_reconnect(slot: &mut Option<Client>, path: &Path) -> Result<(), CommandError> {
+/// Answers the client now in the slot.
+pub async fn force_reconnect<'slot>(
+    slot: &'slot mut Option<Client>,
+    path: &Path,
+) -> Result<&'slot mut Client, CommandError> {
     let client = Client::connect(path).await.map_err(|error| CommandError {
         code: -32000,
         message: error.to_string(),
         transport: true,
         sent: false,
     })?;
-    *slot = Some(client);
-    Ok(())
+    Ok(slot.insert(client))
 }
 
-/// An empty slot, from a window opened before the daemon or after one died, repairs itself the same
-/// way.
-pub async fn ensure_connected(slot: &mut Option<Client>, path: &Path) -> Result<(), CommandError> {
-    if slot.is_none() {
-        force_reconnect(slot, path).await?;
+/// The client in the slot. An empty slot, from a window opened before the daemon or after one
+/// died, repairs itself the same way.
+pub async fn ensure_connected<'slot>(
+    slot: &'slot mut Option<Client>,
+    path: &Path,
+) -> Result<&'slot mut Client, CommandError> {
+    match slot {
+        Some(client) => Ok(client),
+        None => force_reconnect(slot, path).await,
     }
-    Ok(())
 }
+
+/// One attempt at a call, borrowing the client for as long as the call runs. Boxed, because an
+/// async closure that borrows its argument cannot be proved `Send` for every lifetime inside a
+/// Tauri command.
+pub type Attempt<'client, T> =
+    Pin<Box<dyn Future<Output = Result<T, CommandError>> + Send + 'client>>;
 
 /// Every transport failure leaves the framing unknown, so the connection is dropped; only a request
-/// that never reached the daemon is sent again. A macro because an AsyncFn closure that borrows its
-/// arguments hits a known rustc limitation.
-macro_rules! retrying {
-    ($daemon:expr, $client:expr, $body:expr) => {{
-        let path = $daemon.path_or_error()?;
-        ensure_connected(&mut $client, path).await?;
-        match $body {
-            Err(error) if error.transport => {
-                *$client = None;
-                if is_safe_to_retry(&error) {
-                    ensure_connected(&mut $client, path).await?;
-                    $body
-                } else {
-                    Err(error)
-                }
+/// that never reached the daemon is sent again.
+pub async fn retrying<T>(
+    path: &Path,
+    slot: &mut Option<Client>,
+    mut body: impl for<'client> FnMut(&'client mut Client) -> Attempt<'client, T>,
+) -> Result<T, CommandError> {
+    let client = ensure_connected(slot, path).await?;
+    match body(client).await {
+        Err(error) if error.transport => {
+            *slot = None;
+            if !is_safe_to_retry(&error) {
+                return Err(error);
             }
-            other => other,
+            body(force_reconnect(slot, path).await?).await
         }
-    }};
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +119,7 @@ mod tests {
     use super::{Daemon, is_safe_to_retry};
     use crate::calls::CommandError;
     use crate::socket::{RpcError, SOCKET_CLOSED};
+    use banshee_common::rpc_code;
     use std::path::PathBuf;
     use tokio::sync::Mutex;
 
@@ -163,7 +187,7 @@ mod tests {
     #[test]
     fn a_refusal_the_daemon_wrote_is_never_a_dead_connection() {
         assert!(!is_safe_to_retry(&from_socket(
-            -32602,
+            rpc_code::INVALID_PARAMS,
             "Disconnect is not available yet.",
             false,
             true
@@ -220,12 +244,7 @@ mod tests {
 
 #[tauri::command]
 pub async fn status(daemon: State<'_, Daemon>) -> Result<serde_json::Value, CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::status(client.as_mut().unwrap()).await
-    )
+    daemon.call(|client| Box::pin(calls::status(client))).await
 }
 
 #[tauri::command]
@@ -234,72 +253,58 @@ pub async fn set_setting(
     key: String,
     value: serde_json::Value,
 ) -> Result<Vec<String>, CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::set_setting(client.as_mut().unwrap(), &key, value.clone()).await
-    )
+    daemon
+        .call(|client| {
+            let key = key.clone();
+            let value = value.clone();
+            Box::pin(async move { calls::set_setting(client, &key, value).await })
+        })
+        .await
 }
 
 #[tauri::command]
 pub async fn list_devices(daemon: State<'_, Daemon>) -> Result<Devices, CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::list_devices(client.as_mut().unwrap()).await
-    )
+    daemon
+        .call(|client| Box::pin(calls::list_devices(client)))
+        .await
 }
 
 #[tauri::command]
 pub async fn list_voices(daemon: State<'_, Daemon>) -> Result<Voices, CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::list_voices(client.as_mut().unwrap()).await
-    )
+    daemon
+        .call(|client| Box::pin(calls::list_voices(client)))
+        .await
 }
 
 #[tauri::command]
 pub async fn list_languages(daemon: State<'_, Daemon>) -> Result<calls::Languages, CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::list_languages(client.as_mut().unwrap()).await
-    )
+    daemon
+        .call(|client| Box::pin(calls::list_languages(client)))
+        .await
 }
 
 #[tauri::command]
 pub async fn preview_voice(daemon: State<'_, Daemon>, id: String) -> Result<(), CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::preview_voice(client.as_mut().unwrap(), &id).await
-    )
+    daemon
+        .call(|client| {
+            let id = id.clone();
+            Box::pin(async move { calls::preview_voice(client, &id).await })
+        })
+        .await
 }
 
 #[tauri::command]
 pub async fn download_models(daemon: State<'_, Daemon>) -> Result<(), CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::download_models(client.as_mut().unwrap()).await
-    )
+    daemon
+        .call(|client| Box::pin(calls::download_models(client)))
+        .await
 }
 
 #[tauri::command]
 pub async fn detect_agents(daemon: State<'_, Daemon>) -> Result<Vec<AgentRow>, CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::detect_agents(client.as_mut().unwrap()).await
-    )
+    daemon
+        .call(|client| Box::pin(calls::detect_agents(client)))
+        .await
 }
 
 #[tauri::command]
@@ -308,12 +313,12 @@ pub async fn plan_connect(
     id: String,
     disconnect: bool,
 ) -> Result<Vec<PlannedChange>, CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::plan_connect(client.as_mut().unwrap(), &id, disconnect).await
-    )
+    daemon
+        .call(|client| {
+            let id = id.clone();
+            Box::pin(async move { calls::plan_connect(client, &id, disconnect).await })
+        })
+        .await
 }
 
 #[tauri::command]
@@ -322,12 +327,12 @@ pub async fn apply_connect(
     id: String,
     disconnect: bool,
 ) -> Result<(), CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::apply_connect(client.as_mut().unwrap(), &id, disconnect).await
-    )
+    daemon
+        .call(|client| {
+            let id = id.clone();
+            Box::pin(async move { calls::apply_connect(client, &id, disconnect).await })
+        })
+        .await
 }
 
 #[tauri::command]
@@ -335,22 +340,16 @@ pub async fn history(
     daemon: State<'_, Daemon>,
     limit: Option<u32>,
 ) -> Result<Vec<serde_json::Value>, CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::history(client.as_mut().unwrap(), limit).await
-    )
+    daemon
+        .call(|client| Box::pin(calls::history(client, limit)))
+        .await
 }
 
 #[tauri::command]
 pub async fn clear_history(daemon: State<'_, Daemon>) -> Result<(), CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::clear_history(client.as_mut().unwrap()).await
-    )
+    daemon
+        .call(|client| Box::pin(calls::clear_history(client)))
+        .await
 }
 
 #[tauri::command]
@@ -358,12 +357,12 @@ pub async fn open_permission_pane(
     daemon: State<'_, Daemon>,
     id: String,
 ) -> Result<(), CommandError> {
-    let mut client = daemon.client.lock().await;
-    retrying!(
-        daemon,
-        client,
-        calls::open_permission_pane(client.as_mut().unwrap(), &id).await
-    )
+    daemon
+        .call(|client| {
+            let id = id.clone();
+            Box::pin(async move { calls::open_permission_pane(client, &id).await })
+        })
+        .await
 }
 
 #[tauri::command]
@@ -372,7 +371,7 @@ pub async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), Comman
     app.clipboard()
         .write_text(text)
         .map_err(|error| CommandError {
-            code: -32603,
+            code: rpc_code::INTERNAL,
             message: error.to_string(),
             transport: false,
             sent: true,
@@ -381,7 +380,7 @@ pub async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), Comman
 
 fn failed(message: String) -> CommandError {
     CommandError {
-        code: -32603,
+        code: rpc_code::INTERNAL,
         message,
         transport: false,
         sent: false,
@@ -446,7 +445,11 @@ fn kickstart(label: &str, install: &str, replace: bool) -> Result<(), CommandErr
 fn systemctl_args(label: &str, replace: bool) -> Option<Vec<String>> {
     let unit = utils::systemd_unit(label)?;
     let verb = if replace { "restart" } else { "start" };
-    Some(vec!["--user".to_string(), verb.to_string(), unit.to_string()])
+    Some(vec![
+        "--user".to_string(),
+        verb.to_string(),
+        unit.to_string(),
+    ])
 }
 
 /// Puts the menu bar icon up. Not a second copy of the binary, which the

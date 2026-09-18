@@ -1,6 +1,7 @@
 use ringbuf::HeapCons;
 use ringbuf::traits::Consumer;
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,17 +12,25 @@ use crate::audio::utils::{StreamingResampler, resample_audio};
 use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
 use crate::config::HotkeyMode;
 use crate::dictation::type_text;
-use crate::speech_to_text::vad::VADEngine;
+use crate::speech_to_text::vad::{VAD_CHUNK, VADEngine};
 use crate::speech_to_text::{SAMPLE_RATE, Transcriber};
 use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode, TranscribeTarget};
+use crate::text_to_speech::lock;
 
-const VAD_CHUNK: usize = 512;
 const CHUNK_MS: u64 = (VAD_CHUNK * 1000) as u64 / SAMPLE_RATE as u64;
-const ONSET_CHUNKS: usize = 12; // ~384 ms of consecutive speech confirms onset
-const PREROLL_CHUNKS: usize = 8; // keep ~256 ms before onset for Whisper
+/// Consecutive speech that confirms an onset, and the speech kept before it so
+/// Whisper hears the first word start. Durations, because a change to the
+/// detector's window must move the counts and not these.
+const ONSET_MS: u64 = 384;
+const PREROLL_MS: u64 = 256;
+const ONSET_CHUNKS: usize = (ONSET_MS / CHUNK_MS) as usize;
+const PREROLL_CHUNKS: usize = (PREROLL_MS / CHUNK_MS) as usize;
 const ARMED_POLL: Duration = Duration::from_millis(30);
-// Covers the 190 ms arm cue plus playback latency
-const CUE_SETTLE: Duration = Duration::from_millis(250);
+/// Unmeasured. Covers handing audio to the mixer before the first sample leaves.
+const PLAYBACK_LATENCY_MS: u64 = 60;
+/// Long enough for the arm cue to finish sounding.
+const CUE_SETTLE: Duration =
+    Duration::from_millis(crate::audio::cues::Cue::Arm.duration_ms() + PLAYBACK_LATENCY_MS);
 // Ceiling on one answer past the onset timeout; nothing may hang the session
 const MAX_ANSWER: Duration = Duration::from_secs(60);
 // Past this ratio of wall time to audio length, the model is too heavy
@@ -43,18 +52,76 @@ pub struct CaptureSource {
 }
 
 impl CaptureSource {
-    pub fn drain(&mut self) -> Vec<f32> {
-        self.consumer.pop_iter().collect()
+    fn pop_into(&mut self, batch: &mut Vec<f32>) {
+        batch.extend(self.consumer.pop_iter());
     }
 
-    pub fn discard(&mut self) {
-        self.consumer.pop_iter().for_each(drop);
+    /// Throws the ring away in one pass. A cancelled press discards seconds of
+    /// audio at 48 kHz, and this runs on every armed poll while Banshee speaks.
+    fn drop_all(&mut self) {
+        self.consumer.clear();
+    }
+}
+
+/// The capture the consumer thread reads, and the way the watchdog replaces it.
+/// A rebind cannot travel as a command: an armed question holds that thread for
+/// as long as the person takes to answer, and the ring it is reading dies with
+/// the stream the watchdog just dropped.
+pub struct Capture {
+    source: Mutex<CaptureSource>,
+    generation: AtomicU64,
+}
+
+impl Capture {
+    pub fn new(source: CaptureSource) -> Self {
+        Self {
+            source: Mutex::new(source),
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    /// Plays the new device to everything that reads capture, including a
+    /// question that is already listening.
+    pub fn swap(&self, source: CaptureSource) {
+        let mut held = lock(&self.source);
+        *held = source;
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Rises with every swap. A reader holding a resampler or a partial window
+    /// built for the old device learns from this that both are stale.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        lock(&self.source).sample_rate
+    }
+
+    /// The audio waiting, with the rate it was captured at and the device it
+    /// came from, read under one lock. Two reads would pair one device's audio
+    /// with another's rate whenever the watchdog rebinds between them.
+    pub fn take(&self, batch: &mut Vec<f32>) -> (u32, u64) {
+        let mut source = lock(&self.source);
+        source.pop_into(batch);
+        (source.sample_rate, self.generation.load(Ordering::Relaxed))
+    }
+
+    #[cfg(test)]
+    pub fn drain(&self) -> Vec<f32> {
+        let mut batch = Vec::new();
+        self.take(&mut batch);
+        batch
+    }
+
+    pub fn discard(&self) {
+        lock(&self.source).drop_all();
     }
 }
 
 // Everything the audio consumer thread owns
 pub struct Pipeline {
-    pub source: CaptureSource,
+    pub source: Arc<Capture>,
     pub speech_to_text: Box<dyn Transcriber>,
     pub vad: VADEngine,
     pub state: Arc<DaemonState>,
@@ -62,11 +129,56 @@ pub struct Pipeline {
     pub endpoint_silence_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Waiting { speech_run: usize },
     InSpeech { silence_run: usize, start: usize },
     // The user is holding the hotkey; the release ends the answer
     Manual { start: usize },
+}
+
+/// One detector verdict moves the endpointing. `processed` is the sample the
+/// chunk ended at, so an onset keeps `PREROLL_CHUNKS` of audio before the run
+/// that confirmed it, and never reaches before the first sample. The end of
+/// speech is the caller's to read off `silence_run`, against its own bound.
+fn advance(phase: Phase, is_speech: bool, processed: usize) -> Phase {
+    match phase {
+        Phase::Waiting { speech_run } => {
+            let speech_run = if is_speech { speech_run + 1 } else { 0 };
+            if speech_run < ONSET_CHUNKS {
+                return Phase::Waiting { speech_run };
+            }
+            Phase::InSpeech {
+                silence_run: 0,
+                start: processed.saturating_sub((ONSET_CHUNKS + PREROLL_CHUNKS) * VAD_CHUNK),
+            }
+        }
+        Phase::InSpeech { silence_run, start } => Phase::InSpeech {
+            silence_run: if is_speech { 0 } else { silence_run + 1 },
+            start,
+        },
+        Phase::Manual { .. } => phase,
+    }
+}
+
+/// The resampler for a device at this rate. One place, because a question that
+/// outlives a device change builds a second one.
+fn resampler_for(rate: u32) -> Result<StreamingResampler, String> {
+    StreamingResampler::new(rate, SAMPLE_RATE).map_err(|e| {
+        log::error!("Failed to create resampler: {e}");
+        reason(&e)
+    })
+}
+
+/// Drops what the VAD and the phase learned from audio that does not run on
+/// into what comes next: the daemon's own speech, or another device's.
+fn afresh(vad: &mut VADEngine, phase: &mut Phase) {
+    vad.reset_state();
+    match phase {
+        Phase::Waiting { speech_run } => *speech_run = 0,
+        Phase::InSpeech { silence_run, .. } => *silence_run = 0,
+        Phase::Manual { .. } => {}
+    }
 }
 
 pub fn hotkey_listener(
@@ -87,17 +199,6 @@ pub fn hotkey_listener(
                     }
                 }
                 ConsumerCommand::Ask(ask) => pipeline.ask(ask),
-                // The old ring dies with the stream that filled it. Anything
-                // still in it came from a device that is gone.
-                ConsumerCommand::Rebind {
-                    consumer,
-                    sample_rate,
-                } => {
-                    pipeline.source = CaptureSource {
-                        consumer,
-                        sample_rate,
-                    };
-                }
                 ConsumerCommand::Retune(words) => pipeline.speech_to_text.set_vocabulary(&words),
                 ConsumerCommand::Speak(speech) => pipeline.speech_to_text.set_speech(speech),
                 // The load takes seconds and holds this thread. Nothing is lost:
@@ -105,7 +206,7 @@ pub fn hotkey_listener(
                 ConsumerCommand::Reload(preset) => match pipeline.speech_to_text.reload(preset) {
                     Ok(loaded) => pipeline.state.set_stt_model(loaded),
                     Err(error) => {
-                        eprintln!("banshee: the transcription model did not load: {error}")
+                        log::error!("the transcription model did not load: {error}")
                     }
                 },
                 ConsumerCommand::Shutdown => break,
@@ -160,7 +261,7 @@ fn bound_key_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
 pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_mode: HotkeyMode) {
     if !listens() {
         #[cfg(all(unix, not(target_os = "macos")))]
-        println!("Wayland session: {WAYLAND_HOTKEY_HINT}.");
+        log::info!("Wayland session: {WAYLAND_HOTKEY_HINT}.");
         return;
     }
 
@@ -185,7 +286,7 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
             }
         }) {
             // Names the capability that is gone, not just the error type
-            eprintln!(
+            log::error!(
                 "Global hotkey listener stopped: {error:?}. `banshee record start` \
                  and `banshee record stop` still work."
             );
@@ -196,31 +297,31 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
 impl Pipeline {
     // Push-to-talk ended: the ring holds the whole utterance
     fn transcribe_utterance(&mut self, action: TranscribeTarget) {
-        let audio_data = self.source.drain();
+        let mut audio_data = Vec::new();
+        let (rate, _) = self.source.take(&mut audio_data);
 
-        println!(
-            "Downsampling audio from {} Hz to {SAMPLE_RATE} Hz...",
-            self.source.sample_rate
-        );
+        log::debug!("Downsampling audio from {rate} Hz to {SAMPLE_RATE} Hz...");
 
-        let final_data = match resample_audio(&audio_data, self.source.sample_rate, SAMPLE_RATE) {
+        let final_data = match resample_audio(&audio_data, rate, SAMPLE_RATE) {
             Ok(data) => data,
             Err(e) => {
-                eprintln!("Error: {e}");
+                log::error!("resampling failed: {e}");
                 self.state.set_last_error(Some(reason(&e)));
                 self.cues.send(Cue::Error);
                 return;
             }
         };
 
-        let (min_amplitude, max_amplitude) = final_data
-            .iter()
-            .fold((0.0f32, 0.0f32), |(min, max), &sample| {
-                (min.min(sample), max.max(sample))
-            });
-        println!("Audio range: [{min_amplitude}, {max_amplitude}]");
+        if log::log_enabled!(log::Level::Debug) {
+            let (min_amplitude, max_amplitude) = final_data
+                .iter()
+                .fold((0.0f32, 0.0f32), |(min, max), &sample| {
+                    (min.min(sample), max.max(sample))
+                });
+            log::debug!("Audio range: [{min_amplitude}, {max_amplitude}]");
+        }
 
-        println!("Total audio samples after resampling: {}", final_data.len());
+        log::debug!("Total audio samples after resampling: {}", final_data.len());
 
         let mut speech_chunks = 0;
         let mut total_chunks = 0;
@@ -239,14 +340,14 @@ impl Pipeline {
                     }
                 }
                 Err(e) => {
-                    eprintln!("VAD error: {e}");
+                    log::error!("VAD error: {e}");
                     continue;
                 }
             };
             total_chunks += 1;
         }
 
-        println!("VAD detected speech in {speech_chunks} out of {total_chunks} chunks.");
+        log::debug!("VAD detected speech in {speech_chunks} out of {total_chunks} chunks.");
 
         let speech_ratio = if total_chunks > 0 {
             speech_chunks as f32 / total_chunks as f32
@@ -255,7 +356,7 @@ impl Pipeline {
         };
 
         if speech_ratio < 0.1 {
-            println!(
+            log::info!(
                 "Only detected speech in {:.2}% of the audio. Skipping transcription.",
                 speech_ratio * 100.0
             );
@@ -264,12 +365,12 @@ impl Pipeline {
         }
 
         if speech_chunks < 2 {
-            println!("No speech detected in the audio. Skipping transcription.");
+            log::info!("No speech detected in the audio. Skipping transcription.");
             self.cues.send(Cue::Error);
             return;
         }
 
-        println!("Transcribing...");
+        log::debug!("Transcribing...");
         let transcribe_started = Instant::now();
         self.state.set_transcribing(true);
         let transcribed = self.speech_to_text.transcribe(&final_data);
@@ -282,22 +383,22 @@ impl Pipeline {
                 self.state.set_last_error(None);
                 let audio_secs = final_data.len() as f32 / SAMPLE_RATE as f32;
                 let elapsed = transcribe_started.elapsed().as_secs_f32();
-                println!("Transcribed {audio_secs:.1}s of audio in {elapsed:.2}s");
+                log::info!("Transcribed {audio_secs:.1}s of audio in {elapsed:.2}s");
                 // A slow CPU reads as a dead microphone rather than a slow one
                 let slowdown = elapsed / audio_secs.max(0.001);
                 if slowdown > SLOW_TRANSCRIBE_FACTOR
                     && let Some(advice) = self.speech_to_text.slow_advice()
                 {
-                    println!(
+                    log::warn!(
                         "Transcription ran {slowdown:.0}x slower than realtime on this \
                          machine. {advice}"
                     );
                 }
-                println!("Transcription: {transcription}");
+                log::debug!("Transcription: {transcription}");
 
                 // Whisper can return nothing for noise; skip before it reaches the ring or clipboard
                 if transcription.is_empty() {
-                    println!("Empty transcription. Skipping.");
+                    log::info!("Empty transcription. Skipping.");
                     self.cues.send(Cue::Error);
                     return;
                 }
@@ -309,7 +410,7 @@ impl Pipeline {
                         self.cues.send(Cue::Ready);
                     }
                     TranscribeTarget::Dictate => {
-                        println!("Dictating: {}", transcription);
+                        log::debug!("Dictating: {}", transcription);
                         self.state.set_typing(true);
                         let typed = type_text(&transcription);
                         self.state.set_typing(false);
@@ -318,13 +419,13 @@ impl Pipeline {
                                 self.cues.send(Cue::Ready);
                             }
                             Err(e) => {
-                                eprintln!("Failed to type text: {:?}", e);
+                                log::error!("Failed to type text: {e}");
                                 self.cues.send(Cue::Error);
                             }
                         }
                     }
                     TranscribeTarget::Tell => {
-                        println!("Telling the agent: {transcription}");
+                        log::debug!("Telling the agent: {transcription}");
                         let config = self.state.config();
                         let cues = self.cues.clone();
                         let state = Arc::clone(&self.state);
@@ -333,14 +434,14 @@ impl Pipeline {
                         // seconds, and the key must answer the next press.
                         std::thread::spawn(move || {
                             deliver_tell(&state, &cues, || {
-                                crate::tell::run(&words, &config.tell, &|line| println!("{line}"))
+                                crate::tell::run(&words, &config.tell, &|line| log::info!("{line}"))
                             })
                         });
                     }
                 }
             }
             Err(error) => {
-                eprintln!("Transcription failed: {error}");
+                log::error!("Transcription failed: {error}");
                 self.state.set_last_error(Some(reason(&error)));
                 self.cues.send(Cue::Error);
             }
@@ -371,11 +472,11 @@ impl Pipeline {
                 match transcribed {
                     Ok(text) => {
                         self.state.set_last_error(None);
-                        println!("Answer: {text}");
+                        log::debug!("Answer: {text}");
                         Ok(text)
                     }
                     Err(e) => {
-                        eprintln!("Transcription failed: {e}");
+                        log::error!("Transcription failed: {e}");
                         let why = reason(&e);
                         self.state.set_last_error(Some(why.clone()));
                         self.cues.send(Cue::Error);
@@ -402,13 +503,10 @@ impl Pipeline {
     // 16 kHz. `Ok(None)` is an answer that never came: silence, or a session
     // closed from outside. `Err` is a listen that broke.
     fn listen_for_answer(&mut self, timeout: Duration) -> Result<Option<Vec<f32>>, String> {
-        let mut resampler = match StreamingResampler::new(self.source.sample_rate, SAMPLE_RATE) {
-            Ok(resampler) => resampler,
-            Err(e) => {
-                eprintln!("Failed to create resampler: {e}");
-                return Err(reason(&e));
-            }
-        };
+        let mut resampler = resampler_for(self.source.sample_rate())?;
+        // The device this answer started on. The watchdog may put another one
+        // under it at any moment, and the rate is not shared between devices.
+        let mut device = self.source.generation();
         self.vad.reset_state();
         let vad_threshold = self.state.vad_threshold();
         let endpoint_chunks = (self.endpoint_silence_ms / CHUNK_MS).max(1) as usize;
@@ -462,20 +560,26 @@ impl Pipeline {
             }
             if suppressed {
                 suppressed = false;
-                self.vad.reset_state();
                 // Drop the pre-gap partial window so no spliced frame reaches the VAD
                 resampler.reset();
-                match &mut phase {
-                    Phase::Waiting { speech_run } => *speech_run = 0,
-                    Phase::InSpeech { silence_run, .. } => *silence_run = 0,
-                    Phase::Manual { .. } => {}
-                }
+                afresh(&mut self.vad, &mut phase);
             }
 
             batch.clear();
-            batch.extend(self.source.consumer.pop_iter());
+            let (rate, moved) = self.source.take(&mut batch);
+
+            // The microphone moved under this answer. What was said already is
+            // kept: it is resampled and belongs to the answer. What cannot be
+            // kept is a resampler built for the old rate, and a window holding
+            // the old device's audio.
+            if moved != device {
+                device = moved;
+                log::info!("the microphone moved while a question was listening");
+                resampler = resampler_for(rate)?;
+                afresh(&mut self.vad, &mut phase);
+            }
             if let Err(e) = resampler.push(&batch, &mut audio) {
-                eprintln!("Resampling failed: {e}");
+                log::error!("Resampling failed: {e}");
                 return Err(reason(&e));
             }
 
@@ -486,27 +590,11 @@ impl Pipeline {
                 let is_speech = match self.vad.check_speech(chunk, SAMPLE_RATE) {
                     Ok(probability) => probability > vad_threshold,
                     Err(e) => {
-                        eprintln!("VAD error: {e}");
+                        log::error!("VAD error: {e}");
                         false
                     }
                 };
-                match &mut phase {
-                    Phase::Waiting { speech_run } => {
-                        *speech_run = if is_speech { *speech_run + 1 } else { 0 };
-                        if *speech_run >= ONSET_CHUNKS {
-                            let start = processed
-                                .saturating_sub((ONSET_CHUNKS + PREROLL_CHUNKS) * VAD_CHUNK);
-                            phase = Phase::InSpeech {
-                                silence_run: 0,
-                                start,
-                            };
-                        }
-                    }
-                    Phase::InSpeech { silence_run, .. } => {
-                        *silence_run = if is_speech { 0 } else { *silence_run + 1 };
-                    }
-                    Phase::Manual { .. } => {}
-                }
+                phase = advance(phase, is_speech, processed);
             }
 
             if let Phase::InSpeech { silence_run, start } = phase
@@ -536,7 +624,7 @@ fn save_history(state: &DaemonState, transcription: &str) {
     let stored =
         state.with_history(|c| crate::history::TranscriptionHistory::insert(c, transcription));
     if let Some(Err(e)) = stored {
-        eprintln!("Failed to insert transcription into database: {e}");
+        log::error!("Failed to insert transcription into database: {e}");
     }
 }
 
@@ -592,7 +680,7 @@ fn warn_tell(state: &DaemonState, cues: &Cues, warnings: &[crate::tell::Warning]
         .map(crate::tell::Warning::text)
         .collect::<Vec<_>>()
         .join(" ");
-    eprintln!("tell warned: {reason}");
+    log::warn!("tell warned: {reason}");
     state.set_tell_error(Some(reason));
     if warnings
         .iter()
@@ -603,7 +691,7 @@ fn warn_tell(state: &DaemonState, cues: &Cues, warnings: &[crate::tell::Warning]
 }
 
 fn fail_tell(state: &DaemonState, cues: &Cues, reason: String) {
-    eprintln!("tell failed: {reason}");
+    log::error!("tell failed: {reason}");
     state.set_tell_error(Some(reason));
     cues.send(Cue::Error);
 }
@@ -914,27 +1002,160 @@ mod tests {
         )
     }
 
+    // The reader is a question that is already listening. It holds the capture
+    // from before the swap, and must read the device that is there now.
     #[test]
-    fn a_swapped_source_reads_the_new_ring_and_the_new_rate() {
-        let (mut source, _old_producer) = source_holding(&[1.0, 2.0], 16000);
-        assert_eq!(source.drain(), vec![1.0, 2.0]);
-        assert_eq!(source.sample_rate, 16000);
+    fn a_swap_reaches_a_reader_that_already_holds_the_capture() {
+        let (source, _old_producer) = source_holding(&[1.0, 2.0], 16000);
+        let capture = Arc::new(Capture::new(source));
+        let listening = Arc::clone(&capture);
+        assert_eq!(listening.drain(), vec![1.0, 2.0]);
+        assert_eq!(listening.sample_rate(), 16000);
 
         // A headset at 16 kHz gives way to the built in mic at 48 kHz
         let (replacement, _new_producer) = source_holding(&[7.0], 48000);
-        source = replacement;
+        capture.swap(replacement);
 
-        assert_eq!(source.drain(), vec![7.0]);
+        assert_eq!(listening.drain(), vec![7.0]);
         assert_eq!(
-            source.sample_rate, 48000,
+            listening.sample_rate(),
+            48000,
             "a stale rate resamples by the wrong ratio and distorts silently"
         );
     }
 
+    // A reader keeps a partial window and a resampler built for one device.
+    // The generation is how it learns that both belong to a device that is gone.
+    #[test]
+    fn every_swap_moves_the_generation_on() {
+        let (source, _old_producer) = source_holding(&[1.0], 16000);
+        let capture = Capture::new(source);
+        let before = capture.generation();
+
+        let (replacement, _new_producer) = source_holding(&[2.0], 16000);
+        capture.swap(replacement);
+
+        assert_ne!(
+            capture.generation(),
+            before,
+            "a swap at the same rate is still another device"
+        );
+    }
+
+    // A rebind between the two reads would hand one device's audio to the other
+    // device's rate, and resample it by the wrong ratio.
+    #[test]
+    fn the_audio_and_the_rate_it_was_captured_at_come_out_together() {
+        let (source, _old_producer) = source_holding(&[1.0, 2.0], 16000);
+        let capture = Capture::new(source);
+
+        let mut batch = Vec::new();
+        let (rate, device) = capture.take(&mut batch);
+        assert_eq!((batch.as_slice(), rate), ([1.0, 2.0].as_slice(), 16000));
+
+        let (replacement, _new_producer) = source_holding(&[7.0], 48000);
+        capture.swap(replacement);
+
+        batch.clear();
+        let (rate, moved) = capture.take(&mut batch);
+        assert_eq!((batch.as_slice(), rate), ([7.0].as_slice(), 48000));
+        assert_ne!(moved, device, "the reader is told the device changed");
+    }
+
     #[test]
     fn discarding_a_source_empties_it() {
-        let (mut source, _producer) = source_holding(&[1.0, 2.0, 3.0], 16000);
-        source.discard();
-        assert!(source.drain().is_empty());
+        let (source, _producer) = source_holding(&[1.0, 2.0, 3.0], 16000);
+        let capture = Capture::new(source);
+        capture.discard();
+        assert!(capture.drain().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::{ONSET_CHUNKS, PREROLL_CHUNKS, Phase, advance};
+    use crate::speech_to_text::vad::VAD_CHUNK;
+
+    #[test]
+    fn speech_shorter_than_the_onset_stays_waiting() {
+        let mut phase = Phase::Waiting { speech_run: 0 };
+        for chunk in 1..ONSET_CHUNKS {
+            phase = advance(phase, true, chunk * VAD_CHUNK);
+        }
+        assert_eq!(
+            phase,
+            Phase::Waiting {
+                speech_run: ONSET_CHUNKS - 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_quiet_chunk_restarts_the_onset_count() {
+        let almost = Phase::Waiting {
+            speech_run: ONSET_CHUNKS - 1,
+        };
+        assert_eq!(
+            advance(almost, false, 40 * VAD_CHUNK),
+            Phase::Waiting { speech_run: 0 }
+        );
+    }
+
+    #[test]
+    fn the_onset_keeps_the_preroll_before_the_run_that_confirmed_it() {
+        let processed = 100 * VAD_CHUNK;
+        let almost = Phase::Waiting {
+            speech_run: ONSET_CHUNKS - 1,
+        };
+        assert_eq!(
+            advance(almost, true, processed),
+            Phase::InSpeech {
+                silence_run: 0,
+                start: processed - (ONSET_CHUNKS + PREROLL_CHUNKS) * VAD_CHUNK,
+            }
+        );
+    }
+
+    #[test]
+    fn an_onset_at_the_start_of_the_buffer_keeps_from_its_first_sample() {
+        let almost = Phase::Waiting {
+            speech_run: ONSET_CHUNKS - 1,
+        };
+        assert_eq!(
+            advance(almost, true, ONSET_CHUNKS * VAD_CHUNK),
+            Phase::InSpeech {
+                silence_run: 0,
+                start: 0
+            }
+        );
+    }
+
+    #[test]
+    fn silence_inside_speech_counts_and_a_word_resets_it() {
+        let speaking = Phase::InSpeech {
+            silence_run: 3,
+            start: 512,
+        };
+        assert_eq!(
+            advance(speaking, false, 0),
+            Phase::InSpeech {
+                silence_run: 4,
+                start: 512
+            }
+        );
+        assert_eq!(
+            advance(speaking, true, 0),
+            Phase::InSpeech {
+                silence_run: 0,
+                start: 512
+            }
+        );
+    }
+
+    #[test]
+    fn a_held_key_ignores_the_detector() {
+        let held = Phase::Manual { start: 7 };
+        assert_eq!(advance(held, true, 99), held);
+        assert_eq!(advance(held, false, 99), held);
     }
 }
