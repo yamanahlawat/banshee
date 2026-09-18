@@ -229,13 +229,13 @@ impl TtsBackend for RemoteSpeechBackend {
         if voice.is_some() {
             return Err(BansheeError::Rejected(VOICE_NEEDS_KOKORO.into()));
         }
-        Ok(Box::new(self.speak(text)))
+        Ok(Box::new(self.speak(text)?))
     }
 }
 
 impl RemoteSpeechBackend {
     /// The utterance unboxed: `start` boxes it for the trait.
-    fn speak(&self, text: &str) -> RemoteUtterance {
+    fn speak(&self, text: &str) -> Result<RemoteUtterance, BansheeError> {
         let handover: Arc<Mutex<Handover>> = Arc::default();
         let worker_handover = Arc::clone(&handover);
         let fallback = self.fallback.clone();
@@ -365,10 +365,10 @@ impl RemoteSpeechBackend {
             }
         });
 
-        RemoteUtterance {
-            player: self.output.play(chunks, self.faults.clone()),
+        Ok(RemoteUtterance {
+            player: self.output.play(chunks, self.faults.clone())?,
             handover,
-        }
+        })
     }
 
     /// Everything the worker needs to send the request, without the fallback it
@@ -680,7 +680,10 @@ mod tests {
     fn an_utterance_posts_the_whole_text_the_model_the_voice_the_rate_and_the_instructions() {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[0, 1, 2, 3, 4, 5])], false);
         let built = built(base_url, "Calm and even", false);
-        let utterance = built.backend.speak("One sentence. And a second.");
+        let utterance = built
+            .backend
+            .speak("One sentence. And a second.")
+            .expect("a test device opens");
         wait_until("the reply is read", || utterance.spoken());
 
         let request = served.join().unwrap();
@@ -707,7 +710,7 @@ mod tests {
     fn an_empty_instruction_is_left_out() {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[0, 1, 2, 3, 4, 5])], false);
         let built = built(base_url, "", false);
-        let utterance = built.backend.speak("Hello.");
+        let utterance = built.backend.speak("Hello.").expect("a test device opens");
         wait_until("the reply is read", || utterance.spoken());
 
         let request = served.join().unwrap();
@@ -732,7 +735,10 @@ mod tests {
             serve_speech("200 OK", vec![pcm(&[1; 480]), pcm(&[2; 480])], false);
         let built = built(base_url, "", false);
         let started = std::time::Instant::now();
-        let utterance = built.backend.speak("Two chunks.");
+        let utterance = built
+            .backend
+            .speak("Two chunks.")
+            .expect("a test device opens");
         wait_until("the first chunk is queued", || utterance.queued() >= 1);
         let first_at = started.elapsed();
         assert!(
@@ -751,7 +757,10 @@ mod tests {
             false,
         );
         let built = built(base_url, "", false);
-        let mut utterance = built.backend.speak("Three chunks.");
+        let mut utterance = built
+            .backend
+            .speak("Three chunks.")
+            .expect("a test device opens");
         wait_until("the first chunk is queued", || utterance.queued() >= 1);
         utterance.stop();
         wait_until("the utterance ends", || utterance.spoken());
@@ -778,7 +787,10 @@ mod tests {
         });
 
         let built = built(base_url, "", true);
-        let mut utterance = built.backend.speak("Cancel this.");
+        let mut utterance = built
+            .backend
+            .speak("Cancel this.")
+            .expect("a test device opens");
         request_read
             .recv_timeout(Duration::from_secs(5))
             .expect("the request reached the server");
@@ -819,7 +831,10 @@ mod tests {
         });
 
         let built = built(base_url, "", false);
-        let mut utterance = built.backend.speak("Cancel before the byte.");
+        let mut utterance = built
+            .backend
+            .speak("Cancel before the byte.")
+            .expect("a test device opens");
         request_read
             .recv_timeout(Duration::from_secs(5))
             .expect("the request reached the server");
@@ -913,7 +928,9 @@ mod tests {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[1; SAMPLES])], false);
         let (output, mut mixed) = Output::readable();
         let (backend, _faults) = assembled(&table(base_url, ""), "sk-test", None, output);
-        let mut utterance = backend.speak("Every word of this.");
+        let mut utterance = backend
+            .speak("Every word of this.")
+            .expect("a test device opens");
 
         wait_until("the samples reach the player", || utterance.queued() > 0);
         assert!(
@@ -944,7 +961,9 @@ mod tests {
             // device does with it
             Output::silent(),
         );
-        let mut utterance = backend.speak("Say this anyway.");
+        let mut utterance = backend
+            .speak("Say this anyway.")
+            .expect("a test device opens");
 
         assert_eq!(failure(&faults), "the remote speaker refused the key");
         wait_until("the fallback takes the sentence", || {
@@ -1021,7 +1040,10 @@ mod tests {
     fn no_fallback_takes_over_after_the_first_chunk() {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[1; 480])], true);
         let built = built(base_url, "", true);
-        let utterance = built.backend.speak("Half of this.");
+        let utterance = built
+            .backend
+            .speak("Half of this.")
+            .expect("a test device opens");
         wait_until("the first chunk is queued", || utterance.queued() >= 1);
         let played = built.faults.recv_timeout(Duration::from_secs(5));
         assert!(
@@ -1042,7 +1064,7 @@ mod tests {
     fn an_utterance_that_plays_reports_that_it_played() {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[1; 480])], false);
         let built = built(base_url, "", false);
-        let utterance = built.backend.speak("Hello.");
+        let utterance = built.backend.speak("Hello.").expect("a test device opens");
         wait_until("the reply is read", || utterance.spoken());
         let played = built.faults.try_recv();
         assert!(
@@ -1063,7 +1085,7 @@ mod tests {
         };
         assert_eq!(built.backend.reconfigure(&tts).as_deref(), Some("marin"));
 
-        let utterance = built.backend.speak("Hello.");
+        let utterance = built.backend.speak("Hello.").expect("a test device opens");
         wait_until("the reply is read", || utterance.spoken());
         let request = served.join().unwrap();
         let body = request.split("\r\n\r\n").nth(1).expect("a JSON body");
@@ -1100,7 +1122,7 @@ mod tests {
         let mut remote = table(base_url, "");
         remote.response_format = SpeechFormat::Wav;
         let built = build(remote, false);
-        let utterance = built.backend.speak("Hello.");
+        let utterance = built.backend.speak("Hello.").expect("a test device opens");
         wait_until("the reply is read", || utterance.spoken());
 
         let sent = sent_body(&served.join().unwrap());
@@ -1114,7 +1136,7 @@ mod tests {
         let mut remote = table(base_url, "");
         remote.sample_rate = std::num::NonZero::new(22_050);
         let built = build(remote, false);
-        let utterance = built.backend.speak("Hello.");
+        let utterance = built.backend.speak("Hello.").expect("a test device opens");
         wait_until("the reply is read", || utterance.spoken());
 
         let sent = sent_body(&served.join().unwrap());
@@ -1142,7 +1164,10 @@ mod tests {
     }
 
     fn spoken_by(built: Built) -> Vec<crate::text_to_speech::output::Chunk> {
-        let utterance = built.backend.speak("The same sentence.");
+        let utterance = built
+            .backend
+            .speak("The same sentence.")
+            .expect("a test device opens");
         wait_until("the reply is read", || utterance.spoken());
         utterance.heard()
     }

@@ -128,9 +128,12 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
     // Created before the backend, because the backend holds the sender and the
     // drain holds the state the backend must not see
     let (faults, fault_reports) = std::sync::mpsc::channel();
-    let speech = text_to_speech::select_backend(&config.tts, faults)?;
+    // One output for every sound the daemon makes. The voice and the cues on
+    // one device is the point: two holders drift apart the moment one dies.
+    let output = Arc::new(text_to_speech::output::Output::lazy());
+    let speech = text_to_speech::select_backend(&config.tts, faults, Arc::clone(&output))?;
     let (commands, command_receiver) = std::sync::mpsc::channel();
-    let cues = audio::cues::start_cue_player(config.audio.cues.enabled);
+    let cues = audio::cues::start_cue_player(config.audio.cues.enabled, output);
     let daemon_state = Arc::new(DaemonState::new(
         Arc::clone(&config),
         db_connection,
