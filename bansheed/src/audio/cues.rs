@@ -123,8 +123,10 @@ pub fn start_cue_player(enabled: bool, output: Arc<Output>) -> Cues {
             return;
         };
         // A cue that cannot play is not a reply that was not spoken, so its
-        // faults stay out of `last_speech_error`. `play` logs them itself.
-        let (faults, _unread) = mpsc::channel();
+        // faults stay out of `last_speech_error`, and the receiver goes rather
+        // than buffering them for the life of the daemon. `play` logs them.
+        let (faults, unread) = mpsc::channel();
+        drop(unread);
         loop {
             play(&output, cue, &faults);
             cue = match next_playable(&receiver, &enabled) {

@@ -61,7 +61,7 @@ async fn a_flag_that_is_not_a_boolean_is_refused() {
         else {
             panic!("a string {flag} must not be read as a flag by {method}");
         };
-        assert_eq!(error.code, -32602, "{method}");
+        assert_eq!(error.code, rpc_code::INVALID_PARAMS, "{method}");
         assert!(error.message.contains(flag), "{method}: {}", error.message);
     }
 }
@@ -99,7 +99,7 @@ async fn a_history_limit_that_does_not_fit_is_refused() {
     let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
         panic!("a limit past 32 bits must not truncate");
     };
-    assert_eq!(error.code, -32602);
+    assert_eq!(error.code, rpc_code::INVALID_PARAMS);
 }
 
 #[tokio::test]
@@ -200,7 +200,7 @@ async fn concurrent_ask_user_is_refused_while_armed() {
     let JsonRpcResponse::Error { error, .. } = response else {
         panic!("expected error response");
     };
-    assert_eq!(error.code, -32004);
+    assert_eq!(error.code, rpc_code::BUSY);
     // The refused call must not disturb the session that owns the mic
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
 }
@@ -281,7 +281,7 @@ async fn record_start_and_stop_drive_push_to_talk() {
     let JsonRpcResponse::Error { error, .. } = dispatch(again, &state).await else {
         panic!("expected error response");
     };
-    assert_eq!(error.code, -32004);
+    assert_eq!(error.code, rpc_code::BUSY);
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
     let stop = request(BANSHEE_RECORD_STOP, None);
@@ -335,7 +335,7 @@ async fn record_toggle_is_refused_while_recording_is_unavailable() {
     let JsonRpcResponse::Error { error, .. } = dispatch(toggle, &state).await else {
         panic!("expected error response");
     };
-    assert_eq!(error.code, -32000);
+    assert_eq!(error.code, rpc_code::MICROPHONE);
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
 }
 
@@ -691,7 +691,7 @@ async fn a_second_download_is_refused_while_one_runs() {
     else {
         panic!("expected the busy error");
     };
-    assert_eq!(error.code, -32005);
+    assert_eq!(error.code, rpc_code::DOWNLOAD_RUNNING);
 
     drop(slot);
     assert!(state.start_downloading().is_some(), "the slot came back");
@@ -893,7 +893,7 @@ async fn ask_user_names_the_provider_fault_with_its_own_code() {
     let JsonRpcResponse::Error { error, .. } = response else {
         panic!("expected error response");
     };
-    assert_eq!(error.code, -32006);
+    assert_eq!(error.code, rpc_code::PROVIDER);
     assert!(
         error.message.contains("remote listener"),
         "{}",
@@ -928,7 +928,7 @@ async fn ask_user_answers_an_error_when_the_listen_failed() {
     let JsonRpcResponse::Error { error, .. } = response else {
         panic!("expected error response");
     };
-    assert_eq!(error.code, -32007);
+    assert_eq!(error.code, rpc_code::LISTENING_FAILED);
     assert!(
         error.message.contains("refused the key"),
         "{}",

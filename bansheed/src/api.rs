@@ -225,7 +225,10 @@ fn ready(blockers: &[banshee_common::Blocker], pipeline: &crate::state::Pipeline
 }
 
 pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
-    let blockers = readiness::blockers(daemon_state);
+    // Read once for every answer below, so one reply cannot report two states
+    // of the pipeline.
+    let pipeline = daemon_state.pipeline();
+    let blockers = readiness::blockers(daemon_state, &pipeline);
     let running = daemon_state.running_config();
     // Read once for the two sides below, so one reply cannot answer from two
     // states of the file. A file that will not parse holds no key either way.
@@ -255,11 +258,11 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             .is_some_and(crate::speech_to_text::english_only),
         // False where the compositor holds the binding, so the window does not
         // name a key the daemon never listens for.
-        "pipeline": daemon_state.pipeline().as_str(),
+        "pipeline": pipeline.as_str(),
         "hotkey_listens": crate::hotkey::listens(),
         "bindable_modifiers": crate::binding::bindable_modifiers(),
         // Stated, so no client invents a narrower definition of ready
-        "ready": ready(&blockers, &daemon_state.pipeline()),
+        "ready": ready(&blockers, &pipeline),
         "blockers": blockers,
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
@@ -512,7 +515,12 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     }
 
     let answered = answer.await;
-    ends_the_session.kept();
+    // The consumer disarms every session it finishes, so the guard steps aside
+    // for those. A sender that was dropped finished nothing, and the guard
+    // still owes the microphone back.
+    if answered.is_ok() {
+        ends_the_session.kept();
+    }
 
     match answered {
         Ok(Ok(text)) => JsonRpcResponse::success(params.id(), serde_json::json!({ "text": text })),
@@ -522,14 +530,11 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
             rpc_code::LISTENING_FAILED,
             format!("Listening failed: {reason}"),
         ),
-        Err(_) => {
-            daemon_state.set_recording_mode(RecordingMode::Idle);
-            JsonRpcResponse::error(
-                params.id(),
-                rpc_code::INTERNAL,
-                "Listening session ended unexpectedly.",
-            )
-        }
+        Err(_) => JsonRpcResponse::error(
+            params.id(),
+            rpc_code::INTERNAL,
+            "Listening session ended unexpectedly.",
+        ),
     }
 }
 

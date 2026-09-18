@@ -34,7 +34,7 @@ fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
         crate::state::RecordingError::Model("missing file.".to_string()),
     ));
 
-    let blockers = crate::readiness::blockers(&state);
+    let blockers = crate::readiness::blockers(&state, &state.pipeline());
     let model = blockers
         .iter()
         .find(|blocker| blocker.kind == banshee_common::BlockerKind::Model)
@@ -53,7 +53,7 @@ fn an_unreadable_key_file_is_a_recording_fault_the_checklist_names() {
 
     let daemon = super::Daemon::Running {
         status: serde_json::json!({ "audio_device": "MacBook Pro Microphone" }),
-        blockers: crate::readiness::blockers(&state),
+        blockers: crate::readiness::blockers(&state, &state.pipeline()),
     };
 
     assert!(!super::check_recording(&daemon, ""));

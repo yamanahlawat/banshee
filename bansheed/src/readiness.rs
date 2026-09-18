@@ -3,18 +3,14 @@ use banshee_common::{Blocker, BlockerKind};
 use crate::state::{DaemonState, Pipeline, RecordingError};
 use crate::{models, permissions};
 
-pub fn blockers(state: &DaemonState) -> Vec<Blocker> {
+pub fn blockers(state: &DaemonState, pipeline: &Pipeline) -> Vec<Blocker> {
     // The loaded model, not the configured one, and none for a remote listener
     let names: Vec<&str> = state
         .stt_model()
         .into_iter()
         .chain([state.vad_model()])
         .collect();
-    assemble(
-        permissions::blockers(),
-        models::blockers(&names),
-        &state.pipeline(),
-    )
+    assemble(permissions::blockers(), models::blockers(&names), pipeline)
 }
 
 /// Split out so the present-but-dead branch is testable: a test daemon's model

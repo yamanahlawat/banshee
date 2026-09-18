@@ -56,10 +56,10 @@ impl CaptureSource {
         batch.extend(self.consumer.pop_iter());
     }
 
-    /// Throws the ring away without building the vector `pop_into` would: a
-    /// cancelled press discards seconds of audio at 48 kHz.
+    /// Throws the ring away in one pass. A cancelled press discards seconds of
+    /// audio at 48 kHz, and this runs on every armed poll while Banshee speaks.
     fn drop_all(&mut self) {
-        self.consumer.pop_iter().for_each(drop);
+        self.consumer.clear();
     }
 }
 
@@ -83,7 +83,8 @@ impl Capture {
     /// Plays the new device to everything that reads capture, including a
     /// question that is already listening.
     pub fn swap(&self, source: CaptureSource) {
-        *lock(&self.source) = source;
+        let mut held = lock(&self.source);
+        *held = source;
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -97,13 +98,19 @@ impl Capture {
         lock(&self.source).sample_rate
     }
 
-    pub fn pop_into(&self, batch: &mut Vec<f32>) {
-        lock(&self.source).pop_into(batch);
+    /// The audio waiting, with the rate it was captured at and the device it
+    /// came from, read under one lock. Two reads would pair one device's audio
+    /// with another's rate whenever the watchdog rebinds between them.
+    pub fn take(&self, batch: &mut Vec<f32>) -> (u32, u64) {
+        let mut source = lock(&self.source);
+        source.pop_into(batch);
+        (source.sample_rate, self.generation.load(Ordering::Relaxed))
     }
 
+    #[cfg(test)]
     pub fn drain(&self) -> Vec<f32> {
         let mut batch = Vec::new();
-        self.pop_into(&mut batch);
+        self.take(&mut batch);
         batch
     }
 
@@ -290,14 +297,12 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
 impl Pipeline {
     // Push-to-talk ended: the ring holds the whole utterance
     fn transcribe_utterance(&mut self, action: TranscribeTarget) {
-        let audio_data = self.source.drain();
+        let mut audio_data = Vec::new();
+        let (rate, _) = self.source.take(&mut audio_data);
 
-        log::debug!(
-            "Downsampling audio from {} Hz to {SAMPLE_RATE} Hz...",
-            self.source.sample_rate()
-        );
+        log::debug!("Downsampling audio from {rate} Hz to {SAMPLE_RATE} Hz...");
 
-        let final_data = match resample_audio(&audio_data, self.source.sample_rate(), SAMPLE_RATE) {
+        let final_data = match resample_audio(&audio_data, rate, SAMPLE_RATE) {
             Ok(data) => data,
             Err(e) => {
                 log::error!("resampling failed: {e}");
@@ -560,20 +565,19 @@ impl Pipeline {
                 afresh(&mut self.vad, &mut phase);
             }
 
+            batch.clear();
+            let (rate, moved) = self.source.take(&mut batch);
+
             // The microphone moved under this answer. What was said already is
             // kept: it is resampled and belongs to the answer. What cannot be
             // kept is a resampler built for the old rate, and a window holding
             // the old device's audio.
-            let moved = self.source.generation();
             if moved != device {
                 device = moved;
                 log::info!("the microphone moved while a question was listening");
-                resampler = resampler_for(self.source.sample_rate())?;
+                resampler = resampler_for(rate)?;
                 afresh(&mut self.vad, &mut phase);
             }
-
-            batch.clear();
-            self.source.pop_into(&mut batch);
             if let Err(e) = resampler.push(&batch, &mut audio) {
                 log::error!("Resampling failed: {e}");
                 return Err(reason(&e));
@@ -1036,6 +1040,26 @@ mod tests {
             before,
             "a swap at the same rate is still another device"
         );
+    }
+
+    // A rebind between the two reads would hand one device's audio to the other
+    // device's rate, and resample it by the wrong ratio.
+    #[test]
+    fn the_audio_and_the_rate_it_was_captured_at_come_out_together() {
+        let (source, _old_producer) = source_holding(&[1.0, 2.0], 16000);
+        let capture = Capture::new(source);
+
+        let mut batch = Vec::new();
+        let (rate, device) = capture.take(&mut batch);
+        assert_eq!((batch.as_slice(), rate), ([1.0, 2.0].as_slice(), 16000));
+
+        let (replacement, _new_producer) = source_holding(&[7.0], 48000);
+        capture.swap(replacement);
+
+        batch.clear();
+        let (rate, moved) = capture.take(&mut batch);
+        assert_eq!((batch.as_slice(), rate), ([7.0].as_slice(), 48000));
+        assert_ne!(moved, device, "the reader is told the device changed");
     }
 
     #[test]

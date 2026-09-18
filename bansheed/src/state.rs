@@ -139,6 +139,10 @@ impl Pipeline {
         }
     }
 
+    pub fn is_open(&self) -> bool {
+        matches!(self, Pipeline::Open)
+    }
+
     pub fn fault(&self) -> Option<&RecordingError> {
         match self {
             Pipeline::Broken(error) => Some(error),
@@ -404,7 +408,7 @@ impl DaemonState {
     pub fn record_start(&self, action: TranscribeTarget) -> bool {
         // The hotkey arrives here too, so a deaf daemon answers a press with the
         // error cue. Arming a session nothing can transcribe would be silent.
-        if !matches!(*self.pipeline.read().unwrap(), Pipeline::Open) {
+        if !self.pipeline().is_open() {
             self.cues.send(Cue::Error);
             return false;
         }
@@ -817,8 +821,7 @@ impl DaemonState {
     /// Takes the armed-listening lock for `ask_user`. Shares the availability
     /// gate with `record_start`, so no caller can arm a mic that cannot record.
     pub fn arm_for_ask(&self) -> bool {
-        matches!(*self.pipeline.read().unwrap(), Pipeline::Open)
-            && self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
+        self.pipeline().is_open() && self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
     }
 
     /// The voice the speech backend actually loaded, which `config.toml` may no

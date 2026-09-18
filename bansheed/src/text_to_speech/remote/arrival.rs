@@ -125,7 +125,7 @@ impl Arrival {
 }
 
 fn sample(pair: [u8; 2]) -> f32 {
-    f32::from(i16::from_le_bytes(pair)) / 32_768.0
+    crate::audio::utils::from_pcm16(i16::from_le_bytes(pair))
 }
 
 fn refused(what: &str, asked: SpeechFormat) -> Verdict {

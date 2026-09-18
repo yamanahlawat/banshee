@@ -20,8 +20,7 @@ export type Status = Record<string, unknown> & {
   english_only?: boolean;
   download_megabytes?: number;
   running: boolean;
-  /// The daemon's own word for "nothing stops Banshee working". Absent from a
-  /// daemon older than the field, which the blocker count answered for.
+  /// The daemon's own word for "nothing stops Banshee working".
   ready?: boolean;
   blockers?: Blocker[];
   hotkey_listens?: boolean;
@@ -136,6 +135,12 @@ export function markPending(state: Daemon, keys: string[]): Daemon {
 export function hotkeyListens(state: Daemon): boolean {
   return state.status?.hotkey_listens !== false;
 }
+// The daemon's own definition, not a narrower one: a pipeline still opening
+// raises no blocker and is not ready either. Absent from a daemon that has not
+// answered, which `isDown` speaks for.
+export function isReady(state: Daemon): boolean {
+  return state.status?.ready !== false;
+}
 export function isDown(state: Daemon): boolean {
   return state.down !== null || state.status?.running === false;
 }
@@ -154,10 +159,7 @@ export function stateWord(state: Daemon): Word {
   const said = SAYS[state.live.activity];
   if (said !== undefined) return said;
   if (state.download !== null) return 'Downloading';
-  // The daemon's definition, not a narrower one: a pipeline still opening
-  // raises no blocker and is not ready either.
-  if (state.status !== null && state.status.ready === false) return 'Not ready';
-  if ((state.status?.blockers?.length ?? 0) > 0) return 'Not ready';
+  if (!isReady(state)) return 'Not ready';
   return 'Ready';
 }
 export function lampForm(word: Word): LampForm {

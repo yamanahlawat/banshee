@@ -547,7 +547,7 @@ fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
 /// report. `None` once it is open or broken, which the lines below answer for.
 /// The word is the daemon's own, so the two sides cannot spell it differently.
 fn still_opening(status: &serde_json::Value) -> Option<&'static str> {
-    (status["pipeline"].as_str() == Some(crate::state::Pipeline::Opening.as_str()))
+    (banshee_common::pipeline(status) == Some(crate::state::Pipeline::Opening.as_str()))
         .then_some("the microphone is still opening")
 }
 
@@ -623,10 +623,8 @@ fn report_daemon(daemon: &Daemon) -> bool {
             }
             true
         }
-        _ => match absence(daemon) {
-            Some((line, fix)) => fail(&line, fix),
-            None => true,
-        },
+        // Every kind but Running is an absence, and Running is taken above.
+        away => absence(away).is_none_or(|(line, fix)| fail(&line, fix)),
     }
 }
 
