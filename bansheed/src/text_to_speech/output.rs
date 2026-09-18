@@ -197,8 +197,9 @@ impl Output {
         }))
     }
 
-    /// One player per utterance: rodio's `append` sleeps until a stopped player
-    /// drains, and a player whose device is gone never drains.
+    /// One player per utterance, and one thread that owns it. That thread feeds
+    /// the sentences and then stays with the reply until the device has taken
+    /// it, so no caller can forget to look after a reply on a device that dies.
     pub fn play(
         self: &Arc<Self>,
         chunks: impl Iterator<Item = Chunk> + Send + 'static,
@@ -206,95 +207,194 @@ impl Output {
     ) -> Result<PlayerUtterance, BansheeError> {
         let (mixer, device) = self.mixer()?;
         let player = Arc::new(Mutex::new(Arc::new(Player::connect_new(&mixer))));
-        let pulls = Arc::new(AtomicU64::new(0));
         let cancelled = Arc::new(Mutex::new(false));
-        let thread_player = Arc::clone(&player);
-        let thread_cancelled = Arc::clone(&cancelled);
-        let thread_pulls = Arc::clone(&pulls);
         let held: Arc<Mutex<VecDeque<Chunk>>> = Arc::default();
-        let thread_held = Arc::clone(&held);
+        let pulls = Arc::new(AtomicU64::new(0));
+        let on = Arc::new(AtomicU64::new(device));
         #[cfg(test)]
         let heard: Arc<Mutex<Vec<Chunk>>> = Arc::default();
-        #[cfg(test)]
-        let thread_heard = Arc::clone(&heard);
-        let worker = thread::spawn(move || {
-            for chunk in chunks {
-                if chunk.samples.is_empty() {
-                    continue;
-                }
-                // The device decides the pace. Running ahead of it would hand a
-                // whole reply to a device that may be gone by the next sentence.
-                loop {
-                    {
-                        let mut queue = lock(&thread_held);
-                        trim(&mut queue, lock(&thread_player).len());
-                        if queue.len() < LOOK_AHEAD {
-                            break;
-                        }
-                    }
-                    if *lock(&thread_cancelled) {
-                        return;
-                    }
-                    thread::sleep(ROOM_POLL);
-                }
-                // Append under the lock so stop() can never race a chunk into a
-                // stopped player, where append would sleep
-                let guard = lock(&thread_cancelled);
-                if *guard {
-                    break;
-                }
-                // Held and the player move together, so a swap never re-appends
-                // the sentence this thread is appending.
-                let mut queue = lock(&thread_held);
-                let player = lock(&thread_player).clone();
-                queue.push_back(chunk.clone());
-                #[cfg(test)]
-                lock(&thread_heard).push(chunk.clone());
-                player.append(stamped(chunk, Arc::clone(&thread_pulls)));
-            }
-        });
+
+        let mut playing = Playing {
+            player: Arc::clone(&player),
+            held: Arc::clone(&held),
+            cancelled: Arc::clone(&cancelled),
+            output: Arc::clone(self),
+            faults,
+            pulls: Arc::clone(&pulls),
+            on: Arc::clone(&on),
+            seen: (0, std::time::Instant::now()),
+            earned: true,
+            #[cfg(test)]
+            heard: Arc::clone(&heard),
+        };
+        let worker = thread::spawn(move || playing.feed(chunks));
         Ok(PlayerUtterance {
             cancelled,
             worker,
             player,
+            #[cfg(test)]
             held,
-            output: Arc::clone(self),
-            faults,
-            seen: (0, std::time::Instant::now()),
+            #[cfg(test)]
             pulls,
-            device,
-            gave_up: false,
-            earned: true,
+            #[cfg(test)]
+            on,
             #[cfg(test)]
             heard,
         })
     }
 }
 
-pub struct PlayerUtterance {
-    cancelled: Arc<Mutex<bool>>,
+/// Everything the thread that owns a reply holds. The device watch lives here
+/// rather than on the utterance, because a caller that has to remember to look
+/// after a reply is a caller that will one day forget.
+struct Playing {
+    player: Arc<Mutex<Arc<Player>>>,
     /// The sentences the player has been given and the device has not finished.
     /// A device that dies owes exactly these.
     held: Arc<Mutex<VecDeque<Chunk>>>,
-    // is_finished after a panic too, unlike a hand-rolled done flag
-    worker: thread::JoinHandle<()>,
-    player: Arc<Mutex<Arc<Player>>>,
+    cancelled: Arc<Mutex<bool>>,
     output: Arc<Output>,
     faults: std::sync::mpsc::Sender<Fault>,
     /// One step per `PULL_STEP` of this reply the device took. Its own, because
     /// audio another sound's device takes says nothing about this one's.
     pulls: Arc<AtomicU64>,
     /// The generation of the device this player is on.
-    device: u64,
+    on: Arc<AtomicU64>,
     /// The counter, and when it was last seen to move. A counter that stands
     /// still while audio waits is a device that is gone.
     seen: (u64, std::time::Instant),
-    /// Set when there is nowhere left to play. A stopped player on a device
-    /// that is gone never empties, because emptying is the device's own doing.
-    gave_up: bool,
     /// A swap is earned by audio that was taken since the last one. Without it
     /// a device nobody can play through is reopened for ever.
     earned: bool,
+    #[cfg(test)]
+    heard: Arc<Mutex<Vec<Chunk>>>,
+}
+
+impl Playing {
+    fn feed(&mut self, chunks: impl Iterator<Item = Chunk>) {
+        for chunk in chunks {
+            if chunk.samples.is_empty() {
+                continue;
+            }
+            // The device decides the pace. Running ahead of it would hand a
+            // whole reply to a device that may be gone by the next sentence.
+            while !self.has_room() {
+                if self.stopped() || !self.follows_the_device() {
+                    return;
+                }
+                thread::sleep(ROOM_POLL);
+            }
+            // Append under the lock so stop() can never race a chunk into a
+            // stopped player, where append would sleep
+            let guard = lock(&self.cancelled);
+            if *guard {
+                return;
+            }
+            // Held and the player move together, so a swap never re-appends
+            // the sentence this thread is appending.
+            let mut queue = lock(&self.held);
+            let player = lock(&self.player).clone();
+            queue.push_back(chunk.clone());
+            #[cfg(test)]
+            lock(&self.heard).push(chunk.clone());
+            player.append(stamped(chunk, Arc::clone(&self.pulls)));
+        }
+
+        // Every sentence is given. Stay with the reply until the device has
+        // taken it: this thread is the only one that can move it to another.
+        while !self.stopped() && self.queued() > 0 {
+            if !self.follows_the_device() {
+                return;
+            }
+            thread::sleep(ROOM_POLL);
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        *lock(&self.cancelled)
+    }
+
+    fn queued(&self) -> usize {
+        lock(&self.player).len()
+    }
+
+    fn has_room(&self) -> bool {
+        let mut queue = lock(&self.held);
+        trim(&mut queue, lock(&self.player).len());
+        queue.len() < LOOK_AHEAD
+    }
+
+    /// False when the reply is over because nothing can play it.
+    fn follows_the_device(&mut self) -> bool {
+        let pulls = self.pulls.load(Ordering::Relaxed);
+        if pulls != self.seen.0 {
+            self.seen = (pulls, std::time::Instant::now());
+            self.earned = true;
+            return true;
+        }
+        if !output_died(self.queued(), self.seen.1.elapsed()) {
+            return true;
+        }
+        if !self.earned {
+            self.give_up("the speaker went away and the next one took nothing".to_string());
+            return false;
+        }
+        log::warn!("the speaker stopped taking audio; opening the default device again");
+        self.earned = false;
+        match self.swap_device() {
+            Ok(()) => true,
+            Err(error) => {
+                self.give_up(format!(
+                    "the speaker went away and no other could be opened: {error}"
+                ));
+                false
+            }
+        }
+    }
+
+    /// Ends a reply nothing can play. The player stops with it, so the next
+    /// reply is not queued behind this one.
+    fn give_up(&mut self, reason: String) {
+        log::error!("{reason}");
+        let _ = self.faults.send(Fault::Failed(reason));
+        *lock(&self.cancelled) = true;
+        lock(&self.player).stop();
+    }
+
+    /// Moves what is left of this reply to the device that is there now. The
+    /// player and its queue belong to the dead device, so both are replaced.
+    fn swap_device(&mut self) -> Result<(), BansheeError> {
+        let (mixer, device) = self.output.device_after(self.on.load(Ordering::Relaxed))?;
+        let fresh = Arc::new(Player::connect_new(&mixer));
+        {
+            let queue = lock(&self.held);
+            for chunk in queue.iter() {
+                fresh.append(stamped(chunk.clone(), Arc::clone(&self.pulls)));
+            }
+            let mut player = lock(&self.player);
+            player.stop();
+            *player = fresh;
+        }
+        self.on.store(device, Ordering::Relaxed);
+        self.seen = (
+            self.pulls.load(Ordering::Relaxed),
+            std::time::Instant::now(),
+        );
+        Ok(())
+    }
+}
+
+pub struct PlayerUtterance {
+    cancelled: Arc<Mutex<bool>>,
+    // is_finished after a panic too, unlike a hand-rolled done flag
+    worker: thread::JoinHandle<()>,
+    player: Arc<Mutex<Arc<Player>>>,
+    #[cfg(test)]
+    held: Arc<Mutex<VecDeque<Chunk>>>,
+    #[cfg(test)]
+    pulls: Arc<AtomicU64>,
+    #[cfg(test)]
+    on: Arc<AtomicU64>,
     /// Every chunk the player took, for a test that reads what was heard. The
     /// device consumes the samples themselves, so nothing else can.
     #[cfg(test)]
@@ -326,43 +426,12 @@ impl PlayerUtterance {
     /// reply moves, which is what a test watches.
     #[cfg(test)]
     pub fn device(&self) -> u64 {
-        self.device
+        self.on.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
     pub fn queued(&self) -> usize {
         lock(&self.player).len()
-    }
-
-    /// Ends a reply nothing can play. `speaking` clears with it, so the next
-    /// reply is not queued behind this one.
-    fn give_up(&mut self, reason: String) {
-        log::error!("{reason}");
-        let _ = self.faults.send(Fault::Failed(reason));
-        self.stop();
-        self.gave_up = true;
-    }
-
-    /// Moves what is left of this reply to the device that is there now. The
-    /// player and its queue belong to the dead device, so both are replaced.
-    fn swap_device(&mut self) -> Result<(), BansheeError> {
-        let (mixer, device) = self.output.device_after(self.device)?;
-        let fresh = Arc::new(Player::connect_new(&mixer));
-        {
-            let queue = lock(&self.held);
-            for chunk in queue.iter() {
-                fresh.append(stamped(chunk.clone(), Arc::clone(&self.pulls)));
-            }
-            let mut player = lock(&self.player);
-            player.stop();
-            *player = fresh;
-        }
-        self.device = device;
-        self.seen = (
-            self.pulls.load(Ordering::Relaxed),
-            std::time::Instant::now(),
-        );
-        Ok(())
     }
 
     #[cfg(test)]
@@ -377,40 +446,16 @@ impl PlayerUtterance {
 }
 
 impl ActiveUtterance for PlayerUtterance {
+    /// The thread ends when the device has taken the reply, when a stop cuts it
+    /// short, or when nothing could play it. Nothing else ends it.
     fn is_finished(&mut self) -> bool {
-        // empty() only drops when the device pulls samples; a dead device keeps
-        // an utterance unfinished until keep_playing swaps it or gives up
-        self.gave_up || (self.worker.is_finished() && lock(&self.player).empty())
+        self.worker.is_finished()
     }
 
     fn stop(&mut self) {
         let mut guard = lock(&self.cancelled);
         *guard = true;
         lock(&self.player).stop();
-    }
-
-    fn keep_playing(&mut self) {
-        let pulls = self.pulls.load(Ordering::Relaxed);
-        if pulls != self.seen.0 {
-            self.seen = (pulls, std::time::Instant::now());
-            self.earned = true;
-            return;
-        }
-        let queued = lock(&self.player).len();
-        if !output_died(queued, self.seen.1.elapsed()) {
-            return;
-        }
-        if !self.earned {
-            self.give_up("the speaker went away and the next one took nothing".to_string());
-            return;
-        }
-        log::warn!("the speaker stopped taking audio; opening the default device again");
-        self.earned = false;
-        if let Err(error) = self.swap_device() {
-            self.give_up(format!(
-                "the speaker went away and no other could be opened: {error}"
-            ));
-        }
     }
 }
 
@@ -630,7 +675,7 @@ mod tests {
     fn a_dead_device_hands_its_sentences_to_the_new_one() {
         let output = Arc::new(Output::silent());
         let (faults, heard) = std::sync::mpsc::channel();
-        let mut utterance = output
+        let utterance = output
             .play(
                 std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
                 faults,
@@ -641,8 +686,8 @@ mod tests {
         });
 
         let owed = utterance.held().len();
-        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-        utterance.keep_playing();
+        let device = utterance.device();
+        wait_for_the_swap("the reply moves by itself", || utterance.device() != device);
 
         assert_eq!(
             utterance.queued(),
@@ -667,7 +712,6 @@ mod tests {
         });
 
         thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-        utterance.keep_playing();
 
         assert_eq!(
             opened.load(Ordering::Relaxed),
@@ -693,22 +737,17 @@ mod tests {
             utterance.queued() == super::LOOK_AHEAD
         });
 
-        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-        utterance.keep_playing();
-        assert_eq!(
-            opened.load(Ordering::Relaxed),
-            2,
-            "the first swap is allowed"
-        );
-
-        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-        utterance.keep_playing();
+        wait_for_the_swap("the reply moves once", || {
+            opened.load(Ordering::Relaxed) == 2
+        });
+        wait_for_the_swap("the reply ends instead of looping", || {
+            utterance.is_finished()
+        });
         assert_eq!(
             opened.load(Ordering::Relaxed),
             2,
             "a device that took nothing earns no second swap"
         );
-        assert!(utterance.is_finished(), "the reply ends instead of looping");
         match heard.try_recv() {
             Ok(Fault::Failed(reason)) => assert!(reason.contains("speaker"), "{reason}"),
             other => panic!("a reply that was cut must be reported: {other:?}"),
@@ -721,7 +760,7 @@ mod tests {
     fn a_device_that_played_earns_the_next_swap() {
         let (output, opened) = Output::counting();
         let output = Arc::new(output);
-        let mut utterance = output
+        let utterance = output
             .play(
                 std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
                 ignored_faults(),
@@ -731,21 +770,14 @@ mod tests {
             utterance.queued() == super::LOOK_AHEAD
         });
 
-        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-        utterance.keep_playing();
-        assert_eq!(opened.load(Ordering::Relaxed), 2, "the first swap");
+        wait_for_the_swap("the first swap", || opened.load(Ordering::Relaxed) == 2);
 
         // The new device takes audio, which is what the counter is for
         utterance.took_audio();
-        utterance.keep_playing();
 
-        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-        utterance.keep_playing();
-        assert_eq!(
-            opened.load(Ordering::Relaxed),
-            3,
-            "a device that played earns another swap"
-        );
+        wait_for_the_swap("a device that played earns another swap", || {
+            opened.load(Ordering::Relaxed) == 3
+        });
     }
 
     // A cue and a reply play at once through one output. When one of them moves
@@ -755,13 +787,13 @@ mod tests {
     fn one_utterance_moving_leaves_the_other_still_looking_at_a_dead_device() {
         let (output, opened) = Output::counting();
         let output = Arc::new(output);
-        let mut cue = output
+        let cue = output
             .play(
                 std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
                 ignored_faults(),
             )
             .expect("a test device opens");
-        let mut reply = output
+        let reply = output
             .play(
                 std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
                 ignored_faults(),
@@ -771,28 +803,22 @@ mod tests {
             cue.queued() == super::LOOK_AHEAD && reply.queued() == super::LOOK_AHEAD
         });
 
-        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-        cue.keep_playing();
-        let moved_to = cue.device();
-        assert_ne!(moved_to, 0, "the cue moved to the device that is there");
-        assert_eq!(opened.load(Ordering::Relaxed), 2);
+        // Whichever moves first opens the one replacement
+        wait_for_the_swap("a sound moves to the device that is there", || {
+            opened.load(Ordering::Relaxed) == 2
+        });
 
         // The new device takes the cue's audio, which says nothing about the reply
         cue.took_audio();
-        cue.keep_playing();
         assert_eq!(
             reply.pulls(),
             0,
             "the audio the cue's device took is not the reply's"
         );
 
-        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-        reply.keep_playing();
-        assert_eq!(
-            reply.device(),
-            moved_to,
-            "the reply was left on the dead device by the cue's audio"
-        );
+        wait_for_the_swap("both sounds end up on it", || {
+            cue.device() == reply.device() && cue.device() != 0
+        });
         assert_eq!(
             opened.load(Ordering::Relaxed),
             2,
@@ -814,10 +840,7 @@ mod tests {
             utterance.queued() == super::LOOK_AHEAD
         });
 
-        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-        utterance.keep_playing();
-
-        wait_until("the utterance concludes", || utterance.is_finished());
+        wait_for_the_swap("the utterance concludes", || utterance.is_finished());
         match heard.try_recv() {
             Ok(Fault::Failed(reason)) => assert!(reason.contains("speaker"), "{reason}"),
             other => panic!("a reply that was cut must be reported: {other:?}"),
@@ -839,6 +862,19 @@ mod tests {
 
     fn one_second_of_silence() -> impl Iterator<Item = Chunk> + Send + 'static {
         std::iter::once(kokoros_chunk(SAMPLE_RATE.get() as usize))
+    }
+
+    /// Waits past the dead-device bound, which is what the reply's own thread
+    /// has to outwait before it moves.
+    fn wait_for_the_swap(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + super::DEAD_OUTPUT * 4;
+        while !done() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what} did not happen within four times the bound"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
@@ -864,14 +900,7 @@ mod tests {
         let second = output
             .play(one_second_of_silence(), ignored_faults())
             .expect("a test device opens");
-        wait_until("the second utterance's thread finishes", || {
-            second.worker_finished()
-        });
-        assert_eq!(
-            second.queued(),
-            1,
-            "the second sentence was queued on its own player"
-        );
+        wait_until("the second sentence is queued", || second.queued() == 1);
     }
 
     #[test]

@@ -157,7 +157,6 @@ fn play(output: &Arc<Output>, cue: Cue, faults: &mpsc::Sender<crate::text_to_spe
     };
     while !playing.is_finished() {
         thread::sleep(CUE_POLL);
-        playing.keep_playing();
     }
 }
 

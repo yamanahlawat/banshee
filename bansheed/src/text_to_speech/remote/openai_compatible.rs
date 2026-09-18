@@ -436,13 +436,6 @@ impl ActiveUtterance for RemoteUtterance {
                 .is_none_or(|utterance| utterance.is_finished())
     }
 
-    fn keep_playing(&mut self) {
-        self.player.keep_playing();
-        if let Some(utterance) = lock(&self.handover).speaking.as_mut() {
-            utterance.keep_playing();
-        }
-    }
-
     fn stop(&mut self) {
         self.player.stop();
         let mut handover = lock(&self.handover);
@@ -687,28 +680,26 @@ mod tests {
         }
     }
 
-    // The remote speaker plays through the same output as everything else, so a
-    // device that dies under it has to reach the player inside this wrapper.
+    // The remote speaker plays through the same output as everything else, and
+    // the reply's own thread moves it. Nothing here has to remember to look.
     #[test]
     fn a_remote_reply_follows_the_device_like_any_other() {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[0, 1, 2, 3, 4, 5])], false);
         let built = built(base_url, "", false);
-        let mut utterance = built
+        let utterance = built
             .backend
             .speak("One sentence.")
             .expect("a test device opens");
         wait_until("the reply is read", || utterance.spoken());
 
-        std::thread::sleep(
-            crate::text_to_speech::output::dead_output() + Duration::from_millis(30),
-        );
-        utterance.keep_playing();
-
-        assert_eq!(
-            built.opened.load(std::sync::atomic::Ordering::Relaxed),
-            2,
-            "the wrapper swallowed the device watch, so the reply never moved"
-        );
+        let deadline = std::time::Instant::now() + crate::text_to_speech::output::dead_output() * 4;
+        while built.opened.load(std::sync::atomic::Ordering::Relaxed) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a reply nothing plays never moved to another device"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let _ = served.join();
     }
 
