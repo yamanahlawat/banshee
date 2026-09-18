@@ -84,7 +84,7 @@ pub fn receipt_binaries(receipt: &str) -> Vec<PathBuf> {
         prefix,
         parsed["install_layout"].as_str().unwrap_or_default(),
     );
-    parsed["binaries"]
+    let mut named: Vec<PathBuf> = parsed["binaries"]
         .as_array()
         .map(|binaries| {
             binaries
@@ -93,8 +93,15 @@ pub fn receipt_binaries(receipt: &str) -> Vec<PathBuf> {
                 .map(|binary| dir.join(binary))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // The installer places the updater beside them and records it nowhere, so a
+    // receipt read literally leaves behind the one binary that reinstalls.
+    named.push(dir.join(UPDATER));
+    named
 }
+
+/// What the shell installer calls the updater it places beside the binaries.
+const UPDATER: &str = "banshee-update";
 
 /// Where under the prefix the installer put the binaries. A cargo home and the
 /// hierarchical layout both keep them in `bin`; the rest are the prefix itself.
@@ -186,6 +193,7 @@ mod tests {
             vec![
                 PathBuf::from("/home/someone/.cargo/bin/banshee"),
                 PathBuf::from("/home/someone/.cargo/bin/banshee-tray"),
+                PathBuf::from("/home/someone/.cargo/bin/banshee-update"),
             ]
         );
 
@@ -193,7 +201,24 @@ mod tests {
             "install_prefix":"/home/someone/.local/bin","version":"0.14.0"}"#;
         assert_eq!(
             receipt_binaries(flat),
-            vec![PathBuf::from("/home/someone/.local/bin/banshee")]
+            vec![
+                PathBuf::from("/home/someone/.local/bin/banshee"),
+                PathBuf::from("/home/someone/.local/bin/banshee-update"),
+            ]
+        );
+    }
+
+    // The installer places the updater and does not record it, so a receipt
+    // read literally leaves behind the one binary that can bring Banshee back.
+    #[test]
+    fn the_updater_goes_with_the_binaries_that_never_recorded_it() {
+        let receipt = r#"{"binaries":["banshee","banshee-tray"],
+            "install_layout":"cargo-home",
+            "install_prefix":"/home/someone/.cargo","version":"0.14.0"}"#;
+        assert!(
+            receipt_binaries(receipt)
+                .contains(&PathBuf::from("/home/someone/.cargo/bin/banshee-update")),
+            "the updater the installer placed is not named"
         );
     }
 

@@ -69,9 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A quarantined Banshee says so instead of dying silently.** macOS kills the
   `banshee` command with no message at all when the app still carries Homebrew's
   quarantine flag, which made a blocked install look like a broken daemon. The
-  command now names what happened, and in a terminal offers to clear the flag.
-  It asks first, it only ever asks a person, and a hook or an agent gets the
-  line to run rather than a prompt nobody can answer.
+  cask now writes `banshee` and `banshee-mcp-shim` as small wrappers outside the
+  app, because macOS kills anything run from inside a quarantined bundle, a
+  shell script included. They name what happened, and in a terminal offer to
+  clear the flag. They ask first, they only ever ask a person, and a hook or an
+  agent gets the line to run rather than a prompt nobody can answer. The flag
+  returns with every `brew upgrade`, which the caveat and the docs now say.
 
 - **The earcons come out of the same speaker as the voice.** The cue player held
   an audio device of its own, opened once and never again, so a device that went

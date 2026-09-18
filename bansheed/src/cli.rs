@@ -848,6 +848,9 @@ pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
         software.push(receipt.clone());
     }
     software.extend(bundle);
+    // A receipt names what its installer meant to place, and the updater beside
+    // them that it never recorded. Only what is on disk is offered for removal.
+    software.retain(|path| path.exists());
     let plan = crate::uninstall::plan(&owner, software, data.then(utils::banshee_dir).flatten());
 
     println!("Banshee stops now and leaves the login entries.");
@@ -881,6 +884,11 @@ pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
         match removed {
             Ok(()) => println!("Deleted {}", path.display()),
             Err(error) => println!("Could not delete {}: {error}", path.display()),
+        }
+        // The receipt's own directory is Banshee's, and an uninstall that leaves
+        // an empty one behind has not finished. It stays if anything else is in it.
+        if let Some(parent) = path.parent().filter(|dir| dir.ends_with("banshee")) {
+            let _ = std::fs::remove_dir(parent);
         }
     }
     if let Some(command) = plan.leave_to {
