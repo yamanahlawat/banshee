@@ -52,10 +52,14 @@ pub struct CaptureSource {
 }
 
 impl CaptureSource {
-    /// The one place the ring is emptied. Everything that reads capture goes
-    /// through here, so a second way to pop can never drift from this one.
     fn pop_into(&mut self, batch: &mut Vec<f32>) {
         batch.extend(self.consumer.pop_iter());
+    }
+
+    /// Throws the ring away without building the vector `pop_into` would: a
+    /// cancelled press discards seconds of audio at 48 kHz.
+    fn drop_all(&mut self) {
+        self.consumer.pop_iter().for_each(drop);
     }
 }
 
@@ -104,7 +108,7 @@ impl Capture {
     }
 
     pub fn discard(&self) {
-        self.drain();
+        lock(&self.source).drop_all();
     }
 }
 
