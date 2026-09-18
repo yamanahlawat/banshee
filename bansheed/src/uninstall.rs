@@ -80,21 +80,37 @@ pub fn receipt_binaries(receipt: &str) -> Vec<PathBuf> {
     let Some(prefix) = parsed["install_prefix"].as_str() else {
         return Vec::new();
     };
+    let dir = binaries_dir(
+        prefix,
+        parsed["install_layout"].as_str().unwrap_or_default(),
+    );
     parsed["binaries"]
         .as_array()
         .map(|binaries| {
             binaries
                 .iter()
                 .filter_map(|binary| binary.as_str())
-                .map(|binary| Path::new(prefix).join(binary))
+                .map(|binary| dir.join(binary))
                 .collect()
         })
         .unwrap_or_default()
 }
 
-/// The `.app` this binary runs from, if it runs from one at all.
+/// Where under the prefix the installer put the binaries. A cargo home and the
+/// hierarchical layout both keep them in `bin`; the rest are the prefix itself.
+fn binaries_dir(prefix: &str, layout: &str) -> PathBuf {
+    match layout {
+        "cargo-home" | "hierarchical" => Path::new(prefix).join("bin"),
+        _ => PathBuf::from(prefix),
+    }
+}
+
+/// The `.app` this binary runs from, if it runs from one at all. What a person
+/// runs is the link on their PATH, so the link is followed first: the bundle is
+/// where the binary lives, not where the name that reached it lives.
 pub fn bundle_of(exe: &Path) -> Option<PathBuf> {
-    exe.ancestors()
+    let real = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    real.ancestors()
         .find(|path| path.extension().is_some_and(|kind| kind == "app"))
         .map(Path::to_path_buf)
 }
@@ -158,16 +174,26 @@ mod tests {
         assert_eq!(with.remove, vec![PathBuf::from("/Users/someone/.banshee")]);
     }
 
+    // The layout says where under the prefix they went. A cargo home keeps them
+    // in `bin`, and reading the prefix alone names files that are not there.
     #[test]
-    fn a_receipt_names_its_binaries_under_the_prefix_it_recorded() {
-        let receipt = r#"{"binaries":["banshee","banshee-update"],
+    fn a_receipt_names_its_binaries_where_its_layout_put_them() {
+        let cargo_home = r#"{"binaries":["banshee","banshee-tray"],
+            "install_layout":"cargo-home",
             "install_prefix":"/home/someone/.cargo","version":"0.14.0"}"#;
         assert_eq!(
-            receipt_binaries(receipt),
+            receipt_binaries(cargo_home),
             vec![
-                PathBuf::from("/home/someone/.cargo/banshee"),
-                PathBuf::from("/home/someone/.cargo/banshee-update"),
+                PathBuf::from("/home/someone/.cargo/bin/banshee"),
+                PathBuf::from("/home/someone/.cargo/bin/banshee-tray"),
             ]
+        );
+
+        let flat = r#"{"binaries":["banshee"],"install_layout":"flat",
+            "install_prefix":"/home/someone/.local/bin","version":"0.14.0"}"#;
+        assert_eq!(
+            receipt_binaries(flat),
+            vec![PathBuf::from("/home/someone/.local/bin/banshee")]
         );
     }
 
@@ -175,6 +201,30 @@ mod tests {
     fn a_receipt_that_says_nothing_useful_names_no_files_to_delete() {
         assert!(receipt_binaries("not json").is_empty());
         assert!(receipt_binaries(r#"{"version":"0.14.0"}"#).is_empty());
+    }
+
+    // What a person runs is the link on their PATH, not the binary inside the
+    // bundle. A link that is not followed finds no app, and the command then
+    // offers to remove nothing at all.
+    #[test]
+    fn a_link_on_the_path_still_finds_the_app_it_points_into() {
+        let root = std::env::temp_dir().join(format!("banshee-link-{}", std::process::id()));
+        let inside = root.join("Probe.app/Contents/MacOS");
+        std::fs::create_dir_all(&inside).expect("a bundle to point at");
+        let real = inside.join("banshee");
+        std::fs::write(&real, b"").expect("the binary");
+        let link = root.join("banshee");
+        std::os::unix::fs::symlink(&real, &link).expect("the link");
+
+        // `/tmp` is itself a link on macOS, so the answer is compared against
+        // the resolved root rather than the one the test wrote to.
+        let resolved = std::fs::canonicalize(&root).expect("the root resolves");
+        assert_eq!(
+            bundle_of(&link),
+            Some(resolved.join("Probe.app")),
+            "the link was not followed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
