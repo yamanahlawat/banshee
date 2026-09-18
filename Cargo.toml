@@ -17,7 +17,7 @@ categories = ["command-line-utilities", "multimedia::audio"]
 [workspace.dependencies]
 arboard = "3.6.1"
 chrono = "0.4"
-dirs = "6.0.0"
+dirs = "7.0.0"
 log = "0.4.34"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

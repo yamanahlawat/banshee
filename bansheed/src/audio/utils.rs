@@ -1,6 +1,6 @@
 use audioadapter_buffers::direct::InterleavedSlice;
 use banshee_common::error::BansheeError;
-use rubato::{Fft, FixedSync, Resampler};
+use rubato::{Fft, FixedSync, Resampler, WindowFunction};
 
 /// One 16-bit sample as the mixer takes it. The scale is `32_768` while
 /// `pcm16_wav` encodes by `i16::MAX`, so that `+1.0` cannot overflow; the
@@ -30,12 +30,13 @@ impl StreamingResampler {
             None
         } else {
             Some(
-                Fft::<f32>::new(
+                Fft::<f32>::new_custom(
                     original_sample_rate as usize,
                     target_sample_rate as usize,
                     WINDOW,
                     1,
                     1,
+                    WindowFunction::BlackmanHarris2,
                     FixedSync::Input,
                 )
                 .map_err(|e| BansheeError::Other(format!("Failed to create resampler: {e}")))?,
@@ -109,12 +110,13 @@ pub fn resample_audio(
         let mut output_adapter = InterleavedSlice::new_mut(&mut output, 1, out_capacity)
             .map_err(|e| BansheeError::Other(format!("Failed to create output adapter: {e}")))?;
 
-        let mut resampler = Fft::<f32>::new(
+        let mut resampler = Fft::<f32>::new_custom(
             original_sample_rate as usize,
             target_sample_rate as usize,
             WINDOW,
             1, // Sub chunks
             1, // Channels (mono)
+            WindowFunction::BlackmanHarris2,
             FixedSync::Both,
         )
         .map_err(|e| BansheeError::Other(format!("Failed to create resampler: {e}")))?;
