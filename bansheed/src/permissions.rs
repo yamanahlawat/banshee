@@ -258,6 +258,7 @@ pub fn grant_note() {
 /// Whether the daemon goes now. It has to go for the grant to reach it, and a
 /// download in flight dies with the process and starts that file over, while
 /// waiting for one costs no more than an inert hotkey for a few minutes.
+#[cfg(target_os = "macos")]
 pub fn leaves_for_the_grant(granted: bool, downloading: bool) -> bool {
     granted && !downloading
 }
