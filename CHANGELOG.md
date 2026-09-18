@@ -13,10 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes both login entries out, and names the tool that owns the rest:
   Homebrew's copy stays Homebrew's, because deleting files it records leaves the
   records pointing at nothing. A copy from the shell installer or the tarball is
-  removed here. `~/.banshee` holds the models, the history and the keys, and it
-  stays unless `--data` asks for it. Nothing is removed without a yes, and a
-  script with no terminal is told to pass `--yes` rather than asked a question
-  nobody will see.
+  removed here. A source build records nothing, so its files stay, and the
+  command names the binary it runs from. `~/.banshee` holds the models, the
+  history and the keys, and it stays unless `--data` asks for it. Nothing is
+  removed without a yes, and a script with no terminal is told to pass `--yes`
+  rather than asked a question nobody will see.
 
 - **`banshee status` says why a headset sounds dull.** A Bluetooth headset gives
   macOS its microphone or its speaker in full quality, never both, so while
@@ -72,6 +73,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored since 0.11.1. Delete the table and the file loads again.
 
 ### Fixed
+
+- **A reply never plays into a sound card that PipeWire does not hold.** When
+  the default output would not open, Banshee opened whatever other device
+  would. On Linux, with PipeWire restarting or stopped, that was a raw sound
+  card. The card took the audio, so every later reply played into it, and the
+  headset stayed silent until the daemon restarted. On Linux, Banshee now opens
+  the default output only. A reply that meets no output ends, and it says why. The
+  next reply opens the default again, and while there is still no output,
+  `banshee speak` fails with the reason and does not answer `ok`.
+
+- **The window opens at its own height on Hyprland.** Hyprland sized the new
+  window as a tile before it read the window's size limits, so the window
+  floated at the full height of the screen. The window now asks for its
+  configured size when it opens.
+
+- **A microphone that stays gone is logged once.** Banshee tries it again
+  every 5 seconds and wrote an error line each time, 720 lines an hour for one
+  fault. It now writes the fault once, and again only when the reason changes.
 
 - **A quarantined Banshee says so instead of dying silently.** macOS kills the
   `banshee` command with no message at all when the app still carries Homebrew's

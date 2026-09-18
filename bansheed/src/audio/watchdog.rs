@@ -105,12 +105,46 @@ impl Binding {
     /// Recording is unavailable only when the stream this tick holds is not
     /// delivering, so a live stream keeps every fact it has. The caller logs
     /// the case it reports.
-    fn attempt_failed(&mut self, state: &DaemonState, stalled: bool, reason: &str) -> bool {
+    fn attempt_failed(
+        &mut self,
+        state: &DaemonState,
+        stalled: bool,
+        reason: &str,
+    ) -> AttemptFailure {
         if !stalled {
-            return false;
+            return AttemptFailure::KeptTheLiveStream;
         }
+        let reported = matches!(
+            state.pipeline().fault(),
+            Some(RecordingError::Microphone(before)) if before == reason
+        );
         self.fault(state, reason.to_string());
-        true
+        if reported {
+            AttemptFailure::SameFault
+        } else {
+            AttemptFailure::NewFault
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AttemptFailure {
+    KeptTheLiveStream,
+    /// Recording is unavailable, for a reason the log has not seen.
+    NewFault,
+    /// Recording is still unavailable, for the reason already reported.
+    SameFault,
+}
+
+impl AttemptFailure {
+    fn log(&self, reason: &str) {
+        match self {
+            AttemptFailure::NewFault => log::error!("Recording is unavailable: {reason}"),
+            AttemptFailure::KeptTheLiveStream => {
+                log::warn!("Capture keeps the device it has: {reason}")
+            }
+            AttemptFailure::SameFault => {}
+        }
     }
 }
 
@@ -192,11 +226,9 @@ pub fn spawn(
             let selection = match select(&wanted_now) {
                 Ok(selection) => selection,
                 Err(reason) => {
-                    if binding.attempt_failed(&state, stalled, &reason) {
-                        log::error!("Recording is unavailable: {reason}");
-                    } else {
-                        log::warn!("Capture keeps the device it has: {reason}");
-                    }
+                    binding
+                        .attempt_failed(&state, stalled, &reason)
+                        .log(&reason);
                     continue;
                 }
             };
@@ -236,14 +268,9 @@ pub fn spawn(
                     // A fault clears the device name too: open_capture names
                     // the device only after play() succeeds, so the old name
                     // would otherwise stand
-                    if binding.attempt_failed(&state, stalled, &reason) {
-                        log::error!("Could not open {}: {reason}", selection.open);
-                    } else {
-                        log::warn!(
-                            "Capture keeps the device it has, {} did not open: {reason}",
-                            selection.open
-                        );
-                    }
+                    binding
+                        .attempt_failed(&state, stalled, &reason)
+                        .log(&reason);
                 }
             }
         }

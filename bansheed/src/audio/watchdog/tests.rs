@@ -360,8 +360,9 @@ fn a_tick_that_cannot_move_keeps_the_microphone_it_has() {
         false
     ));
 
-    assert!(
-        !binding.attempt_failed(&state, false, "no input device is available"),
+    assert_eq!(
+        binding.attempt_failed(&state, false, "no input device is available"),
+        AttemptFailure::KeptTheLiveStream,
         "a live stream is not a fault"
     );
 
@@ -386,8 +387,9 @@ fn a_tick_that_cannot_move_keeps_the_microphone_it_has() {
     );
 
     // The same failure with a dead stream loses capture
-    assert!(
+    assert_eq!(
         binding.attempt_failed(&state, true, "no input device is available"),
+        AttemptFailure::NewFault,
         "a stalled stream that opens nothing is unavailable"
     );
     assert!(matches!(
@@ -395,6 +397,52 @@ fn a_tick_that_cannot_move_keeps_the_microphone_it_has() {
         Some(RecordingError::Microphone(_))
     ));
     assert_eq!(state.audio_device(), None);
+}
+
+// A microphone that stays gone fails on every RETRY. The log needs the fault
+// once, and again only when its reason changes.
+#[test]
+fn a_fault_is_new_only_when_its_reason_is() {
+    let state = test_state();
+    let mut binding = Binding {
+        opened_for: Some("default".to_string()),
+        open_device: Some("PipeWire Sound Server".to_string()),
+    };
+
+    let attempts = [
+        ("Host is down", AttemptFailure::NewFault),
+        ("Host is down", AttemptFailure::SameFault),
+        ("No such file or directory", AttemptFailure::NewFault),
+    ];
+    for (reason, expected) in attempts {
+        assert_eq!(
+            binding.attempt_failed(&state, true, reason),
+            expected,
+            "{reason}"
+        );
+    }
+}
+
+// A person who picks another microphone while capture is down waits for its
+// answer. The same OS error on another device is news.
+#[test]
+fn another_device_that_fails_the_same_way_is_a_new_fault() {
+    let state = test_state();
+    let mut binding = Binding {
+        opened_for: None,
+        open_device: None,
+    };
+    let yeti = crate::audio::open_failure("Blue Yeti Stereo Microphone", "Host is down");
+    let buds = crate::audio::open_failure("OnePlus Buds 3", "Host is down");
+
+    assert_eq!(
+        binding.attempt_failed(&state, true, &yeti),
+        AttemptFailure::NewFault
+    );
+    assert_eq!(
+        binding.attempt_failed(&state, true, &buds),
+        AttemptFailure::NewFault
+    );
 }
 
 #[test]

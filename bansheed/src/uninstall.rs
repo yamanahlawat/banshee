@@ -40,13 +40,28 @@ pub fn owner(cask: bool, formula: bool, receipt: bool, bundle: bool) -> Owner {
 pub struct Plan {
     /// Deleted by this command.
     pub remove: Vec<PathBuf>,
-    /// Left to its owner, with the command that does it.
-    pub leave_to: Option<&'static str>,
+    /// What this command leaves, and who removes it.
+    pub rest: Option<Rest>,
+}
+
+/// The part of Banshee this command does not remove.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Rest {
+    /// Its owner removes it with this command.
+    Owner(&'static str),
+    /// Nothing records how this binary was installed, so the person removes it.
+    ByHand(PathBuf),
 }
 
 /// `software` is what the owner placed: the binaries a receipt names, or the
-/// app bundle. `data` is `~/.banshee` when the person asked for it.
-pub fn plan(owner: &Owner, software: Vec<PathBuf>, data: Option<PathBuf>) -> Plan {
+/// app bundle. `data` is `~/.banshee` when the person asked for it. `running`
+/// is the binary this command runs from, when the OS can name it.
+pub fn plan(
+    owner: &Owner,
+    software: Vec<PathBuf>,
+    data: Option<PathBuf>,
+    running: Option<&Path>,
+) -> Plan {
     let mut remove = match owner {
         // Its files are Homebrew's to remove, but the data directory is nobody's
         // but the person's, and `--zap` is easy to miss.
@@ -57,9 +72,10 @@ pub fn plan(owner: &Owner, software: Vec<PathBuf>, data: Option<PathBuf>) -> Pla
     remove.extend(data);
     Plan {
         remove,
-        leave_to: match owner {
-            Owner::Homebrew(command) => Some(command),
-            _ => None,
+        rest: match owner {
+            Owner::Homebrew(command) => Some(Rest::Owner(command)),
+            Owner::Unknown => running.map(|binary| Rest::ByHand(binary.to_path_buf())),
+            Owner::Installer | Owner::Bundle => None,
         },
     }
 }
@@ -126,6 +142,8 @@ pub fn bundle_of(exe: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    const CASK_BINARY: &str = "/Applications/Banshee.app/Contents/MacOS/banshee";
+
     // A cask install has an app bundle as well, so the order of these questions
     // is what keeps the answer from being "delete Homebrew's files".
     #[test]
@@ -155,28 +173,59 @@ mod tests {
             &Owner::Homebrew("brew uninstall --cask banshee"),
             vec![PathBuf::from("/Applications/Banshee.app")],
             Some(PathBuf::from("/Users/someone/.banshee")),
+            Some(Path::new(CASK_BINARY)),
         );
         assert_eq!(plan.remove, vec![PathBuf::from("/Users/someone/.banshee")]);
-        assert_eq!(plan.leave_to, Some("brew uninstall --cask banshee"));
+        assert_eq!(
+            plan.rest,
+            Some(Rest::Owner("brew uninstall --cask banshee"))
+        );
     }
 
     #[test]
     fn what_the_installer_placed_is_removed_here() {
         let binaries = vec![PathBuf::from("/home/someone/.cargo/bin/banshee")];
-        let plan = plan(&Owner::Installer, binaries.clone(), None);
+        let plan = plan(
+            &Owner::Installer,
+            binaries.clone(),
+            None,
+            Some(&binaries[0]),
+        );
         assert_eq!(plan.remove, binaries);
-        assert_eq!(plan.leave_to, None, "nobody else has to be asked");
+        assert_eq!(plan.rest, None, "nobody else has to be asked");
+    }
+
+    // A source build records nothing, so its files stay. The person has to be
+    // told which binary that is, or the command looks like it removed Banshee.
+    #[test]
+    fn a_copy_nothing_records_is_named_and_left() {
+        let running = Path::new("/home/someone/banshee/target/release/banshee");
+        let named = plan(&Owner::Unknown, Vec::new(), None, Some(running));
+        assert!(named.remove.is_empty(), "nothing records what to remove");
+        assert_eq!(named.rest, Some(Rest::ByHand(running.to_path_buf())));
+
+        let unnamed = plan(&Owner::Unknown, Vec::new(), None, None);
+        assert_eq!(
+            unnamed.rest, None,
+            "a binary the OS cannot name is not named"
+        );
     }
 
     #[test]
     fn data_goes_only_when_it_is_given() {
-        let without = plan(&Owner::Bundle, Vec::new(), None);
+        let without = plan(
+            &Owner::Bundle,
+            Vec::new(),
+            None,
+            Some(Path::new(CASK_BINARY)),
+        );
         assert!(without.remove.is_empty());
 
         let with = plan(
             &Owner::Bundle,
             Vec::new(),
             Some(PathBuf::from("/Users/someone/.banshee")),
+            Some(Path::new(CASK_BINARY)),
         );
         assert_eq!(with.remove, vec![PathBuf::from("/Users/someone/.banshee")]);
     }

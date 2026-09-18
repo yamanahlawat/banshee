@@ -145,6 +145,8 @@ impl Output {
         let mut device = lock(&self.device);
         let now = self.generation.load(Ordering::Relaxed);
         if device.is_none() || replace_when == Some(now) {
+            // Taken before the open, so a failed open leaves no dead device
+            device.take();
             *device = Some((self.opener)()?);
             self.generation.store(now + 1, Ordering::Relaxed);
         }
@@ -377,7 +379,7 @@ impl Playing {
             Ok(()) => true,
             Err(error) => {
                 self.give_up(format!(
-                    "the speaker went away and no other could be opened: {error}"
+                    "the speaker went away and the default output would not open: {error}"
                 ));
                 false
             }
@@ -489,6 +491,19 @@ impl ActiveUtterance for PlayerUtterance {
     }
 }
 
+// Not rodio's `open_default_sink` on Linux: when the default will not open, it
+// opens any other device that will. ALSA lists the raw cards behind PipeWire,
+// which take audio, so a reply on one never learns it is in the wrong place.
+#[cfg(target_os = "linux")]
+fn open_default_sink() -> Result<rodio::MixerDeviceSink, rodio::DeviceSinkError> {
+    DeviceSinkBuilder::from_default_device().and_then(|builder| builder.open_sink_or_fallback())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_default_sink() -> Result<rodio::MixerDeviceSink, rodio::DeviceSinkError> {
+    DeviceSinkBuilder::open_default_sink()
+}
+
 /// Opens the machine's default output on a thread that keeps it alive. The
 /// thread leaves when the `Device` it answers with is dropped, which closes the
 /// stream and releases the device.
@@ -496,7 +511,7 @@ fn default_device() -> Result<Device, BansheeError> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (closer, closed) = std::sync::mpsc::channel::<()>();
     thread::spawn(move || {
-        let sink = match DeviceSinkBuilder::open_default_sink() {
+        let sink = match open_default_sink() {
             // rodio prints its own line to stderr when a sink drops, which lands
             // in the daemon log without a clock or a level. A swap drops one on
             // purpose, and the log says so itself.
@@ -515,8 +530,7 @@ fn default_device() -> Result<Device, BansheeError> {
             return;
         }
         // After the mixer is handed over, so the first sentence never waits for
-        // a line in the log. rodio opens another device when the default will
-        // not open, and names neither, so the shape is all this may claim.
+        // a line in the log
         let config = sink.config();
         log::info!(
             "Output opened at {} Hz, {} ch",
@@ -702,6 +716,30 @@ mod tests {
             "a player behind by a generation opens nothing"
         );
         assert_eq!(taken, second);
+    }
+
+    // A reopen that fails leaves nothing to play on. The next sound must try the
+    // machine again, or it plays into the dead device and reports success.
+    #[test]
+    fn a_failed_reopen_leaves_the_next_sound_to_open_again() {
+        let attempts = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counted = Arc::clone(&attempts);
+        let output = Output::from_opener(Box::new(move || {
+            if counted.fetch_add(1, Ordering::Relaxed) == 1 {
+                Err(BansheeError::Other("no device".to_string()))
+            } else {
+                Ok(Output::test_device())
+            }
+        }));
+        let (_mixer, first) = output.mixer().expect("the first open");
+        assert!(output.device_after(first).is_err(), "the reopen fails");
+
+        output.mixer().expect("the machine has a device again");
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            3,
+            "the next sound took the dead device instead of opening one"
+        );
     }
 
     // The device is gone and the reply has to carry on somewhere. The sentences

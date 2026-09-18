@@ -829,10 +829,12 @@ fn brew_holds(what: &str) -> bool {
 
 /// Undoes what Banshee installed, and names the tool that owns the rest.
 pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
+    use crate::uninstall::Rest;
+
     let receipt = crate::uninstall::receipt_path().filter(|path| path.exists());
-    let bundle = std::env::current_exe()
-        .ok()
-        .and_then(|exe| crate::uninstall::bundle_of(&exe));
+    // A binary the OS cannot name must not stop the uninstall
+    let running = std::env::current_exe().ok();
+    let bundle = running.as_deref().and_then(crate::uninstall::bundle_of);
     let owner = crate::uninstall::owner(
         brew_holds("Caskroom/banshee"),
         brew_holds("Cellar/banshee"),
@@ -851,14 +853,26 @@ pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
     // A receipt names what its installer meant to place, and the updater beside
     // them that it never recorded. Only what is on disk is offered for removal.
     software.retain(|path| path.exists());
-    let plan = crate::uninstall::plan(&owner, software, data.then(utils::banshee_dir).flatten());
+    let plan = crate::uninstall::plan(
+        &owner,
+        software,
+        data.then(utils::banshee_dir).flatten(),
+        running.as_deref(),
+    );
 
-    println!("Banshee stops now and leaves the login entries.");
+    println!("Banshee stops now and no longer starts at login.");
     for path in &plan.remove {
         println!("  delete {}", path.display());
     }
-    if let Some(command) = plan.leave_to {
-        println!("  {} removes the rest: it keeps its own records", command);
+    match &plan.rest {
+        Some(Rest::Owner(command)) => {
+            println!("  {command} removes the rest: it keeps its own records")
+        }
+        Some(Rest::ByHand(binary)) => println!(
+            "  {} stays, with every file its install placed: nothing records them",
+            binary.display()
+        ),
+        None => {}
     }
     if !data {
         println!("  ~/.banshee stays: the models, the history and the keys. --data takes it.");
@@ -891,7 +905,7 @@ pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
             let _ = std::fs::remove_dir(parent);
         }
     }
-    if let Some(command) = plan.leave_to {
+    if let Some(Rest::Owner(command)) = plan.rest {
         println!("Now run: {command}");
     }
     Ok(())

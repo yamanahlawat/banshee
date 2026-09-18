@@ -230,6 +230,11 @@ where
     Ok(stream)
 }
 
+/// Names the device, because the OS gives two devices the same error.
+pub fn open_failure(device: &str, error: impl std::fmt::Display) -> String {
+    format!("{device}: {error}")
+}
+
 /// Enumeration is not proof: a device can list itself and still fail
 /// `hw_params` when opened.
 ///
@@ -262,7 +267,7 @@ pub fn open_capture(
     let device = &selection.device;
     let config = device
         .default_input_config()
-        .map_err(|e| BansheeError::Other(e.to_string()))?;
+        .map_err(|e| BansheeError::Other(open_failure(&selection.open, e)))?;
 
     let sample_rate = config.sample_rate();
     let channels = config.channels();
@@ -285,7 +290,8 @@ pub fn open_capture(
                 producer.push_slice(data);
             }
         }
-    })?;
+    })
+    .map_err(|e| BansheeError::Other(open_failure(&selection.open, e)))?;
 
     // Set after play() succeeds, so status never names a mic that failed to open
     daemon_state.set_audio_device(Some(selection.open.clone()));
