@@ -346,7 +346,13 @@ fn default_device() -> Result<Device, BansheeError> {
     let (closer, closed) = std::sync::mpsc::channel::<()>();
     thread::spawn(move || {
         let sink = match DeviceSinkBuilder::open_default_sink() {
-            Ok(sink) => sink,
+            // rodio prints its own line to stderr when a sink drops, which lands
+            // in the daemon log without a clock or a level. A swap drops one on
+            // purpose, and the log says so itself.
+            Ok(mut sink) => {
+                sink.log_on_drop(false);
+                sink
+            }
             Err(e) => {
                 let _ = ready_tx.send(Err(BansheeError::Other(format!(
                     "No audio output device: {e}"
