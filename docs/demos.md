@@ -7,7 +7,7 @@ White captions carry the person's words. Orange captions carry Banshee's voice.
 
 ### A focus mode, built and then removed
 
-<https://github.com/user-attachments/assets/84096919-37c0-4c03-b574-c8b31fd0ee1d>
+<https://github.com/user-attachments/assets/830cb5c8-2c52-4a2d-b7e9-e3d4bb252955>
 
 The person taps `Super` + `F5` and asks for a focus mode. Claude Code dims the inactive
 windows, turns the animations off, and binds `Super` + `Shift` + `F` to the top bar.
@@ -17,13 +17,14 @@ the desktop back, and the key returns to the file manager.
 
 ### The desktop, set up for a recording
 
-<https://github.com/user-attachments/assets/181704bc-48e4-4488-aefa-2b0b000e739f>
+<https://github.com/user-attachments/assets/7ec3eaa1-33d6-4cdd-8e5b-10ae11871918>
 
 The person asks for a screencast setup: no screen lock, no top bar, no window gaps, and
 rounded corners. Claude Code makes the change, and reads the result back.
 
 The person then wants the gaps back, and says so. `show me` reopens the thread in a
-terminal. See [the tell command](cli.md#telling-your-agent-to-change-the-desktop).
+terminal. The thread plays in real time, so each change the voice asked for is on screen.
+See [the tell command](cli.md#telling-your-agent-to-change-the-desktop).
 
 ## macOS
 
