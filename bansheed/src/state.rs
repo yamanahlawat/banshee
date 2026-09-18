@@ -72,12 +72,6 @@ pub enum ConsumerCommand {
     Retune(Vec<String>),
     Speak(crate::speech_to_text::Speech),
     Reload(crate::config::STTPreset),
-    // A new stream opened, so the old ring is dead. The rate comes with it:
-    // devices do not share one.
-    Rebind {
-        consumer: ringbuf::HeapCons<f32>,
-        sample_rate: u32,
-    },
     Shutdown,
 }
 

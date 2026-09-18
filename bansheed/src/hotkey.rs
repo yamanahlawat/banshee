@@ -1,6 +1,7 @@
 use ringbuf::HeapCons;
 use ringbuf::traits::Consumer;
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ use crate::dictation::type_text;
 use crate::speech_to_text::vad::{VAD_CHUNK, VADEngine};
 use crate::speech_to_text::{SAMPLE_RATE, Transcriber};
 use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode, TranscribeTarget};
+use crate::text_to_speech::lock;
 
 const CHUNK_MS: u64 = (VAD_CHUNK * 1000) as u64 / SAMPLE_RATE as u64;
 /// Consecutive speech that confirms an onset, and the speech kept before it so
@@ -50,18 +52,65 @@ pub struct CaptureSource {
 }
 
 impl CaptureSource {
-    pub fn drain(&mut self) -> Vec<f32> {
-        self.consumer.pop_iter().collect()
+    /// The one place the ring is emptied. Everything that reads capture goes
+    /// through here, so a second way to pop can never drift from this one.
+    fn pop_into(&mut self, batch: &mut Vec<f32>) {
+        batch.extend(self.consumer.pop_iter());
+    }
+}
+
+/// The capture the consumer thread reads, and the way the watchdog replaces it.
+/// A rebind cannot travel as a command: an armed question holds that thread for
+/// as long as the person takes to answer, and the ring it is reading dies with
+/// the stream the watchdog just dropped.
+pub struct Capture {
+    source: Mutex<CaptureSource>,
+    generation: AtomicU64,
+}
+
+impl Capture {
+    pub fn new(source: CaptureSource) -> Self {
+        Self {
+            source: Mutex::new(source),
+            generation: AtomicU64::new(0),
+        }
     }
 
-    pub fn discard(&mut self) {
-        self.consumer.pop_iter().for_each(drop);
+    /// Plays the new device to everything that reads capture, including a
+    /// question that is already listening.
+    pub fn swap(&self, source: CaptureSource) {
+        *lock(&self.source) = source;
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Rises with every swap. A reader holding a resampler or a partial window
+    /// built for the old device learns from this that both are stale.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        lock(&self.source).sample_rate
+    }
+
+    pub fn pop_into(&self, batch: &mut Vec<f32>) {
+        lock(&self.source).pop_into(batch);
+    }
+
+    pub fn drain(&self) -> Vec<f32> {
+        let mut batch = Vec::new();
+        self.pop_into(&mut batch);
+        batch
+    }
+
+    pub fn discard(&self) {
+        self.drain();
     }
 }
 
 // Everything the audio consumer thread owns
 pub struct Pipeline {
-    pub source: CaptureSource,
+    pub source: Arc<Capture>,
     pub speech_to_text: Box<dyn Transcriber>,
     pub vad: VADEngine,
     pub state: Arc<DaemonState>,
@@ -101,6 +150,26 @@ fn advance(phase: Phase, is_speech: bool, processed: usize) -> Phase {
     }
 }
 
+/// The resampler for a device at this rate. One place, because a question that
+/// outlives a device change builds a second one.
+fn resampler_for(rate: u32) -> Result<StreamingResampler, String> {
+    StreamingResampler::new(rate, SAMPLE_RATE).map_err(|e| {
+        log::error!("Failed to create resampler: {e}");
+        reason(&e)
+    })
+}
+
+/// Drops what the VAD and the phase learned from audio that does not run on
+/// into what comes next: the daemon's own speech, or another device's.
+fn afresh(vad: &mut VADEngine, phase: &mut Phase) {
+    vad.reset_state();
+    match phase {
+        Phase::Waiting { speech_run } => *speech_run = 0,
+        Phase::InSpeech { silence_run, .. } => *silence_run = 0,
+        Phase::Manual { .. } => {}
+    }
+}
+
 pub fn hotkey_listener(
     pipeline: Pipeline,
     commands: mpsc::Receiver<ConsumerCommand>,
@@ -119,17 +188,6 @@ pub fn hotkey_listener(
                     }
                 }
                 ConsumerCommand::Ask(ask) => pipeline.ask(ask),
-                // The old ring dies with the stream that filled it. Anything
-                // still in it came from a device that is gone.
-                ConsumerCommand::Rebind {
-                    consumer,
-                    sample_rate,
-                } => {
-                    pipeline.source = CaptureSource {
-                        consumer,
-                        sample_rate,
-                    };
-                }
                 ConsumerCommand::Retune(words) => pipeline.speech_to_text.set_vocabulary(&words),
                 ConsumerCommand::Speak(speech) => pipeline.speech_to_text.set_speech(speech),
                 // The load takes seconds and holds this thread. Nothing is lost:
@@ -232,10 +290,10 @@ impl Pipeline {
 
         log::debug!(
             "Downsampling audio from {} Hz to {SAMPLE_RATE} Hz...",
-            self.source.sample_rate
+            self.source.sample_rate()
         );
 
-        let final_data = match resample_audio(&audio_data, self.source.sample_rate, SAMPLE_RATE) {
+        let final_data = match resample_audio(&audio_data, self.source.sample_rate(), SAMPLE_RATE) {
             Ok(data) => data,
             Err(e) => {
                 log::error!("resampling failed: {e}");
@@ -436,13 +494,10 @@ impl Pipeline {
     // 16 kHz. `Ok(None)` is an answer that never came: silence, or a session
     // closed from outside. `Err` is a listen that broke.
     fn listen_for_answer(&mut self, timeout: Duration) -> Result<Option<Vec<f32>>, String> {
-        let mut resampler = match StreamingResampler::new(self.source.sample_rate, SAMPLE_RATE) {
-            Ok(resampler) => resampler,
-            Err(e) => {
-                log::error!("Failed to create resampler: {e}");
-                return Err(reason(&e));
-            }
-        };
+        let mut resampler = resampler_for(self.source.sample_rate())?;
+        // The device this answer started on. The watchdog may put another one
+        // under it at any moment, and the rate is not shared between devices.
+        let mut device = self.source.generation();
         self.vad.reset_state();
         let vad_threshold = self.state.vad_threshold();
         let endpoint_chunks = (self.endpoint_silence_ms / CHUNK_MS).max(1) as usize;
@@ -496,18 +551,25 @@ impl Pipeline {
             }
             if suppressed {
                 suppressed = false;
-                self.vad.reset_state();
                 // Drop the pre-gap partial window so no spliced frame reaches the VAD
                 resampler.reset();
-                match &mut phase {
-                    Phase::Waiting { speech_run } => *speech_run = 0,
-                    Phase::InSpeech { silence_run, .. } => *silence_run = 0,
-                    Phase::Manual { .. } => {}
-                }
+                afresh(&mut self.vad, &mut phase);
+            }
+
+            // The microphone moved under this answer. What was said already is
+            // kept: it is resampled and belongs to the answer. What cannot be
+            // kept is a resampler built for the old rate, and a window holding
+            // the old device's audio.
+            let moved = self.source.generation();
+            if moved != device {
+                device = moved;
+                log::info!("the microphone moved while a question was listening");
+                resampler = resampler_for(self.source.sample_rate())?;
+                afresh(&mut self.vad, &mut phase);
             }
 
             batch.clear();
-            batch.extend(self.source.consumer.pop_iter());
+            self.source.pop_into(&mut batch);
             if let Err(e) = resampler.push(&batch, &mut audio) {
                 log::error!("Resampling failed: {e}");
                 return Err(reason(&e));
@@ -932,28 +994,52 @@ mod tests {
         )
     }
 
+    // The reader is a question that is already listening. It holds the capture
+    // from before the swap, and must read the device that is there now.
     #[test]
-    fn a_swapped_source_reads_the_new_ring_and_the_new_rate() {
-        let (mut source, _old_producer) = source_holding(&[1.0, 2.0], 16000);
-        assert_eq!(source.drain(), vec![1.0, 2.0]);
-        assert_eq!(source.sample_rate, 16000);
+    fn a_swap_reaches_a_reader_that_already_holds_the_capture() {
+        let (source, _old_producer) = source_holding(&[1.0, 2.0], 16000);
+        let capture = Arc::new(Capture::new(source));
+        let listening = Arc::clone(&capture);
+        assert_eq!(listening.drain(), vec![1.0, 2.0]);
+        assert_eq!(listening.sample_rate(), 16000);
 
         // A headset at 16 kHz gives way to the built in mic at 48 kHz
         let (replacement, _new_producer) = source_holding(&[7.0], 48000);
-        source = replacement;
+        capture.swap(replacement);
 
-        assert_eq!(source.drain(), vec![7.0]);
+        assert_eq!(listening.drain(), vec![7.0]);
         assert_eq!(
-            source.sample_rate, 48000,
+            listening.sample_rate(),
+            48000,
             "a stale rate resamples by the wrong ratio and distorts silently"
+        );
+    }
+
+    // A reader keeps a partial window and a resampler built for one device.
+    // The generation is how it learns that both belong to a device that is gone.
+    #[test]
+    fn every_swap_moves_the_generation_on() {
+        let (source, _old_producer) = source_holding(&[1.0], 16000);
+        let capture = Capture::new(source);
+        let before = capture.generation();
+
+        let (replacement, _new_producer) = source_holding(&[2.0], 16000);
+        capture.swap(replacement);
+
+        assert_ne!(
+            capture.generation(),
+            before,
+            "a swap at the same rate is still another device"
         );
     }
 
     #[test]
     fn discarding_a_source_empties_it() {
-        let (mut source, _producer) = source_holding(&[1.0, 2.0, 3.0], 16000);
-        source.discard();
-        assert!(source.drain().is_empty());
+        let (source, _producer) = source_holding(&[1.0, 2.0, 3.0], 16000);
+        let capture = Capture::new(source);
+        capture.discard();
+        assert!(capture.drain().is_empty());
     }
 }
 

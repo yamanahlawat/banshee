@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use cpal::Stream;
 
 use crate::audio::{already_serving, default_input_name, follows_os_default, open_capture, select};
-use crate::state::{ConsumerCommand, DaemonState, RecordingError};
+use crate::state::{DaemonState, RecordingError};
 
 // Reading the liveness stamp is one atomic load, so this can be frequent
 const TICK: Duration = Duration::from_millis(500);
@@ -132,12 +132,14 @@ impl Handle {
 pub fn spawn(
     state: Arc<DaemonState>,
     stream: Stream,
+    capture: Arc<crate::hotkey::Capture>,
     open: String,
     missing: Option<String>,
 ) -> Handle {
     let (stop_tx, stop_rx) = mpsc::channel();
     let thread = thread::spawn(move || {
         let mut stream = stream;
+        let shared = capture;
         let mut last_wanted = state.wanted_device();
         let mut binding = Binding::seeded(last_wanted.clone(), open, missing);
         let mut next_scan = Instant::now();
@@ -208,9 +210,11 @@ pub fn spawn(
 
             match open_capture(Arc::clone(&state), &selection) {
                 Ok(capture) => {
-                    // Sent only after play() succeeded, so the pipeline is
-                    // never handed a ring whose stream failed to play
-                    let _ = state.commands().send(ConsumerCommand::Rebind {
+                    // Written only after play() succeeded, so nothing reads a
+                    // ring whose stream failed to play. Written rather than
+                    // sent: a question that is already listening holds the
+                    // consumer thread, and a command would wait for it.
+                    shared.swap(crate::hotkey::CaptureSource {
                         consumer: capture.consumer,
                         sample_rate: capture.sample_rate,
                     });

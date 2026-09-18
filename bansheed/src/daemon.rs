@@ -49,6 +49,7 @@ pub(crate) fn drop_device_name(daemon_state: &DaemonState) {
 struct Recording {
     stream: cpal::Stream,
     thread: std::thread::JoinHandle<()>,
+    capture: Arc<hotkey::Capture>,
     open: String,
     missing: Option<String>,
 }
@@ -85,12 +86,15 @@ fn start_recording(
         drop_device_name(daemon_state);
         RecordingError::Model(e.to_string())
     })?;
+    // One capture, held by the consumer thread and by the watchdog that
+    // replaces it. A question that is already listening reads it too.
+    let shared_capture = Arc::new(hotkey::Capture::new(hotkey::CaptureSource {
+        consumer: capture.consumer,
+        sample_rate: capture.sample_rate,
+    }));
     let thread = hotkey::hotkey_listener(
         hotkey::Pipeline {
-            source: hotkey::CaptureSource {
-                consumer: capture.consumer,
-                sample_rate: capture.sample_rate,
-            },
+            source: Arc::clone(&shared_capture),
             speech_to_text,
             vad,
             state: Arc::clone(daemon_state),
@@ -105,6 +109,7 @@ fn start_recording(
     Ok(Recording {
         stream: capture.stream,
         thread,
+        capture: shared_capture,
         open: selection.open,
         missing: selection.missing,
     })
@@ -176,6 +181,7 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
                     let watchdog = audio::watchdog::spawn(
                         Arc::clone(&state),
                         started.stream,
+                        started.capture,
                         started.open,
                         started.missing,
                     );
