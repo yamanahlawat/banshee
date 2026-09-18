@@ -27,12 +27,10 @@ pub struct Chunk {
 /// and the bound is what keeps a dead device from holding a whole reply.
 const LOOK_AHEAD: usize = 2;
 
-/// How often the worker asks the player for room.
 const ROOM_POLL: Duration = Duration::from_millis(20);
 
-/// How long a live device may go without taking audio. Measured 2026-09-17
-/// across two device changes in the middle of a reply: the longest gap a
-/// working device left was 279 ms, and a dead one never took audio again.
+/// How long a live device may go without taking audio. Measured at 279 ms
+/// across a device change; a dead device never takes audio again.
 const DEAD_OUTPUT: Duration = Duration::from_secs(1);
 
 /// True when the device stopped taking the audio that is waiting for it. Audio
@@ -70,9 +68,10 @@ pub struct Output {
     /// holds no audio hardware at all.
     device: Mutex<Option<Device>>,
     opener: Opener,
-    /// One step for every 20 ms of audio the device took. A device that stops
-    /// taking audio is the only thing that stops this.
-    pulls: Arc<AtomicU64>,
+    /// Rises with every device this output opens. Two sounds playing at once
+    /// hold players on the same device, and this is how the second one learns
+    /// that the first has already replaced it.
+    generation: AtomicU64,
 }
 
 impl Output {
@@ -84,32 +83,43 @@ impl Output {
         Self {
             device: Mutex::new(None),
             opener,
-            pulls: Arc::new(AtomicU64::new(0)),
+            generation: AtomicU64::new(0),
         }
     }
 
     /// The mixer of the device that is open, opening one if none is. Every
     /// sound the daemon makes goes through this, so the voice and the cues
     /// cannot end up on two different devices.
-    fn mixer(&self) -> Result<Mixer, BansheeError> {
+    fn mixer(&self) -> Result<(Mixer, u64), BansheeError> {
         let mut device = lock(&self.device);
         if device.is_none() {
             *device = Some((self.opener)()?);
         }
-        Ok(device
-            .as_ref()
-            .expect("a device was just opened")
-            .mixer
-            .clone())
+        Ok((
+            device
+                .as_ref()
+                .expect("a device was just opened")
+                .mixer
+                .clone(),
+            self.generation.load(Ordering::Relaxed),
+        ))
     }
 
-    /// Opens the machine's default output again and plays through that one.
+    /// The device to play on now, opening the machine's default again when
+    /// `seen` is still the current one. A caller holding an older generation
+    /// takes the device that replaced it rather than opening a third.
     /// The old device's thread leaves with its sink, which releases it.
-    pub fn reopen(&self) -> Result<(), BansheeError> {
-        let device = (self.opener)()?;
-        *lock(&self.device) = Some(device);
-        self.pulls.store(0, Ordering::Relaxed);
-        Ok(())
+    fn device_after(&self, seen: u64) -> Result<(Mixer, u64), BansheeError> {
+        let mut device = lock(&self.device);
+        let now = self.generation.load(Ordering::Relaxed);
+        if now == seen || device.is_none() {
+            *device = Some((self.opener)()?);
+            self.generation.store(now + 1, Ordering::Relaxed);
+        }
+        Ok((
+            device.as_ref().expect("a device is open").mixer.clone(),
+            self.generation.load(Ordering::Relaxed),
+        ))
     }
 
     /// A mixer nobody reads: the output device is gone, so no sample is ever
@@ -160,17 +170,9 @@ impl Output {
                 _closer: closer,
             })),
             opener: Box::new(Self::test_device_ok),
-            pulls: Arc::new(AtomicU64::new(0)),
+            generation: AtomicU64::new(0),
         };
         (output, source)
-    }
-
-    pub fn pulls(&self) -> u64 {
-        self.pulls.load(Ordering::Relaxed)
-    }
-
-    fn stamp(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.pulls)
     }
 
     /// An output that opens once and never again, for the case where a reply
@@ -194,11 +196,13 @@ impl Output {
         chunks: impl Iterator<Item = Chunk> + Send + 'static,
         faults: std::sync::mpsc::Sender<Fault>,
     ) -> Result<PlayerUtterance, BansheeError> {
-        let player = Arc::new(Mutex::new(Arc::new(Player::connect_new(&self.mixer()?))));
+        let (mixer, device) = self.mixer()?;
+        let player = Arc::new(Mutex::new(Arc::new(Player::connect_new(&mixer))));
+        let pulls = Arc::new(AtomicU64::new(0));
         let cancelled = Arc::new(Mutex::new(false));
         let thread_player = Arc::clone(&player);
         let thread_cancelled = Arc::clone(&cancelled);
-        let thread_pulls = Arc::clone(&self.pulls);
+        let thread_pulls = Arc::clone(&pulls);
         let held: Arc<Mutex<VecDeque<Chunk>>> = Arc::default();
         let thread_held = Arc::clone(&held);
         #[cfg(test)]
@@ -251,7 +255,10 @@ impl Output {
             held,
             output: Arc::clone(self),
             faults,
-            seen: (self.pulls(), std::time::Instant::now()),
+            seen: (0, std::time::Instant::now()),
+            pulls,
+            device,
+            moves: 0,
             gave_up: false,
             earned: true,
             #[cfg(test)]
@@ -270,9 +277,16 @@ pub struct PlayerUtterance {
     player: Arc<Mutex<Arc<Player>>>,
     output: Arc<Output>,
     faults: std::sync::mpsc::Sender<Fault>,
+    /// One step for every 20 ms of this reply the device took. Its own, because
+    /// audio another sound's device takes says nothing about this one's.
+    pulls: Arc<AtomicU64>,
+    /// The generation of the device this player is on.
+    device: u64,
     /// The counter, and when it was last seen to move. A counter that stands
     /// still while audio waits is a device that is gone.
     seen: (u64, std::time::Instant),
+    /// How many devices this reply has been moved to.
+    moves: u64,
     /// Set when there is nowhere left to play. A stopped player on a device
     /// that is gone never empties, because emptying is the device's own doing.
     gave_up: bool,
@@ -286,8 +300,7 @@ pub struct PlayerUtterance {
 }
 
 impl PlayerUtterance {
-    /// The sentences a swap would re-append. The swap reads the same deque
-    /// under the same lock; this is how a test sees it.
+    /// The sentences a swap would re-append.
     #[cfg(test)]
     pub fn held(&self) -> Vec<Chunk> {
         let mut queue = lock(&self.held);
@@ -296,6 +309,23 @@ impl PlayerUtterance {
             queue.pop_front();
         }
         queue.iter().cloned().collect()
+    }
+
+    /// Stands for the device taking this reply's audio, which a test has no
+    /// device to do for it.
+    #[cfg(test)]
+    pub fn took_audio(&self) {
+        self.pulls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub fn pulls(&self) -> u64 {
+        self.pulls.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn moves(&self) -> u64 {
+        self.moves
     }
 
     #[cfg(test)]
@@ -315,18 +345,23 @@ impl PlayerUtterance {
     /// Moves what is left of this reply to the device that is there now. The
     /// player and its queue belong to the dead device, so both are replaced.
     fn swap_device(&mut self) -> Result<(), BansheeError> {
-        self.output.reopen()?;
-        let fresh = Arc::new(Player::connect_new(&self.output.mixer()?));
+        let (mixer, device) = self.output.device_after(self.device)?;
+        let fresh = Arc::new(Player::connect_new(&mixer));
         {
             let queue = lock(&self.held);
             for chunk in queue.iter() {
-                fresh.append(stamped(chunk.clone(), self.output.stamp()));
+                fresh.append(stamped(chunk.clone(), Arc::clone(&self.pulls)));
             }
             let mut player = lock(&self.player);
             player.stop();
             *player = fresh;
         }
-        self.seen = (self.output.pulls(), std::time::Instant::now());
+        self.device = device;
+        self.moves += 1;
+        self.seen = (
+            self.pulls.load(Ordering::Relaxed),
+            std::time::Instant::now(),
+        );
         Ok(())
     }
 
@@ -355,7 +390,7 @@ impl ActiveUtterance for PlayerUtterance {
     }
 
     fn keep_playing(&mut self) {
-        let pulls = self.output.pulls();
+        let pulls = self.pulls.load(Ordering::Relaxed);
         if pulls != self.seen.0 {
             self.seen = (pulls, std::time::Instant::now());
             self.earned = true;
@@ -459,14 +494,14 @@ mod tests {
             .play(one_second_of_silence(), ignored_faults())
             .expect("a test device opens");
         wait_until("the chunk is queued", || utterance.queued() == 1);
-        assert_eq!(output.pulls(), 0, "nothing has been taken yet");
+        assert_eq!(utterance.pulls(), 0, "nothing has been taken yet");
 
         // A tenth of a second of audio, which is five of the counter's steps
         for _ in 0..2_400 {
             mixed.next();
         }
         assert!(
-            output.pulls() > 0,
+            utterance.pulls() > 0,
             "the device took audio and the counter stood still"
         );
     }
@@ -479,7 +514,7 @@ mod tests {
             .expect("a test device opens");
         wait_until("the chunk is queued", || utterance.queued() == 1);
         thread::sleep(Duration::from_millis(100));
-        assert_eq!(output.pulls(), 0);
+        assert_eq!(utterance.pulls(), 0);
     }
 
     // What a swap re-appends. A device that took nothing still owes the whole
@@ -566,14 +601,27 @@ mod tests {
         assert!(played.is_err(), "nothing can play without a device");
     }
 
+    // The caller that finds the device dead opens another; a caller still
+    // holding the one before it takes what replaced it instead of a third.
     #[test]
-    fn reopening_asks_for_the_default_device_again() {
+    fn a_device_is_opened_once_however_many_players_find_it_dead() {
         let (output, opened) = Output::counting();
-        output.reopen().expect("the first open");
+        let (_mixer, first) = output.mixer().expect("the first open");
         assert_eq!(opened.load(Ordering::Relaxed), 1);
 
-        output.reopen().expect("the second open");
+        let (_mixer, second) = output.device_after(first).expect("the second open");
         assert_eq!(opened.load(Ordering::Relaxed), 2);
+        assert_ne!(second, first, "a new device is a new generation");
+
+        let (_mixer, taken) = output
+            .device_after(first)
+            .expect("the one that replaced it");
+        assert_eq!(
+            opened.load(Ordering::Relaxed),
+            2,
+            "a player behind by a generation opens nothing"
+        );
+        assert_eq!(taken, second);
     }
 
     // The device is gone and the reply has to carry on somewhere. The sentences
@@ -628,9 +676,8 @@ mod tests {
         );
     }
 
-    // A swap that changes nothing must not be tried again for ever. Measured
-    // 2026-09-18: without this the daemon reopened the device about forty times
-    // a minute, for hours, and stayed mute the whole time.
+    // A swap that changes nothing must not be tried again for ever: a device
+    // nobody can play through would be reopened until the daemon restarts.
     #[test]
     fn a_second_device_that_takes_nothing_ends_the_reply() {
         let (output, opened) = Output::counting();
@@ -689,7 +736,7 @@ mod tests {
         assert_eq!(opened.load(Ordering::Relaxed), 2, "the first swap");
 
         // The new device takes audio, which is what the counter is for
-        output.pulls.fetch_add(1, Ordering::Relaxed);
+        utterance.took_audio();
         utterance.keep_playing();
 
         thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
@@ -698,6 +745,57 @@ mod tests {
             opened.load(Ordering::Relaxed),
             3,
             "a device that played earns another swap"
+        );
+    }
+
+    // A cue and a reply play at once through one output. When one of them moves
+    // to a new device, the audio the new device takes says nothing about the
+    // other, which is still pointed at the device that died.
+    #[test]
+    fn one_utterance_moving_leaves_the_other_still_looking_at_a_dead_device() {
+        let (output, opened) = Output::counting();
+        let output = Arc::new(output);
+        let mut cue = output
+            .play(
+                std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
+                ignored_faults(),
+            )
+            .expect("a test device opens");
+        let mut reply = output
+            .play(
+                std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
+                ignored_faults(),
+            )
+            .expect("the same device serves both");
+        wait_until("both fill their look-ahead", || {
+            cue.queued() == super::LOOK_AHEAD && reply.queued() == super::LOOK_AHEAD
+        });
+
+        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
+        cue.keep_playing();
+        assert_eq!(cue.moves(), 1, "the cue moved to the device that is there");
+        assert_eq!(opened.load(Ordering::Relaxed), 2);
+
+        // The new device takes the cue's audio, which says nothing about the reply
+        cue.took_audio();
+        cue.keep_playing();
+        assert_eq!(
+            reply.pulls(),
+            0,
+            "the audio the cue's device took is not the reply's"
+        );
+
+        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
+        reply.keep_playing();
+        assert_eq!(
+            reply.moves(),
+            1,
+            "the reply was left on the dead device by the cue's audio"
+        );
+        assert_eq!(
+            opened.load(Ordering::Relaxed),
+            2,
+            "the device was already replaced, so nothing opens a third"
         );
     }
 
@@ -725,8 +823,7 @@ mod tests {
         }
     }
 
-    /// A fault channel a test does not read. The daemon's own runs on a thread
-    /// that drains it.
+    /// A fault channel a test does not read.
     fn ignored_faults() -> std::sync::mpsc::Sender<Fault> {
         std::sync::mpsc::channel().0
     }
