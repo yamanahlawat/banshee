@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A reply follows the speaker.** When the device Banshee was playing through
+  disappeared, the rest of the reply went into it and was never heard, the daemon
+  believed it was still speaking, and every later reply queued behind a device
+  that was gone until it was restarted. Banshee now notices that nothing is
+  taking the audio, opens the device that is default now, and carries on,
+  repeating at most the sentence that was cut.
+
 - **A box that stands above the record lines up with the boxes beside it.** A
   drawn absence is indented to the turn text column, which is right where it
   stands in for a turn. "Banshee is not running" stands above the record, where
