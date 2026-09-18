@@ -532,13 +532,43 @@ fn open_fix(blockers: &[Blocker]) -> &str {
         .map_or(MICROPHONE_FIX, |blocker| blocker.fix.as_str())
 }
 
+/// The rate a Bluetooth headset runs at while anything holds its microphone.
+/// Measured on a OnePlus Buds 3: 16000 Hz in and out while Banshee records, and
+/// 44100 Hz in stereo out the moment it stops.
+const HANDS_FREE: u32 = 16_000;
+
+/// What the speaker costs when it is the microphone's own device. A person who
+/// hears a dull voice has no other way to learn that Banshee holding the
+/// microphone is the reason.
+///
+/// The speaker is the machine's default, which is the one Banshee plays
+/// through unless rodio fell back to another, and it names neither. The line
+/// says "default" rather than claiming to describe the device the voice came
+/// out of.
+fn shared_device(open: &str, speaker: Option<(String, u32)>) -> Option<String> {
+    let (speaker, rate) = speaker?;
+    (open == speaker && rate <= HANDS_FREE).then(|| {
+        format!(
+            "the default speaker is this microphone's own device, and it plays at {rate} Hz while Banshee listens"
+        )
+    })
+}
+
 fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
     match banshee_common::audio_device(status) {
-        Some(open) => pass(&microphone_line(
-            "daemon has the microphone",
-            Some(open),
-            banshee_common::missing_device(status),
-        )),
+        Some(open) => {
+            let held = pass(&microphone_line(
+                "daemon has the microphone",
+                Some(open),
+                banshee_common::missing_device(status),
+            ));
+            // After the line it annotates, or it reads as a note on the check
+            // above it.
+            if let Some(cost) = shared_device(open, crate::audio::default_output()) {
+                note(&cost);
+            }
+            held
+        }
         None => fail("the daemon has no microphone open", open_fix(blockers)),
     }
 }

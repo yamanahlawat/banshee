@@ -319,3 +319,43 @@ fn a_daemon_that_answers_is_no_absence() {
     };
     assert!(super::absence(&running).is_none());
 }
+
+#[test]
+fn a_speaker_that_shares_the_microphone_device_says_what_it_costs() {
+    assert_eq!(
+        super::shared_device("OnePlus Buds 3", Some(("OnePlus Buds 3".to_string(), 16_000))),
+        Some(
+            "the default speaker is this microphone's own device, and it plays at 16000 Hz while Banshee listens"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn a_speaker_of_its_own_costs_the_microphone_nothing() {
+    assert_eq!(
+        super::shared_device(
+            "MacBook Pro Microphone",
+            Some(("MacBook Pro Speakers".to_string(), 48_000))
+        ),
+        None
+    );
+}
+
+// A device that records and plays without dropping its rate has nothing to
+// report, and a line that fires anyway is noise on every headset that works.
+#[test]
+fn one_device_at_full_rate_is_not_worth_a_line() {
+    assert_eq!(
+        super::shared_device(
+            "Studio Display",
+            Some(("Studio Display".to_string(), 48_000))
+        ),
+        None
+    );
+}
+
+#[test]
+fn nothing_is_said_when_no_speaker_answers() {
+    assert_eq!(super::shared_device("Buds", None), None);
+}

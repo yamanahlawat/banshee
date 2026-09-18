@@ -23,9 +23,18 @@ pub struct Chunk {
     pub channels: std::num::NonZero<u16>,
 }
 
-/// Sentences queued ahead of the one playing. One ahead keeps speech smooth,
-/// and the bound is what keeps a dead device from holding a whole reply.
-const LOOK_AHEAD: usize = 2;
+/// Audio queued ahead of the device. It must outlast the producer's worst gap
+/// or the device runs dry, and it is the ceiling on what a dead device holds
+/// and a swap replays.
+///
+/// Measured against a remote speaker: the reply arrives in pieces of 25 ms and
+/// the longest wait for the next piece was 1.22 s.
+const LOOK_AHEAD: Duration = Duration::from_secs(2);
+
+/// The sentence playing and one behind it, however long they are. Kokoro hands
+/// over a whole sentence at a time, and a spoken sentence outlasts the bound
+/// above, which alone would leave the player dry at every sentence boundary.
+const ALWAYS_QUEUED: usize = 2;
 
 const ROOM_POLL: Duration = Duration::from_millis(20);
 
@@ -48,6 +57,16 @@ pub fn dead_output() -> Duration {
 /// for synthesis and no device is late.
 fn output_died(queued: usize, since_last_pull: Duration) -> bool {
     queued > 0 && since_last_pull > DEAD_OUTPUT
+}
+
+/// The time a chunk plays for. Its samples are interleaved, so a stereo chunk
+/// carries half the audio of a mono one of the same length.
+///
+/// rodio answers the same question, but only from a `SamplesBuffer`, and
+/// building one copies every sample into a shared array.
+fn playtime(chunk: &Chunk) -> Duration {
+    let frames = chunk.samples.len() as f64 / f64::from(chunk.channels.get());
+    Duration::from_secs_f64(frames / f64::from(chunk.rate.get()))
 }
 
 /// Drops the sentences the player has finished. The held set is what a swap
@@ -222,7 +241,8 @@ impl Output {
             faults,
             pulls: Arc::clone(&pulls),
             on: Arc::clone(&on),
-            seen: (0, std::time::Instant::now()),
+            seen_pulls: 0,
+            owed_since: std::time::Instant::now(),
             earned: true,
             #[cfg(test)]
             heard: Arc::clone(&heard),
@@ -260,9 +280,13 @@ struct Playing {
     pulls: Arc<AtomicU64>,
     /// The generation of the device this player is on.
     on: Arc<AtomicU64>,
-    /// The counter, and when it was last seen to move. A counter that stands
-    /// still while audio waits is a device that is gone.
-    seen: (u64, std::time::Instant),
+    /// The counter as the last look found it. A counter that stands still while
+    /// audio waits is a device that is gone.
+    seen_pulls: u64,
+    /// When the device was first owed the audio it has not taken. It starts at
+    /// the sentence that ends a quiet, because a device owes nothing while the
+    /// player is empty.
+    owed_since: std::time::Instant,
     /// A swap is earned by audio that was taken since the last one. Without it
     /// a device nobody can play through is reopened for ever.
     earned: bool,
@@ -284,20 +308,27 @@ impl Playing {
                 }
                 thread::sleep(ROOM_POLL);
             }
-            // Append under the lock so stop() can never race a chunk into a
-            // stopped player, where append would sleep
-            let guard = lock(&self.cancelled);
-            if *guard {
-                return;
+            let ended_the_quiet = {
+                // Append under the lock so stop() can never race a chunk into a
+                // stopped player, where append would sleep
+                let guard = lock(&self.cancelled);
+                if *guard {
+                    return;
+                }
+                // Held and the player move together, so a swap never re-appends
+                // the sentence this thread is appending.
+                let mut queue = lock(&self.held);
+                let player = lock(&self.player).clone();
+                let quiet = player.len() == 0;
+                queue.push_back(chunk.clone());
+                #[cfg(test)]
+                lock(&self.heard).push(chunk.clone());
+                player.append(stamped(chunk, Arc::clone(&self.pulls)));
+                quiet
+            };
+            if ended_the_quiet {
+                self.owed_since = std::time::Instant::now();
             }
-            // Held and the player move together, so a swap never re-appends
-            // the sentence this thread is appending.
-            let mut queue = lock(&self.held);
-            let player = lock(&self.player).clone();
-            queue.push_back(chunk.clone());
-            #[cfg(test)]
-            lock(&self.heard).push(chunk.clone());
-            player.append(stamped(chunk, Arc::clone(&self.pulls)));
         }
 
         // Every sentence is given. Stay with the reply until the device has
@@ -321,18 +352,19 @@ impl Playing {
     fn has_room(&self) -> bool {
         let mut queue = lock(&self.held);
         trim(&mut queue, lock(&self.player).len());
-        queue.len() < LOOK_AHEAD
+        queue.len() < ALWAYS_QUEUED || queue.iter().map(playtime).sum::<Duration>() < LOOK_AHEAD
     }
 
     /// False when the reply is over because nothing can play it.
     fn follows_the_device(&mut self) -> bool {
         let pulls = self.pulls.load(Ordering::Relaxed);
-        if pulls != self.seen.0 {
-            self.seen = (pulls, std::time::Instant::now());
+        if pulls != self.seen_pulls {
+            self.seen_pulls = pulls;
+            self.owed_since = std::time::Instant::now();
             self.earned = true;
             return true;
         }
-        if !output_died(self.queued(), self.seen.1.elapsed()) {
+        if !output_died(self.queued(), self.owed_since.elapsed()) {
             return true;
         }
         if !self.earned {
@@ -376,10 +408,8 @@ impl Playing {
             *player = fresh;
         }
         self.on.store(device, Ordering::Relaxed);
-        self.seen = (
-            self.pulls.load(Ordering::Relaxed),
-            std::time::Instant::now(),
-        );
+        self.seen_pulls = self.pulls.load(Ordering::Relaxed);
+        self.owed_since = std::time::Instant::now();
         Ok(())
     }
 }
@@ -484,6 +514,15 @@ fn default_device() -> Result<Device, BansheeError> {
         if ready_tx.send(Ok(sink.mixer().clone())).is_err() {
             return;
         }
+        // After the mixer is handed over, so the first sentence never waits for
+        // a line in the log. rodio opens another device when the default will
+        // not open, and names neither, so the shape is all this may claim.
+        let config = sink.config();
+        log::info!(
+            "Output opened at {} Hz, {} ch",
+            config.sample_rate(),
+            config.channel_count()
+        );
         // Parks holding the !Send sink. Dropping it here closes the stream, and
         // the only way out is the Device at the other end going away.
         let _ = closed.recv();
@@ -568,18 +607,15 @@ mod tests {
     fn a_device_that_took_nothing_holds_every_sentence_it_was_given() {
         let output = Arc::new(Output::silent());
         let utterance = output
-            .play(
-                std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
-                ignored_faults(),
-            )
+            .play(std::iter::repeat_with(a_sentence).take(5), ignored_faults())
             .expect("a test device opens");
         wait_until("the look-ahead fills", || {
-            utterance.queued() == super::LOOK_AHEAD
+            utterance.queued() == super::ALWAYS_QUEUED
         });
         thread::sleep(Duration::from_millis(50));
         assert_eq!(
             utterance.held().len(),
-            super::LOOK_AHEAD,
+            super::ALWAYS_QUEUED,
             "a dead device may not be given the whole reply"
         );
     }
@@ -590,15 +626,14 @@ mod tests {
     fn a_sentence_the_device_finished_is_no_longer_held() {
         let (output, mut mixed) = Output::readable();
         let output = Arc::new(output);
+        let both = 2;
         let utterance = output
             .play(
-                std::iter::repeat_with(|| kokoros_chunk(240)).take(super::LOOK_AHEAD),
+                std::iter::repeat_with(|| kokoros_chunk(240)).take(both),
                 ignored_faults(),
             )
             .expect("a test device opens");
-        wait_until("both sentences are queued", || {
-            utterance.queued() == super::LOOK_AHEAD
-        });
+        wait_until("both sentences are queued", || utterance.queued() == both);
 
         for taken in 1..=480 {
             mixed.next();
@@ -676,13 +711,10 @@ mod tests {
         let output = Arc::new(Output::silent());
         let (faults, heard) = std::sync::mpsc::channel();
         let utterance = output
-            .play(
-                std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
-                faults,
-            )
+            .play(std::iter::repeat_with(a_sentence).take(5), faults)
             .expect("a test device opens");
         wait_until("the look-ahead fills", || {
-            utterance.queued() == super::LOOK_AHEAD
+            utterance.queued() == super::ALWAYS_QUEUED
         });
 
         let owed = utterance.held().len();
@@ -720,6 +752,71 @@ mod tests {
         );
     }
 
+    // Kokoro hands over a whole sentence at a time, and a spoken sentence runs
+    // longer than the bound. The next one must still stand behind the one
+    // playing, or the player runs dry at every sentence boundary.
+    #[test]
+    fn a_sentence_longer_than_the_bound_keeps_the_next_one_behind_it() {
+        let output = Arc::new(Output::silent());
+        let four_seconds = SAMPLE_RATE.get() as usize * 4;
+        let utterance = output
+            .play(
+                std::iter::repeat_with(move || kokoros_chunk(four_seconds)).take(5),
+                ignored_faults(),
+            )
+            .expect("a test device opens");
+
+        wait_until("the next sentence stands behind the one playing", || {
+            utterance.queued() == super::ALWAYS_QUEUED
+        });
+    }
+
+    // A remote reply arrives in pieces of 25 ms, where Kokoro's arrive as whole
+    // sentences. The bound holds the same audio whatever the pieces are.
+    #[test]
+    fn a_reply_that_arrives_in_small_pieces_still_fills_the_look_ahead() {
+        let output = Arc::new(Output::silent());
+        let utterance = output
+            .play(
+                std::iter::repeat_with(|| kokoros_chunk(600)).take(400),
+                ignored_faults(),
+            )
+            .expect("a test device opens");
+
+        wait_until("the look-ahead fills", || {
+            queued_audio(&utterance.held()) >= super::LOOK_AHEAD
+        });
+    }
+
+    /// The audio a set of chunks carries, which is what the look-ahead bounds.
+    fn queued_audio(chunks: &[Chunk]) -> Duration {
+        chunks.iter().map(super::playtime).sum()
+    }
+
+    // A remote speaker answers in its own time, and the player is empty until
+    // it does. The device is owed nothing in that quiet, so reading it as a
+    // dead device reopens the speaker in the middle of the first word.
+    #[test]
+    fn a_reply_that_waited_for_its_first_sentence_swaps_nothing() {
+        let (output, opened) = Output::counting();
+        let output = Arc::new(output);
+        let late = std::iter::once_with(|| {
+            thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
+            kokoros_chunk(240)
+        });
+        let utterance = output
+            .play(late, ignored_faults())
+            .expect("a test device opens");
+
+        wait_until("the late sentence is queued", || utterance.queued() == 1);
+
+        assert_eq!(
+            opened.load(Ordering::Relaxed),
+            1,
+            "the wait for the first sentence was read as a dead device"
+        );
+    }
+
     // A swap that changes nothing must not be tried again for ever: a device
     // nobody can play through would be reopened until the daemon restarts.
     #[test]
@@ -728,13 +825,10 @@ mod tests {
         let output = Arc::new(output);
         let (faults, heard) = std::sync::mpsc::channel();
         let mut utterance = output
-            .play(
-                std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
-                faults,
-            )
+            .play(std::iter::repeat_with(a_sentence).take(5), faults)
             .expect("a test device opens");
         wait_until("the look-ahead fills", || {
-            utterance.queued() == super::LOOK_AHEAD
+            utterance.queued() == super::ALWAYS_QUEUED
         });
 
         wait_for_the_swap("the reply moves once", || {
@@ -761,13 +855,10 @@ mod tests {
         let (output, opened) = Output::counting();
         let output = Arc::new(output);
         let utterance = output
-            .play(
-                std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
-                ignored_faults(),
-            )
+            .play(std::iter::repeat_with(a_sentence).take(5), ignored_faults())
             .expect("a test device opens");
         wait_until("the look-ahead fills", || {
-            utterance.queued() == super::LOOK_AHEAD
+            utterance.queued() == super::ALWAYS_QUEUED
         });
 
         wait_for_the_swap("the first swap", || opened.load(Ordering::Relaxed) == 2);
@@ -788,19 +879,13 @@ mod tests {
         let (output, opened) = Output::counting();
         let output = Arc::new(output);
         let cue = output
-            .play(
-                std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
-                ignored_faults(),
-            )
+            .play(std::iter::repeat_with(a_sentence).take(5), ignored_faults())
             .expect("a test device opens");
         let reply = output
-            .play(
-                std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
-                ignored_faults(),
-            )
+            .play(std::iter::repeat_with(a_sentence).take(5), ignored_faults())
             .expect("the same device serves both");
         wait_until("both fill their look-ahead", || {
-            cue.queued() == super::LOOK_AHEAD && reply.queued() == super::LOOK_AHEAD
+            cue.queued() == super::ALWAYS_QUEUED && reply.queued() == super::ALWAYS_QUEUED
         });
 
         // Whichever moves first opens the one replacement
@@ -831,13 +916,10 @@ mod tests {
         let output = Arc::new(Output::dead_after_first());
         let (faults, heard) = std::sync::mpsc::channel();
         let mut utterance = output
-            .play(
-                std::iter::repeat_with(|| kokoros_chunk(240)).take(5),
-                faults,
-            )
+            .play(std::iter::repeat_with(a_sentence).take(5), faults)
             .expect("a test device opens");
         wait_until("the look-ahead fills", || {
-            utterance.queued() == super::LOOK_AHEAD
+            utterance.queued() == super::ALWAYS_QUEUED
         });
 
         wait_for_the_swap("the utterance concludes", || utterance.is_finished());
@@ -850,6 +932,13 @@ mod tests {
     /// A fault channel a test does not read.
     fn ignored_faults() -> std::sync::mpsc::Sender<Fault> {
         std::sync::mpsc::channel().0
+    }
+
+    /// A sentence that fills the look-ahead on its own, as Kokoro's do. The
+    /// player then holds it and the one the floor lets in behind it, which is
+    /// what the tests that watch a full player wait for.
+    fn a_sentence() -> Chunk {
+        kokoros_chunk(SAMPLE_RATE.get() as usize * super::LOOK_AHEAD.as_secs() as usize)
     }
 
     fn kokoros_chunk(samples: usize) -> Chunk {

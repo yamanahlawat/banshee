@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script with no terminal is told to pass `--yes` rather than asked a question
   nobody will see.
 
+- **`banshee status` says why a headset sounds dull.** A Bluetooth headset gives
+  macOS its microphone or its speaker in full quality, never both, so while
+  Banshee holds the microphone the same device plays at 16 kHz. The line appears
+  when the open microphone and the default speaker are the same device and its
+  rate has dropped, and it names the rate. Pinning `[audio] input_device` to
+  another microphone is the way out.
+
 - **`banshee-update` comes with the shell installer.** That route had no update
   path at all: Homebrew has `brew upgrade`, and the downloaded app is replaced by
   running its own command again, but the installer's route had nothing.
