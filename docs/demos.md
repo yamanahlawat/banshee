@@ -1,19 +1,10 @@
 # The demos
 
-The talking runs in real time. The quiet stretches, where the agent works, run faster.
+The talking and each change to the desktop run in real time. The quiet stretches, where
+the agent works, run faster.
 White captions carry the person's words. Orange captions carry Banshee's voice.
 
 ## Linux, on Omarchy
-
-### A focus mode, built and then removed
-
-<https://github.com/user-attachments/assets/830cb5c8-2c52-4a2d-b7e9-e3d4bb252955>
-
-The person taps `Super` + `F5` and asks for a focus mode. Claude Code dims the inactive
-windows, turns the animations off, and binds `Super` + `Shift` + `F` to the top bar.
-
-From 0:31 the new key toggles the top bar on screen, three times. A second request puts
-the desktop back, and the key returns to the file manager.
 
 ### The desktop, set up for a recording
 
@@ -23,8 +14,18 @@ The person asks for a screencast setup: no screen lock, no top bar, no window ga
 rounded corners. Claude Code makes the change, and reads the result back.
 
 The person then wants the gaps back, and says so. `show me` reopens the thread in a
-terminal. The thread plays in real time, so each change the voice asked for is on screen.
+terminal, where the diffs can be reviewed.
 See [the tell command](cli.md#telling-your-agent-to-change-the-desktop).
+
+### A focus mode, built and then removed
+
+<https://github.com/user-attachments/assets/830cb5c8-2c52-4a2d-b7e9-e3d4bb252955>
+
+The person taps `Super` + `F5` and asks for a focus mode. Claude Code dims the inactive
+windows, turns the animations off, and binds `Super` + `Shift` + `F` to the top bar.
+
+From 0:32 the new key toggles the top bar on screen, three times. A second request puts
+the desktop back, and the key returns to the file manager.
 
 ## macOS
 
