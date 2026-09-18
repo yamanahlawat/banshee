@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A question follows the microphone.** A device that changed while Banshee was
+  already listening left the answer unheard: the new microphone arrived as a
+  command, and the question itself was holding the thread that reads commands,
+  so it went on reading a device that no longer existed until it timed out. The
+  capture is now shared, so a question already listening reads whatever
+  microphone is there, keeps what was said before the change, and rebuilds only
+  what belonged to the old device.
+
 - **A reply follows the speaker.** When the device Banshee was playing through
   disappeared, the rest of the reply went into it and was never heard, the daemon
   believed it was still speaking, and every later reply queued behind a device
