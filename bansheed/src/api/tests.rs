@@ -1207,6 +1207,35 @@ async fn status_says_the_pipeline_is_opening_until_it_stands() {
     assert_eq!(result["pipeline"], "open");
 }
 
+// The window draws its word from this. A daemon that answers "ready" while it
+// cannot record sends a person to a hotkey that plays the error cue.
+#[test]
+fn a_daemon_still_opening_its_microphone_is_not_ready() {
+    assert!(super::ready(&[], &crate::state::Pipeline::Open));
+    assert!(!super::ready(&[], &crate::state::Pipeline::Opening));
+    assert!(!super::ready(
+        &[],
+        &crate::state::Pipeline::Broken(crate::state::RecordingError::Microphone(
+            "no device".to_string()
+        ))
+    ));
+}
+
+#[test]
+fn anything_that_stops_banshee_working_is_not_ready() {
+    let blocker = banshee_common::Blocker {
+        kind: banshee_common::BlockerKind::Permission,
+        role: None,
+        remedy: None,
+        id: "accessibility".to_string(),
+        name: "Accessibility".to_string(),
+        consequence: "dictation cannot type".to_string(),
+        fix: "grant it".to_string(),
+        command: None,
+    };
+    assert!(!super::ready(&[blocker], &crate::state::Pipeline::Open));
+}
+
 #[tokio::test]
 async fn ask_user_is_refused_while_the_pipeline_is_still_opening() {
     let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
@@ -1229,6 +1258,38 @@ async fn ask_user_is_refused_while_the_pipeline_is_still_opening() {
 // An agent that dies mid-question leaves the microphone armed for the rest of
 // the session, and every other ask is refused as busy until it ends. Dropping
 // the call has to close the session the way a stop does.
+// The question is still being spoken when the agent dies. The microphone was
+// armed before the first word, so nothing but the guard can give it back.
+#[tokio::test]
+async fn an_ask_dropped_while_it_speaks_closes_the_session_it_armed() {
+    let (state, _cut_short) = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_secs(30),
+        std::sync::mpsc::channel().0,
+    );
+
+    let asking = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            let asked = request(
+                BANSHEE_ASK_USER,
+                Some(serde_json::json!({"question": "Ready to ship?"})),
+            );
+            dispatch(asked, &state).await
+        }
+    });
+    wait_for(&state, "the session arms", |state| {
+        state.recording_mode() == RecordingMode::Armed
+    })
+    .await;
+
+    asking.abort();
+
+    wait_for(&state, "the session closes", |state| {
+        state.recording_mode() == RecordingMode::Idle
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_dropped_ask_closes_the_session_it_armed() {
     let (commands, command_receiver) = std::sync::mpsc::channel();
@@ -1268,4 +1329,20 @@ async fn a_dropped_ask_closes_the_session_it_armed() {
         "the microphone belongs to nobody once the caller is gone"
     );
     drop(ask);
+}
+
+/// Polls the state until it holds, or the test fails. Generous next to the
+/// intervals the daemon polls at: a bound for the test, not a promise.
+async fn wait_for(
+    state: &crate::state::DaemonState,
+    what: &str,
+    holds: impl Fn(&crate::state::DaemonState) -> bool,
+) {
+    for _ in 0..200 {
+        if holds(state) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("{what} did not happen within 2s");
 }

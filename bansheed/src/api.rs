@@ -217,6 +217,13 @@ fn not_recording(
     }
 }
 
+/// Nothing stops Banshee working. A pipeline still opening raises no blocker,
+/// because waiting is nobody's to fix, and it is not ready either: nothing
+/// records until the microphone is open.
+fn ready(blockers: &[banshee_common::Blocker], pipeline: &crate::state::Pipeline) -> bool {
+    blockers.is_empty() && matches!(pipeline, crate::state::Pipeline::Open)
+}
+
 pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     let blockers = readiness::blockers(daemon_state);
     let running = daemon_state.running_config();
@@ -252,7 +259,7 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "hotkey_listens": crate::hotkey::listens(),
         "bindable_modifiers": crate::binding::bindable_modifiers(),
         // Stated, so no client invents a narrower definition of ready
-        "ready": blockers.is_empty(),
+        "ready": ready(&blockers, &daemon_state.pipeline()),
         "blockers": blockers,
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
@@ -464,13 +471,17 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         );
     }
 
+    // From here the mode is held, and every way out of this call gives it back:
+    // the question is spoken before anyone listens, and a client that dies
+    // while it plays would otherwise hold the microphone until a restart.
+    let ends_the_session = EndsTheSession::new(daemon_state);
+
     // A status outruns any budget short of the stalled-backend bound.
     let settled = silence_within(daemon_state, Duration::from_millis(MAX_PLAYBACK_WAIT_MS)).await;
 
     // Interrupts only what outran the wait, so a stalled backend costs one budget.
     let clean_question = sanitize(question);
     if let Err(e) = daemon_state.speech().speak(&clean_question, !settled, None) {
-        daemon_state.set_recording_mode(RecordingMode::Idle);
         return JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
@@ -480,7 +491,6 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
 
     if !playback_ended(daemon_state, &clean_question).await {
         daemon_state.speech().stop();
-        daemon_state.set_recording_mode(RecordingMode::Idle);
         return JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
@@ -494,7 +504,6 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         timeout: Duration::from_millis(timeout_ms),
     });
     if daemon_state.commands().send(command).is_err() {
-        daemon_state.set_recording_mode(RecordingMode::Idle);
         return JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
@@ -502,7 +511,6 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         );
     }
 
-    let ends_the_session = EndsTheSession::new(daemon_state);
     let answered = answer.await;
     ends_the_session.kept();
 
