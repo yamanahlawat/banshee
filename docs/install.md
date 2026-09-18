@@ -17,6 +17,9 @@ xattr -dr com.apple.quarantine /Applications/Banshee.app
 - **The `xattr` line** clears that flag.
 - **The `banshee` command** offers to clear it for you when you next run it in a
   terminal. It asks first, and only ever asks a person.
+- **Update it** with `brew upgrade --cask banshee`.
+- **Remove it** with `brew uninstall --cask banshee`, and add `--zap` to take
+  `~/.banshee` as well.
 - **The `banshee` command** is on your `PATH` as well as in the app.
 
 ## macOS, without Homebrew
@@ -32,6 +35,9 @@ curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Bans
 - **Link it** onto your `PATH` if you want it short.
 - **No admin account?** Unpack into `~/Applications`, and read that path
   instead.
+- **Update it** by running the same command again: it replaces the app in place.
+- **Remove it** with `banshee uninstall`, which stops the daemon and takes the
+  login entries with it.
 
 ## macOS, terminal only
 
@@ -55,9 +61,11 @@ Or without Homebrew:
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/yamanahlawat/banshee/releases/latest/download/banshee-installer.sh | sh
 ```
 
-- **You get** the daemon and the `banshee` command.
+- **You get** the daemon, the `banshee` command and `banshee-update`.
 - **`banshee watch --waybar`** feeds a status bar.
 - **The typing tool and the service** are in [linux.md](linux.md).
+- **Update it** with `banshee-update`, which fetches the latest release.
+- **Remove it** with `banshee uninstall`.
 
 ## From source
 
@@ -111,12 +119,16 @@ banshee status
 
 ## Uninstall
 
-- **The cask:** `brew uninstall --zap --cask banshee`. `--zap` also removes
-  `~/.banshee`.
-- **The formula or the installer:** `banshee tray --uninstall`, then
-  `banshee service uninstall`, then `brew uninstall --formula banshee`.
-- **Without Homebrew,** delete the binaries by hand instead.
-- **The app from `curl`:** the two `banshee` commands above, then delete
-  `/Applications/Banshee.app`.
-- **`~/.banshee`** holds the models, the history and `config.toml`. Delete it
-  after the last two routes if you want it gone.
+```bash
+banshee uninstall
+```
+
+- **It stops Banshee** and takes it out of login, whichever way it was installed.
+- **It shows what it will remove** and asks before it removes anything.
+- **Homebrew's copy stays Homebrew's:** the command names
+  `brew uninstall --cask banshee` rather than deleting files Homebrew records.
+- **`--data`** also deletes `~/.banshee`: the models, the history and the keys.
+  Without it, they stay.
+- **`--yes`** removes without asking, for a script.
+- **The cask alone:** `brew uninstall --zap --cask banshee` does the same in one
+  step, and `--zap` takes `~/.banshee` with it.

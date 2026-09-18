@@ -817,6 +817,88 @@ pub async fn bind(
     Ok(())
 }
 
+/// Homebrew's two roots, so the tree is asked rather than the `brew` command,
+/// which a person removing Banshee may have removed first.
+const BREW_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
+
+fn brew_holds(what: &str) -> bool {
+    BREW_PREFIXES
+        .iter()
+        .any(|prefix| std::path::Path::new(prefix).join(what).exists())
+}
+
+/// Undoes what Banshee installed, and names the tool that owns the rest.
+pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
+    let receipt = crate::uninstall::receipt_path().filter(|path| path.exists());
+    let bundle = std::env::current_exe()
+        .ok()
+        .and_then(|exe| crate::uninstall::bundle_of(&exe));
+    let owner = crate::uninstall::owner(
+        brew_holds("Caskroom/banshee"),
+        brew_holds("Cellar/banshee"),
+        receipt.is_some(),
+        bundle.is_some(),
+    );
+
+    let mut software: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(receipt) = &receipt {
+        software.extend(crate::uninstall::receipt_binaries(
+            &std::fs::read_to_string(receipt).unwrap_or_default(),
+        ));
+        software.push(receipt.clone());
+    }
+    software.extend(bundle);
+    let plan = crate::uninstall::plan(&owner, software, data.then(utils::banshee_dir).flatten());
+
+    println!("Banshee stops now and leaves the login entries.");
+    for path in &plan.remove {
+        println!("  delete {}", path.display());
+    }
+    if let Some(command) = plan.leave_to {
+        println!("  {} removes the rest: it keeps its own records", command);
+    }
+    if !data {
+        println!("  ~/.banshee stays: the models, the history and the keys. --data takes it.");
+    }
+
+    if !yes && !confirmed()? {
+        println!("Nothing was removed.");
+        return Ok(());
+    }
+
+    stop().await?;
+    for agent in service::Agent::ALL {
+        if service::uninstall(agent)? {
+            println!("The {} no longer starts at login.", agent.name());
+        }
+    }
+    for path in &plan.remove {
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        match removed {
+            Ok(()) => println!("Deleted {}", path.display()),
+            Err(error) => println!("Could not delete {}: {error}", path.display()),
+        }
+    }
+    if let Some(command) = plan.leave_to {
+        println!("Now run: {command}");
+    }
+    Ok(())
+}
+
+/// A person says yes. Nothing else can: a script with no terminal is told to
+/// pass `--yes` rather than being asked a question nobody will see.
+fn confirmed() -> Result<bool, BansheeError> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        println!("Run it again with --yes to remove without asking.");
+        return Ok(false);
+    }
+    crate::connect::confirm("Remove it? [y/N] ")
+}
+
 pub fn service(action: args::ServiceAction) -> Result<(), BansheeError> {
     match action {
         // Every entry, so none is left behind to fail at the next login

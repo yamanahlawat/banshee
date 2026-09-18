@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`banshee uninstall` undoes what Banshee installed.** It stops the daemon,
+  takes both login entries out, and names the tool that owns the rest:
+  Homebrew's copy stays Homebrew's, because deleting files it records leaves the
+  records pointing at nothing. A copy from the shell installer or the tarball is
+  removed here. `~/.banshee` holds the models, the history and the keys, and it
+  stays unless `--data` asks for it. Nothing is removed without a yes, and a
+  script with no terminal is told to pass `--yes` rather than asked a question
+  nobody will see.
+
+- **`banshee-update` comes with the shell installer.** That route had no update
+  path at all: Homebrew has `brew upgrade`, and the downloaded app is replaced by
+  running its own command again, but the installer's route had nothing.
+
 ### Changed
 
 - **`banshee start` starts, and downloads nothing.** A first run no longer
