@@ -30,6 +30,15 @@ fn main() {
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            // Hyprland keeps the height of the tile it first sizes the window as
+            #[cfg(target_os = "linux")]
+            if let (Some(window), Some(configured)) = (
+                app.get_webview_window("main"),
+                app.config().app.windows.first(),
+            ) {
+                let _ =
+                    window.set_size(tauri::LogicalSize::new(configured.width, configured.height));
+            }
             start_the_icon();
             // No connection is opened here: a command's first use and a
             // reconnect after the daemon dies both run through the same

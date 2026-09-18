@@ -127,6 +127,8 @@ banshee uninstall
 - **It shows what it will remove** and asks before it removes anything.
 - **Homebrew's copy stays Homebrew's:** the command names
   `brew uninstall --cask banshee` rather than deleting files Homebrew records.
+- **A source build stays:** `make install` records nothing, so the command
+  names the binary it runs from and leaves every file the install placed.
 - **`--data`** also deletes `~/.banshee`: the models, the history and the keys.
   Without it, they stay.
 - **`--yes`** removes without asking, for a script.
