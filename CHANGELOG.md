@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A quarantined Banshee says so instead of dying silently.** macOS kills the
+  `banshee` command with no message at all when the app still carries Homebrew's
+  quarantine flag, which made a blocked install look like a broken daemon. The
+  command now names what happened, and in a terminal offers to clear the flag.
+  It asks first, it only ever asks a person, and a hook or an agent gets the
+  line to run rather than a prompt nobody can answer.
+
 - **The earcons come out of the same speaker as the voice.** The cue player held
   an audio device of its own, opened once and never again, so a device that went
   away left every later beep unheard while the voice carried on elsewhere. Every

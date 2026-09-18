@@ -52,7 +52,7 @@ xattr -dr com.apple.quarantine /Applications/Banshee.app
 open /Applications/Banshee.app
 ```
 
-- The `xattr` line is needed until Banshee is notarised. [A direct download](docs/install.md#macos-without-homebrew) needs none.
+- The `xattr` line is needed until Banshee is notarised, and Homebrew marks every upgrade too. The `banshee` command offers to clear it when you next run it. [A direct download](docs/install.md#macos-without-homebrew) needs none.
 - The window asks before it downloads the models (~860 MB), and lets you pick the speech model first.
 - Approve the **Microphone** and **Accessibility** grants. Without them Banshee cannot record or type.
 - **Hold `Right Option`**, speak, let go. The text is typed into the app you are focused on.

@@ -11,8 +11,11 @@ cask "banshee" do
   depends_on macos: :ventura
 
   app "Banshee.app"
-  binary "#{appdir}/Banshee.app/Contents/MacOS/banshee"
-  binary "#{appdir}/Banshee.app/Contents/MacOS/banshee-mcp-shim"
+
+  # Both point at one script, which reads the name it was called by. macOS kills
+  # a quarantined binary with no message, and Homebrew marks every download.
+  binary "#{appdir}/Banshee.app/Contents/Resources/banshee-run", target: "banshee"
+  binary "#{appdir}/Banshee.app/Contents/Resources/banshee-run", target: "banshee-mcp-shim"
 
   # The formula is the same daemon without the window, and two copies fight for one socket;
   # the shim formula is an old one still in the tap. Casks can conflict only with casks.
@@ -43,9 +46,11 @@ cask "banshee" do
 
   caveats do
     <<~EOS
-      Banshee is signed but not yet notarised, so macOS refuses the downloaded app
-      and kills the banshee command silently. Clear the flag once:
+      Banshee is signed but not yet notarised, so macOS refuses the downloaded app.
+      Clear the flag, and again after each upgrade, because Homebrew marks every
+      download:
         xattr -dr com.apple.quarantine #{appdir}/Banshee.app
+      The banshee command offers to do it for you the next time you run it.
     EOS
   end
 end

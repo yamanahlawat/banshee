@@ -32,6 +32,8 @@ for binary in $binaries; do
     cp "$bindir/$binary" "$macos/$binary"
 done
 
+cp "$root/packaging/banshee-run" "$resources/banshee-run"
+chmod +x "$resources/banshee-run"
 cp "$root/assets/banshee.icns" "$resources/banshee.icns"
 sed "s/__VERSION__/$version/g" "$root/packaging/Info.plist" > "$staging/Contents/Info.plist"
 

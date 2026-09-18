@@ -12,10 +12,11 @@ brew install --cask yamanahlawat/banshee/banshee
 xattr -dr com.apple.quarantine /Applications/Banshee.app
 ```
 
-- **Homebrew** marks the download as quarantined.
-- **A quarantined Banshee** does not open, and its `banshee` command dies with
-  no message.
+- **Homebrew** marks every download as quarantined, including every upgrade.
+- **A quarantined Banshee** does not open, and macOS kills its `banshee` command.
 - **The `xattr` line** clears that flag.
+- **The `banshee` command** offers to clear it for you when you next run it in a
+  terminal. It asks first, and only ever asks a person.
 - **The `banshee` command** is on your `PATH` as well as in the app.
 
 ## macOS, without Homebrew
