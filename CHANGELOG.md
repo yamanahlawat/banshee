@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The earcons come out of the same speaker as the voice.** The cue player held
+  an audio device of its own, opened once and never again, so a device that went
+  away left every later beep unheard while the voice carried on elsewhere. Every
+  sound the daemon makes now goes through one output, which follows the device
+  and is opened only when there is something to play, so cues turned off still
+  hold no audio hardware.
+
 - **A question follows the microphone.** A device that changed while Banshee was
   already listening left the answer unheard: the new microphone arrived as a
   command, and the question itself was holding the thread that reads commands,
