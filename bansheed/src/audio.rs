@@ -6,11 +6,11 @@ use banshee_common::{InputDevice, error::BansheeError};
 use std::sync::Arc;
 
 use cpal::{
-    Stream,
+    FromSample, Sample, SizedSample, Stream,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use ringbuf::{
-    HeapCons, HeapRb,
+    HeapCons, HeapProd, HeapRb,
     traits::{Producer, Split},
 };
 
@@ -207,19 +207,83 @@ pub fn already_serving(target: &str, open_device: Option<&str>, stalled: bool) -
     !stalled && open_device == Some(target)
 }
 
-// Shared so the probe fails wherever capture would, down to the sample format.
-fn build_and_play<D>(
+struct CaptureSink {
+    state: Arc<DaemonState>,
+    producer: HeapProd<f32>,
+    channels: usize,
+}
+
+impl CaptureSink {
+    // Runs on the real-time audio thread, so it must not allocate: downmixing
+    // through an iterator keeps the mono copy out of the heap
+    fn take<T: Sample>(&mut self, data: &[T])
+    where
+        f32: FromSample<T>,
+    {
+        self.state.mark_capture_alive();
+        if self.state.is_recording() {
+            self.producer.push_iter(downmix(data, self.channels));
+        }
+    }
+}
+
+fn downmix<T: Sample>(data: &[T], channels: usize) -> impl Iterator<Item = f32> + '_
+where
+    f32: FromSample<T>,
+{
+    data.chunks(channels).map(move |frame| {
+        frame
+            .iter()
+            .map(|&sample| f32::from_sample(sample))
+            .sum::<f32>()
+            / channels as f32
+    })
+}
+
+/// Opens the stream in the device's own sample format, because a raw ALSA
+/// device can refuse any other. Shared so the probe fails wherever capture
+/// would.
+fn build_and_play(
     device: &cpal::Device,
     config: cpal::SupportedStreamConfig,
-    data: D,
+    sink: Option<CaptureSink>,
+) -> Result<Stream, BansheeError> {
+    use cpal::SampleFormat as Format;
+    match config.sample_format() {
+        Format::I8 => play::<i8>(device, config, sink),
+        Format::I16 => play::<i16>(device, config, sink),
+        Format::I24 => play::<cpal::I24>(device, config, sink),
+        Format::I32 => play::<i32>(device, config, sink),
+        Format::I64 => play::<i64>(device, config, sink),
+        Format::U8 => play::<u8>(device, config, sink),
+        Format::U16 => play::<u16>(device, config, sink),
+        Format::U24 => play::<cpal::U24>(device, config, sink),
+        Format::U32 => play::<u32>(device, config, sink),
+        Format::U64 => play::<u64>(device, config, sink),
+        Format::F32 => play::<f32>(device, config, sink),
+        Format::F64 => play::<f64>(device, config, sink),
+        other => Err(BansheeError::Other(format!(
+            "the microphone delivers {other} samples, which Banshee cannot read"
+        ))),
+    }
+}
+
+fn play<T: SizedSample>(
+    device: &cpal::Device,
+    config: cpal::SupportedStreamConfig,
+    mut sink: Option<CaptureSink>,
 ) -> Result<Stream, BansheeError>
 where
-    D: FnMut(&[f32], &cpal::InputCallbackInfo) + Send + 'static,
+    f32: FromSample<T>,
 {
     let stream = device
         .build_input_stream(
             config.into(),
-            data,
+            move |data: &[T], _: &cpal::InputCallbackInfo| {
+                if let Some(sink) = &mut sink {
+                    sink.take(data);
+                }
+            },
             |error| log::error!("Audio Error: {error}"),
             None,
         )
@@ -247,7 +311,7 @@ pub fn probe_input_device(input_device: &str) -> Result<(String, Option<String>)
         .default_input_config()
         .map_err(|e| e.to_string())?;
     // Dropped at once: opening and starting it is the whole proof
-    let stream = build_and_play(&selection.device, config, |_, _| {}).map_err(|e| e.to_string())?;
+    let stream = build_and_play(&selection.device, config, None).map_err(|e| e.to_string())?;
     drop(stream);
     Ok((selection.open, selection.missing))
 }
@@ -270,28 +334,16 @@ pub fn open_capture(
         .map_err(|e| BansheeError::Other(open_failure(&selection.open, e)))?;
 
     let sample_rate = config.sample_rate();
-    let channels = config.channels();
-
     let ring_capacity = sample_rate as usize * RING_SECS;
-    let (mut producer, consumer) = HeapRb::<f32>::new(ring_capacity).split();
+    let (producer, consumer) = HeapRb::<f32>::new(ring_capacity).split();
 
-    let capture_state = Arc::clone(&daemon_state);
-    // Runs on the real-time audio thread, so it must not allocate: downmixing
-    // through an iterator keeps the mono copy out of the heap
-    let stream = build_and_play(device, config, move |data: &[f32], _| {
-        capture_state.mark_capture_alive();
-        if capture_state.is_recording() {
-            if channels > 1 {
-                producer.push_iter(
-                    data.chunks(channels as usize)
-                        .map(|frame| frame.iter().sum::<f32>() / channels as f32),
-                );
-            } else {
-                producer.push_slice(data);
-            }
-        }
-    })
-    .map_err(|e| BansheeError::Other(open_failure(&selection.open, e)))?;
+    let sink = CaptureSink {
+        state: Arc::clone(&daemon_state),
+        producer,
+        channels: config.channels() as usize,
+    };
+    let stream = build_and_play(device, config, Some(sink))
+        .map_err(|e| BansheeError::Other(open_failure(&selection.open, e)))?;
 
     // Set after play() succeeds, so status never names a mic that failed to open
     daemon_state.set_audio_device(Some(selection.open.clone()));
@@ -530,5 +582,24 @@ mod tests {
             reason.contains("yeti"),
             "the reason must name what was asked"
         );
+    }
+
+    // A raw ALSA device can deliver integers only. Whisper reads the ring as
+    // levels in -1.0..1.0, whatever the device delivered.
+    #[test]
+    fn integer_samples_reach_the_ring_as_the_same_level() {
+        let stereo: Vec<f32> = downmix(&[i16::MAX, i16::MAX, i16::MIN, 0], 2).collect();
+        assert_eq!(stereo.len(), 2, "one value per frame");
+        assert!((stereo[0] - 1.0).abs() < 1e-3, "full scale: {stereo:?}");
+        assert!(
+            (stereo[1] + 0.5).abs() < 1e-3,
+            "the frame average: {stereo:?}"
+        );
+
+        let silence: Vec<f32> = downmix(&[128u8, 128], 1).collect();
+        assert_eq!(silence, vec![0.0, 0.0], "u8 silence sits at 128");
+
+        let float: Vec<f32> = downmix(&[0.25f32, -0.75], 1).collect();
+        assert_eq!(float, vec![0.25, -0.75], "f32 passes through unchanged");
     }
 }
