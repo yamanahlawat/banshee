@@ -457,10 +457,10 @@ impl Pipeline {
         thread::sleep(CUE_SETTLE);
         self.source.discard();
 
-        let listened = self.listen_for_answer(ask.timeout);
+        let listened = self.listen_for_answer(ask.timeout, ask.session);
 
         // Close the mic before the slow transcription; every exit disarms
-        self.state.set_recording_mode(RecordingMode::Idle);
+        self.state.disarm(ask.session);
         self.cues.send(Cue::Disarm);
 
         let text = match listened {
@@ -502,11 +502,15 @@ impl Pipeline {
     // Confirms onset, then ends on trailing silence; the audio comes back at
     // 16 kHz. `Ok(None)` is an answer that never came: silence, or a session
     // closed from outside. `Err` is a listen that broke.
-    fn listen_for_answer(&mut self, timeout: Duration) -> Result<Option<Vec<f32>>, String> {
-        let mut resampler = resampler_for(self.source.sample_rate())?;
+    fn listen_for_answer(
+        &mut self,
+        timeout: Duration,
+        session: u64,
+    ) -> Result<Option<Vec<f32>>, String> {
         // The device this answer started on. The watchdog may put another one
         // under it at any moment, and the rate is not shared between devices.
         let mut device = self.source.generation();
+        let mut resampler = resampler_for(self.source.sample_rate())?;
         self.vad.reset_state();
         let vad_threshold = self.state.vad_threshold();
         let endpoint_chunks = (self.endpoint_silence_ms / CHUNK_MS).max(1) as usize;
@@ -523,14 +527,14 @@ impl Pipeline {
         loop {
             thread::sleep(ARMED_POLL);
 
-            match self.state.recording_mode() {
-                RecordingMode::ArmedHold => {
+            match self.state.armed_mode(session) {
+                Some(RecordingMode::ArmedHold) => {
                     if !matches!(phase, Phase::Manual { .. }) {
                         // The hold replaces whatever endpointing had collected
                         phase = Phase::Manual { start: audio.len() };
                     }
                 }
-                RecordingMode::Armed => {
+                Some(RecordingMode::Armed) => {
                     if let Phase::Manual { start } = phase {
                         // The hotkey release ends the manual answer
                         audio.drain(..start);

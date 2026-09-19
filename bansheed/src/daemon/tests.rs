@@ -274,9 +274,9 @@ async fn stale_socket_is_reclaimed() {
     // Between fork and exec a `say` child holds a copy of the dead listener
     // fd, so the probe can transiently see the socket as alive
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let listener = loop {
+    let claimed = loop {
         match claim_socket(&path) {
-            Ok(listener) => break listener,
+            Ok(claimed) => break claimed,
             Err(e) if std::time::Instant::now() < deadline => {
                 assert_eq!(e.kind(), io::ErrorKind::AddrInUse);
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -284,8 +284,9 @@ async fn stale_socket_is_reclaimed() {
             Err(e) => panic!("stale socket not reclaimed: {e}"),
         }
     };
-    drop(listener);
+    drop(claimed);
     let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(path.with_extension("lock"));
 }
 
 #[tokio::test]
@@ -402,4 +403,19 @@ async fn a_request_sent_during_a_call_is_still_answered() {
     assert!(first["result"]["transcriptions"].is_array(), "{first}");
     let second = next_message(&mut lines).await;
     assert_eq!(second["result"]["running"], true, "{second}");
+}
+
+#[tokio::test]
+async fn a_stale_socket_is_left_to_the_claim_that_holds_the_lock() {
+    let path = test_socket_path("locked");
+    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+    let held = fs::File::create(path.with_extension("lock")).unwrap();
+    held.try_lock().unwrap();
+
+    let error = claim_socket(&path).expect_err("a second claim must not take the socket");
+
+    assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+    assert!(path.exists());
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(path.with_extension("lock"));
 }

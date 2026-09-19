@@ -758,20 +758,34 @@ mod tests {
 
     #[test]
     fn the_first_chunk_reaches_the_player_before_the_second_is_written() {
-        let (base_url, served) =
-            serve_speech("200 OK", vec![pcm(&[1; 480]), pcm(&[2; 480])], false);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request(&mut stream);
+            let chunk = |piece: Vec<u8>| {
+                [format!("{:x}\r\n", piece.len()).as_bytes(), &piece, b"\r\n"].concat()
+            };
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .unwrap();
+            stream.write_all(&chunk(pcm(&[1; 480]))).unwrap();
+            stream.flush().unwrap();
+            let _ = held.recv();
+            let _ = stream
+                .write_all(&chunk(pcm(&[2; 480])))
+                .and_then(|()| stream.write_all(b"0\r\n\r\n"))
+                .and_then(|()| stream.flush());
+        });
         let built = built(base_url, "", false);
-        let started = std::time::Instant::now();
         let utterance = built
             .backend
             .speak("Two chunks.")
             .expect("a test device opens");
+
         wait_until("the first chunk is queued", || utterance.queued() >= 1);
-        let first_at = started.elapsed();
-        assert!(
-            first_at < GAP,
-            "the first chunk waited for the second: {first_at:?}"
-        );
+        release.send(()).unwrap();
         wait_until("both chunks are queued", || utterance.queued() == 2);
         served.join().unwrap();
     }

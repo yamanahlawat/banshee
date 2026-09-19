@@ -1,3 +1,4 @@
+import { get } from 'svelte/store';
 import { describe, expect, it } from 'vitest';
 import ready from '../mocks/ready.json';
 import remote from '../mocks/remote.json';
@@ -9,6 +10,9 @@ import speakingJson from '../mocks/speaking.json';
 import notRunning from '../mocks/not-running.json';
 import pendingCues from '../mocks/pending-cues.json';
 import {
+  applyPush,
+  applyPushedStatus,
+  daemon,
   deviceLabel,
   downloadLine,
   empty,
@@ -23,6 +27,7 @@ import {
   reduceLive,
   reduceStatus,
   readinessIsStale,
+  refreshStatus,
   shownFloat,
   stateWord,
   listeningFacts,
@@ -466,5 +471,40 @@ describe('hotkeyListens', () => {
     expect(
       hotkeyListens(reduceStatus(empty(), { running: true, hotkey_listens: false } as Status)),
     ).toBe(false);
+  });
+});
+
+describe('a status read', () => {
+  it('keeps the live flags a push delivered while it was in flight', async () => {
+    daemon.set(empty());
+    let answer: (status: Status) => void = () => {};
+    const reading = refreshStatus(() => new Promise((resolve) => (answer = resolve)));
+    applyPush({ activity: 'recording', recording: true });
+    answer({ running: true, activity: 'idle', recording: false });
+    await reading;
+    expect(get(daemon).live.activity).toBe('recording');
+  });
+
+  it('is dropped when a pushed status landed while it was in flight', async () => {
+    daemon.set(empty());
+    let answer: (status: Status) => void = () => {};
+    const reading = refreshStatus(() => new Promise((resolve) => (answer = resolve)));
+    applyPushedStatus({ running: true, pending: ['tts.voice'] });
+    answer({ running: true, pending: [] });
+    await reading;
+    expect(get(daemon).pending.has('tts.voice')).toBe(true);
+  });
+
+  it('is dropped when a later read has already landed', async () => {
+    daemon.set(empty());
+    let first: (status: Status) => void = () => {};
+    let second: (status: Status) => void = () => {};
+    const older = refreshStatus(() => new Promise((resolve) => (first = resolve)));
+    const newer = refreshStatus(() => new Promise((resolve) => (second = resolve)));
+    second({ running: true, pending: ['tts.voice'] });
+    await newer;
+    first({ running: true, pending: [] });
+    await older;
+    expect(get(daemon).pending.has('tts.voice')).toBe(true);
   });
 });

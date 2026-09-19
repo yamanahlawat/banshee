@@ -14,9 +14,7 @@ use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
 use crate::connect;
 use crate::permissions;
-use crate::state::{
-    AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, TranscribeTarget,
-};
+use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingError, TranscribeTarget};
 use crate::text_to_speech::sanitizer::sanitize;
 use crate::{readiness, settings};
 
@@ -172,31 +170,17 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
 }
 
-/// Closes the listening session if the call is dropped before its answer
-/// arrives, which is what a client going away looks like from here. The
-/// consumer polls the mode, so clearing it ends the listen and disarms the
-/// microphone. `kept` marks a session that ended on its own: clearing the mode
-/// then could close a session someone else has since armed.
+/// Gives this call's session back on every exit. A client that goes away drops
+/// the call before its answer arrives, and the listen ends when the consumer
+/// sees the session gone.
 struct EndsTheSession<'a> {
     state: &'a DaemonState,
-    kept: bool,
-}
-
-impl<'a> EndsTheSession<'a> {
-    fn new(state: &'a DaemonState) -> Self {
-        Self { state, kept: false }
-    }
-
-    fn kept(mut self) {
-        self.kept = true;
-    }
+    session: u64,
 }
 
 impl Drop for EndsTheSession<'_> {
     fn drop(&mut self) {
-        if !self.kept {
-            self.state.set_recording_mode(RecordingMode::Idle);
-        }
+        self.state.disarm(self.session);
     }
 }
 
@@ -473,18 +457,21 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
 
     // One armed session at a time; the mode is the lock. Armed before the wait
     // below, so a press while Banshee talks holds to answer rather than dictates.
-    if !daemon_state.arm_for_ask() {
+    let Some(session) = daemon_state.arm_for_ask() else {
         return JsonRpcResponse::error(
             params.id(),
             rpc_code::BUSY,
             "Microphone is busy with another recording or listening session.",
         );
-    }
+    };
 
     // From here the mode is held, and every way out of this call gives it back:
     // the question is spoken before anyone listens, and a client that dies
     // while it plays would otherwise hold the microphone until a restart.
-    let ends_the_session = EndsTheSession::new(daemon_state);
+    let _ends_the_session = EndsTheSession {
+        state: daemon_state,
+        session,
+    };
 
     // A status outruns any budget short of the stalled-backend bound.
     let settled = silence_within(daemon_state, Duration::from_millis(MAX_PLAYBACK_WAIT_MS)).await;
@@ -512,6 +499,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     let command = ConsumerCommand::Ask(AskCommand {
         reply,
         timeout: Duration::from_millis(timeout_ms),
+        session,
     });
     if daemon_state.commands().send(command).is_err() {
         return JsonRpcResponse::error(
@@ -521,15 +509,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         );
     }
 
-    let answered = answer.await;
-    // The consumer disarms every session it finishes, so the guard steps aside
-    // for those. A sender that was dropped finished nothing, and the guard
-    // still owes the microphone back.
-    if answered.is_ok() {
-        ends_the_session.kept();
-    }
-
-    match answered {
+    match answer.await {
         Ok(Ok(text)) => JsonRpcResponse::success(params.id(), serde_json::json!({ "text": text })),
         // Distinct from silence, which answers empty text
         Ok(Err(reason)) => JsonRpcResponse::error(

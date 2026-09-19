@@ -1,4 +1,5 @@
 use super::*;
+use crate::state::RecordingMode;
 use crate::test_support::daemon_state as test_state;
 
 fn request(method: &str, params: Option<serde_json::Value>) -> JsonRpcRequest {
@@ -596,7 +597,10 @@ fn live_state_reports_armed_while_a_question_waits() {
     let state = test_state(std::sync::mpsc::channel().0);
     assert_eq!(live_state(&state)["armed"], serde_json::json!(false));
 
-    assert!(state.arm_for_ask(), "the fixture must discriminate");
+    assert!(
+        state.arm_for_ask().is_some(),
+        "the fixture must discriminate"
+    );
     let live = live_state(&state);
     assert_eq!(live["armed"], serde_json::json!(true));
     // The microphone is open while armed
@@ -1345,4 +1349,18 @@ async fn wait_for(
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("{what} did not happen within 2s");
+}
+
+#[test]
+fn a_dropped_ask_leaves_a_recording_someone_else_started() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let session = EndsTheSession {
+        state: &state,
+        session: state.arm_for_ask().expect("the ask arms"),
+    };
+    state.set_recording_mode(RecordingMode::PushToTalk);
+
+    drop(session);
+
+    assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 }

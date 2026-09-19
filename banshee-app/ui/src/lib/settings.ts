@@ -1,4 +1,4 @@
-import { daemon, markPending, reduceStatus } from './daemon';
+import { daemon, markPending, refreshStatus } from './daemon';
 import { setSetting, status } from './tauri';
 import { announce } from './copy';
 
@@ -25,8 +25,7 @@ export async function set(key: string, value: unknown): Promise<void> {
   // A write changes what `status` answers, and nothing pushes that, so a row
   // would go on showing the value the user just replaced.
   try {
-    const fresh = await status();
-    daemon.update((state) => reduceStatus(state, fresh));
+    await refreshStatus(status);
   } catch {
     // The write landed. A stale row is a smaller wrong than a lost setting.
   }

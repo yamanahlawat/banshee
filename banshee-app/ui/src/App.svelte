@@ -9,8 +9,9 @@
     isDown,
     lampForm,
     listeningFacts,
-    reduceLive,
-    reduceStatus,
+    applyPush,
+    applyPushedStatus,
+    refreshStatus,
     readinessIsStale,
     speechFacts,
     waitsOnARestart,
@@ -307,9 +308,8 @@
   /// andStart is off for the restart poll: launchd is already bringing the daemon back.
   async function readStatus(andStart = true): Promise<boolean> {
     try {
-      const initial = await status();
-      wasTranscribing = initial.transcribing === true;
-      daemon.update((s) => reduceStatus(s, initial));
+      await refreshStatus(status);
+      wasTranscribing = $daemon.live.transcribing;
       return true;
     } catch (error) {
       const reason = (error as { message?: string })?.message || 'not running';
@@ -348,13 +348,13 @@
     // came back. None of these touches the daemon socket.
     await Promise.all([
       listen<Status>('daemon:status', (e) => {
-        daemon.update((s) => reduceStatus(s, e.payload));
+        applyPushedStatus(e.payload);
         if (!$table.loaded) readAll().catch(() => {});
         readTheRest();
       }),
       listen<Partial<Live> & Pick<Status, 'pipeline'>>('daemon:state', (e) => {
         if (readinessIsStale($daemon, e.payload)) readStatus(false);
-        daemon.update((s) => reduceLive(s, e.payload));
+        applyPush(e.payload);
         if (e.payload.transcribing === false && wasTranscribing) readNewest().catch(() => {});
         if (e.payload.transcribing !== undefined) wasTranscribing = e.payload.transcribing;
       }),

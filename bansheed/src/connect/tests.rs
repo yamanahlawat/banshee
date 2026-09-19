@@ -1244,3 +1244,23 @@ fn opencode_plan_targets_the_jsonc_file() {
     }
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn a_file_that_changed_after_the_plan_is_left_as_it_is() {
+    let home = scratch("connect-changed");
+    let path = home.join("opencode.jsonc");
+    std::fs::write(&path, "{\"theme\": \"dark\"}").unwrap();
+    let change = Change::WriteFile {
+        path: path.clone(),
+        before: Some("{}".to_string()),
+        after: "{\"mcp\": {}}".to_string(),
+        executable: false,
+    };
+
+    assert!(apply_write(&change).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "{\"theme\": \"dark\"}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
