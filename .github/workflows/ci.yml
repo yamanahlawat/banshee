@@ -36,6 +36,21 @@ jobs:
           echo "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3  $HOME/.banshee/models/silero_vad.onnx" | shasum -a 256 -c -
       - run: cargo test
 
+  # The release publishes the cask only after `brew style` passes on it, so the
+  # same render and the same check run here, before a tag depends on them.
+  cask:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          sed -e "s/@VERSION@/0.0.0/" -e "s/@SHA256@/$(printf '0%.0s' {1..64})/" \
+            packaging/banshee.cask.rb > "$RUNNER_TEMP/tap/Casks/banshee.rb"
+          brew style "$RUNNER_TEMP/tap/Casks/banshee.rb"
+
   # The advisory database, every crate's licence and every crate's source,
   # against deny.toml. Ubuntu, because the graph resolves for every target.
   deny:
