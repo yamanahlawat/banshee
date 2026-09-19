@@ -36,22 +36,9 @@ pub enum TranscribeTarget {
     Tell,
 }
 
-impl TranscribeTarget {
-    fn as_u8(self) -> u8 {
-        match self {
-            TranscribeTarget::Mailbox => 0,
-            TranscribeTarget::Dictate => 1,
-            TranscribeTarget::Tell => 2,
-        }
-    }
-
-    fn from_u8(value: u8) -> TranscribeTarget {
-        match value {
-            1 => TranscribeTarget::Dictate,
-            2 => TranscribeTarget::Tell,
-            _ => TranscribeTarget::Mailbox,
-        }
-    }
+struct PushToTalk {
+    deadline: Instant,
+    target: TranscribeTarget,
 }
 
 pub struct AskCommand {
@@ -331,14 +318,11 @@ pub struct DaemonState {
     cues: Cues,
     barge_in: Mutex<BargeInMode>,
     // Start and stop can be separate RPC calls, so this cannot live on a stack
-    pending_target: AtomicU8,
+    push_to_talk: Mutex<PushToTalk>,
     // enigo posts to the same HID stream rdev listens at, so while this is
     // true the hotkey listener drops events: the paste's own modifier presses
     // would otherwise cancel or open sessions.
     typing: AtomicBool,
-    // Milliseconds since `started_at` at which an open push-to-talk is stuck.
-    // A deadline rather than a start keeps the watchdog to one load and compare.
-    push_to_talk_deadline: AtomicU64,
     // Milliseconds since `started_at` at which the capture callback last ran.
     // Zero means it has never run, which reads as stalled.
     capture_tick: AtomicU64,
@@ -396,9 +380,11 @@ impl DaemonState {
             speech: Arc::new(speech),
             commands,
             cues,
-            pending_target: AtomicU8::new(TranscribeTarget::Mailbox.as_u8()),
+            push_to_talk: Mutex::new(PushToTalk {
+                deadline: Instant::now(),
+                target: TranscribeTarget::Mailbox,
+            }),
             typing: AtomicBool::new(false),
-            push_to_talk_deadline: AtomicU64::new(0),
             capture_tick: AtomicU64::new(0),
             shutdown: tokio::sync::Notify::new(),
         }
@@ -419,17 +405,11 @@ impl DaemonState {
             }
             self.cues.send(Cue::RecordStart);
             true
-        } else if self.try_transition(RecordingMode::Idle, RecordingMode::PushToTalk) {
+        } else if self.start_push_to_talk(action) {
             // Silence the daemon's own voice before the mic opens
             if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
-            self.push_to_talk_deadline.store(
-                (self.started_at.elapsed() + MAX_PUSH_TO_TALK).as_millis() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            self.pending_target
-                .store(action.as_u8(), std::sync::atomic::Ordering::Release);
             self.cues.send(Cue::RecordStart);
             log::info!("Recording started...");
             true
@@ -441,17 +421,41 @@ impl DaemonState {
     // A stop with nothing in flight is a no-op, so release keybinds can fire
     // unconditionally.
     pub fn record_stop(&self) {
-        if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
-            log::info!("Recording stopped");
-            self.cues.send(Cue::RecordStop);
-            let action = TranscribeTarget::from_u8(
-                self.pending_target
-                    .load(std::sync::atomic::Ordering::Acquire),
-            );
-            let _ = self.commands.send(ConsumerCommand::Transcribe(action));
-        } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
+        if !self.stop_push_to_talk(self.locked_push_to_talk())
+            && self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed)
+        {
             self.cues.send(Cue::RecordStop);
         }
+    }
+
+    fn start_push_to_talk(&self, target: TranscribeTarget) -> bool {
+        let mut session = self.locked_push_to_talk();
+        if !self.try_transition(RecordingMode::Idle, RecordingMode::PushToTalk) {
+            return false;
+        }
+        *session = PushToTalk {
+            deadline: Instant::now() + MAX_PUSH_TO_TALK,
+            target,
+        };
+        true
+    }
+
+    fn stop_push_to_talk(&self, session: std::sync::MutexGuard<'_, PushToTalk>) -> bool {
+        if !self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
+            return false;
+        }
+        let target = session.target;
+        drop(session);
+        log::info!("Recording stopped");
+        self.cues.send(Cue::RecordStop);
+        let _ = self.commands.send(ConsumerCommand::Transcribe(target));
+        true
+    }
+
+    fn locked_push_to_talk(&self) -> std::sync::MutexGuard<'_, PushToTalk> {
+        self.push_to_talk
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
     // Resolved here, not in the tracker: a tracker-side read races a mode change. True when it
@@ -494,21 +498,15 @@ impl DaemonState {
     // Releases a session that never got its stop. Stops rather than discards:
     // the ring holds real audio and record_stop is what routes it.
     pub fn expire_stuck_recording(&self) -> bool {
-        if self.recording_mode() != RecordingMode::PushToTalk {
-            return false;
-        }
-        let deadline = self
-            .push_to_talk_deadline
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if (self.started_at.elapsed().as_millis() as u64) < deadline {
+        let session = self.locked_push_to_talk();
+        if self.recording_mode() != RecordingMode::PushToTalk || Instant::now() < session.deadline {
             return false;
         }
         log::warn!(
             "Push-to-talk ran past {}s with no stop; releasing the microphone.",
             MAX_PUSH_TO_TALK.as_secs()
         );
-        self.record_stop();
-        true
+        self.stop_push_to_talk(session)
     }
 
     pub fn speech(&self) -> &Arc<SpeechPlayer> {
@@ -559,6 +557,7 @@ impl DaemonState {
         RecordingMode::from_u8(self.recording.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    #[cfg(test)]
     pub fn set_recording_mode(&self, mode: RecordingMode) {
         self.recording
             .store(mode as u8, std::sync::atomic::Ordering::Relaxed);
@@ -639,16 +638,20 @@ impl DaemonState {
     }
 
     fn write_failure(&self, from: Source, reason: Option<String>) {
-        let cleared = self
-            .last_error
-            .borrow()
-            .as_ref()
-            .is_none_or(|failed| failed.from == from);
-        match reason {
-            Some(reason) => send_if_new(&self.last_error, Some(Failed { from, reason })),
-            None if cleared => send_if_new(&self.last_error, None),
-            None => {}
-        }
+        self.last_error.send_if_modified(|current| {
+            let next = match reason {
+                Some(reason) => Some(Failed { from, reason }),
+                None if current.as_ref().is_some_and(|failed| failed.from != from) => {
+                    return false;
+                }
+                None => None,
+            };
+            if *current == next {
+                return false;
+            }
+            *current = next;
+            true
+        });
     }
 
     pub fn last_error(&self) -> Option<String> {
@@ -826,6 +829,11 @@ impl DaemonState {
     /// gate with `record_start`, so no caller can arm a mic that cannot record.
     pub fn arm_for_ask(&self) -> bool {
         self.pipeline().is_open() && self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
+    }
+
+    pub fn disarm(&self) {
+        let _ = self.try_transition(RecordingMode::Armed, RecordingMode::Idle)
+            || self.try_transition(RecordingMode::ArmedHold, RecordingMode::Idle);
     }
 
     /// The voice the speech backend actually loaded, which `config.toml` may no

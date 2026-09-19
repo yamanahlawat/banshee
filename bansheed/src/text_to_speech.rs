@@ -302,10 +302,7 @@ impl SpeechPlayer {
         // normalize can leave nothing speakable (e.g. input was only underscores);
         // keep the id sequence but start no playback
         if text.is_empty() {
-            drop(playback);
-            if interrupt {
-                self.speaking.send_replace(false);
-            }
+            self.publish(&playback);
             return Ok(utterance_id);
         }
 
@@ -327,16 +324,14 @@ impl SpeechPlayer {
             // this reads true, so a reply that never starts would leave the
             // daemon deaf.
             Err(error) => {
-                drop(playback);
-                self.speaking
-                    .send_if_modified(|speaking| std::mem::replace(speaking, false));
+                self.publish(&playback);
                 return Err(error);
             }
         }
         let needs_watcher = !playback.watcher_running;
         playback.watcher_running = true;
+        self.publish(&playback);
         drop(playback);
-        self.speaking.send_replace(true);
 
         if needs_watcher {
             let player = Arc::clone(self);
@@ -349,8 +344,7 @@ impl SpeechPlayer {
         let mut playback = self.lock();
         playback.queue.clear();
         stop_active(&mut playback);
-        drop(playback);
-        self.speaking.send_replace(false);
+        self.publish(&playback);
     }
 
     pub fn is_speaking(&self) -> bool {
@@ -381,15 +375,13 @@ impl SpeechPlayer {
                         log::error!("Failed to speak queued utterance: {e}");
                         playback.queue.clear();
                         playback.watcher_running = false;
-                        drop(playback);
-                        self.speaking.send_replace(false);
+                        self.publish(&playback);
                         return;
                     }
                 },
                 None => {
                     playback.watcher_running = false;
-                    drop(playback);
-                    self.speaking.send_replace(false);
+                    self.publish(&playback);
                     return;
                 }
             }
@@ -398,6 +390,12 @@ impl SpeechPlayer {
 
     fn lock(&self) -> MutexGuard<'_, Playback> {
         lock(&self.playback)
+    }
+
+    fn publish(&self, playback: &Playback) {
+        self.speaking.send_if_modified(|speaking| {
+            std::mem::replace(speaking, playback.active.is_some()) != playback.active.is_some()
+        });
     }
 }
 

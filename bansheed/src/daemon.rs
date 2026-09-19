@@ -22,7 +22,7 @@ use crate::state::{ConsumerCommand, DaemonState, RecordingError};
 use crate::{audio, history, hotkey, models, permissions, text_to_speech};
 
 // Claimed before model loading, so a lost single-instance race stays cheap
-pub fn claim() -> Result<(std::path::PathBuf, UnixListener), BansheeError> {
+pub fn claim() -> Result<(std::path::PathBuf, UnixListener, fs::File), BansheeError> {
     let socket_path = socket_path().ok_or_else(|| {
         BansheeError::Other("could not find home directory for the socket path".to_string())
     })?;
@@ -31,11 +31,11 @@ pub fn claim() -> Result<(std::path::PathBuf, UnixListener), BansheeError> {
         fs::create_dir_all(parent_dir).map_err(|e| BansheeError::file(parent_dir, e))?;
     }
 
-    let listener = claim_socket(&socket_path)?;
+    let (listener, lock) = claim_socket(&socket_path)?;
     // owner-only: the socket is a command channel into the mic and speakers
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
         .map_err(|e| BansheeError::file(&socket_path, e))?;
-    Ok((socket_path, listener))
+    Ok((socket_path, listener, lock))
 }
 
 /// `open_capture` writes the device name once `play()` succeeds, so a name left
@@ -117,7 +117,7 @@ fn start_recording(
 
 pub async fn start(config: Config) -> Result<(), BansheeError> {
     let config = Arc::new(config);
-    let (socket_path, listener) = claim()?;
+    let (socket_path, listener, _lock) = claim()?;
     permissions::ask_for_accessibility();
     let db_connection = if config.daemon.save_history {
         Some(history::open()?)
@@ -495,8 +495,14 @@ pub fn socket_answers(socket_path: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
 }
 
-// The socket file doubles as the single-instance lock
-fn claim_socket(socket_path: &Path) -> io::Result<UnixListener> {
+fn claim_socket(socket_path: &Path) -> io::Result<(UnixListener, fs::File)> {
+    let lock = fs::File::create(socket_path.with_extension("lock"))?;
+    if lock.try_lock().is_err() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "another banshee daemon is already running",
+        ));
+    }
     if socket_path.exists() {
         if socket_answers(socket_path) {
             return Err(io::Error::new(
@@ -508,7 +514,7 @@ fn claim_socket(socket_path: &Path) -> io::Result<UnixListener> {
         log::info!("Removing stale socket at {}", socket_path.display());
         fs::remove_file(socket_path)?;
     }
-    UnixListener::bind(socket_path)
+    Ok((UnixListener::bind(socket_path)?, lock))
 }
 
 #[cfg(test)]

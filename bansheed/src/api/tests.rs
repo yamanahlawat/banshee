@@ -1,4 +1,5 @@
 use super::*;
+use crate::state::RecordingMode;
 use crate::test_support::daemon_state as test_state;
 
 fn request(method: &str, params: Option<serde_json::Value>) -> JsonRpcRequest {
@@ -1345,4 +1346,15 @@ async fn wait_for(
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("{what} did not happen within 2s");
+}
+
+#[test]
+fn a_dropped_ask_leaves_a_recording_someone_else_started() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let session = EndsTheSession::new(&state);
+    state.set_recording_mode(RecordingMode::PushToTalk);
+
+    drop(session);
+
+    assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 }

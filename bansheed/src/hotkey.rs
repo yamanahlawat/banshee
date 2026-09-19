@@ -460,7 +460,7 @@ impl Pipeline {
         let listened = self.listen_for_answer(ask.timeout);
 
         // Close the mic before the slow transcription; every exit disarms
-        self.state.set_recording_mode(RecordingMode::Idle);
+        self.state.disarm();
         self.cues.send(Cue::Disarm);
 
         let text = match listened {
@@ -503,10 +503,10 @@ impl Pipeline {
     // 16 kHz. `Ok(None)` is an answer that never came: silence, or a session
     // closed from outside. `Err` is a listen that broke.
     fn listen_for_answer(&mut self, timeout: Duration) -> Result<Option<Vec<f32>>, String> {
-        let mut resampler = resampler_for(self.source.sample_rate())?;
         // The device this answer started on. The watchdog may put another one
         // under it at any moment, and the rate is not shared between devices.
         let mut device = self.source.generation();
+        let mut resampler = resampler_for(self.source.sample_rate())?;
         self.vad.reset_state();
         let vad_threshold = self.state.vad_threshold();
         let endpoint_chunks = (self.endpoint_silence_ms / CHUNK_MS).max(1) as usize;
