@@ -342,6 +342,7 @@ struct StateWatches {
     transcribing: watch::Receiver<bool>,
     telling: watch::Receiver<bool>,
     devices: watch::Receiver<u64>,
+    pipeline: watch::Receiver<crate::state::Pipeline>,
     last_error: watch::Receiver<Option<crate::state::Failed>>,
     last_speech_error: watch::Receiver<Option<String>>,
 }
@@ -363,6 +364,7 @@ async fn push_changes(
             woken = watches.transcribing.changed() => woken,
             woken = watches.telling.changed() => woken,
             woken = watches.devices.changed() => woken,
+            woken = watches.pipeline.changed() => woken,
             woken = watches.last_error.changed() => woken,
             woken = watches.last_speech_error.changed() => woken,
         };
@@ -438,6 +440,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
                     transcribing: state.subscribe_transcribing(),
                     telling: state.subscribe_telling(),
                     devices: state.device_changes(),
+                    pipeline: state.subscribe_pipeline(),
                     last_error: state.subscribe_last_error(),
                     last_speech_error: state.subscribe_last_speech_error(),
                 },

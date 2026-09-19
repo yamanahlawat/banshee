@@ -99,6 +99,21 @@ async fn a_subscriber_hears_the_microphone_open() {
     assert!(pushed.get("id").is_none(), "a notification carries no id");
 }
 
+// A window connects while the pipeline opens and reads "not ready". Without
+// this push it keeps that answer until it happens to read the status again.
+#[tokio::test]
+async fn a_subscriber_hears_the_pipeline_open() {
+    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+    let (mut lines, _writer, reply) = subscribed(&state).await;
+    assert_eq!(reply["result"]["pipeline"], "opening");
+
+    state.set_pipeline(crate::state::Pipeline::Open);
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], BANSHEE_STATE_CHANGED);
+    assert_eq!(pushed["params"]["pipeline"], "open");
+}
+
 // ask_user arms the microphone and then parks inside dispatch, for up to two
 // minutes, waiting for the answer. A subscriber that hears nothing while the
 // microphone is open is the whole reason not to poll.

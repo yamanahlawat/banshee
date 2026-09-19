@@ -22,6 +22,8 @@ export type Status = Record<string, unknown> & {
   running: boolean;
   /// The daemon's own word for "nothing stops Banshee working".
   ready?: boolean;
+  /// The pipeline `ready` was judged against. Absent from a daemon older than it.
+  pipeline?: 'opening' | 'open' | 'broken';
   blockers?: Blocker[];
   hotkey_listens?: boolean;
   bindable_modifiers?: string[];
@@ -140,6 +142,12 @@ export function hotkeyListens(state: Daemon): boolean {
 // answered, which `isDown` speaks for.
 export function isReady(state: Daemon): boolean {
   return state.status?.ready !== false;
+}
+// `ready` comes only with the full status, but a push carries the pipeline it
+// was judged against.
+export function readinessIsStale(state: Daemon, pushed: { pipeline?: string }): boolean {
+  if (state.status === null || pushed.pipeline === undefined) return false;
+  return pushed.pipeline !== state.status.pipeline;
 }
 export function isDown(state: Daemon): boolean {
   return state.down !== null || state.status?.running === false;
