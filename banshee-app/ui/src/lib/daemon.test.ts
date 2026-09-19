@@ -11,6 +11,7 @@ import notRunning from '../mocks/not-running.json';
 import pendingCues from '../mocks/pending-cues.json';
 import {
   applyPush,
+  applyPushedStatus,
   daemon,
   deviceLabel,
   downloadLine,
@@ -482,6 +483,16 @@ describe('a status read', () => {
     answer({ running: true, activity: 'idle', recording: false });
     await reading;
     expect(get(daemon).live.activity).toBe('recording');
+  });
+
+  it('is dropped when a pushed status landed while it was in flight', async () => {
+    daemon.set(empty());
+    let answer: (status: Status) => void = () => {};
+    const reading = refreshStatus(() => new Promise((resolve) => (answer = resolve)));
+    applyPushedStatus({ running: true, pending: ['tts.voice'] });
+    answer({ running: true, pending: [] });
+    await reading;
+    expect(get(daemon).pending.has('tts.voice')).toBe(true);
   });
 
   it('is dropped when a later read has already landed', async () => {
