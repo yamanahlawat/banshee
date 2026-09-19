@@ -357,3 +357,29 @@ export function speechFacts(
       : (voices.find((one) => one.id === id)?.name ?? id),
   };
 }
+
+let pushes = 0;
+let reads = 0;
+
+export function applyPush(live: Partial<Live>): void {
+  pushes += 1;
+  daemon.update((state) => reduceLive(state, live));
+}
+
+export function applyPushedStatus(status: Status): void {
+  pushes += 1;
+  daemon.update((state) => reduceStatus(state, status));
+}
+
+export async function refreshStatus(read: () => Promise<Status>): Promise<Status> {
+  const mine = ++reads;
+  const seen = pushes;
+  const status = await read();
+  if (mine === reads) {
+    daemon.update((state) => {
+      const next = reduceStatus(state, status);
+      return pushes === seen ? next : { ...next, live: state.live };
+    });
+  }
+  return status;
+}

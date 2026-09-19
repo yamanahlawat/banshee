@@ -1592,7 +1592,7 @@ fn with_a_thread(name: &str) -> PathBuf {
     executable(
         &dir,
         "kitty",
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.tmp\" && /bin/mv \"$0.tmp\" \"$0.args\"\n",
     );
     write_session(
         &dir,
@@ -1680,7 +1680,7 @@ fn show_opens_nothing_when_there_is_no_thread() {
     executable(
         &dir,
         "kitty",
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.tmp\" && /bin/mv \"$0.tmp\" \"$0.args\"\n",
     );
     let error = shown(&dir).0.unwrap_err();
     assert!(error.to_string().contains("Nothing has run yet"), "{error}");

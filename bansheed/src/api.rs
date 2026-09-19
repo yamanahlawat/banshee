@@ -14,9 +14,7 @@ use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
 use crate::connect;
 use crate::permissions;
-use crate::state::{
-    AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, TranscribeTarget,
-};
+use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingError, TranscribeTarget};
 use crate::text_to_speech::sanitizer::sanitize;
 use crate::{readiness, settings};
 
@@ -195,7 +193,7 @@ impl<'a> EndsTheSession<'a> {
 impl Drop for EndsTheSession<'_> {
     fn drop(&mut self) {
         if !self.kept {
-            self.state.set_recording_mode(RecordingMode::Idle);
+            self.state.disarm();
         }
     }
 }

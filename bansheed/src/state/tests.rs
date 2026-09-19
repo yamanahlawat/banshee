@@ -389,9 +389,7 @@ fn watchdog_releases_a_push_to_talk_that_never_stopped() {
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
     // Bring the deadline forward instead of waiting out MAX_PUSH_TO_TALK
-    state
-        .push_to_talk_deadline
-        .store(0, std::sync::atomic::Ordering::Relaxed);
+    state.locked_push_to_talk().deadline = Instant::now();
 
     // Past it, the mic comes back and the utterance is still transcribed
     assert!(state.expire_stuck_recording());
@@ -411,9 +409,7 @@ fn watchdog_leaves_armed_listening_alone() {
     // ask_user sessions run their own timeouts; the watchdog must not
     // yank the microphone out from under one
     state.set_recording_mode(RecordingMode::Armed);
-    state
-        .push_to_talk_deadline
-        .store(0, std::sync::atomic::Ordering::Relaxed);
+    state.locked_push_to_talk().deadline = Instant::now();
     assert!(!state.expire_stuck_recording());
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
 }
@@ -654,4 +650,71 @@ fn record_start_is_refused_while_the_pipeline_is_still_opening() {
 
     state.set_pipeline(Pipeline::Open);
     assert!(state.record_start(TranscribeTarget::Mailbox));
+}
+
+struct StopWaits {
+    stopping: std::sync::mpsc::Sender<()>,
+    release: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl crate::text_to_speech::ActiveUtterance for StopWaits {
+    fn is_finished(&mut self) -> bool {
+        false
+    }
+    fn stop(&mut self) {
+        let _ = self.stopping.send(());
+        let _ = self.release.lock().unwrap().recv();
+    }
+}
+
+struct StopsSlowly {
+    stopping: std::sync::mpsc::Sender<()>,
+    release: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl crate::text_to_speech::TtsBackend for StopsSlowly {
+    fn start(
+        &self,
+        _text: &str,
+        _voice: Option<&str>,
+    ) -> Result<Box<dyn crate::text_to_speech::ActiveUtterance>, banshee_common::error::BansheeError>
+    {
+        Ok(Box::new(StopWaits {
+            stopping: self.stopping.clone(),
+            release: std::sync::Arc::clone(&self.release),
+        }))
+    }
+}
+
+#[test]
+fn the_watchdog_does_not_expire_a_press_whose_start_is_still_running() {
+    let (stopping, stop_started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let speech = crate::text_to_speech::SpeechPlayer::new(Box::new(StopsSlowly {
+        stopping,
+        release: std::sync::Arc::new(std::sync::Mutex::new(released)),
+    }));
+    let state = std::sync::Arc::new(DaemonState::new(
+        std::sync::Arc::new(Config::default()),
+        None,
+        speech,
+        crate::text_to_speech::Speaker::Fallback,
+        std::sync::mpsc::channel().0,
+        crate::audio::cues::Cues::silent(),
+        crate::test_support::scratch("state-press"),
+    ));
+    state.set_pipeline(Pipeline::Open);
+    std::sync::Arc::clone(state.speech())
+        .speak("A reply.", false, None)
+        .unwrap();
+
+    let starting = std::sync::Arc::clone(&state);
+    let pressed = std::thread::spawn(move || starting.record_start(TranscribeTarget::Mailbox));
+    stop_started.recv().unwrap();
+    let expired = state.expire_stuck_recording();
+    release.send(()).unwrap();
+
+    assert!(pressed.join().unwrap());
+    assert!(!expired);
+    assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 }

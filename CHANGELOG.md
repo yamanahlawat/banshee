@@ -7,14 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **A microphone that delivers only whole numbers records.** Banshee asked every
-  microphone for floating-point samples. A raw ALSA device, such as a USB
-  microphone opened without PipeWire, can refuse them. Capture then failed with
-  "Sample format f32 is not supported". Banshee now opens the format that the
-  device offers, and converts each sample to floating point.
-
 ## [0.15.0] - 2026-09-19
 
 ### Added
@@ -83,6 +75,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored since 0.11.1. Delete the table and the file loads again.
 
 ### Fixed
+
+- **A microphone that delivers only whole numbers records.** Banshee asked every
+  microphone for floating-point samples. A raw ALSA device, such as a USB
+  microphone opened without PipeWire, can refuse them. Capture then failed with
+  "Sample format f32 is not supported". Banshee now opens the format that the
+  device offers, and converts each sample to floating point.
+
+- **The window says ready as soon as the microphone opens.** The window read
+  `ready` only with the full status, and the daemon pushed no word when the
+  microphone finished opening or broke. The window could keep the old state
+  until something else asked again. The daemon now pushes the microphone state,
+  and the window reads the status again when it changes.
 
 - **A reply never plays into a sound card that PipeWire does not hold.** When
   the default output would not open, Banshee opened whatever other device

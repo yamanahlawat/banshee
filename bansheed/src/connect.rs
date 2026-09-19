@@ -606,10 +606,16 @@ pub fn apply(change: &Change, path: &OsStr) -> Result<(), BansheeError> {
         }
         Change::WriteFile {
             path,
+            before,
             after,
             executable,
-            ..
         } => {
+            if read_if_present(path)? != *before {
+                return Err(BansheeError::Rejected(format!(
+                    "{} changed after the plan was made. Nothing was written to it; run the command again.",
+                    path.display()
+                )));
+            }
             let mode = executable.then_some(0o755);
             banshee_common::utils::write_atomically(path, after.as_bytes(), mode)?;
             Ok(())

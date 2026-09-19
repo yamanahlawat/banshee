@@ -398,9 +398,14 @@ impl Playing {
     /// Moves what is left of this reply to the device that is there now. The
     /// player and its queue belong to the dead device, so both are replaced.
     fn swap_device(&mut self) -> Result<(), BansheeError> {
+        self.seen_pulls = self.pulls.load(Ordering::Relaxed);
         let (mixer, device) = self.output.device_after(self.on.load(Ordering::Relaxed))?;
-        let fresh = Arc::new(Player::connect_new(&mixer));
         {
+            let cancelled = lock(&self.cancelled);
+            if *cancelled {
+                return Ok(());
+            }
+            let fresh = Arc::new(Player::connect_new(&mixer));
             let queue = lock(&self.held);
             for chunk in queue.iter() {
                 fresh.append(stamped(chunk.clone(), Arc::clone(&self.pulls)));
@@ -410,7 +415,6 @@ impl Playing {
             *player = fresh;
         }
         self.on.store(device, Ordering::Relaxed);
-        self.seen_pulls = self.pulls.load(Ordering::Relaxed);
         self.owed_since = std::time::Instant::now();
         Ok(())
     }
@@ -890,8 +894,18 @@ mod tests {
     // that took audio has earned the reply another move.
     #[test]
     fn a_device_that_played_earns_the_next_swap() {
-        let (output, opened) = Output::counting();
-        let output = Arc::new(output);
+        let opened = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counted = Arc::clone(&opened);
+        let (opening, swap_started) = std::sync::mpsc::channel();
+        let (finish, may_finish) = std::sync::mpsc::channel::<()>();
+        let may_finish = std::sync::Mutex::new(may_finish);
+        let output = Arc::new(Output::from_opener(Box::new(move || {
+            if counted.fetch_add(1, Ordering::Relaxed) == 1 {
+                let _ = opening.send(());
+                let _ = may_finish.lock().unwrap().recv();
+            }
+            Ok(Output::test_device())
+        })));
         let utterance = output
             .play(std::iter::repeat_with(a_sentence).take(5), ignored_faults())
             .expect("a test device opens");
@@ -899,14 +913,69 @@ mod tests {
             utterance.queued() == super::ALWAYS_QUEUED
         });
 
-        wait_for_the_swap("the first swap", || opened.load(Ordering::Relaxed) == 2);
+        swap_started
+            .recv_timeout(super::DEAD_OUTPUT * 4)
+            .expect("the first swap starts");
 
-        // The new device takes audio, which is what the counter is for
+        // The new device takes audio while the swap is still in progress
         utterance.took_audio();
+        finish.send(()).expect("the swap waits for the test");
 
         wait_for_the_swap("a device that played earns another swap", || {
             opened.load(Ordering::Relaxed) == 3
         });
+    }
+
+    #[test]
+    fn a_stop_during_a_swap_sends_nothing_to_the_new_device() {
+        let opened = std::sync::atomic::AtomicU64::new(0);
+        let second: Arc<std::sync::Mutex<Option<rodio::mixer::MixerSource>>> = Arc::default();
+        let reads = Arc::clone(&second);
+        let (opening, swap_started) = std::sync::mpsc::channel();
+        let (finish, may_finish) = std::sync::mpsc::channel::<()>();
+        let may_finish = std::sync::Mutex::new(may_finish);
+        let output = Arc::new(Output::from_opener(Box::new(move || {
+            if opened.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Ok(Output::test_device());
+            }
+            let _ = opening.send(());
+            let _ = may_finish.lock().unwrap().recv();
+            let (mixer, source) = rodio::mixer::mixer(CHANNELS, SAMPLE_RATE);
+            *reads.lock().unwrap() = Some(source);
+            let (closer, _closed) = std::sync::mpsc::channel();
+            Ok(super::Device {
+                mixer,
+                _closer: closer,
+            })
+        })));
+        let loud = || Chunk {
+            samples: vec![0.5; SAMPLE_RATE.get() as usize],
+            ..kokoros_chunk(0)
+        };
+        let mut utterance = output
+            .play(std::iter::repeat_with(loud).take(5), ignored_faults())
+            .expect("a test device opens");
+        wait_until("the look-ahead fills", || {
+            utterance.queued() == super::ALWAYS_QUEUED
+        });
+
+        swap_started
+            .recv_timeout(super::DEAD_OUTPUT * 4)
+            .expect("the swap starts");
+        utterance.stop();
+        finish.send(()).expect("the swap waits for the test");
+        wait_until("the thread ends", || utterance.worker_finished());
+
+        let mut mixed = second
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the swap opened a device");
+        let heard = (0..2_400)
+            .filter_map(|_| mixed.next())
+            .filter(|s| *s != 0.0)
+            .count();
+        assert_eq!(heard, 0);
     }
 
     // A cue and a reply play at once through one output. When one of them moves
