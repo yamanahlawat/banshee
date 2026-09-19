@@ -141,7 +141,8 @@ bind = SUPER, F9, exec, banshee record toggle --tell
 
 ## Building the desktop window
 
-- **The window** is a Tauri app. It needs WebKitGTK, GTK 3 and Node 22.22.2 or newer.
+- **The window** is a Tauri app. It needs WebKitGTK, GTK 3 and Node: 22 from
+  22.22.2, 24 from 24.15, or 26 or newer.
 - **The tray** needs GTK 3.
 - **The daemon and the CLI** need none of them to run.
 - **A build from source** still needs the GTK 3 headers, because one crate holds
@@ -165,7 +166,7 @@ make install
 
 - **`make install`** builds and installs the daemon, the CLI and the window.
 - **It builds the window** only when `webkit2gtk-4.1`, `gtk+-3.0`, `npm` and the
-  Tauri CLI are present. The window needs Node 22.22.2 or newer.
+  Tauri CLI are present.
 - **Without them** it installs the daemon and the CLI, and names what is missing.
   A machine with no GTK still runs them.
 - **A plain `cargo build` of `banshee-app`** leaves out the UI. The window then
