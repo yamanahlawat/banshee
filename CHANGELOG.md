@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A microphone that delivers only whole numbers records.** Banshee asked every
+  microphone for floating-point samples. A raw ALSA device, such as a USB
+  microphone opened without PipeWire, can refuse them. Capture then failed with
+  "Sample format f32 is not supported". Banshee now opens the format that the
+  device offers, and converts each sample to floating point.
+
 ## [0.15.0] - 2026-09-19
 
 ### Added

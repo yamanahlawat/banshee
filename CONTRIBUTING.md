@@ -133,7 +133,8 @@ cargo run -p banshee -- serve
 
 - `make install` needs three more things.
 - Install the Tauri CLI: `cargo install tauri-cli --version "^2" --locked`.
-- Install Node 22.
+- Install Node 22 from 22.22.2, Node 24 from 24.15, or Node 26 or newer. Node 23 and 25
+  are not supported. `engines` in `banshee-app/ui/package.json` holds the range.
 - Run `npm ci` in `banshee-app/ui`; the Tauri build runs `npm run build`
   there.
 

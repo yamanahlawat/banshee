@@ -22,6 +22,7 @@ import {
   spokenProgress,
   reduceLive,
   reduceStatus,
+  readinessIsStale,
   shownFloat,
   stateWord,
   listeningFacts,
@@ -113,6 +114,24 @@ describe('the state word', () => {
     const stale = reduceLive(reduceStatus(empty(), notRunning), { armed: false });
     expect(stale.down).toBeNull();
     expect(stateWord(stale)).toBe('Not running');
+  });
+});
+
+// The window reads `ready` once per connection. A push that shows the pipeline
+// has moved since then says that reading is out of date.
+describe('readiness', () => {
+  const opening = reduceStatus(empty(), { ...ready, pipeline: 'opening', ready: false } as Status);
+  it('is stale once a push shows the pipeline moved', () => {
+    expect(readinessIsStale(opening, { ...armed, pipeline: 'open' })).toBe(true);
+  });
+  it('is not stale while the pipeline stays where it was read', () => {
+    expect(readinessIsStale(opening, { ...armed, pipeline: 'opening' })).toBe(false);
+  });
+  it('is not stale for a daemon that pushes no pipeline', () => {
+    expect(readinessIsStale(opening, {})).toBe(false);
+  });
+  it('is not stale before any status was read', () => {
+    expect(readinessIsStale(empty(), { pipeline: 'open' })).toBe(false);
   });
 });
 

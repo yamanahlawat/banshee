@@ -235,7 +235,7 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     let credentials = crate::credentials::Credentials::load().ok();
     // The same call the `banshee.state_changed` push answers with, so a reply
     // and a push cannot spell one fact two ways.
-    let mut payload = live_state(daemon_state);
+    let mut payload = live_state_at(daemon_state, &pipeline);
     let rest = serde_json::json!({
         "running": true,
         "version": daemon_state.version(),
@@ -258,7 +258,6 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             .is_some_and(crate::speech_to_text::english_only),
         // False where the compositor holds the binding, so the window does not
         // name a key the daemon never listens for.
-        "pipeline": pipeline.as_str(),
         "hotkey_listens": crate::hotkey::listens(),
         "bindable_modifiers": crate::binding::bindable_modifiers(),
         // Stated, so no client invents a narrower definition of ready
@@ -324,10 +323,17 @@ fn with_key_press_access(payload: serde_json::Value) -> serde_json::Value {
 }
 
 /// The `banshee.state_changed` params: what moves without a client touching it.
-/// The two device fields move on their own, because the watchdog rebinds while
-/// the daemon idles. `vad_threshold` moves at runtime too, but only when a
+/// The two device fields and the pipeline move on their own, because the
+/// watchdog rebinds while the daemon idles. `vad_threshold` moves at runtime too, but only when a
 /// `configure` call asks it to, and that call already answers.
 pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
+    live_state_at(daemon_state, &daemon_state.pipeline())
+}
+
+fn live_state_at(
+    daemon_state: &DaemonState,
+    pipeline: &crate::state::Pipeline,
+) -> serde_json::Value {
     let mut live = serde_json::json!({
         "recording": daemon_state.is_recording(),
         "armed": daemon_state.is_armed(),
@@ -338,6 +344,7 @@ pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
         "missing_device": daemon_state.missing_device(),
         "last_error": daemon_state.last_error(),
         "last_speech_error": daemon_state.last_speech_error(),
+        "pipeline": pipeline.as_str(),
     });
     // Ranked once, in banshee-common, so no client ranks the flags itself.
     live["activity"] = banshee_common::Activity::of(&live).word().into();
