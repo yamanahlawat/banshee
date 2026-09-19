@@ -241,7 +241,10 @@ The `preset` picks which Whisper model Banshee uses:
 - **Bare samples describe nothing,** so Banshee reads them as 16-bit mono at
   24000 Hz.
 - **`sample_rate` changes that rate,** for a server that answers `pcm` at
-  another one. Banshee sends the field to the server only when you set it.
+  another one. Banshee sends the field to the server only when you set it,
+  and never under `wav`, where the header states the rate.
+- **The Voice panel sets both.** It shows the rate only under `pcm`, and an
+  empty rate field goes back to 24000 Hz.
 - **Banshee identifies every answer from its own bytes.** It refuses one it
   cannot play, and it names what arrived.
 - **A server that sends MP3, Ogg or an error page** in place of audio says so in

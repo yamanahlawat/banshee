@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Voice panel sets the audio format of a remote speaker.** A `WAV`/`PCM`
+  choice sits above the speech error, and a sample rate field shows only under
+  `PCM`. An empty rate field goes back to 24000 Hz. The change takes effect when
+  Banshee restarts. The "First audio" log line now names the rate and channel
+  count of the reply. In the Voice and Microphone panels, the key now sits
+  under the server it belongs to.
+
+### Fixed
+
+- **A remote speaker under `wav` no longer sends `sample_rate`.** Groq wrote the
+  requested rate into the WAV header without resampling, so a reply asked at
+  44100 Hz played 1.8 times too fast. A WAV header states its own rate, so
+  Banshee now sends the field only under `pcm`.
+
 ## [0.15.0] - 2026-09-19
 
 ### Added

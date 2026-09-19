@@ -129,6 +129,22 @@ pub struct Outcome {
     pub restart_required: Vec<String>,
 }
 
+/// The section a dotted path names, or `None` when the file never wrote it.
+fn table_along<'a>(
+    mut table: &'a mut toml_edit::Table,
+    path: &str,
+) -> Result<Option<&'a mut toml_edit::Table>, BansheeError> {
+    for name in path.split('.') {
+        let Some(item) = table.get_mut(name) else {
+            return Ok(None);
+        };
+        table = item
+            .as_table_mut()
+            .ok_or_else(|| BansheeError::Rejected(format!("[{path}] is not a section")))?;
+    }
+    Ok(Some(table))
+}
+
 /// Edits the document rather than serializing a `Config`, so hand-written
 /// comments and layout survive.
 fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), BansheeError> {
@@ -141,6 +157,15 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
         let (path, field) = key.rsplit_once('.').ok_or_else(|| {
             BansheeError::Rejected(format!("'{key}' must name a section, as in stt.language"))
         })?;
+        if value.is_null() {
+            if value_at(&Config::default(), key).is_none_or(|default| default.is_object()) {
+                return Err(BansheeError::Rejected(format!("'{key}' is not a setting")));
+            }
+            if let Some(section) = table_along(document.as_table_mut(), path)? {
+                section.remove(field);
+            }
+            continue;
+        }
         let mut table = document.as_table_mut();
         for section in path.split('.') {
             let invented = !table.contains_key(section);
