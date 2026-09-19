@@ -597,7 +597,10 @@ fn live_state_reports_armed_while_a_question_waits() {
     let state = test_state(std::sync::mpsc::channel().0);
     assert_eq!(live_state(&state)["armed"], serde_json::json!(false));
 
-    assert!(state.arm_for_ask(), "the fixture must discriminate");
+    assert!(
+        state.arm_for_ask().is_some(),
+        "the fixture must discriminate"
+    );
     let live = live_state(&state);
     assert_eq!(live["armed"], serde_json::json!(true));
     // The microphone is open while armed
@@ -1351,7 +1354,10 @@ async fn wait_for(
 #[test]
 fn a_dropped_ask_leaves_a_recording_someone_else_started() {
     let state = test_state(std::sync::mpsc::channel().0);
-    let session = EndsTheSession::new(&state);
+    let session = EndsTheSession {
+        state: &state,
+        session: state.arm_for_ask().expect("the ask arms"),
+    };
     state.set_recording_mode(RecordingMode::PushToTalk);
 
     drop(session);

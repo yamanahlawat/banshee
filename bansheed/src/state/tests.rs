@@ -90,6 +90,7 @@ fn history_turned_back_on_is_written_to_again() {
 }
 
 use super::*;
+use crate::text_to_speech::lock;
 
 /// A client offers the command behind a Copy button, so `command` has to
 /// be the command the sentence names, not a near miss.
@@ -184,7 +185,7 @@ fn recording_error_keeps_the_cause_it_was_given() {
     let state = test_state();
     assert!(state.pipeline().fault().is_none());
     // An armed session is available while nothing is wrong
-    assert!(state.arm_for_ask());
+    assert!(state.arm_for_ask().is_some());
     state.set_recording_mode(RecordingMode::Idle);
 
     state.set_pipeline(Pipeline::Broken(RecordingError::Model(
@@ -195,7 +196,7 @@ fn recording_error_keeps_the_cause_it_was_given() {
         Some(RecordingError::Model(_))
     ));
     // The same gate record_start uses, so ask_user cannot arm a deaf mic
-    assert!(!state.arm_for_ask());
+    assert!(state.arm_for_ask().is_none());
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
 }
 
@@ -389,7 +390,7 @@ fn watchdog_releases_a_push_to_talk_that_never_stopped() {
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
     // Bring the deadline forward instead of waiting out MAX_PUSH_TO_TALK
-    state.locked_push_to_talk().deadline = Instant::now();
+    lock(&state.push_to_talk).deadline = Instant::now();
 
     // Past it, the mic comes back and the utterance is still transcribed
     assert!(state.expire_stuck_recording());
@@ -409,7 +410,7 @@ fn watchdog_leaves_armed_listening_alone() {
     // ask_user sessions run their own timeouts; the watchdog must not
     // yank the microphone out from under one
     state.set_recording_mode(RecordingMode::Armed);
-    state.locked_push_to_talk().deadline = Instant::now();
+    lock(&state.push_to_talk).deadline = Instant::now();
     assert!(!state.expire_stuck_recording());
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
 }
@@ -644,7 +645,7 @@ fn record_start_is_refused_while_the_pipeline_is_still_opening() {
     state.set_pipeline(Pipeline::Opening);
 
     assert!(!state.record_start(TranscribeTarget::Mailbox));
-    assert!(!state.arm_for_ask());
+    assert!(state.arm_for_ask().is_none());
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     assert!(transcribe_requests.try_recv().is_err());
 
@@ -710,11 +711,26 @@ fn the_watchdog_does_not_expire_a_press_whose_start_is_still_running() {
 
     let starting = std::sync::Arc::clone(&state);
     let pressed = std::thread::spawn(move || starting.record_start(TranscribeTarget::Mailbox));
-    stop_started.recv().unwrap();
+    stop_started
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("record_start reaches speech.stop");
     let expired = state.expire_stuck_recording();
     release.send(()).unwrap();
 
     assert!(pressed.join().unwrap());
     assert!(!expired);
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+}
+
+#[test]
+fn an_older_ask_cannot_close_the_one_armed_after_it() {
+    let state = test_state();
+    let older = state.arm_for_ask().expect("the first ask arms");
+    state.disarm(older);
+    let newer = state.arm_for_ask().expect("the second ask arms");
+
+    state.disarm(older);
+
+    assert!(state.armed_mode(newer).is_some());
+    assert!(state.armed_mode(older).is_none());
 }

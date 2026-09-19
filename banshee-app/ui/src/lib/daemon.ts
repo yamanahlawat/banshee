@@ -367,7 +367,7 @@ export function applyPush(live: Partial<Live>): void {
 }
 
 export function applyPushedStatus(status: Status): void {
-  pushes += 1;
+  reads += 1;
   daemon.update((state) => reduceStatus(state, status));
 }
 

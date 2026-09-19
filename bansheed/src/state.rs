@@ -12,7 +12,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::audio::cues::{Cue, Cues};
 use crate::config::{BargeInMode, Config};
-use crate::text_to_speech::SpeechPlayer;
+use crate::text_to_speech::{SpeechPlayer, lock};
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
 
@@ -44,6 +44,7 @@ struct PushToTalk {
 pub struct AskCommand {
     pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     pub timeout: Duration,
+    pub session: u64,
 }
 
 pub enum ConsumerCommand {
@@ -319,6 +320,7 @@ pub struct DaemonState {
     barge_in: Mutex<BargeInMode>,
     // Start and stop can be separate RPC calls, so this cannot live on a stack
     push_to_talk: Mutex<PushToTalk>,
+    armed_session: Mutex<u64>,
     // enigo posts to the same HID stream rdev listens at, so while this is
     // true the hotkey listener drops events: the paste's own modifier presses
     // would otherwise cancel or open sessions.
@@ -384,6 +386,7 @@ impl DaemonState {
                 deadline: Instant::now(),
                 target: TranscribeTarget::Mailbox,
             }),
+            armed_session: Mutex::new(0),
             typing: AtomicBool::new(false),
             capture_tick: AtomicU64::new(0),
             shutdown: tokio::sync::Notify::new(),
@@ -421,7 +424,7 @@ impl DaemonState {
     // A stop with nothing in flight is a no-op, so release keybinds can fire
     // unconditionally.
     pub fn record_stop(&self) {
-        if !self.stop_push_to_talk(self.locked_push_to_talk())
+        if !self.stop_push_to_talk(lock(&self.push_to_talk))
             && self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed)
         {
             self.cues.send(Cue::RecordStop);
@@ -429,7 +432,7 @@ impl DaemonState {
     }
 
     fn start_push_to_talk(&self, target: TranscribeTarget) -> bool {
-        let mut session = self.locked_push_to_talk();
+        let mut session = lock(&self.push_to_talk);
         if !self.try_transition(RecordingMode::Idle, RecordingMode::PushToTalk) {
             return false;
         }
@@ -450,12 +453,6 @@ impl DaemonState {
         self.cues.send(Cue::RecordStop);
         let _ = self.commands.send(ConsumerCommand::Transcribe(target));
         true
-    }
-
-    fn locked_push_to_talk(&self) -> std::sync::MutexGuard<'_, PushToTalk> {
-        self.push_to_talk
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
     }
 
     // Resolved here, not in the tracker: a tracker-side read races a mode change. True when it
@@ -498,7 +495,7 @@ impl DaemonState {
     // Releases a session that never got its stop. Stops rather than discards:
     // the ring holds real audio and record_stop is what routes it.
     pub fn expire_stuck_recording(&self) -> bool {
-        let session = self.locked_push_to_talk();
+        let session = lock(&self.push_to_talk);
         if self.recording_mode() != RecordingMode::PushToTalk || Instant::now() < session.deadline {
             return false;
         }
@@ -827,13 +824,29 @@ impl DaemonState {
 
     /// Takes the armed-listening lock for `ask_user`. Shares the availability
     /// gate with `record_start`, so no caller can arm a mic that cannot record.
-    pub fn arm_for_ask(&self) -> bool {
-        self.pipeline().is_open() && self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
+    pub fn arm_for_ask(&self) -> Option<u64> {
+        let mut session = lock(&self.armed_session);
+        if !self.pipeline().is_open()
+            || !self.try_transition(RecordingMode::Idle, RecordingMode::Armed)
+        {
+            return None;
+        }
+        *session += 1;
+        Some(*session)
     }
 
-    pub fn disarm(&self) {
-        let _ = self.try_transition(RecordingMode::Armed, RecordingMode::Idle)
-            || self.try_transition(RecordingMode::ArmedHold, RecordingMode::Idle);
+    pub fn armed_mode(&self, session: u64) -> Option<RecordingMode> {
+        let current = lock(&self.armed_session);
+        let mode = self.recording_mode();
+        (*current == session && self.is_armed()).then_some(mode)
+    }
+
+    pub fn disarm(&self, session: u64) {
+        let current = lock(&self.armed_session);
+        if *current == session {
+            let _ = self.try_transition(RecordingMode::Armed, RecordingMode::Idle)
+                || self.try_transition(RecordingMode::ArmedHold, RecordingMode::Idle);
+        }
     }
 
     /// The voice the speech backend actually loaded, which `config.toml` may no
