@@ -298,7 +298,7 @@ pub struct DaemonState {
     pending: Mutex<std::collections::BTreeSet<String>>,
     // Why recording is off, when it is. The microphone half clears when the
     // watchdog rebinds; the model half still needs a restart.
-    pipeline: RwLock<Pipeline>,
+    pipeline: watch::Sender<Pipeline>,
     recording: AtomicU8,
     started_at: Instant,
     db_connection: Mutex<Option<rusqlite::Connection>>,
@@ -374,7 +374,7 @@ impl DaemonState {
             running_config: Arc::clone(&config),
             config: RwLock::new(config),
             pending: Mutex::new(std::collections::BTreeSet::new()),
-            pipeline: RwLock::new(Pipeline::Opening),
+            pipeline: watch::channel(Pipeline::Opening).0,
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
             db_connection: Mutex::new(db_connection),
@@ -811,11 +811,15 @@ impl DaemonState {
     }
 
     pub fn pipeline(&self) -> Pipeline {
-        self.pipeline.read().unwrap().clone()
+        self.pipeline.borrow().clone()
     }
 
     pub fn set_pipeline(&self, state: Pipeline) {
-        *self.pipeline.write().unwrap() = state;
+        self.pipeline.send_replace(state);
+    }
+
+    pub fn subscribe_pipeline(&self) -> watch::Receiver<Pipeline> {
+        self.pipeline.subscribe()
     }
 
     /// Takes the armed-listening lock for `ask_user`. Shares the availability

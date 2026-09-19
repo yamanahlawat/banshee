@@ -11,6 +11,7 @@
     listeningFacts,
     reduceLive,
     reduceStatus,
+    readinessIsStale,
     speechFacts,
     waitsOnARestart,
     stateWord,
@@ -351,7 +352,8 @@
         if (!$table.loaded) readAll().catch(() => {});
         readTheRest();
       }),
-      listen<Partial<Live>>('daemon:state', (e) => {
+      listen<Partial<Live> & Pick<Status, 'pipeline'>>('daemon:state', (e) => {
+        if (readinessIsStale($daemon, e.payload)) readStatus(false);
         daemon.update((s) => reduceLive(s, e.payload));
         if (e.payload.transcribing === false && wasTranscribing) readNewest().catch(() => {});
         if (e.payload.transcribing !== undefined) wasTranscribing = e.payload.transcribing;

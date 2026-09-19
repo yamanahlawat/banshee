@@ -8,5 +8,6 @@
   "missing_device": null,
   "last_error": null,
   "last_speech_error": null,
+  "pipeline": "open",
   "activity": "recording"
 }
