@@ -107,6 +107,12 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   forbids a null id, so no compliant client sends one.
 - `DaemonState` holds 37 fields and 78 methods, and every module takes the whole `Arc`. A split
   into owned pieces is its own design.
+- A microphone is chosen by its name, and ALSA gives one card several devices with the same
+  name. `pick` takes the first match, and cpal lists `hw:` before `plughw:`. Measured on a USB
+  card: `USB Audio, USB Audio #1` opens `hw:CARD=0,DEV=1`, which offers I16 only, and its `F32`
+  `plughw:` twin cannot be reached by name. Choosing by the ALSA pcm id, or preferring
+  `plughw:` and `sysdefault:` on a tie, would fix it; both change the name contract of
+  `[audio] input_device`.
 
 ## The window
 
