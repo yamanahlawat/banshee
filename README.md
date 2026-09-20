@@ -56,7 +56,7 @@ open /Applications/Banshee.app
 ```
 
 - The downloaded app needs no `xattr` line. Run the same `curl` again to update it.
-- No admin account? Unpack into `~/Applications`.
+- No admin account? Unpack into `~/Applications`, open it from there, and read that path in the line below.
 - The `banshee` command is `/Applications/Banshee.app/Contents/MacOS/banshee`. [Link it](docs/install.md#macos-without-homebrew) onto your PATH to run it short.
 - The window asks before it downloads the models (~860 MB), and lets you pick the speech model first.
 - Approve the **Microphone** and **Accessibility** grants. Without them Banshee cannot record or type.
