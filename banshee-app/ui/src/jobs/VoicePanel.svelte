@@ -2,12 +2,13 @@
   import { daemon, shownFloat, speechFacts, waitsOnARestart } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { downloadModels, previewVoice, type Voice, type Voices } from '../lib/tauri';
-  import { announcer, report, speechNote } from '../lib/copy';
+  import { announce, announcer, report, speechNote } from '../lib/copy';
   import Row from '../controls/Row.svelte';
   import Field from '../controls/Field.svelte';
   import KeyRow from '../controls/KeyRow.svelte';
   import ProviderGroup from '../controls/ProviderGroup.svelte';
   import SubRow from '../controls/SubRow.svelte';
+  import Segmented from '../controls/Segmented.svelte';
 
   export let voices: Voices = { voices: [], current: null };
 
@@ -21,6 +22,10 @@
     { value: 'local', label: 'On this machine' },
     { value: 'remote', label: 'A remote server' },
   ];
+  const FORMATS = [
+    { value: 'wav', label: 'WAV' },
+    { value: 'pcm', label: 'PCM' },
+  ];
 
   $: tts = ($daemon.status?.config?.tts ?? {}) as Record<string, unknown>;
   $: speed = shownFloat(Number(tts.speed ?? 1.2));
@@ -28,6 +33,7 @@
   $: current = String(tts.voice ?? voices.current ?? '');
   $: provider = String(tts.provider ?? 'local');
   $: remoteTable = (tts.remote ?? {}) as Record<string, unknown>;
+  $: format = String(remoteTable.response_format ?? 'wav');
   // The daemon says which speaker is in force; `provider` above says only which
   // one was asked for.
   $: speech = speechFacts($daemon, $waitsOnARestart, voices.voices);
@@ -48,8 +54,20 @@
   $: if ($daemon.status) {
     sawProvider(
       provider,
-      `${speakerNote} ${provider === 'remote' ? 'Server, model, voice and key are below.' : 'The voices are below.'}`,
+      `${speakerNote} ${provider === 'remote' ? 'Server, key, model, voice and format are below.' : 'The voices are below.'}`,
     );
+  }
+
+  // Empty is null, so the daemon goes back to the rate it assumes.
+  function writeRate(typed: string): Promise<boolean> | boolean {
+    const rate = typed.trim();
+    if (rate === '') return write('tts.remote.sample_rate', null);
+    // The bound is the config type's own: a NonZero<u32>.
+    if (!/^\d+$/.test(rate) || Number(rate) < 1 || Number(rate) > 4_294_967_295) {
+      announce('The sample rate is a whole number of hertz, as in 24000.');
+      return false;
+    }
+    return write('tts.remote.sample_rate', Number(rate));
   }
 
   // The daemon applies a voice once its file lands, so choosing one is the whole interaction.
@@ -86,6 +104,7 @@
         commit={(next) => write('tts.remote.base_url', next)}
       />
     </SubRow>
+    <KeyRow setting="tts.remote.api_key" present={speech.keyPresent} />
     <SubRow name="model" pending={$waitsOnARestart.has('tts.remote.model')}>
       <Field
         label="Model"
@@ -111,7 +130,24 @@
         commit={(next) => write('tts.remote.instructions', next)}
       />
     </SubRow>
-    <KeyRow setting="tts.remote.api_key" present={speech.keyPresent} />
+    <SubRow name="format" pending={$waitsOnARestart.has('tts.remote.response_format')}>
+      <Segmented
+        label="Audio format"
+        value={format}
+        options={FORMATS}
+        change={(next) => write('tts.remote.response_format', next)}
+      />
+    </SubRow>
+    {#if format === 'pcm'}
+      <SubRow name="rate" pending={$waitsOnARestart.has('tts.remote.sample_rate')}>
+        <Field
+          label="Sample rate"
+          value={remoteTable.sample_rate == null ? '' : String(remoteTable.sample_rate)}
+          placeholder="24000"
+          commit={writeRate}
+        />
+      </SubRow>
+    {/if}
   {:else}
     <SubRow name="voice" pending={$waitsOnARestart.has('tts.voice')}>
       <div class="voices">

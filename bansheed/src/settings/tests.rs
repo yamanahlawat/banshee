@@ -466,6 +466,62 @@ fn a_missing_section_is_created() {
 }
 
 #[test]
+fn a_null_clears_the_key_back_to_its_default() {
+    let existing = "[tts.remote]\nresponse_format = \"pcm\"\nsample_rate = 22050\n";
+    let (rendered, config) = edit(
+        existing,
+        &assignments(&[("tts.remote.sample_rate", serde_json::Value::Null)]),
+    )
+    .unwrap();
+    assert!(!rendered.contains("sample_rate"), "{rendered}");
+    assert!(rendered.contains("response_format"), "{rendered}");
+    assert_eq!(config.tts.remote.sample_rate, None);
+}
+
+#[test]
+fn a_null_for_a_key_never_written_changes_nothing() {
+    let (rendered, config) = edit(
+        "",
+        &assignments(&[("tts.remote.sample_rate", serde_json::Value::Null)]),
+    )
+    .unwrap();
+    assert_eq!(rendered, "");
+    assert_eq!(config.tts.remote.sample_rate, None);
+}
+
+#[test]
+fn a_null_for_an_unknown_key_is_refused() {
+    let error = edit(
+        "",
+        &assignments(&[("stt.nonesuch", serde_json::Value::Null)]),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("nonesuch"), "{error}");
+}
+
+#[test]
+fn a_null_for_a_section_is_refused() {
+    let existing = "[tts.remote]\nvoice = \"marin\"\n";
+    let error = edit(
+        existing,
+        &assignments(&[("tts.remote", serde_json::Value::Null)]),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("tts.remote"), "{error}");
+}
+
+#[test]
+fn a_null_inside_an_inline_table_is_refused_as_a_write_would_be() {
+    let existing = "[tts]\nremote = { response_format = \"pcm\", sample_rate = 22050 }\n";
+    let error = edit(
+        existing,
+        &assignments(&[("tts.remote.sample_rate", serde_json::Value::Null)]),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("is not a section"), "{error}");
+}
+
+#[test]
 fn an_unknown_key_is_refused() {
     let error = edit("", &assignments(&[("stt.nonesuch", 1.into())])).unwrap_err();
     assert!(
