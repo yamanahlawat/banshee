@@ -319,3 +319,81 @@ it('keeps the speaking rate outside the group', () => {
   const rate = screen.getByRole('slider', { name: 'Speaking rate' });
   expect(speakingGroup().contains(rate)).toBe(false);
 });
+
+function remoteAsking(format?: string, rate?: number | null): Status {
+  const table = (remoteStatus.config?.tts as { remote: Record<string, unknown> }).remote;
+  return speaking(
+    { provider: 'remote', remote: { ...table, response_format: format, sample_rate: rate } },
+    REMOTE_IN_FORCE,
+  );
+}
+
+function rateField(): HTMLInputElement | null {
+  return screen.queryByRole('textbox', { name: 'Sample rate' });
+}
+
+it('asks for WAV until the config names another format', () => {
+  daemon.set(reduceStatus(empty(), remoteAsking(undefined)));
+  render(VoicePanel, { voices: VOICES });
+  const format = screen.getByRole('radiogroup', { name: 'Audio format' });
+  expect(speakingGroup().contains(format)).toBe(true);
+  expect(screen.getByRole('radio', { name: 'WAV' }).getAttribute('aria-checked')).toBe('true');
+  expect(screen.getByRole('radio', { name: 'PCM' }).getAttribute('aria-checked')).toBe('false');
+});
+
+it('writes the format the reader picks', async () => {
+  daemon.set(reduceStatus(empty(), remoteAsking('wav')));
+  render(VoicePanel, { voices: VOICES });
+  await fireEvent.click(screen.getByRole('radio', { name: 'PCM' }));
+  expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.remote.response_format', 'pcm');
+});
+
+// A WAV header states its own rate, so a rate beside it would say nothing.
+it('offers a rate only under PCM', () => {
+  daemon.set(reduceStatus(empty(), remoteAsking('wav', 44_100)));
+  const wav = render(VoicePanel, { voices: VOICES });
+  expect(rateField()).toBeNull();
+  wav.unmount();
+
+  daemon.set(reduceStatus(empty(), remoteAsking('pcm', 22_050)));
+  render(VoicePanel, { voices: VOICES });
+  expect(rateField()?.value).toBe('22050');
+  expect(rateField()?.placeholder).toBe('24000');
+});
+
+it('writes the rate as a number', async () => {
+  daemon.set(reduceStatus(empty(), remoteAsking('pcm', null)));
+  render(VoicePanel, { voices: VOICES });
+  const field = rateField()!;
+  await fireEvent.input(field, { target: { value: ' 22050 ' } });
+  await fireEvent.blur(field);
+  expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.remote.sample_rate', 22_050);
+});
+
+// An empty field goes back to the rate Banshee assumes, not to a rate of 0.
+it('clears the rate when the field is emptied', async () => {
+  daemon.set(reduceStatus(empty(), remoteAsking('pcm', 22_050)));
+  render(VoicePanel, { voices: VOICES });
+  const field = rateField()!;
+  await fireEvent.input(field, { target: { value: '' } });
+  await fireEvent.blur(field);
+  expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.remote.sample_rate', null);
+});
+
+it('sends nothing for a rate that is not a whole number, and says why', async () => {
+  daemon.set(reduceStatus(empty(), remoteAsking('pcm', 22_050)));
+  render(VoicePanel, { voices: VOICES });
+  const field = rateField()!;
+  await fireEvent.input(field, { target: { value: '22.05k' } });
+  await fireEvent.blur(field);
+  expect(vi.mocked(setSetting)).not.toHaveBeenCalled();
+  await waitFor(() => expect(field.value).toBe('22050'));
+  expect(get(announcement)).toBe('The sample rate is a whole number of hertz, as in 24000.');
+});
+
+it('orders the remote rows from the server down to the format', () => {
+  daemon.set(reduceStatus(empty(), remoteAsking('pcm')));
+  render(VoicePanel, { voices: VOICES });
+  const names = [...speakingGroup().querySelectorAll('.sub')].map((name) => name.textContent);
+  expect(names).toEqual(['server', 'key', 'model', 'voice', 'tone', 'format', 'rate']);
+});

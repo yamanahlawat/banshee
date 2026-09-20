@@ -51,25 +51,79 @@ banshee connect claude
 Apple Silicon, with the window.
 
 ```bash
-brew install --cask yamanahlawat/banshee/banshee
-xattr -dr com.apple.quarantine /Applications/Banshee.app
+curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Banshee.app.tar.gz | tar -xzf - -C /Applications
 open /Applications/Banshee.app
 ```
 
-- The `xattr` line is needed until Banshee is notarised, and Homebrew marks every upgrade too. The `banshee` command offers to clear it when you next run it. [A direct download](docs/install.md#macos-without-homebrew) needs none.
+- The downloaded app needs no `xattr` line. Run the same `curl` again to update it.
+- No admin account? Unpack into `~/Applications`.
+- The `banshee` command is `/Applications/Banshee.app/Contents/MacOS/banshee`. [Link it](docs/install.md#macos-without-homebrew) onto your PATH to run it short.
 - The window asks before it downloads the models (~860 MB), and lets you pick the speech model first.
 - Approve the **Microphone** and **Accessibility** grants. Without them Banshee cannot record or type.
 - **Hold `Right Option`**, speak, let go. The text is typed into the app you are focused on.
 - `banshee status` names the fix, and changes nothing itself.
 
-Then give your coding agent a voice:
+Or with Homebrew, which puts `banshee` on your PATH:
 
 ```bash
-banshee connect claude
+brew install --cask yamanahlawat/banshee/banshee
+xattr -dr com.apple.quarantine /Applications/Banshee.app
+open /Applications/Banshee.app
 ```
 
-- Restart the agent. It speaks its decisions and asks you questions out loud.
-- [Every other agent](#connect-your-coding-agent)
+- The `xattr` line is needed until Banshee is notarised, and Homebrew marks every upgrade too. The `banshee` command offers to clear it when you next run it.
+
+Then give your coding agent a voice: [connect it](#connect-your-coding-agent).
+
+## Connect your coding agent
+
+This is the step that closes the voice loop: the agent speaks, and you answer out loud.
+
+**In the window,** open **Agents**. Each agent installed on this machine has a row:
+
+1. Press **Connect**. The window shows the exact change it will write.
+2. Press **Apply**.
+3. Restart the agent. It speaks its decisions and asks you questions out loud.
+
+- The Claude Code hook needs `jq` on your PATH.
+- Antigravity, Claude Code, OpenCode and Pi are verified on a real install. Codex and Cursor follow their published formats, and wait for a report.
+- Pi has its own extension API, so it gets a [native extension](integrations/pi) instead.
+
+<p align="center"><img src="assets/agents.png" width="360" alt="The Agents panel: Claude Code and OpenCode are connected, and Codex and Cursor are installed with a Connect button beside each."></p>
+
+**From the terminal,** the same work:
+
+```bash
+banshee connect            # which agents are installed, and which are connected
+banshee connect antigravity # Antigravity IDE, agy CLI and SDK: the MCP server in ~/.gemini/config/mcp_config.json
+banshee connect claude      # Claude Code: the MCP server and a stop hook that refuses to end a turn with no spoken status
+banshee connect codex       # Codex CLI: the MCP server in ~/.codex/config.toml
+banshee connect cursor      # Cursor: the MCP server in ~/.cursor/mcp.json
+banshee connect opencode    # OpenCode: the MCP server
+banshee connect pi          # Pi: the native extension
+```
+
+- Each command shows the exact change, and asks before it writes. Restart the tool after.
+- `banshee-mcp-shim` is the MCP stdio server behind this.
+- Any other MCP host takes the same shape. Use the shim's full path if the bare name does not resolve:
+
+```json
+{
+  "mcpServers": {
+    "banshee": {
+      "command": "banshee-mcp-shim"
+    }
+  }
+}
+```
+
+It exposes three tools:
+
+| Tool                | What the agent does with it                                       |
+| ------------------- | ----------------------------------------------------------------- |
+| `speak_status`      | Say something aloud, for decisions made and work finished         |
+| `ask_user`          | Ask a question aloud, then wait for and return your spoken answer |
+| `listen_for_prompt` | Pick up anything you've said since it last checked                |
 
 ## The keys
 
@@ -102,53 +156,12 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 - Waiting for you means an agent asked a question and holds for your answer.
 - The states differ by shape, never by colour alone, and macOS tints the template image.
 
-## Connect your coding agent
-
-```bash
-banshee connect            # which agents are installed, and which are connected
-banshee connect antigravity # Antigravity IDE, agy CLI and SDK: the MCP server in ~/.gemini/config/mcp_config.json
-banshee connect claude      # Claude Code: the MCP server and a stop hook that refuses to end a turn with no spoken status
-banshee connect codex       # Codex CLI: the MCP server in ~/.codex/config.toml
-banshee connect cursor      # Cursor: the MCP server in ~/.cursor/mcp.json
-banshee connect opencode    # OpenCode: the MCP server
-banshee connect pi          # Pi: the native extension
-```
-
-- Each command shows the exact change, and asks before it writes. Restart the tool after.
-- The Claude Code hook needs `jq` on your PATH.
-- Antigravity, Claude Code, OpenCode and Pi are verified on a real install. Codex and Cursor follow their published formats, and wait for a report.
-- Pi has its own extension API, so it gets a [native extension](integrations/pi) instead.
-- The window's Agents panel does the same work.
-
-<p align="center"><img src="assets/agents.png" width="360" alt="The Agents panel, listing Antigravity, Claude Code, OpenCode and Pi as connected, and noting that Banshee also works with Codex and Cursor."></p>
-
-- `banshee-mcp-shim` is the MCP stdio server behind this.
-- Any other MCP host takes the same shape. Use the shim's full path if the bare name does not resolve:
-
-```json
-{
-  "mcpServers": {
-    "banshee": {
-      "command": "banshee-mcp-shim"
-    }
-  }
-}
-```
-
-It exposes three tools:
-
-| Tool                | What the agent does with it                                       |
-| ------------------- | ----------------------------------------------------------------- |
-| `speak_status`      | Say something aloud, for decisions made and work finished         |
-| `ask_user`          | Ask a question aloud, then wait for and return your spoken answer |
-| `listen_for_prompt` | Pick up anything you've said since it last checked                |
-
 ## Other ways to install
 
 |                       | With the desktop window                                                                                           | Terminal only                                                           |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Linux (x86_64, arm64) | [from source](docs/linux.md#building-the-desktop-window)                                                          | the installer above, or [Homebrew](docs/install.md#linux-with-homebrew) |
-| macOS (Apple Silicon) | [the cask](docs/install.md#macos-with-the-window), or [a direct download](docs/install.md#macos-without-homebrew) | [the formula](docs/install.md#macos-terminal-only)                      |
+| macOS (Apple Silicon) | [a direct download](docs/install.md#macos-without-homebrew), or [the cask](docs/install.md#macos-with-the-window) | [the formula](docs/install.md#macos-terminal-only)                      |
 | Windows               | not yet                                                                                                           | not yet                                                                 |
 
 - [Build from source](docs/install.md#from-source), [set up from the terminal](docs/install.md#set-up-from-the-terminal), or [remove any install](docs/install.md#uninstall)

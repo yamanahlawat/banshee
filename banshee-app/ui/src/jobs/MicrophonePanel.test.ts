@@ -229,7 +229,7 @@ it('announces where audio goes at the flip, and nothing on arrival', async () =>
   daemon.set(reduceStatus(empty(), toRemote));
   await waitFor(() =>
     expect(get(announcement)).toBe(
-      `Audio still stays on this machine. ${TAKES_EFFECT} Server, model and key are below.`,
+      `Audio still stays on this machine. ${TAKES_EFFECT} Server, key and model are below.`,
     ),
   );
 });
@@ -299,4 +299,11 @@ it('speaks a failure that arrives, and says nothing about one already there', as
   await waitFor(() =>
     expect(get(announcement)).toBe('The last dictation failed: the server timed out.'),
   );
+});
+
+it('puts the key under the server it opens', () => {
+  daemon.set(reduceStatus(empty(), remoteStatus));
+  render(MicrophonePanel);
+  const names = [...listenerGroup().querySelectorAll('.sub')].map((name) => name.textContent);
+  expect(names).toEqual(['server', 'key', 'model']);
 });

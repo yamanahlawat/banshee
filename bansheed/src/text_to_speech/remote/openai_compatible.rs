@@ -8,7 +8,7 @@ use reqwest::blocking::Client;
 use crate::config::{RemoteTtsConfig, SpeechFormat, TTSConfig};
 use crate::credentials::{self, RemoteKey};
 use crate::text_to_speech::local::say::VOICE_NEEDS_KOKORO;
-use crate::text_to_speech::output::Output;
+use crate::text_to_speech::output::{Chunk, Output};
 use crate::text_to_speech::remote::arrival::{Arrival, declared};
 use crate::text_to_speech::{ActiveUtterance, Fault, TtsBackend, lock};
 
@@ -50,6 +50,15 @@ pub struct RemoteSpeechBackend {
     output: Arc<Output>,
     fallback: Option<Arc<dyn TtsBackend>>,
     faults: std::sync::mpsc::Sender<Fault>,
+}
+
+fn first_audio(host: &str, waited: Duration, chunk: &Chunk) -> String {
+    format!(
+        "First audio from {host} in {:.2}s, {} Hz, {} channels",
+        waited.as_secs_f32(),
+        chunk.rate,
+        chunk.channels
+    )
 }
 
 /// The reason a refused answer leaves. The server's own words win, because a
@@ -152,8 +161,9 @@ impl RemoteSpeechBackend {
             body["instructions"] = instructions.clone().into();
         }
         // Sent only when the user named one: a server that takes no such field
-        // may refuse the whole request over it
-        if let Some(rate) = self.sample_rate {
+        // may refuse the whole request over it. Never under WAV, whose header
+        // already states the rate
+        if let (SpeechFormat::Pcm, Some(rate)) = (self.response_format, self.sample_rate) {
             body["sample_rate"] = rate.get().into();
         }
         body
@@ -353,11 +363,7 @@ impl RemoteSpeechBackend {
                     let handover = lock(&worker_handover);
                     report(
                         &handover,
-                        Report::Line(format!(
-                            "First audio from {} in {:.2}s",
-                            opener.host,
-                            started.elapsed().as_secs_f32()
-                        )),
+                        Report::Line(first_audio(&opener.host, started.elapsed(), &chunk)),
                     );
                     report(&handover, Report::Fault(Fault::Played));
                 }
@@ -1156,12 +1162,15 @@ mod tests {
         serde_json::from_str(body).expect("valid JSON")
     }
 
+    // Groq writes an asked rate into the WAV header without resampling, so the
+    // reply plays at the wrong speed.
     #[test]
-    fn an_utterance_asks_for_wav_and_names_no_rate_unless_one_is_set() {
+    fn an_utterance_asks_for_wav_and_names_no_rate_even_when_one_is_set() {
         let (base_url, served) =
             serve_typed("200 OK", "audio/wav", vec![wav(24_000, &[16_384])], false);
         let mut remote = table(base_url, "");
         remote.response_format = SpeechFormat::Wav;
+        remote.sample_rate = std::num::NonZero::new(44_100);
         let built = build(remote, false);
         let utterance = built.backend.speak("Hello.").expect("a test device opens");
         wait_until("the reply is read", || utterance.spoken());
@@ -1182,6 +1191,20 @@ mod tests {
 
         let sent = sent_body(&served.join().unwrap());
         assert_eq!(sent["sample_rate"], 22_050);
+    }
+
+    #[test]
+    fn the_first_audio_line_names_the_rate_and_channels_it_plays_at() {
+        let chunk = super::Chunk {
+            samples: vec![0.0; 4],
+            rate: std::num::NonZero::new(22_050).unwrap(),
+            channels: std::num::NonZero::new(2).unwrap(),
+        };
+        let line = super::first_audio("api.groq.com", Duration::from_millis(1_250), &chunk);
+        assert_eq!(
+            line,
+            "First audio from api.groq.com in 1.25s, 22050 Hz, 2 channels"
+        );
     }
 
     #[test]

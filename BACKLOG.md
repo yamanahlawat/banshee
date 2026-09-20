@@ -39,12 +39,6 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   costs the full 15 s.
 - A stop does not drop the in-flight request. The worker ends at the next byte or the bound,
   whichever comes first.
-- Under `response_format = "wav"` a configured `tts.remote.sample_rate` still goes out in the
-  request, and Groq's Orpheus writes it into the WAV header without resampling. Measured
-  2026-09-17 against `api.groq.com`: three requests for one sentence answered the same 142,072
-  bytes of 24 kHz samples, and the one that asked for 44100 said 44100 in its header, so the
-  reply played 1.8 times too fast. Groq ignored `speed` in the same three requests: the bytes
-  were identical. The field should not be sent under `wav`, where the header is the rate.
 - `speed` goes out on every speech request, since it is part of the original OpenAI schema. A
   server that refuses the field refuses every utterance, not only the ones where speed changed.
 - Both remote keys live in `~/.banshee/credentials.toml`, which only the owner can read. The
@@ -141,13 +135,6 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
 - The remote key row is duplicated whole between the Microphone panel and the Voice panel:
   about 40 lines of script and markup, plus the `.held` style rule, in each of them. Only the
   setting name differs.
-- The Voice panel edits a remote speaker's server, model, voice, instructions and key, and shows
-  the last speech error, but has no control for `tts.remote.response_format` or
-  `tts.remote.sample_rate`. A person whose server answers PCM, or who hears a reply at the wrong
-  speed, reads an error naming a format the panel cannot change and has to edit `config.toml`.
-  Decided 2026-09-17, for a later phase: a `wav`/`pcm` choice beside the error, a rate field
-  shown only under `pcm`, the daemon never sending `sample_rate` under `wav`, and the reply's
-  rate and channels in the "First audio" log line.
 - The window writes `-32000` for its own transport failures, which `rpc_code` names `MICROPHONE`.
   Inert today: nothing in the window or the UI routes on the code, and the retry decision reads the
   `transport` and `sent` flags. It is one number for two facts on one socket.

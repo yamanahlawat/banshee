@@ -46,8 +46,8 @@ function inForce(
 }
 
 // The speaker the config asks for, with the table a remote one reads. The
-// window shows neither `response_format` nor `sample_rate`, so this names them
-// no value to look at.
+// table leaves out `response_format` and `sample_rate`, so the window shows
+// their defaults.
 function asks(provider: string, model: string, voice: string) {
   // Every fixture carries a config; the type leaves it optional because a
   // reply from a daemon that is not running does not.

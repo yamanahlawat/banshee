@@ -133,7 +133,7 @@
   $: if ($daemon.status) {
     sawProvider(
       provider,
-      `${listenerNote} ${provider === 'remote' ? 'Server, model and key are below.' : 'Model is below.'}`,
+      `${listenerNote} ${provider === 'remote' ? 'Server, key and model are below.' : 'Model is below.'}`,
     );
   }
   $: language = String(stt.language ?? 'en');
@@ -228,6 +228,7 @@
         commit={(next) => write('stt.remote.base_url', next)}
       />
     </SubRow>
+    <KeyRow setting="stt.remote.api_key" present={listening.keyPresent} />
     <SubRow name="model" pending={$waitsOnARestart.has('stt.remote.model')}>
       <Field
         label="Model"
@@ -236,7 +237,6 @@
         commit={(next) => write('stt.remote.model', next)}
       />
     </SubRow>
-    <KeyRow setting="stt.remote.api_key" present={listening.keyPresent} />
   {:else}
     <SubRow name="model" pending={$waitsOnARestart.has('stt.preset')}>
       <Segmented
