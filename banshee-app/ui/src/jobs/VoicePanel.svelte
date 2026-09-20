@@ -2,22 +2,27 @@
   import { daemon, shownFloat, speechFacts, waitsOnARestart } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { downloadModels, previewVoice, type Voice, type Voices } from '../lib/tauri';
-  import { announce, announcer, report, speechNote } from '../lib/copy';
+  import {
+    announce,
+    announcer,
+    report,
+    speechNote,
+    SPEECH_FAILED,
+    SPEECH_FAILURE,
+  } from '../lib/copy';
   import Row from '../controls/Row.svelte';
   import Field from '../controls/Field.svelte';
   import KeyRow from '../controls/KeyRow.svelte';
   import ProviderGroup from '../controls/ProviderGroup.svelte';
   import SubRow from '../controls/SubRow.svelte';
   import Segmented from '../controls/Segmented.svelte';
+  import Failure from '../controls/Failure.svelte';
 
   export let voices: Voices = { voices: [], current: null };
 
   // The choice and its consequence are one reading, so the group names the
   // sentence its radiogroup is described by.
   const SPEAKER_NOTE = 'speaker-note';
-  // The group is read with a standing failure as well as with its note: a
-  // failure that arrived before the panel opened announces nothing.
-  const SPEECH_FAILURE = 'speech-failure';
   const SPEAKING = [
     { value: 'local', label: 'On this machine' },
     { value: 'remote', label: 'A remote server' },
@@ -40,12 +45,6 @@
   $: speakerNote = speechNote(speech);
 
   $: lastError = $daemon.live.last_speech_error;
-  $: failureSays = lastError ? `The last spoken reply failed: ${lastError}.` : '';
-
-  // A failure arrives on a push, with no control moving and no reader
-  // necessarily looking.
-  const sawFailure = announcer<string | null>();
-  $: sawFailure(lastError, failureSays);
 
   // Fields appear or leave with no event of their own, and where the text
   // goes changes with them, so a reader who is not looking hears the
@@ -92,7 +91,7 @@
   options={SPEAKING}
   note={speakerNote}
   noteId={SPEAKER_NOTE}
-  alsoId={failureSays ? SPEECH_FAILURE : undefined}
+  alsoId={lastError ? SPEECH_FAILURE : undefined}
   change={(next) => write('tts.provider', next)}
 >
   {#if provider === 'remote'}
@@ -184,10 +183,8 @@
     </SubRow>
   {/if}
 
-  <!-- Beside the server and the voice that caused it, not at the head of the
-       panel where the reader has already left the group. -->
-  {#if failureSays}
-    <p class="note failed" id={SPEECH_FAILURE}>{failureSays}</p>
+  {#if lastError}
+    <Failure id={SPEECH_FAILURE} label={SPEECH_FAILED} said={lastError} />
   {/if}
 </ProviderGroup>
 

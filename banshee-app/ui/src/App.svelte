@@ -21,12 +21,18 @@
   } from './lib/daemon';
   import {
     announcement,
+    announcer,
     listeningLead,
     problem,
     report,
     speechLead,
     A_SERVER,
+    DICTATION_FAILED,
+    DICTATION_FAILURE,
+    failureSays,
     RESTART_SAYS,
+    SPEECH_FAILED,
+    SPEECH_FAILURE,
     spell,
   } from './lib/copy';
   import { followSaveHistory, readAll, readLatest, readNewest, table } from './lib/history';
@@ -66,15 +72,26 @@
   let agentsRead = false;
   type Job = 'Microphone' | 'Hotkey' | 'Voice' | 'Agents' | 'Record';
   let job: Job | null = null;
+  let foot: Foot;
 
-  // The click destroys the opener, so the way back is its id, never the node.
-  const RETURNS_TO = { ledger: 'ledger', absence: 'nothing-yet', agents: 'no-agents' };
+  // An id, never the node: the click destroys most of these openers.
+  const RETURNS_TO = {
+    ledger: 'ledger',
+    absence: 'nothing-yet',
+    agents: 'no-agents',
+    failure: 'failure-notice',
+  };
   let cameFrom = '';
 
-  async function openJob(next: Job | null, from = '') {
+  // `at` lands after the panel's own mount focus. It cannot live in the panel:
+  // one already open never mounts again when the job changes under it.
+  async function openJob(next: Job | null, from = '', at = '') {
     cameFrom = next === null ? cameFrom : from;
     job = next;
-    if (next !== null) return;
+    if (next !== null) {
+      if (at !== '') await land(() => document.getElementById(at));
+      return;
+    }
     await land(() => document.getElementById(cameFrom));
     cameFrom = '';
   }
@@ -139,6 +156,33 @@
   // Said on the home screen only while it is true, so it needs no dismissal to
   // remember: connecting one is what clears it.
   $: noAgentYet = live && agentsRead && connected === 0;
+
+  // Dictation is the way in, so it takes the one slot when both sides failed.
+  // The daemon clears each on the next one that works, so neither is dismissed
+  // here.
+  $: failed = !live
+    ? null
+    : $daemon.live.last_error
+      ? {
+          says: 'Dictation failed',
+          job: 'Microphone' as Job,
+          at: DICTATION_FAILURE,
+          said: failureSays(DICTATION_FAILED, $daemon.live.last_error),
+        }
+      : $daemon.live.last_speech_error
+        ? {
+            says: 'Speech failed',
+            job: 'Voice' as Job,
+            at: SPEECH_FAILURE,
+            said: failureSays(SPEECH_FAILED, $daemon.live.last_speech_error),
+          }
+        : null;
+
+  // The window says it, not the panel: a panel is mounted only while it is
+  // open, and a failure arrives with no control moving.
+  const sawFailure = announcer<string | null>();
+  $: said = failed?.said ?? null;
+  $: sawFailure(said, said ?? '');
 
   // The daemon says which listener and which speaker are in force; the config
   // says only which ones were asked for. The heading, the panel's note and the
@@ -394,11 +438,18 @@
   <!-- Invisible until it takes focus. The roving foot collapses four stops into
        one, but the copy controls are the bulk of them and they have to stay
        reachable, so the keyboard needs a way over the record entirely. -->
-  <button class="skip" on:click={() => document.getElementById('job-microphone')?.focus()}>
-    Skip to the jobs
-  </button>
+  <button class="skip" on:click={() => foot.enter()}> Skip to the jobs </button>
 
-  <Header {word} {form} waiting={live && $waitsOnARestart.size > 0} {restart} {restarting} />
+  <Header
+    {word}
+    {form}
+    waiting={live && $waitsOnARestart.size > 0}
+    {restart}
+    {restarting}
+    failure={failed?.says ?? null}
+    failureId={RETURNS_TO.failure}
+    showFailure={() => failed && openJob(failed.job, RETURNS_TO.failure, failed.at)}
+  />
 
   <div class="body">
     <!-- Outside the panel branch on purpose: a voice that will not play is
@@ -541,6 +592,7 @@
 
   <!-- Foot hands back the label it was given, so the narrowing is sound. -->
   <Foot
+    bind:this={foot}
     values={footValues}
     active={job}
     open={(name, id) => openJob(job === name ? null : (name as Job), id)}

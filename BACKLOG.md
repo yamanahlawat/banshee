@@ -132,9 +132,6 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   rather than seen.
 - Speech has no panel of its own. The Voice panel holds the local voice and the remote
   speaker, so both sets of controls grow inside one screen.
-- The remote key row is duplicated whole between the Microphone panel and the Voice panel:
-  about 40 lines of script and markup, plus the `.held` style rule, in each of them. Only the
-  setting name differs.
 - The window writes `-32000` for its own transport failures, which `rpc_code` names `MICROPHONE`.
   Inert today: nothing in the window or the UI routes on the code, and the retry decision reads the
   `transport` and `sent` flags. It is one number for two facts on one socket.

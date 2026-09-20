@@ -18,15 +18,13 @@
   import Segmented from '../controls/Segmented.svelte';
   import ProviderGroup from '../controls/ProviderGroup.svelte';
   import SubRow from '../controls/SubRow.svelte';
+  import Failure from '../controls/Failure.svelte';
   import { claimKeys } from '../lib/keys';
-  import { announcer, listeningNote } from '../lib/copy';
+  import { announcer, listeningNote, DICTATION_FAILED, DICTATION_FAILURE } from '../lib/copy';
 
   // The choice and its consequence are one reading, so the group names the
   // sentence its radiogroup is described by.
   const LISTENER_NOTE = 'listener-note';
-  // The group is read with a standing failure as well as with its note: a
-  // failure that arrived before the panel opened announces nothing.
-  const DICTATION_FAILURE = 'dictation-failure';
 
   // Three words are all the window reads back. The midpoints are derived from the band edges, not
   // measured against a room.
@@ -119,12 +117,6 @@
     ? 'Words Banshee should expect to hear. They go to the server with your audio.'
     : 'Words Banshee should expect to hear.';
   $: lastError = $daemon.live.last_error;
-  $: failureSays = lastError ? `The last dictation failed: ${lastError}.` : '';
-
-  // A failure arrives on a push, with no control moving and no reader
-  // necessarily looking.
-  const sawFailure = announcer<string | null>();
-  $: sawFailure(lastError, failureSays);
 
   // Three fields appear or leave with no event of their own, and where the
   // audio goes changes with them, so a reader who is not looking hears the
@@ -216,7 +208,7 @@
   options={LISTENING}
   note={listenerNote}
   noteId={LISTENER_NOTE}
-  alsoId={failureSays ? DICTATION_FAILURE : undefined}
+  alsoId={lastError ? DICTATION_FAILURE : undefined}
   change={(next) => write('stt.provider', next)}
 >
   {#if provider === 'remote'}
@@ -248,10 +240,8 @@
     </SubRow>
   {/if}
 
-  <!-- Beside the key and the server that caused it, not at the head of the
-       panel where the reader has already left the group. -->
-  {#if failureSays}
-    <p class="note failed" id={DICTATION_FAILURE}>{failureSays}</p>
+  {#if lastError}
+    <Failure id={DICTATION_FAILURE} label={DICTATION_FAILED} said={lastError} />
   {/if}
 </ProviderGroup>
 
