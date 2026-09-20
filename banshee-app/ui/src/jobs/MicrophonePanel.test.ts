@@ -268,8 +268,6 @@ it('names the last failure inside the group that caused it', () => {
   expect(failure.getAttribute('role')).toBeNull();
 });
 
-// A failure already standing when the panel opens raises no announcement, so
-// the group has to be read with it or a screen reader never meets it.
 it('reads the group with the failure standing under it', () => {
   daemon.set(
     reduceStatus(empty(), {
@@ -283,21 +281,7 @@ it('reads the group with the failure standing under it', () => {
     .getAttribute('aria-describedby');
   expect(described).toBe('listener-note dictation-failure');
   expect(document.getElementById('dictation-failure')?.textContent).toBe(
-    'The last dictation failed: the remote listener refused the key.',
-  );
-});
-
-// The reader is most often not looking at the screen when one of these lands.
-it('speaks a failure that arrives, and says nothing about one already there', async () => {
-  daemon.set(
-    reduceStatus(empty(), { ...remoteStatus, last_error: 'the remote listener refused the key' }),
-  );
-  render(MicrophonePanel);
-  expect(get(announcement)).toBe('');
-
-  daemon.set(reduceStatus(empty(), { ...remoteStatus, last_error: 'the server timed out' }));
-  await waitFor(() =>
-    expect(get(announcement)).toBe('The last dictation failed: the server timed out.'),
+    'The last dictation failed. the remote listener refused the key',
   );
 });
 

@@ -18,21 +18,29 @@
   // A toolbar is one tab stop and the arrows move within it. The foot is the
   // only route to every setting in the window, so it cannot sit behind every
   // copy control on the page.
+  const cells = () => [...band.querySelectorAll('button')];
+
   function onKeydown(event: KeyboardEvent) {
-    const cells = [...band.querySelectorAll('button')];
-    const at = cells.indexOf(event.currentTarget as HTMLButtonElement);
-    const to = arrowStep(event.key, at, cells.length);
+    const all = cells();
+    const at = all.indexOf(event.currentTarget as HTMLButtonElement);
+    const to = arrowStep(event.key, at, all.length);
     if (to === null) return;
     event.preventDefault();
     stop = to;
     // Focus moves; nothing opens. A panel is a choice, not a side effect of
     // arriving somewhere.
-    cells[to].focus();
+    all[to].focus();
   }
 
   // Returning by Tab lands where you left: the arrows move the stop, and
   // opening a panel moves it to that cell.
   let stop = 0;
+
+  /// Lands on the cell the stop names, or a reader entering from outside
+  /// arrives on one that Tab will not leave from.
+  export function enter() {
+    cells()[stop]?.focus();
+  }
   $: if (active)
     stop = Math.max(
       0,
