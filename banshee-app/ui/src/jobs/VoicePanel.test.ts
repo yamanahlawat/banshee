@@ -397,3 +397,16 @@ it('orders the remote rows from the server down to the format', () => {
   const names = [...speakingGroup().querySelectorAll('.sub')].map((name) => name.textContent);
   expect(names).toEqual(['server', 'key', 'model', 'voice', 'tone', 'format', 'rate']);
 });
+
+// The daemon refuses both, but its answer is a TOML parse error over four
+// lines, and the panel says it aloud.
+it.each(['0', '4294967296'])('sends nothing for a rate of %s', async (typed) => {
+  daemon.set(reduceStatus(empty(), remoteAsking('pcm', 22_050)));
+  render(VoicePanel, { voices: VOICES });
+  const field = rateField()!;
+  await fireEvent.input(field, { target: { value: typed } });
+  await fireEvent.blur(field);
+  expect(vi.mocked(setSetting)).not.toHaveBeenCalled();
+  await waitFor(() => expect(field.value).toBe('22050'));
+  expect(get(announcement)).toBe('The sample rate is a whole number of hertz, as in 24000.');
+});

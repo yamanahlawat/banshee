@@ -62,7 +62,8 @@
   function writeRate(typed: string): Promise<boolean> | boolean {
     const rate = typed.trim();
     if (rate === '') return write('tts.remote.sample_rate', null);
-    if (!/^\d+$/.test(rate)) {
+    // The bound is the config type's own: a NonZero<u32>.
+    if (!/^\d+$/.test(rate) || Number(rate) < 1 || Number(rate) > 4_294_967_295) {
       announce('The sample rate is a whole number of hertz, as in 24000.');
       return false;
     }
