@@ -648,6 +648,21 @@ pub(crate) fn path_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
     std::env::split_paths(path).filter(|dir| !dir.as_os_str().is_empty())
 }
 
+fn path_holds(path: &OsStr, dir: &Path) -> bool {
+    path_dirs(path).any(|held| held == dir)
+}
+
+// The native installer for Claude Code and Codex writes the binary here. It
+// puts the directory in the interactive rc file. One name serves macOS and
+// Linux, so this needs no platform split.
+fn with_local_bin(path: OsString, home: &Path) -> OsString {
+    let local_bin = home.join(".local/bin");
+    if path_holds(&path, &local_bin) {
+        return path;
+    }
+    std::env::join_paths(path_dirs(&path).chain(std::iter::once(local_bin))).unwrap_or(path)
+}
+
 const PATH_START: &str = "__BANSHEE_PATH_START__";
 const PATH_END: &str = "__BANSHEE_PATH_END__";
 
@@ -666,59 +681,226 @@ fn extract_path(output: &str) -> Option<OsString> {
     split_between(output, PATH_START, PATH_END).map(|(_, path, _)| OsString::from(path))
 }
 
-// A login profile that blocks would otherwise hold the first caller forever,
-// and every later caller behind the OnceLock. Nothing measured either number.
-// The wait trades how slow a profile may be against how long a hung one stalls
-// agent detection. The poll trades wake-ups against how late the kill lands.
+// A profile that blocks would otherwise hold the first caller forever, and
+// every later caller behind the OnceLock. An interactive profile measured
+// 1.25 s on one machine, so 5 s leaves room for a slower one. The poll trades
+// wake-ups against how late the probe reads the exit status.
 const SHELL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 const SHELL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
-fn login_shell_path() -> Option<OsString> {
-    use std::io::Read;
+enum Probe {
+    Path(OsString),
+    /// One sentence for the log. Nothing else reads it.
+    Failed(String),
+}
 
-    let shell = std::env::var_os("SHELL")?;
-    let command = format!(r#"printf '{PATH_START}%s{PATH_END}' "$PATH""#);
-    let mut child = std::process::Command::new(&shell)
-        .arg("-lc")
-        .arg(&command)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
+// A marker can straddle two reads, so a search covers everything read so far.
+const READ_CHUNK: usize = 256;
 
-    let deadline = std::time::Instant::now() + SHELL_WAIT;
+fn holds_marker(bytes: &[u8], marker: &str) -> bool {
+    bytes
+        .windows(marker.len())
+        .any(|window| window == marker.as_bytes())
+}
+
+// A shell that fills the 64 KiB pipe buffer blocks, so the read runs on its
+// own thread. An rc file's daemon holds the pipe open for its own life, so
+// `marker` ends the read too.
+fn drain(
+    pipe: Option<impl std::io::Read + Send + 'static>,
+    marker: Option<&'static str>,
+) -> std::sync::mpsc::Receiver<String> {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let mut buffer = [0u8; READ_CHUNK];
+            while let Ok(read) = pipe.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+                if marker.is_some_and(|marker| holds_marker(&bytes, marker)) {
+                    break;
+                }
+            }
+        }
+        let _ = send.send(String::from_utf8_lossy(&bytes).into_owned());
+    });
+    receive
+}
+
+fn remaining(deadline: std::time::Instant) -> std::time::Duration {
+    deadline.saturating_duration_since(std::time::Instant::now())
+}
+
+/// The exit status, or `None` when the shell still runs at the deadline.
+fn exit_status(child: &mut std::process::Child, deadline: std::time::Instant) -> Option<String> {
     loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) | Err(_) => return None,
+            Ok(Some(status)) => return Some(status.to_string()),
+            Err(error) => return Some(error.to_string()),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
                     return None;
                 }
                 std::thread::sleep(SHELL_POLL);
             }
         }
     }
-
-    let mut printed = String::new();
-    child.stdout.take()?.read_to_string(&mut printed).ok()?;
-    extract_path(&printed)
 }
 
-fn with_fallback(shell_path: Option<OsString>) -> OsString {
-    match shell_path {
-        Some(path) if !path.is_empty() => path,
-        _ => std::env::var_os("PATH").unwrap_or_default(),
+fn reap(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn probe(shell: &OsStr, flags: &[&str], wait: std::time::Duration) -> Probe {
+    let deadline = std::time::Instant::now() + wait;
+    let command = format!(r#"printf '{PATH_START}%s{PATH_END}' "$PATH""#);
+    let started = std::process::Command::new(shell)
+        .args(flags)
+        .arg("-c")
+        .arg(&command)
+        // An rc file that reads stdin holds `banshee connect` at the terminal.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let flags = flags.join(" ");
+    let mut child = match started {
+        Ok(child) => child,
+        Err(error) => {
+            return Probe::Failed(format!("{shell:?} {flags} did not start: {error}"));
+        }
+    };
+
+    let printed = drain(child.stdout.take(), Some(PATH_END));
+    let complained = drain(child.stderr.take(), None);
+    // The status belongs to the last rc command, so a failed rc file still
+    // leaves the PATH good.
+    let answer = printed
+        .recv_timeout(remaining(deadline))
+        .unwrap_or_default();
+    let found = extract_path(&answer);
+    let ended = match found {
+        Some(_) => None,
+        None => exit_status(&mut child, deadline),
+    };
+    reap(&mut child);
+    if let Some(path) = found {
+        return Probe::Path(path);
+    }
+
+    let complained = complained
+        .recv_timeout(remaining(deadline))
+        .unwrap_or_default();
+    Probe::Failed(format!(
+        "{shell:?} {flags} reported no PATH: {}. {}",
+        ended.unwrap_or_else(|| format!("no answer in {wait:?}")),
+        complained.trim()
+    ))
+}
+
+// An interactive shell reads the rc file, where an npm or nvm install puts
+// its directory. A login shell reads none.
+fn shell_path(shell: &OsStr, wait: std::time::Duration) -> Option<OsString> {
+    for flags in [["-i", "-l"].as_slice(), ["-l"].as_slice()] {
+        match probe(shell, flags, wait) {
+            Probe::Path(path) => return Some(path),
+            Probe::Failed(why) => log::warn!("{why}"),
+        }
+    }
+    None
+}
+
+fn login_shell_path() -> Option<OsString> {
+    shell_path(&std::env::var_os("SHELL")?, SHELL_WAIT)
+}
+
+struct SearchPath(std::sync::Mutex<Option<OsString>>);
+
+impl SearchPath {
+    const fn new() -> SearchPath {
+        SearchPath(std::sync::Mutex::new(None))
+    }
+
+    /// The PATH in hand, or `probe`'s answer when nothing is in hand yet.
+    fn get(&self, probe: impl FnOnce() -> OsString) -> OsString {
+        if let Some(path) = self.held().clone() {
+            return path;
+        }
+        // No probe runs under the lock. A reader that waited behind another
+        // reader's shell would be the stall this cache exists to prevent. A
+        // race probes twice instead, and the first answer stored wins.
+        let probed = probe();
+        self.held().get_or_insert(probed).clone()
+    }
+
+    /// Puts a PATH in hand, and answers what readers now get.
+    fn replace(&self, path: OsString) -> OsString {
+        *self.held() = Some(path.clone());
+        path
+    }
+
+    // A panic under the lock leaves either no PATH or a good one. So the
+    // daemon keeps resolving instead of dying with the poison.
+    fn held(&self) -> std::sync::MutexGuard<'_, Option<OsString>> {
+        self.0.lock().unwrap_or_else(|held| held.into_inner())
+    }
+}
+
+static SEARCH_PATH: SearchPath = SearchPath::new();
+
+/// A shell that printed nothing between the markers reported no PATH.
+fn answered(shell_path: Option<OsString>) -> Option<OsString> {
+    shell_path.filter(|path| !path.is_empty())
+}
+
+fn searchable(path: OsString) -> OsString {
+    // `tell show`, dictation, the status report and the readiness check all
+    // search this PATH. None of them builds an `Env`, so the call belongs here.
+    let path = match crate::service::home_dir() {
+        Ok(home) => with_local_bin(path, &home),
+        Err(_) => path,
+    };
+    log::debug!("agents are searched for on PATH {path:?}");
+    path
+}
+
+/// What a shell reported. `None` when none answered.
+fn probed_path() -> Option<OsString> {
+    answered(login_shell_path()).map(searchable)
+}
+
+/// What to search when no shell answers.
+fn fallback_path() -> OsString {
+    searchable(std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// A probe that answers nothing leaves the PATH in hand.
+fn refreshed(
+    cache: &SearchPath,
+    probe: impl FnOnce() -> Option<OsString>,
+    fallback: impl FnOnce() -> OsString,
+) -> OsString {
+    match probe() {
+        Some(path) => cache.replace(path),
+        // The fallback holds almost nothing under a service manager. Writing
+        // it over a working PATH would take detection, dictation and `tell`
+        // down until a later probe happened to answer.
+        None => cache.get(fallback),
     }
 }
 
 pub(crate) fn resolved_path() -> OsString {
-    static RESOLVED: std::sync::OnceLock<OsString> = std::sync::OnceLock::new();
-    RESOLVED
-        .get_or_init(|| with_fallback(login_shell_path()))
-        .clone()
+    SEARCH_PATH.get(|| probed_path().unwrap_or_else(fallback_path))
+}
+
+/// Asks the shell again, so an agent installed since the daemon started
+/// appears.
+pub(crate) fn refreshed_path() -> OsString {
+    refreshed(&SEARCH_PATH, probed_path, fallback_path)
 }
 
 impl Env {
@@ -726,9 +908,14 @@ impl Env {
         Env::with_path(resolved_path())
     }
 
+    pub fn from_machine_refreshed() -> Result<Env, BansheeError> {
+        Env::with_path(refreshed_path())
+    }
+
     #[cfg(test)]
     fn with_shell_path(shell_path: Option<OsString>) -> Result<Env, BansheeError> {
-        Env::with_path(with_fallback(shell_path))
+        let path = answered(shell_path).map(searchable);
+        Env::with_path(path.unwrap_or_else(fallback_path))
     }
 
     /// Where detection found this agent's binary. `None` for an agent found by

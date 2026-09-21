@@ -56,7 +56,9 @@ fn the_plan(agent: connect::Agent) -> Result<(connect::Env, Vec<connect::Change>
 }
 
 fn read_the_agents() -> Result<serde_json::Value, BansheeError> {
-    let env = connect::Env::from_machine()?;
+    // The window reads this on an Agents panel open, and on a reconnect until
+    // one read succeeds. So an agent installed now appears without a restart.
+    let env = connect::Env::from_machine_refreshed()?;
     let agents: Vec<_> = connect::Agent::ALL
         .iter()
         .map(|agent| connect::row(*agent, &env))
