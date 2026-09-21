@@ -956,7 +956,7 @@ fn show_line(agent: Headless, binary: &Path, dir: &Path, id: &str) -> String {
 
 /// One shell word. A home directory may hold a space, and every launcher hands
 /// the line to a shell.
-fn quoted(word: &str) -> String {
+pub(crate) fn quoted(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 

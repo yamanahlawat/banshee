@@ -705,9 +705,29 @@ fn missing_models_note(missing: &[String]) -> Option<String> {
     })
 }
 
+// A tarball route unpacks the app and places nothing on PATH, so `start`
+// does it. A link never blocks the daemon, so nothing here returns an error.
+fn link_the_command() {
+    use crate::on_path::Linked;
+
+    let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) else {
+        return;
+    };
+    match crate::on_path::ensure(&exe, crate::connect::resolved_path) {
+        None | Some(Linked::Already(_)) => {}
+        Some(Linked::Made(link)) => println!("The banshee command is now at {}.", link.display()),
+        Some(Linked::Advised(command)) => {
+            println!();
+            println!("To run banshee from a terminal, this puts it on your PATH:");
+            println!("  {command}");
+        }
+    }
+}
+
 pub async fn start(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
     let log = service::install(service::Agent::Daemon)?;
     println!("Banshee is running, and starts again at login.");
+    link_the_command();
 
     // The daemon reports these to its log, which nobody reads on a first run
     let mut blocked = false;
@@ -853,12 +873,13 @@ pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
     // A receipt names what its installer meant to place, and the updater beside
     // them that it never recorded. Only what is on disk is offered for removal.
     software.retain(|path| path.exists());
-    let plan = crate::uninstall::plan(
-        &owner,
-        software,
-        data.then(utils::banshee_dir).flatten(),
-        running.as_deref(),
-    );
+    let unowned = data
+        .then(utils::banshee_dir)
+        .flatten()
+        .into_iter()
+        .chain(crate::on_path::placed(running.as_deref()))
+        .collect();
+    let plan = crate::uninstall::plan(&owner, software, unowned, running.as_deref());
 
     println!("Banshee stops now and no longer starts at login.");
     for path in &plan.remove {
