@@ -8,6 +8,16 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
 - The hotkey fires a dictation while the window captures a new one. The daemon binds the key
   at OS level, so window focus does not stop it, and no protocol method suspends it. A fix
   needs a suspend with a timeout, so a window that dies does not leave the hotkey dead.
+- The PATH probe reads no `.bashrc` that a login file does not source, so an agent installed
+  under `nvm` can stay invisible. `-i -l` and `-l` both read the login files, and bash reads
+  `.bashrc` only for an interactive shell that is not a login shell. Measured on Ubuntu with
+  a `.bash_profile` that does not source `.bashrc`: `bash -i -l -c` and `bash -l -c` miss the
+  rc file, and `bash -i -c` reads it but misses the login file. Dropping `-l` is not the fix:
+  `zsh -i -c` loses `/usr/local/bin`, because `/etc/zprofile` is what runs `path_helper`.
+  The escalation also only advances when a probe fails, and `-i -l` succeeds with an
+  incomplete PATH, so a third probe would never run. A fix means a union of the PATHs from
+  several probes, or a second probe when detection finds nothing. Narrow: `~/.local/bin` is
+  searched whatever the shell reports, so the official installer is covered either way.
 - Reading the status starts the daemon as a side effect. The restart poll asks twelve times,
   so a daemon slow to load can be kickstarted more than once.
 - No protocol method cancels a download. A person on a metered connection can start 862 MB

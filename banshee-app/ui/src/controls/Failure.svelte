@@ -4,6 +4,10 @@
   export let id: string;
   export let label: string;
   export let said: string;
+
+  /// The panel keeps one `id` for its failure row, so a second failure arriving
+  /// inside the held confirmation would leave Copied over text nobody copied.
+  $: copyId = `${id}:${said}`;
 </script>
 
 <div class="failure">
@@ -11,8 +15,8 @@
     <p class="note failed">{label}</p>
     <p class="note said">{said}</p>
   </div>
-  <button class="caps btn-underline" on:click={() => copy(failureSays(label, said), id)}>
-    {$copied === id ? 'Copied' : 'Copy'}
+  <button class="caps btn-underline" on:click={() => copy(failureSays(label, said), copyId)}>
+    {$copied === copyId ? 'Copied' : 'Copy'}
     <span class="sr">the failure</span>
   </button>
 </div>

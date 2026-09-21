@@ -51,15 +51,22 @@ fn ensure_in(exe: &Path, path: impl FnOnce() -> OsString, target: &Path) -> Link
 }
 
 // A clean macOS has no `/usr/local/bin`, and its parent belongs to `root`, so
-// the directory is part of what the person has to make. No `-f`, so a file
-// that is not ours stays and `ln` says why.
+// the directory is part of what the person has to make. No `-f`, so `ln` stops
+// rather than writing over an entry that stays.
 fn advice(exe: &Path, target: &Path, link: &Path) -> String {
-    let linking = format!("sudo ln -s {} {}", shell_word(exe), shell_word(link));
-    if target.is_dir() {
-        linking
-    } else {
-        format!("sudo mkdir -p {} && {linking}", shell_word(target))
+    let mut steps = Vec::new();
+    if !target.is_dir() {
+        steps.push(format!("sudo mkdir -p {}", shell_word(target)));
     }
+    if dangling(link) {
+        steps.push(format!("sudo rm {}", shell_word(link)));
+    }
+    steps.push(format!(
+        "sudo ln -s {} {}",
+        shell_word(exe),
+        shell_word(link)
+    ));
+    steps.join(" && ")
 }
 
 fn shell_word(path: &Path) -> String {
@@ -67,8 +74,9 @@ fn shell_word(path: &Path) -> String {
 }
 
 fn place(exe: &Path, link: &Path) -> std::io::Result<()> {
-    // A link left by a deleted install holds the name and answers nothing.
-    if is_link(link) {
+    // Only a free name is taken. `symlink` refuses every other entry, and the
+    // person is advised instead.
+    if dangling(link) {
         std::fs::remove_file(link)?;
     }
     std::os::unix::fs::symlink(exe, link)
@@ -76,6 +84,13 @@ fn place(exe: &Path, link: &Path) -> std::io::Result<()> {
 
 fn is_link(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+// A link nobody can follow points into an install that is gone, so its name is
+// free. Every other entry stays, including a link to another copy of Banshee:
+// somebody made it, and it still answers.
+fn dangling(link: &Path) -> bool {
+    is_link(link) && std::fs::canonicalize(link).is_err()
 }
 
 /// The link this install owns, which `uninstall` removes with the rest. A
@@ -180,6 +195,45 @@ mod tests {
             "the directory is there, so making it is noise: {command}"
         );
         assert!(!target.join(NAME).exists(), "nothing was written");
+    }
+
+    // Another copy of Banshee is still somebody's install. Reached when the
+    // probe fell back to a PATH without the target, so nothing answered.
+    #[test]
+    fn a_link_into_another_install_is_left_where_it_is() {
+        let install = scratch("foreign-install");
+        let target = scratch("foreign-target");
+        let elsewhere = scratch("foreign-elsewhere");
+        let exe = installed(&install);
+        let theirs = installed(&elsewhere);
+        std::os::unix::fs::symlink(&theirs, target.join(NAME)).unwrap();
+
+        let outcome = ensure_in(&exe, OsString::new, &target);
+        assert!(matches!(outcome, Linked::Advised(_)), "{outcome:?}");
+        assert_eq!(
+            std::fs::read_link(target.join(NAME)).unwrap(),
+            theirs,
+            "their link still points where they put it"
+        );
+    }
+
+    // `ln` refuses a name a dangling link holds, so the advice has to free it.
+    #[test]
+    fn a_dangling_link_that_cannot_be_removed_is_advised_away() {
+        let install = scratch("stuck-install");
+        let target = scratch("stuck-target");
+        let exe = installed(&install);
+        std::os::unix::fs::symlink(install.join("gone"), target.join(NAME)).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let outcome = ensure_in(&exe, OsString::new, &target);
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let Linked::Advised(command) = outcome else {
+            panic!("a directory that refuses a write takes no link");
+        };
+        assert!(command.contains("sudo rm "), "{command}");
+        assert!(command.contains(" && sudo ln -s "), "{command}");
     }
 
     #[test]
