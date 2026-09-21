@@ -37,14 +37,14 @@ curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Bans
   so Banshee cannot make it. One line does:
 
 ```bash
-sudo mkdir -p /usr/local/bin && sudo ln -sf \
+sudo mkdir -p /usr/local/bin && sudo ln -s \
   /Applications/Banshee.app/Contents/MacOS/banshee /usr/local/bin/banshee
 ```
 
 - **Nothing of yours is replaced.** A `banshee` that already answers is left
   alone, so a Homebrew install keeps the wrapper that clears its quarantine
-  flag. A file of your own at that name stays, and the `ln` above says so
-  rather than writing over it.
+  flag. There is no `-f` above, so a file or a link of your own at that name
+  stays, and `ln` says `File exists` rather than writing over it.
 - **The command inside the app** stays at
   `/Applications/Banshee.app/Contents/MacOS/banshee`, whether it is linked or
   not.

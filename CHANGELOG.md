@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `banshee` on your `PATH` that points at another install stays.** Linking
+  the command took any link at that name, so a second copy of Banshee could
+  have its link repointed. Only a link nobody can follow is replaced now, and
+  the advised command frees such a name rather than failing on it.
+- **The Copy button under a failure no longer says Copied for the next
+  failure.** The confirmation was keyed to the panel's row, not to the text, so
+  a second failure inside 1.5 seconds left it standing over words nobody
+  copied.
 - **The window no longer reports an installed agent as absent.** The daemon's
   own shell could not see an install under `~/.local/bin`, or one an rc file
   adds, such as npm. It now searches that directory, asks an interactive shell
