@@ -30,14 +30,29 @@ curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Bans
 ```
 
 - **The unpacked app** sets no quarantine flag, so it needs no `xattr` line.
-- **The `banshee` command** is
-  `/Applications/Banshee.app/Contents/MacOS/banshee`.
-- **Link it** onto your `PATH` if you want it short.
+- **Opening the app** puts the `banshee` command on your `PATH`, at
+  `/usr/local/bin/banshee`. That directory is first in `/etc/paths`, so it
+  answers in every terminal. `banshee start` does the same from a terminal.
+- **A clean macOS has no `/usr/local/bin`,** and its parent belongs to `root`,
+  so Banshee cannot make it. One line does:
+
+```bash
+sudo mkdir -p /usr/local/bin && sudo ln -sf \
+  /Applications/Banshee.app/Contents/MacOS/banshee /usr/local/bin/banshee
+```
+
+- **Nothing of yours is replaced.** A `banshee` that already answers is left
+  alone, so a Homebrew install keeps the wrapper that clears its quarantine
+  flag. A file of your own at that name stays, and the `ln` above says so
+  rather than writing over it.
+- **The command inside the app** stays at
+  `/Applications/Banshee.app/Contents/MacOS/banshee`, whether it is linked or
+  not.
 - **No admin account?** Unpack into `~/Applications`, and read that path
   instead.
 - **Update it** by running the same command again: it replaces the app in place.
 - **Remove it** with `banshee uninstall`, which stops the daemon and takes the
-  login entries with it.
+  login entries and the link with it.
 
 ## macOS, terminal only
 

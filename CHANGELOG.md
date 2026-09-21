@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The failure itself now reads as two lines, Banshee's own words and then the
   server's, with a control that copies both. The window speaks a failure when it
   arrives, even when no panel is open.
+- **Opening the app puts the `banshee` command on your PATH.** The macOS
+  tarball placed nothing there. It links into `/usr/local/bin`, leaves a
+  `banshee` that already answers alone, and `banshee uninstall` takes it away.
+  A clean macOS has no `/usr/local/bin`, and
+  [install.md](docs/install.md) carries the line that makes it.
 
 ### Fixed
 

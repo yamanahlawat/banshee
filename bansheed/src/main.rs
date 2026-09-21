@@ -12,6 +12,7 @@ mod dictation;
 mod history;
 mod hotkey;
 mod models;
+mod on_path;
 mod permissions;
 mod readiness;
 mod remote;
