@@ -7,7 +7,7 @@
 - Gives your AI coding agent a voice.
 - Speaks its decisions and questions out loud.
 - You answer by talking, hands-free.
-- Local Whisper and a local neural voice by default. No account.
+- Whisper, Kokoro and Silero run inside Banshee. Nothing to host, no account.
 - Words leave your laptop only with a remote listener or voice you set. The tray and `banshee status` say so.
 - Also a dictation tool: hold a hotkey, speak. The text lands in the app you are focused on.
 - Tell it to change your desktop: `banshee tell "make the window gaps bigger"` hands your words to your coding agent.
