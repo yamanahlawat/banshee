@@ -59,6 +59,209 @@ fn detection_searches_the_resolved_path_not_the_process_path() {
 }
 
 #[test]
+fn the_searched_path_holds_the_installer_directory() {
+    let path = with_local_bin(OsString::from("/usr/bin:/bin"), Path::new("/home/someone"));
+    assert_eq!(
+        path,
+        OsString::from("/usr/bin:/bin:/home/someone/.local/bin")
+    );
+}
+
+#[test]
+fn a_path_that_already_names_the_installer_directory_is_unchanged() {
+    let already = OsString::from("/home/someone/.local/bin:/usr/bin");
+    let path = with_local_bin(already.clone(), Path::new("/home/someone"));
+    assert_eq!(path, already);
+}
+
+#[test]
+fn an_empty_path_still_gets_the_installer_directory() {
+    let path = with_local_bin(OsString::new(), Path::new("/home/someone"));
+    assert_eq!(path, OsString::from("/home/someone/.local/bin"));
+}
+
+/// Counts its calls, and answers a different PATH each time.
+fn counting(probes: &std::cell::Cell<usize>) -> impl Fn() -> OsString + '_ {
+    move || {
+        probes.set(probes.get() + 1);
+        OsString::from(format!("/probe/{}", probes.get()))
+    }
+}
+
+#[test]
+fn readers_after_the_first_share_its_probe() {
+    let probes = std::cell::Cell::new(0);
+    let probe = counting(&probes);
+    let path = SearchPath::new();
+    assert_eq!(path.get(&probe), OsString::from("/probe/1"));
+    assert_eq!(path.get(&probe), OsString::from("/probe/1"));
+    assert_eq!(probes.get(), 1);
+}
+
+#[test]
+fn a_replaced_path_is_what_readers_then_get() {
+    let probes = std::cell::Cell::new(0);
+    let probe = counting(&probes);
+    let path = SearchPath::new();
+    assert_eq!(path.get(&probe), OsString::from("/probe/1"));
+    assert_eq!(path.replace(OsString::from("/second")), "/second");
+    assert_eq!(path.get(&probe), OsString::from("/second"));
+    assert_eq!(probes.get(), 1, "a replacement needs no probe");
+}
+
+#[test]
+fn a_probe_that_answers_nothing_keeps_the_path_in_hand() {
+    let path = SearchPath::new();
+    path.replace(OsString::from("/good"));
+    let refreshed = refreshed(&path, || None, || OsString::from("/bare"));
+    assert_eq!(refreshed, OsString::from("/good"));
+    assert_eq!(path.get(|| OsString::from("/probed")), "/good");
+}
+
+#[test]
+fn a_probe_that_answers_replaces_the_path_in_hand() {
+    let path = SearchPath::new();
+    path.replace(OsString::from("/good"));
+    let answer = || Some(OsString::from("/better"));
+    assert_eq!(
+        refreshed(&path, answer, || OsString::from("/bare")),
+        "/better"
+    );
+    assert_eq!(path.get(|| OsString::from("/probed")), "/better");
+}
+
+#[test]
+fn nothing_in_hand_and_no_answer_leaves_the_fallback() {
+    let path = SearchPath::new();
+    let refreshed = refreshed(&path, || None, || OsString::from("/bare"));
+    assert_eq!(refreshed, OsString::from("/bare"));
+}
+
+#[test]
+fn an_empty_answer_is_no_answer() {
+    assert_eq!(answered(None), None);
+    assert_eq!(answered(Some(OsString::new())), None);
+    assert_eq!(
+        answered(Some(OsString::from("/usr/bin"))),
+        Some(OsString::from("/usr/bin"))
+    );
+}
+
+#[test]
+fn the_fallback_keeps_every_directory_the_process_had() {
+    let fallback = fallback_path();
+    for dir in path_dirs(&std::env::var_os("PATH").unwrap_or_default()) {
+        assert!(path_holds(&fallback, &dir), "{} is lost", dir.display());
+    }
+}
+
+#[test]
+fn every_caller_of_the_resolved_path_gets_the_installer_directory() {
+    let local_bin = crate::service::home_dir().unwrap().join(".local/bin");
+    let path = resolved_path();
+    assert!(path_holds(&path, &local_bin), "{path:?}");
+}
+
+fn fake_shell(name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let shell = scratch(name).join("shell");
+    std::fs::write(&shell, body).unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    shell
+}
+
+fn answers_apart(interactive_runs: &str, login_reports: &str) -> String {
+    format!(
+        "#!/bin/sh\ncase \" $* \" in\n  *\" -i \"*) {interactive_runs} ;;\n  *) printf '{PATH_START}{login_reports}{PATH_END}' ;;\nesac\n"
+    )
+}
+
+fn probed(shell: &Path, wait: std::time::Duration) -> Option<OsString> {
+    shell_path(shell.as_os_str(), wait)
+}
+
+// A loaded suite needs this long to spawn a shell and read its print. At
+// 200 ms the probes below returned nothing. Every hang they give up on lasts
+// 300 s, so the gap stays plain.
+const PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[test]
+fn the_probe_prefers_what_the_interactive_shell_reports() {
+    let body = answers_apart(
+        &format!("printf '{PATH_START}/rc/bin{PATH_END}'"),
+        "/login/bin",
+    );
+    let shell = fake_shell("probe-interactive", &body);
+    assert_eq!(
+        probed(&shell, SHELL_WAIT),
+        Some(OsString::from("/rc/bin")),
+        "the rc file holds an npm install, so its answer wins"
+    );
+}
+
+#[test]
+fn a_failed_interactive_shell_falls_back_to_the_login_shell() {
+    let body = answers_apart("echo 'rc is broken' >&2; exit 3", "/login/bin");
+    let shell = fake_shell("probe-failed", &body);
+    assert_eq!(
+        probed(&shell, SHELL_WAIT),
+        Some(OsString::from("/login/bin"))
+    );
+}
+
+#[test]
+fn a_hung_interactive_shell_falls_back_without_waiting_for_it() {
+    // The login shell answers only because the probe gave up on the hang,
+    // never because the hang ended.
+    let body = answers_apart("sleep 300", "/login/bin");
+    let shell = fake_shell("probe-hung", &body);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        probed(&shell, PROBE_WAIT),
+        Some(OsString::from("/login/bin"))
+    );
+    let elapsed = started.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
+}
+
+#[test]
+fn markers_split_across_two_reads_still_answer() {
+    const PATH: &str = "/late/bin";
+    // The pad puts the end marker across a read boundary, in one write. A
+    // search of the last chunk alone then misses it.
+    let pad = READ_CHUNK - (PATH_START.len() + PATH.len() + PATH_END.len() / 2);
+    let banner = "z".repeat(pad);
+    // The sleep holds the pipe open after the print, as an rc file's daemon
+    // does. So the end of the pipe cannot be what answers.
+    let body = format!("#!/bin/sh\nprintf '{banner}{PATH_START}{PATH}{PATH_END}'\nsleep 300\n");
+    let shell = fake_shell("probe-split", &body);
+    let started = std::time::Instant::now();
+    assert_eq!(probed(&shell, PROBE_WAIT), Some(OsString::from(PATH)));
+    let elapsed = started.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
+}
+
+#[test]
+fn a_failed_probe_says_what_the_shell_complained() {
+    let body = answers_apart("echo 'nvm: command not found' >&2; exit 1", "/login/bin");
+    let shell = fake_shell("probe-stderr", &body);
+    let Probe::Failed(why) = probe(shell.as_os_str(), &["-i", "-l"], SHELL_WAIT) else {
+        panic!("an exit of 1 with no markers is a failure");
+    };
+    assert!(why.contains("nvm: command not found"), "{why}");
+    assert!(why.contains("-i"), "{why}");
+}
+
+#[test]
+fn a_shell_that_does_not_start_is_a_failure_not_a_panic() {
+    let Probe::Failed(why) = probe(OsStr::new("/no/such/shell"), &["-l"], SHELL_WAIT) else {
+        panic!("a missing shell cannot answer");
+    };
+    assert!(why.contains("did not start"), "{why}");
+}
+
+#[test]
 fn a_banner_before_the_markers_is_not_part_of_the_path() {
     let output = format!("Welcome to zsh\n{PATH_START}/usr/bin:/bin{PATH_END}\n");
     assert_eq!(extract_path(&output), Some(OsString::from("/usr/bin:/bin")));
@@ -83,22 +286,6 @@ fn an_empty_path_does_not_search_the_working_directory() {
         "test assumes the crate root as the working directory"
     );
     assert!(crate::status::resolve("Cargo.toml", &OsString::new()).is_none());
-}
-
-#[test]
-fn a_resolver_that_fails_falls_back_to_the_process_path() {
-    assert_eq!(
-        with_fallback(None),
-        std::env::var_os("PATH").unwrap_or_default()
-    );
-}
-
-#[test]
-fn an_empty_resolved_path_falls_back_to_the_process_path() {
-    assert_eq!(
-        with_fallback(Some(OsString::new())),
-        std::env::var_os("PATH").unwrap_or_default()
-    );
 }
 
 #[test]

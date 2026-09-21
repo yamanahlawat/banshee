@@ -32,6 +32,18 @@ This page lists what breaks, and the fix.
   - In **System Settings > Sound**, set _Input_ to the built-in microphone.
   - Leave _Output_ on the earbuds; the built-in mic transcribes better
     anyway.
+- **The window shows an agent as not installed, but your shell finds it.**
+  - The daemon takes its PATH from a shell it starts itself, not from your
+    terminal. A service manager gives that shell almost no PATH to begin with.
+  - Banshee asks an interactive login shell first, so a directory that only
+    `.zshrc` or `.bashrc` adds still counts. An npm or nvm install is the
+    common case.
+  - `~/.banshee/daemon.log` names the PATH the search used, and names every
+    probe that failed with what the shell printed.
+  - If the log shows a probe that timed out, your profile is slow. Move the
+    PATH line to `.zshenv` on zsh, or `.profile` on bash, where a plain login
+    shell reads it.
+  - `~/.local/bin` is always searched, so the native installer needs nothing.
 - **Hotkeys or typing stopped working, but no error appears.**
   - macOS withholds input events silently when the Accessibility grant is
     stale.

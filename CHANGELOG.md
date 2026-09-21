@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The window no longer reports an installed agent as absent.** The daemon's
+  own shell could not see an install under `~/.local/bin`, or one an rc file
+  adds, such as npm. It now searches that directory, asks an interactive shell
+  first, re-checks when the Agents panel opens, and logs why a probe failed.
 - **"Skip to the jobs" now enters the foot where you left it.** It always landed
   on Microphone, whichever job the foot held, so the cell it focused was not the
   one Tab leaves from. The link is a keyboard route past the record's copy
