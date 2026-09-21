@@ -7,7 +7,7 @@
 - Gives your AI coding agent a voice.
 - Speaks its decisions and questions out loud.
 - You answer by talking, hands-free.
-- Local Whisper and a local neural voice by default. No account.
+- Whisper, Kokoro and Silero run inside Banshee. Nothing to host, no account.
 - Words leave your laptop only with a remote listener or voice you set. The tray and `banshee status` say so.
 - Also a dictation tool: hold a hotkey, speak. The text lands in the app you are focused on.
 - Tell it to change your desktop: `banshee tell "make the window gaps bigger"` hands your words to your coding agent.
@@ -57,7 +57,7 @@ open /Applications/Banshee.app
 
 - The downloaded app needs no `xattr` line. Run the same `curl` again to update it.
 - No admin account? Unpack into `~/Applications`, open it from there, and read that path in the line below.
-- The `banshee` command is `/Applications/Banshee.app/Contents/MacOS/banshee`. [Link it](docs/install.md#macos-without-homebrew) onto your PATH to run it short.
+- Opening the app puts the `banshee` command on your PATH, where `/usr/local/bin` takes it. A clean macOS has no such directory, and [one line makes it](docs/install.md#macos-without-homebrew).
 - The window asks before it downloads the models (~860 MB), and lets you pick the speech model first.
 - Approve the **Microphone** and **Accessibility** grants. Without them Banshee cannot record or type.
 - **Hold `Right Option`**, speak, let go. The text is typed into the app you are focused on.

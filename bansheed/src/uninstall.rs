@@ -54,12 +54,13 @@ pub enum Rest {
 }
 
 /// `software` is what the owner placed: the binaries a receipt names, or the
-/// app bundle. `data` is `~/.banshee` when the person asked for it. `running`
-/// is the binary this command runs from, when the OS can name it.
+/// app bundle. `unowned` is what no installer accounts for: `~/.banshee` when
+/// the person asked for it, and the PATH entry Banshee made for itself.
+/// `running` is the binary this command runs from, when the OS can name it.
 pub fn plan(
     owner: &Owner,
     software: Vec<PathBuf>,
-    data: Option<PathBuf>,
+    unowned: Vec<PathBuf>,
     running: Option<&Path>,
 ) -> Plan {
     let mut remove = match owner {
@@ -69,7 +70,9 @@ pub fn plan(
         Owner::Installer | Owner::Bundle => software,
         Owner::Unknown => Vec::new(),
     };
-    remove.extend(data);
+    // A person who unpacked the tarball and later moved to Homebrew still has
+    // the link, and Homebrew has no record of it to remove.
+    remove.extend(unowned);
     Plan {
         remove,
         rest: match owner {
@@ -172,7 +175,7 @@ mod tests {
         let plan = plan(
             &Owner::Homebrew("brew uninstall --cask banshee"),
             vec![PathBuf::from("/Applications/Banshee.app")],
-            Some(PathBuf::from("/Users/someone/.banshee")),
+            vec![PathBuf::from("/Users/someone/.banshee")],
             Some(Path::new(CASK_BINARY)),
         );
         assert_eq!(plan.remove, vec![PathBuf::from("/Users/someone/.banshee")]);
@@ -188,7 +191,7 @@ mod tests {
         let plan = plan(
             &Owner::Installer,
             binaries.clone(),
-            None,
+            Vec::new(),
             Some(&binaries[0]),
         );
         assert_eq!(plan.remove, binaries);
@@ -200,11 +203,11 @@ mod tests {
     #[test]
     fn a_copy_nothing_records_is_named_and_left() {
         let running = Path::new("/home/someone/banshee/target/release/banshee");
-        let named = plan(&Owner::Unknown, Vec::new(), None, Some(running));
+        let named = plan(&Owner::Unknown, Vec::new(), Vec::new(), Some(running));
         assert!(named.remove.is_empty(), "nothing records what to remove");
         assert_eq!(named.rest, Some(Rest::ByHand(running.to_path_buf())));
 
-        let unnamed = plan(&Owner::Unknown, Vec::new(), None, None);
+        let unnamed = plan(&Owner::Unknown, Vec::new(), Vec::new(), None);
         assert_eq!(
             unnamed.rest, None,
             "a binary the OS cannot name is not named"
@@ -212,11 +215,25 @@ mod tests {
     }
 
     #[test]
+    fn the_link_banshee_made_goes_whoever_owns_the_rest() {
+        let link = PathBuf::from("/usr/local/bin/banshee");
+        for owner in [
+            Owner::Homebrew("brew uninstall --cask banshee"),
+            Owner::Installer,
+            Owner::Bundle,
+            Owner::Unknown,
+        ] {
+            let plan = plan(&owner, Vec::new(), vec![link.clone()], None);
+            assert!(plan.remove.contains(&link), "{owner:?} left it behind");
+        }
+    }
+
+    #[test]
     fn data_goes_only_when_it_is_given() {
         let without = plan(
             &Owner::Bundle,
             Vec::new(),
-            None,
+            Vec::new(),
             Some(Path::new(CASK_BINARY)),
         );
         assert!(without.remove.is_empty());
@@ -224,7 +241,7 @@ mod tests {
         let with = plan(
             &Owner::Bundle,
             Vec::new(),
-            Some(PathBuf::from("/Users/someone/.banshee")),
+            vec![PathBuf::from("/Users/someone/.banshee")],
             Some(Path::new(CASK_BINARY)),
         );
         assert_eq!(with.remove, vec![PathBuf::from("/Users/someone/.banshee")]);

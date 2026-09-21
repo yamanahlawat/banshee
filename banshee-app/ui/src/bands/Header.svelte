@@ -6,11 +6,21 @@
   export let waiting = false;
   export let restart: () => void;
   export let restarting = false;
+  /// What failed, in two words. A server's message never reaches this band:
+  /// it would grow it to any width.
+  export let failure: string | null = null;
+  export let showFailure: () => void = () => {};
+  export let failureId = '';
 </script>
 
 <header class="band">
   <span class="mark"><Mark {form} /></span>
   <span class="caps state">{word}</span>
+  {#if failure}
+    <button id={failureId} class="caps failed btn-underline" on:click={showFailure}>
+      {failure}
+    </button>
+  {/if}
   {#if waiting}
     <button class="caps waiting btn-underline" on:click={restart} disabled={restarting}>
       {restarting ? 'Restarting' : 'Restart to apply'}
@@ -41,5 +51,19 @@
   .waiting {
     margin-left: auto;
     color: var(--accent);
+  }
+
+  /* Takes the right edge when it is alone, and stands left of the restart when
+     both are up. */
+  .failed {
+    margin-left: auto;
+    color: var(--accent);
+    font-variation-settings:
+      'wght' 700,
+      'wdth' 100;
+  }
+
+  .failed + .waiting {
+    margin-left: 16px;
   }
 </style>

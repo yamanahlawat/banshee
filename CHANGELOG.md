@@ -15,9 +15,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Banshee restarts. The "First audio" log line now names the rate and channel
   count of the reply. In the Voice and Microphone panels, the key now sits
   under the server it belongs to.
+- **The header names a failed reply or dictation, and opens the panel that holds
+  it.** The notice sits beside the state word. Pressing it opens the Voice or
+  Microphone panel at the failure, and leaving that panel returns to the notice.
+  The failure itself now reads as two lines, Banshee's own words and then the
+  server's, with a control that copies both. The window speaks a failure when it
+  arrives, even when no panel is open.
+- **Opening the app puts the `banshee` command on your PATH.** The macOS
+  tarball placed nothing there. It links into `/usr/local/bin`, leaves a
+  `banshee` that already answers alone, and `banshee uninstall` takes it away.
+  A clean macOS has no `/usr/local/bin`, and
+  [install.md](docs/install.md) carries the line that makes it.
 
 ### Fixed
 
+- **A `banshee` on your `PATH` that points at another install stays.** Linking
+  the command took any link at that name, so a second copy of Banshee could
+  have its link repointed. Only a link nobody can follow is replaced now, and
+  the advised command frees such a name rather than failing on it.
+- **The Copy button under a failure no longer says Copied for the next
+  failure.** The confirmation was keyed to the panel's row, not to the text, so
+  a second failure inside 1.5 seconds left it standing over words nobody
+  copied.
+- **The window no longer reports an installed agent as absent.** The daemon's
+  own shell could not see an install under `~/.local/bin`, or one an rc file
+  adds, such as npm. It now searches that directory, asks an interactive shell
+  first, re-checks when the Agents panel opens, and logs why a probe failed.
+- **"Skip to the jobs" now enters the foot where you left it.** It always landed
+  on Microphone, whichever job the foot held, so the cell it focused was not the
+  one Tab leaves from. The link is a keyboard route past the record's copy
+  controls, and it is on screen only while it holds focus.
 - **A remote speaker under `wav` no longer sends `sample_rate`.** Groq wrote the
   requested rate into the WAV header without resampling, so a reply asked at
   44100 Hz played 1.8 times too fast. A WAV header states its own rate, so

@@ -4,7 +4,7 @@ import { get } from 'svelte/store';
 
 vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTauri());
 
-import { downloadModels, setSetting, status, type Voices } from '../lib/tauri';
+import { copyText, downloadModels, setSetting, status, type Voices } from '../lib/tauri';
 import {
   daemon,
   empty,
@@ -223,14 +223,27 @@ it('names the last spoken failure inside the group that caused it', () => {
     }),
   );
   render(VoicePanel, { voices: VOICES });
-  const failure = screen.getByText(
-    'The last spoken reply failed: the remote speaker refused the key.',
-  );
+  const failure = screen.getByText('The last spoken reply failed.');
   expect(speakingGroup().contains(failure)).toBe(true);
+  expect(speakingGroup().textContent).toContain('the remote speaker refused the key');
 });
 
-// A failure already standing when the panel opens raises no announcement, so
-// the group has to be read with it or a screen reader never meets it.
+it('copies both halves of the failure', async () => {
+  daemon.set(
+    reduceStatus(empty(), {
+      ...remoteStatus,
+      last_speech_error: 'the remote speaker refused the key',
+    }),
+  );
+  render(VoicePanel, { voices: VOICES });
+  const copy = screen.getByRole('button', { name: 'Copy the failure' });
+  await fireEvent.click(copy);
+  expect(vi.mocked(copyText)).toHaveBeenCalledWith(
+    'The last spoken reply failed. the remote speaker refused the key',
+  );
+  await waitFor(() => expect(copy.textContent).toContain('Copied'));
+});
+
 it('reads the group with the failure standing under it', () => {
   daemon.set(
     reduceStatus(empty(), {
@@ -244,31 +257,7 @@ it('reads the group with the failure standing under it', () => {
     .getAttribute('aria-describedby');
   expect(described).toBe('speaker-note speech-failure');
   expect(document.getElementById('speech-failure')?.textContent).toBe(
-    'The last spoken reply failed: the remote speaker refused the key.',
-  );
-});
-
-// The reader is most often not looking at the screen when one of these lands.
-it('speaks a failure that arrives, and says nothing about one already there', async () => {
-  daemon.set(
-    reduceStatus(empty(), {
-      ...remoteStatus,
-      last_speech_error: 'the remote speaker refused the key',
-    }),
-  );
-  render(VoicePanel, { voices: VOICES });
-  expect(get(announcement)).toBe('');
-
-  daemon.set(
-    reduceStatus(empty(), {
-      ...remoteStatus,
-      last_speech_error: 'api.openai.com did not answer in time',
-    }),
-  );
-  await waitFor(() =>
-    expect(get(announcement)).toBe(
-      'The last spoken reply failed: api.openai.com did not answer in time.',
-    ),
+    'The last spoken reply failed. the remote speaker refused the key',
   );
 });
 

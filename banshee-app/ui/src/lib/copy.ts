@@ -6,6 +6,22 @@ export const RESTART_SAYS = '— set, and in effect when Banshee restarts';
 /// say it in full.
 export const PENDING_SAYS = 'Set. It takes effect when Banshee restarts.';
 
+/// What each side calls its own failure. The server's words follow, so these
+/// end in a full stop rather than a colon.
+export const SPEECH_FAILED = 'The last spoken reply failed.';
+export const DICTATION_FAILED = 'The last dictation failed.';
+
+/// The element that carries each one, named by the panel's group and by the
+/// header notice that lands the reader on it.
+export const SPEECH_FAILURE = 'speech-failure';
+export const DICTATION_FAILURE = 'dictation-failure';
+
+/// The whole failure as one line, for the window to speak and for Copy to hand
+/// over. The panel draws the two parts itself.
+export function failureSays(label: string, said: string): string {
+  return `${label} ${said}`;
+}
+
 // The whole group waits on one restart, so a group states it once.
 export const TAKES_EFFECT = 'Your choice takes effect when Banshee restarts.';
 

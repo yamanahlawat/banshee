@@ -35,10 +35,11 @@ import {
   startDaemon,
   status,
 } from './lib/tauri';
+import { get } from 'svelte/store';
 import { agents } from './lib/agents';
 import { table as historyTable } from './lib/history';
 import { daemon, empty, reduceStatus, type Blocker } from './lib/daemon';
-import { forgetCopy, RESTART_SAYS } from './lib/copy';
+import { announcement, forgetCopy, RESTART_SAYS } from './lib/copy';
 import { forgetKeys } from './lib/keys';
 import App from './App.svelte';
 
@@ -2007,4 +2008,125 @@ it('sends the answerer to the compositor binding while an agent waits', async ()
     expect(screen.getByText(/compositor's Banshee binding to answer/)).toBeTruthy(),
   );
   expect(screen.queryByText(/Tap Right Command to answer/)).toBeNull();
+});
+
+// A failure reported by the daemon lives in a panel nobody has open.
+it('names a failed reply in the header, and opens the voice panel on it', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  daemon.update((s) => ({
+    ...s,
+    live: { ...s.live, last_speech_error: 'api.deepinfra.com says no' },
+  }));
+
+  const notice = await screen.findByRole('button', { name: 'Speech failed' });
+  await fireEvent.click(notice);
+  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
+  expect(document.getElementById('speech-failure')?.textContent).toContain(
+    'api.deepinfra.com says no',
+  );
+});
+
+it('names a failed dictation in the header, and opens the microphone panel on it', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  daemon.update((s) => ({ ...s, live: { ...s.live, last_error: 'api.groq.com says no' } }));
+
+  await fireEvent.click(await screen.findByRole('button', { name: 'Dictation failed' }));
+  await waitFor(() => expect(panelHeading('Microphone')).toBeTruthy());
+});
+
+it('carries the dictation failure when both sides have one', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  daemon.update((s) => ({
+    ...s,
+    live: { ...s.live, last_error: 'no microphone', last_speech_error: 'no voice' },
+  }));
+
+  expect(await screen.findByRole('button', { name: 'Dictation failed' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Speech failed' })).toBeNull();
+});
+
+it('names no failure in the header when the daemon reports none', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  expect(screen.queryByRole('button', { name: /failed/i })).toBeNull();
+});
+
+it('speaks a failure that arrives while no panel is open', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  expect(get(announcement)).toBe('');
+
+  daemon.update((s) => ({
+    ...s,
+    live: { ...s.live, last_speech_error: 'api.openai.com did not answer in time' },
+  }));
+  await waitFor(() =>
+    expect(get(announcement)).toBe(
+      'The last spoken reply failed. api.openai.com did not answer in time',
+    ),
+  );
+});
+
+it('returns focus to the header notice when its panel closes', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  daemon.update((s) => ({ ...s, live: { ...s.live, last_speech_error: 'no voice' } }));
+
+  const notice = await screen.findByRole('button', { name: 'Speech failed' });
+  await fireEvent.click(notice);
+  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  await waitFor(() => expect(document.activeElement).toBe(notice));
+});
+
+// On a remote speaker the failure sits below the fold, so opening the panel is
+// only half of what the notice promises.
+it('lands on the failure itself, not the top of the panel it opens', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  daemon.update((s) => ({ ...s, live: { ...s.live, last_speech_error: 'no voice' } }));
+
+  await fireEvent.click(await screen.findByRole('button', { name: 'Speech failed' }));
+  await waitFor(() =>
+    expect(document.activeElement).toBe(document.getElementById('speech-failure')),
+  );
+});
+
+it('the skip link enters the jobs where the reader left them', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+
+  await fireEvent.click(document.getElementById('job-voice')!);
+  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  await waitFor(() => expect(document.activeElement?.id).toBe('job-voice'));
+  (document.activeElement as HTMLElement).blur();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Skip to the jobs' }));
+  expect(document.activeElement?.id).toBe('job-voice');
+});
+
+// Switching panels keeps the same Panel mounted, so nothing remounts.
+it('lands on the failure when another panel is already open', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await fireEvent.click(document.getElementById('job-microphone')!);
+  await waitFor(() => expect(panelHeading('Microphone')).toBeTruthy());
+  daemon.update((s) => ({ ...s, live: { ...s.live, last_speech_error: 'no voice' } }));
+
+  await fireEvent.click(await screen.findByRole('button', { name: 'Speech failed' }));
+  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
+  expect(document.activeElement).toBe(document.getElementById('speech-failure'));
 });
