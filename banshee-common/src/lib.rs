@@ -224,6 +224,9 @@ pub enum Activity {
 }
 
 impl Activity {
+    // Reading a model off disk ranks with them: the user is no part of it, and
+    // the listener answers on the old model while it runs, so it is work rather
+    // than a stop.
     // The microphone outranks the speaker: it is what the user is waiting on,
     // and both are true at once when barge-in is off. Waiting on an answer
     // outranks both: the daemon opens the microphone to hear one, so `armed`
@@ -239,7 +242,7 @@ impl Activity {
             Activity::Recording
         } else if flag("speaking") {
             Activity::Speaking
-        } else if flag("transcribing") || flag("telling") {
+        } else if flag("transcribing") || flag("telling") || flag("loading_model") {
             Activity::Busy
         } else {
             Activity::Idle
@@ -598,6 +601,20 @@ mod wire_tests {
             "recording": false, "armed": false, "speaking": false, "transcribing": true
         });
         assert_eq!(Activity::of(&transcribing), Activity::Busy);
+    }
+
+    #[test]
+    fn a_model_being_read_off_disk_is_busy() {
+        let loading = serde_json::json!({
+            "recording": false, "armed": false, "speaking": false, "loading_model": true
+        });
+        assert_eq!(Activity::of(&loading), Activity::Busy);
+    }
+
+    #[test]
+    fn dictation_outranks_a_model_being_read() {
+        let both = serde_json::json!({"recording": true, "loading_model": true});
+        assert_eq!(Activity::of(&both), Activity::Recording);
     }
 
     #[test]

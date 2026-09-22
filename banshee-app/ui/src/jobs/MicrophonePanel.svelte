@@ -9,6 +9,7 @@
     SYSTEM_DEVICE,
   } from '../lib/daemon';
   import { write } from '../lib/settings';
+  import { askForModels, fetching } from '../lib/downloads';
   import { PRESETS } from '../lib/presets';
   import { listDevices, listLanguages, type Devices, type Languages } from '../lib/tauri';
   import Row from '../controls/Row.svelte';
@@ -20,7 +21,15 @@
   import SubRow from '../controls/SubRow.svelte';
   import Failure from '../controls/Failure.svelte';
   import { claimKeys } from '../lib/keys';
-  import { announcer, listeningNote, DICTATION_FAILED, DICTATION_FAILURE } from '../lib/copy';
+  import {
+    announcer,
+    languageNote as saysAboutLanguage,
+    listeningNote,
+    modelCost,
+    report,
+    DICTATION_FAILED,
+    DICTATION_FAILURE,
+  } from '../lib/copy';
 
   // The choice and its consequence are one reading, so the group names the
   // sentence its radiogroup is described by.
@@ -117,6 +126,19 @@
     ? 'Words Banshee should expect to hear. They go to the server with your audio.'
     : 'Words Banshee should expect to hear.';
   $: lastError = $daemon.live.last_error;
+  // The missing list, not the blockers: dictation carries on with the loaded
+  // model, so a heavier preset raises nothing and would leave this row silent.
+  // Not `pending` either, which a restart empties while the file is still gone.
+  $: absentModel =
+    ($daemon.status?.missing_downloads ?? []).find((one) => one.role === 'speech') ?? null;
+  $: presetNeedsFetching = provider === 'local' && absentModel !== null;
+  // No guard here: `askForModels` claims the run before it awaits anything.
+  async function fetchModel() {
+    await askForModels().catch(() => report('The download did not start.'));
+  }
+  $: presetSays = absentModel
+    ? modelCost(presetName, absentModel.megabytes, Number($daemon.status?.download_megabytes ?? 0))
+    : null;
 
   // Three fields appear or leave with no event of their own, and where the
   // audio goes changes with them, so a reader who is not looking hears the
@@ -131,7 +153,11 @@
   $: language = String(stt.language ?? 'en');
   $: translate = stt.translate === true;
   // The daemon's own word, so the preset name is not a second rule for one fact.
+  // It answers for the model the listener loaded, which lags the preset beside
+  // it while a heavier one is read off disk.
   $: englishOnly = $daemon.status?.english_only === true;
+  $: loadingModel = $daemon.live.loading_model;
+  $: presetName = PRESETS.find((one) => one.value === preset)?.label ?? preset;
   // A code Whisper's table does not name still needs its row: a select whose value matches no
   // option draws empty.
   $: languagesOffered =
@@ -139,11 +165,13 @@
       ? spoken.languages
       : [{ code: language, name: language }, ...spoken.languages];
 
-  $: languageNote = !languagesArrived
-    ? 'Banshee could not list the languages it knows. The one set here still applies.'
-    : englishOnly
-      ? 'Fast hears English only. Choose Balanced or Quality above to speak another language.'
-      : 'The language you speak. Naming it beats detecting it.';
+  $: languageNote = saysAboutLanguage({
+    languagesArrived,
+    englishOnly,
+    loading: loadingModel,
+    chosen: presetName,
+    isFast: preset === 'fast',
+  });
 
   // `endpoint_silence_ms` is a plain u64 in the daemon, so a hand-edited config
   // can hold a value none of these offer.
@@ -230,13 +258,20 @@
       />
     </SubRow>
   {:else}
-    <SubRow name="model" pending={$waitsOnARestart.has('stt.preset')}>
+    <SubRow name="model" pending={presetNeedsFetching} says={presetSays}>
       <Segmented
         label="Model"
         value={preset}
         options={PRESETS}
         change={(next) => write('stt.preset', next)}
       />
+      <svelte:fragment slot="action">
+        {#if presetNeedsFetching}
+          <button class="btn fetch" disabled={$fetching} on:click={fetchModel}>
+            {$fetching ? 'Downloading' : 'Download'}
+          </button>
+        {/if}
+      </svelte:fragment>
     </SubRow>
   {/if}
 
@@ -251,7 +286,7 @@
   <Picker
     label="Language"
     value={language}
-    disabled={englishOnly}
+    disabled={englishOnly && preset === 'fast'}
     change={(next) => write('stt.language', next)}
   >
     <!-- `auto` is a value the config takes and the engine reads as detect it,
@@ -313,6 +348,13 @@
 </Row>
 
 <style>
+  /* Under the sentence that explains it, aligned with the control it acts for. */
+  .fetch {
+    grid-column: 2;
+    justify-self: start;
+    margin-top: 12px;
+  }
+
   /* Centred, not stretched: a wrapped flex line sizes its items to the tallest, so the input would
      stretch the chips beside it. */
   .chips {

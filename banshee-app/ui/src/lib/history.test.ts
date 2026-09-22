@@ -8,6 +8,7 @@ import {
   countNewer,
   forget,
   formatCount,
+  freshLead,
   newestFirst,
   readAll,
   readNewest,
@@ -96,5 +97,17 @@ describe('readAll', () => {
 
     expect(get(table).rows).toEqual([]);
     expect(get(table).total).toBe(0);
+  });
+});
+
+describe('freshLead', () => {
+  it('stays still on first paint and on a repeated id', () => {
+    expect(freshLead(null, 7)).toBe(false);
+    expect(freshLead(7, 7)).toBe(false);
+    expect(freshLead(7, null)).toBe(false);
+  });
+
+  it('arrives only when the lead replaces another one', () => {
+    expect(freshLead(7, 8)).toBe(true);
   });
 });

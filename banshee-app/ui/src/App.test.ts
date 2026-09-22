@@ -39,7 +39,8 @@ import { get } from 'svelte/store';
 import { agents } from './lib/agents';
 import { table as historyTable } from './lib/history';
 import { daemon, empty, reduceStatus, type Blocker } from './lib/daemon';
-import { announcement, forgetCopy, RESTART_SAYS } from './lib/copy';
+import { forgetTheAsk } from './lib/downloads';
+import { announcement, forgetCopy, DICTATION_FAILURE, RESTART_SAYS } from './lib/copy';
 import { forgetKeys } from './lib/keys';
 import App from './App.svelte';
 
@@ -61,6 +62,7 @@ beforeEach(async () => {
   agents.set([]);
   historyTable.set({ rows: [], total: 0, loaded: false, saving: null });
   forgetCopy();
+  forgetTheAsk();
   forgetKeys();
   vi.mocked(status).mockResolvedValue(ready);
   vi.mocked(history).mockResolvedValue(rows);
@@ -161,7 +163,7 @@ it('asks before it deletes the record', async () => {
   expect(screen.getByText(/This cannot be undone/)).toBeTruthy();
 });
 
-it('renders a page of turns at a time rather than the whole record', async () => {
+it('mounts the whole record where nothing is measurable, with no paging controls', async () => {
   const many = Array.from({ length: 95 }, (_, i) => ({
     id: i + 1,
     text: `dictation ${i + 1}`,
@@ -172,9 +174,11 @@ it('renders a page of turns at a time rather than the whole record', async () =>
   const { container } = render(App);
   await waitFor(() => expect(screen.getByText('dictation 95')).toBeTruthy());
 
-  expect(container.querySelectorAll('article.turn').length).toBe(40);
-  await fireEvent.click(screen.getByRole('button', { name: '55 older' }));
-  expect(container.querySelectorAll('article.turn').length).toBe(80);
+  // jsdom lays nothing out, so the windowing math has no viewport to work
+  // against and the fallback mounts every row. The windowed path is held by
+  // lib/vlist instead, where sizes are numbers rather than hopes.
+  expect(container.querySelectorAll('article.turn').length).toBe(95);
+  expect(screen.queryByRole('button', { name: /older/i })).toBeNull();
 });
 
 it('filters what was said instead of opening a second place for it', async () => {
@@ -196,6 +200,19 @@ it('filters what was said instead of opening a second place for it', async () =>
   await fireEvent.keyDown(window, { key: 'Escape' });
   await waitFor(() => expect(screen.queryByRole('searchbox')).toBeNull());
   expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
+});
+
+// A regex here would throw on the paren.
+it('treats find metacharacters as text rather than a pattern', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.keyDown(window, { key: 'f', metaKey: true });
+
+  const find = screen.getByRole('searchbox', { name: 'Find in what was said' });
+  await fireEvent.input(find, { target: { value: '.*(' } });
+
+  await waitFor(() => expect(screen.getByText('No match')).toBeTruthy());
+  expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
 });
 
 it('says what Banshee does with your words without being asked', async () => {
@@ -231,7 +248,6 @@ it('marks the saving switch the daemon has not taken', async () => {
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
-  // The switch carries the mark, and the find hint keeps its own place.
   const swtch = screen.getByRole('button', {
     name: /Stop saving.*in effect when Banshee restarts/,
   });
@@ -924,13 +940,11 @@ it('offers every voice, and fetches the one that is chosen', async () => {
   await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
   expect(screen.getByText('George')).toBeTruthy();
 
-  // Nothing to play until the file is here.
-  expect(screen.getByRole('button', { name: 'Preview George' }).hasAttribute('disabled')).toBe(
-    true,
-  );
-  expect(screen.getByRole('button', { name: 'Preview Sky' }).hasAttribute('disabled')).toBe(false);
+  expect(screen.queryByRole('button', { name: 'Play George' })).toBeNull();
+  expect(screen.getByRole('button', { name: /Get George/ })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Play Sky' }).hasAttribute('disabled')).toBe(false);
 
-  await fireEvent.change(screen.getByRole('radio', { name: /George/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /Get George/ }));
   await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'bm_george'));
   expect(vi.mocked(downloadModels)).toHaveBeenCalled();
 });
@@ -1166,6 +1180,13 @@ it('reaches what Banshee keeps before anything has been said', async () => {
   await fireEvent.click(screen.getByRole('button', { name: 'What Banshee keeps' }));
   await waitFor(() => expect(panelHeading('What Banshee keeps')).toBeTruthy());
   expect(screen.getByRole('button', { name: /Stop saving/ })).toBeTruthy();
+});
+
+it('names the agent capability on a fresh record, beside the first dictation', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
+  expect(screen.getByText('No agent can speak to you yet')).toBeTruthy();
 });
 
 // A microphone fault and a model fault carry the same command, and restarting
@@ -1504,6 +1525,25 @@ it('opens find on Cmd+F whatever Caps Lock says', async () => {
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
   await fireEvent.keyDown(window, { key: 'F', metaKey: true });
   expect(await screen.findByRole('searchbox', { name: /Find/i })).toBeTruthy();
+});
+
+it('opens find from the ledger without the shortcut', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /find in what was said/i }));
+  expect(await screen.findByRole('searchbox', { name: /Find/i })).toBeTruthy();
+});
+
+// Dismissing the field destroys the node holding focus. Without a move it falls
+// to the body, and the ledger button that opened it is two Tabs away from the top.
+it('keeps the ledger up while finding and hands focus back on escape', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /find in what was said/i }));
+  await screen.findByRole('searchbox', { name: /Find/i });
+  expect(screen.getByRole('button', { name: /saved/ })).toBeTruthy();
+  await fireEvent.keyDown(window, { key: 'Escape' });
+  await waitFor(() => expect(document.activeElement?.id).toBe('ledger-find'));
 });
 
 // Activating Clear destroys the button that was activated. Without a move the
@@ -2038,6 +2078,23 @@ it('names a failed dictation in the header, and opens the microphone panel on it
   await waitFor(() => expect(panelHeading('Microphone')).toBeTruthy());
 });
 
+// The header names the failure in two words, so the body states the reason and
+// the fix where the reader already looks.
+it('states a failed dictation and its fix inline, above the record', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  daemon.update((s) => ({ ...s, live: { ...s.live, last_error: 'api.groq.com says no' } }));
+
+  await waitFor(() => {
+    const line = container.querySelector('.failure')?.textContent ?? '';
+    expect(line).toContain('api.groq.com says no');
+  });
+  expect(screen.getByRole('button', { name: 'Open Listening' })).toBeTruthy();
+  expect(container.querySelector('.failure')?.textContent).not.toContain('Microphone');
+  expect(screen.getByRole('button', { name: 'Dictation failed' })).toBeTruthy();
+});
+
 it('carries the dictation failure when both sides have one', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   render(App);
@@ -2129,4 +2186,231 @@ it('lands on the failure when another panel is already open', async () => {
   await fireEvent.click(await screen.findByRole('button', { name: 'Speech failed' }));
   await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
   expect(document.activeElement).toBe(document.getElementById('speech-failure'));
+});
+
+it('closes the record with the day it starts', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const line = container.querySelector('.colophon')?.textContent ?? '';
+  expect(line).toContain('The record starts here, today');
+  expect(line).toContain('keeps it on this machine and sends it nowhere');
+});
+
+// The claim is about the record, and the foot names the host a band below it.
+it('drops the nowhere claim while a remote server does the listening', async () => {
+  vi.mocked(status).mockResolvedValue(remote);
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const line = container.querySelector('.colophon')?.textContent ?? '';
+  expect(line).toContain('keeps it on this machine');
+  expect(line).not.toContain('sends it nowhere');
+});
+
+// The last match is not the start of anything, so the edge would lie.
+it('draws no closing line under a filter', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.keyDown(window, { key: 'f', metaKey: true });
+  await fireEvent.input(screen.getByRole('searchbox', { name: /Find/i }), {
+    target: { value: 'older' },
+  });
+
+  await waitFor(() => expect(screen.queryByText('Yes, open the pull request.')).toBeNull());
+  expect(container.querySelector('.colophon')).toBeNull();
+});
+
+it('states a failure as one sentence rather than two run together', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  daemon.update((s) => ({ ...s, live: { ...s.live, last_error: 'the key was refused' } }));
+
+  await waitFor(() =>
+    expect(container.querySelector('.failure p')?.textContent?.trim()).toBe(
+      'The last dictation failed: the key was refused.',
+    ),
+  );
+});
+
+// jsdom has no view transitions, so every other test takes the synchronous
+// path. The platform runs the callback in a later task, and focus is moved on
+// the line after the swap.
+it('lands focus in the panel even where the platform defers the swap', async () => {
+  const deferred = (run: () => void) => {
+    const updateCallbackDone = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        run();
+        resolve();
+      }, 0);
+    });
+    return { updateCallbackDone, finished: updateCallbackDone, ready: updateCallbackDone };
+  };
+  Object.defineProperty(document, 'startViewTransition', {
+    configurable: true,
+    writable: true,
+    value: deferred,
+  });
+  try {
+    vi.mocked(status).mockResolvedValue(ready);
+    render(App);
+    await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+    daemon.update((s) => ({ ...s, live: { ...s.live, last_error: 'the key was refused' } }));
+
+    const open = await screen.findByRole('button', { name: 'Open Listening' });
+    await fireEvent.click(open);
+
+    await waitFor(() => expect(document.activeElement?.id).toBe(DICTATION_FAILURE));
+  } finally {
+    delete (document as Partial<Document>).startViewTransition;
+  }
+});
+
+// `stt_model` and `english_only` arrive only with a full status, and the read a
+// write does happens before the file has landed, so without this the window
+// keeps reporting the model it was told about at the moment of the write.
+it('reads the daemon again when a model finishes loading', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+
+  pushes.get('daemon:state')?.({ payload: { loading_model: true } });
+  const readsBefore = vi.mocked(status).mock.calls.length;
+  pushes.get('daemon:state')?.({ payload: { loading_model: false } });
+
+  await waitFor(() => expect(vi.mocked(status).mock.calls.length).toBeGreaterThan(readsBefore));
+});
+
+it('does not re-read the daemon when no model was loading', async () => {
+  vi.mocked(status).mockResolvedValue(ready);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+
+  const readsBefore = vi.mocked(status).mock.calls.length;
+  pushes.get('daemon:state')?.({ payload: { loading_model: false } });
+  await Promise.resolve();
+
+  expect(vi.mocked(status).mock.calls.length).toBe(readsBefore);
+});
+
+// A status read is the other way the window learns a load is running, and the
+// falling edge is judged against what it held, not against the push alone.
+it('follows up a load it learned from a status read rather than a push', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, loading_model: true });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+
+  const readsBefore = vi.mocked(status).mock.calls.length;
+  pushes.get('daemon:state')?.({ payload: { loading_model: false } });
+
+  await waitFor(() => expect(vi.mocked(status).mock.calls.length).toBeGreaterThan(readsBefore));
+});
+
+// Filtering moves which row is drawn first; it does not make that row news.
+it('does not replay the lead entrance when a filter is cleared', async () => {
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  await fireEvent.keyDown(window, { key: 'f', metaKey: true });
+  const find = screen.getByRole('searchbox', { name: /Find/i });
+  await fireEvent.input(find, { target: { value: 'older' } });
+  await waitFor(() => expect(screen.queryByText('Yes, open the pull request.')).toBeNull());
+  await fireEvent.keyDown(window, { key: 'Escape' });
+
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  expect(container.querySelector('article.turn.lead.arrive')).toBeNull();
+});
+
+// A grant made in System Settings, a hand-edited config.toml and a model file
+// added outside Banshee reach no push. Returning to the window is what catches
+// them, and the reader is always coming back from another application.
+it('reads the daemon again when the window is returned to', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const readsBefore = vi.mocked(status).mock.calls.length;
+  await fireEvent.focus(window);
+
+  await waitFor(() => expect(vi.mocked(status).mock.calls.length).toBeGreaterThan(readsBefore));
+});
+
+it('does not start the daemon when the window is returned to', async () => {
+  vi.mocked(status).mockRejectedValue(new Error('not running'));
+  render(App);
+  await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
+
+  vi.mocked(startDaemon).mockClear();
+  await fireEvent.focus(window);
+  await waitFor(() => expect(vi.mocked(status).mock.calls.length).toBeGreaterThan(0));
+
+  expect(vi.mocked(startDaemon)).not.toHaveBeenCalled();
+});
+
+// A window unhidden without the pointer landing in it fires no focus event.
+it('reads the daemon again when the window becomes visible', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const readsBefore = vi.mocked(status).mock.calls.length;
+  document.dispatchEvent(new Event('visibilitychange'));
+
+  await waitFor(() => expect(vi.mocked(status).mock.calls.length).toBeGreaterThan(readsBefore));
+});
+
+// `visibilitychange` fires on the way out as well as the way back, and a window
+// being hidden has nobody to show a fresh reading to.
+it('does not read the daemon when the window is hidden', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  const readsBefore = vi.mocked(status).mock.calls.length;
+  const visible = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
+  Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+  try {
+    document.dispatchEvent(new Event('visibilitychange'));
+    await Promise.resolve();
+    expect(vi.mocked(status).mock.calls.length).toBe(readsBefore);
+  } finally {
+    if (visible) Object.defineProperty(document, 'visibilityState', visible);
+  }
+});
+
+it('releases the download controls once the run reports', async () => {
+  vi.mocked(downloadModels).mockResolvedValue(undefined);
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    blockers: [
+      {
+        kind: 'model',
+        id: 'ggml-x.bin',
+        name: 'ggml-x.bin',
+        role: 'speech',
+        remedy: 'download',
+        consequence: 'recording does not work',
+        fix: 'run: banshee setup',
+        command: 'banshee setup',
+      },
+    ] as Blocker[],
+  });
+  render(App);
+  const start = await screen.findByRole('button', { name: /Download/ });
+  await fireEvent.click(start);
+
+  await waitFor(() =>
+    expect((screen.getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    ),
+  );
+
+  pushes.get('daemon:downloads')?.({
+    payload: { model: 'ggml-x.bin', bytes: 10, total: 100, state: 'done' },
+  });
+
+  await waitFor(() =>
+    expect((screen.getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(
+      false,
+    ),
+  );
 });

@@ -105,6 +105,13 @@
       transform: scale(0.9);
       opacity: 0.35;
     }
+    /* The arrival overshoots and comes back, so a state change lands rather
+       than fades: a spring read, not a second moment. Opacity is already full
+       by the overshoot, so only the shape travels past one. */
+    60% {
+      transform: scale(1.025);
+      opacity: 1;
+    }
     to {
       transform: scale(1);
       opacity: 1;

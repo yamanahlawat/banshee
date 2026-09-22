@@ -1,8 +1,11 @@
 import { fireEvent, render } from '@testing-library/svelte';
-import { expect, it } from 'vitest';
+import { beforeEach, expect, it } from 'vitest';
 import Blockers from './Blockers.svelte';
+import { claimTheRun, forgetTheAsk } from '../lib/downloads';
 import permissions from '../mocks/permissions.json';
 import type { Blocker, BlockerKind } from '../lib/daemon';
+
+beforeEach(forgetTheAsk);
 
 const at = (bytes: number) => ({
   label: 'Speech model',
@@ -186,7 +189,7 @@ it('draws the download against its own length', () => {
     },
     restart: () => {},
   });
-  expect(container.querySelector('.bar')?.getAttribute('style')).toMatch(/41%/);
+  expect(container.querySelector('.bar')?.getAttribute('style')).toMatch(/scaleX\(0\.41\)/);
 });
 
 // A failed file does not end the run: the daemon carries on to the next one and
@@ -261,3 +264,35 @@ it.each(OPENING)(
     );
   },
 );
+
+const missingModel: Blocker = {
+  kind: 'model' as BlockerKind,
+  id: 'ggml-x.bin',
+  name: 'ggml-x.bin',
+  role: 'speech',
+  remedy: 'download',
+  consequence: 'recording does not work',
+  fix: 'run: banshee setup',
+  command: 'banshee setup',
+};
+
+it('shuts Download while a run is already asked for', () => {
+  claimTheRun();
+  const { getByRole } = render(Blockers, {
+    blockers: [missingModel],
+    download: null,
+    restart: () => {},
+  });
+
+  expect((getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it('offers Download while nothing is running', () => {
+  const { getByRole } = render(Blockers, {
+    blockers: [missingModel],
+    download: null,
+    restart: () => {},
+  });
+
+  expect((getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(false);
+});

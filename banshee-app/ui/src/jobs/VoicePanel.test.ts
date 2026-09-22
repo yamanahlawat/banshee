@@ -14,6 +14,7 @@ import {
   type Status,
 } from '../lib/daemon';
 import { announcement, forgetCopy, speechNote, PENDING_SAYS } from '../lib/copy';
+import { forgetTheAsk } from '../lib/downloads';
 import VoicePanel from './VoicePanel.svelte';
 
 const VOICES: Voices = {
@@ -70,6 +71,7 @@ function keyField(): HTMLInputElement | null {
 beforeEach(() => {
   daemon.set(empty());
   forgetCopy();
+  forgetTheAsk();
   vi.clearAllMocks();
   vi.mocked(setSetting).mockResolvedValue([]);
   vi.mocked(downloadModels).mockResolvedValue(undefined);
@@ -282,11 +284,11 @@ it('fetches nothing when the daemon refuses the voice', async () => {
   expect(vi.mocked(downloadModels)).not.toHaveBeenCalled();
 });
 
-it('fetches the file when the daemon takes a voice it does not have', async () => {
+it('fetches the file when the reader asks for a voice the machine lacks', async () => {
   daemon.set(reduceStatus(empty(), LOCAL));
   render(VoicePanel, { voices: VOICES });
 
-  await fireEvent.change(screen.getByRole('radio', { name: /Adam/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /Get Adam/ }));
 
   await waitFor(() => expect(vi.mocked(downloadModels)).toHaveBeenCalled());
 });
@@ -398,4 +400,58 @@ it.each(['0', '4294967296'])('sends nothing for a rate of %s', async (typed) => 
   expect(vi.mocked(setSetting)).not.toHaveBeenCalled();
   await waitFor(() => expect(field.value).toBe('22050'));
   expect(get(announcement)).toBe('The sample rate is a whole number of hertz, as in 24000.');
+});
+
+it('puts the whole description in the row', () => {
+  const { container } = render(VoicePanel, {
+    voices: {
+      voices: [
+        { id: 'af_bella', name: 'Bella', description: 'American, warm', downloaded: true },
+        { id: 'bf_isabella', name: 'Isabella', description: 'British, warm', downloaded: true },
+      ],
+      current: 'af_bella',
+    },
+  });
+  expect([...container.querySelectorAll('.desc')].map((n) => n.textContent)).toEqual([
+    'American, warm',
+    'British, warm',
+  ]);
+});
+
+it('offers a voice that is not here the control that gets it', () => {
+  render(VoicePanel, { voices: VOICES });
+
+  expect(screen.getByRole('button', { name: /Get Adam/ })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Play Adam' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Play Sky' })).toBeTruthy();
+});
+
+it('takes a voice without fetching it', async () => {
+  vi.mocked(setSetting).mockResolvedValue([]);
+  render(VoicePanel, { voices: VOICES });
+
+  await fireEvent.change(screen.getByRole('radio', { name: /Adam/ }));
+
+  await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'am_adam'));
+  expect(vi.mocked(downloadModels)).not.toHaveBeenCalled();
+});
+
+it('says a voice is absent in the name the radio carries', () => {
+  render(VoicePanel, { voices: VOICES });
+  expect(screen.getByRole('radio', { name: /Adam.*not on this machine/ })).toBeTruthy();
+  expect(screen.getByRole('radiogroup', { name: 'Voice' })).toBeTruthy();
+});
+
+it('sends one fetch however fast Get is pressed', async () => {
+  vi.mocked(downloadModels).mockResolvedValue(undefined);
+  render(VoicePanel, { voices: VOICES });
+
+  // Both in one tick, because `disabled` only lands on the next render and the
+  // second press of a real double-click arrives before it.
+  const get = screen.getByRole('button', { name: /Get Adam/ });
+  get.click();
+  get.click();
+
+  await waitFor(() => expect(vi.mocked(downloadModels)).toHaveBeenCalledTimes(1));
+  expect((get as HTMLButtonElement).disabled).toBe(true);
 });

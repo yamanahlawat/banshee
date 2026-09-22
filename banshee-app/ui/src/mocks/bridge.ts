@@ -73,9 +73,28 @@ const STATES: Record<string, Status> = {
   // A real first run: blocked, and nothing ever said.
   'first-run': permissions,
   downloading: permissions,
-  recording: { ...ready, recording: true },
-  speaking: { ...ready, speaking: true },
-  armed: { ...ready, recording: true, armed: true },
+  // The header word and the mark read `activity`, which is the daemon's own
+  // ranking of these flags, never the booleans beside it.
+  recording: { ...ready, recording: true, activity: 'recording' },
+  speaking: { ...ready, speaking: true, activity: 'speaking' },
+  armed: { ...ready, recording: true, armed: true, activity: 'listening' },
+  transcribing: { ...ready, transcribing: true, activity: 'busy' },
+  // Balanced is loaded and working; Quality has been chosen and is not here.
+  // The daemon is not blocked, so this is the errand, not a fault.
+  'needs-model': {
+    ...ready,
+    config: { ...ready.config, stt: { ...ready.config?.stt, preset: 'quality' } },
+    download_megabytes: 1031,
+    missing_downloads: [{ name: 'ggml-large-v3-q5_0.bin', role: 'speech', megabytes: 1031 }],
+  },
+  // Balanced chosen, Fast still loaded: the seconds a heavier model takes to
+  // read off disk.
+  'model-lagging': {
+    ...ready,
+    config: { ...ready.config, stt: { ...ready.config?.stt, preset: 'balanced' } },
+    english_only: true,
+    loading_model: true,
+  },
   saving_off: { ...ready, config: { ...ready.config, daemon: { save_history: false } } },
   pending: { ...ready, pending: ['audio.hotkey', 'daemon.save_history'] },
   // The listener the config asks for and the one the daemon runs, in each
@@ -172,12 +191,17 @@ function rows(): HistoryRow[] {
     state === 'downloading'
   )
     return [];
+  // Preview scale only: `?rows=500` repeats the fixture so a long record can
+  // be looked at in a browser. Capped, so a typo cannot ask for a million.
+  const asked = Number(new URLSearchParams(window.location.search).get('rows') ?? 0);
+  const total =
+    Number.isFinite(asked) && asked > 0 ? Math.min(Math.floor(asked), 5000) : SAID.length;
   const start = new Date();
   start.setHours(21, 58, 0, 0);
   // The daemon answers oldest first.
-  return SAID.map((text, i) => ({
-    id: SAID.length - i,
-    text,
+  return Array.from({ length: total }, (_, i) => ({
+    id: total - i,
+    text: SAID[i % SAID.length],
     timestamp: new Date(start.getTime() - i * 11 * 60_000).toISOString(),
   })).reverse();
 }
@@ -238,9 +262,17 @@ const ANSWERS: Record<string, () => unknown> = {
   list_voices: (): Voices => ({
     voices: [
       { id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true },
-      { id: 'af_heart', name: 'Heart', description: 'American, warm', downloaded: true },
-      // Not on the machine, so the panel's fetch path has something to show.
+      { id: 'af_bella', name: 'Bella', description: 'American, warm', downloaded: false },
+      { id: 'af_heart', name: 'Heart', description: 'American, soft', downloaded: true },
+      { id: 'af_nicole', name: 'Nicole', description: 'American, hushed', downloaded: false },
+      { id: 'af_sarah', name: 'Sarah', description: 'American, even', downloaded: false },
       { id: 'am_adam', name: 'Adam', description: 'American, low', downloaded: false },
+      { id: 'am_michael', name: 'Michael', description: 'American, steady', downloaded: false },
+      { id: 'am_santa', name: 'Santa', description: 'American, deep', downloaded: false },
+      { id: 'bf_emma', name: 'Emma', description: 'British, bright', downloaded: false },
+      { id: 'bf_isabella', name: 'Isabella', description: 'British, warm', downloaded: false },
+      { id: 'bm_george', name: 'George', description: 'British, steady', downloaded: false },
+      { id: 'bm_lewis', name: 'Lewis', description: 'British, low', downloaded: false },
     ],
     current: 'af_sky',
   }),
@@ -273,10 +305,16 @@ const ANSWERS: Record<string, () => unknown> = {
 // which stands in for the longest wait in the product, is unreviewable.
 export function push(event: string, deliver: (payload: unknown) => void): () => void {
   if (event !== 'daemon:downloads' || chosen() !== 'downloading') return () => {};
+  // `mb` is the percentage's denominator, from the daemon's real byte count.
   const files = [
-    { label: 'Speech model', model: 'ggml-large-v3-turbo.bin', index: 1, count: 4 },
-    { label: 'Voice detection', model: 'silero_vad.onnx', index: 2, count: 4 },
+    { label: 'Speech model', model: 'ggml-large-v3-turbo.bin', index: 1, count: 4, mb: 142 },
+    { label: 'Voice detection', model: 'silero_vad.onnx', index: 2, count: 4, mb: 2 },
   ];
+  const at_ = (file: (typeof files)[number], percent: number) => {
+    const { mb, ...rest } = file;
+    const total = mb * 1_048_576;
+    return { ...rest, bytes: Math.round((total * percent) / 100), total, state: 'downloading' };
+  };
   let at = 0;
   let done = 0;
   const tick = setInterval(() => {
@@ -286,9 +324,9 @@ export function push(event: string, deliver: (payload: unknown) => void): () => 
       at += 1;
       if (at >= files.length) return clearInterval(tick);
     }
-    deliver({ ...files[at], bytes: done, total: 100, state: 'downloading' });
+    deliver(at_(files[at], done));
   }, 400);
-  deliver({ ...files[0], bytes: 41, total: 100, state: 'downloading' });
+  deliver(at_(files[0], 41));
   return () => clearInterval(tick);
 }
 

@@ -294,6 +294,10 @@ pub struct DaemonState {
     latest_transcription_id: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
+    // Reading a Whisper file off disk takes seconds, and the listener answers
+    // with the old model until it lands. Watched, so the window is told when it
+    // does: `stt_model` is not a live field and nothing else reports the end.
+    loading_model: watch::Sender<bool>,
     // True for the life of one agent run the tell key started.
     telling: watch::Sender<bool>,
     // A second press that the run lock rejects ends first, and a flag alone
@@ -371,6 +375,7 @@ impl DaemonState {
             latest_transcription_id: watch::channel(0).0,
             recording_active: watch::channel(false).0,
             transcribing: watch::channel(false).0,
+            loading_model: watch::channel(false).0,
             telling: watch::channel(false).0,
             deliveries: Mutex::new(0),
             last_error: watch::channel(None).0,
@@ -595,6 +600,22 @@ impl DaemonState {
 
     pub fn is_transcribing(&self) -> bool {
         *self.transcribing.borrow()
+    }
+
+    pub fn is_loading_model(&self) -> bool {
+        *self.loading_model.borrow()
+    }
+
+    pub fn set_loading_model(&self, loading: bool) {
+        self.loading_model.send_if_modified(|held| {
+            let moved = *held != loading;
+            *held = loading;
+            moved
+        });
+    }
+
+    pub fn subscribe_loading_model(&self) -> watch::Receiver<bool> {
+        self.loading_model.subscribe()
     }
 
     pub fn subscribe_transcribing(&self) -> watch::Receiver<bool> {

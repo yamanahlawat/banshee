@@ -22,10 +22,49 @@ export function failureSays(label: string, said: string): string {
   return `${label} ${said}`;
 }
 
+/// The same failure for the eye, as one sentence. The daemon's words arrive
+/// lower case and unterminated, so the label gives up its full stop.
+export function failureReads(label: string, said: string): string {
+  return `${label.replace(/\.+$/, '')}: ${said.trim().replace(/\.+$/, '')}.`;
+}
+
+/// What the Language row says. The listener answers on the model it holds, so
+/// a preset just chosen and the model in force are two readings, and the row
+/// sits under both.
+export function languageNote(facts: {
+  languagesArrived: boolean;
+  englishOnly: boolean;
+  loading: boolean;
+  chosen: string;
+  isFast: boolean;
+}): string {
+  if (!facts.languagesArrived) {
+    return 'Banshee could not list the languages it knows. The one set here still applies.';
+  }
+  if (!facts.englishOnly) return 'The language you speak. Naming it beats detecting it.';
+  if (facts.isFast) {
+    return 'Fast hears English only. Choose Balanced or Quality above to speak another language.';
+  }
+  return facts.loading
+    ? `Banshee is reading ${facts.chosen} off disk. Until it lands, it still hears English only.`
+    : `Banshee has not picked up ${facts.chosen} yet, so it still hears English only.`;
+}
+
+/// What a model the reader just chose costs. `owed` is the whole run, which
+/// brings the detector and a voice as well, so it is named only when it is more
+/// than the one file.
+export function modelCost(chosen: string, megabytes: number, owed: number): string {
+  const one = `${chosen} is not on this machine. About ${downloadSize(megabytes)} to fetch.`;
+  return owed > megabytes
+    ? `${one} Download brings everything missing, ${downloadSize(owed)} in all.`
+    : one;
+}
+
 // The whole group waits on one restart, so a group states it once.
 export const TAKES_EFFECT = 'Your choice takes effect when Banshee restarts.';
 
 import { writable } from 'svelte/store';
+import { downloadSize } from './presets';
 import { copyText } from './tauri';
 import type { Listening, Speech } from './daemon';
 

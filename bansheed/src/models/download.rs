@@ -320,6 +320,27 @@ mod size_tests {
         assert!(names.contains(&crate::models::VAD_MODEL.to_string()));
     }
 
+    // The sum above covers the detector, the engine and a voice as well.
+    #[test]
+    fn each_missing_file_carries_its_own_price_and_role() {
+        let dir = std::path::Path::new("/no-such-models-dir-9f3a");
+        let mut config = Config::default();
+        config.stt.preset = STTPreset::Quality;
+
+        let missing = super::still_missing(&wanted(&config), dir);
+        let speech = missing
+            .iter()
+            .find(|file| super::role(&file.name) == banshee_common::FileRole::Speech)
+            .expect("a run with no directory is missing its speech model");
+
+        assert!(
+            speech.megabytes > 0 && speech.megabytes < pending_megabytes(&wanted(&config), dir),
+            "one file priced {} against a run of {}",
+            speech.megabytes,
+            pending_megabytes(&wanted(&config), dir)
+        );
+    }
+
     /// Nothing left to fetch costs nothing, which is what a client shows once
     /// setup is done.
     #[test]
