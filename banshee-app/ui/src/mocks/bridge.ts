@@ -93,6 +93,7 @@ const STATES: Record<string, Status> = {
     ...ready,
     config: { ...ready.config, stt: { ...ready.config?.stt, preset: 'balanced' } },
     english_only: true,
+    loading_model: true,
   },
   saving_off: { ...ready, config: { ...ready.config, daemon: { save_history: false } } },
   pending: { ...ready, pending: ['audio.hotkey', 'daemon.save_history'] },
@@ -261,9 +262,17 @@ const ANSWERS: Record<string, () => unknown> = {
   list_voices: (): Voices => ({
     voices: [
       { id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true },
-      { id: 'af_heart', name: 'Heart', description: 'American, warm', downloaded: true },
-      // Not on the machine, so the panel's fetch path has something to show.
+      { id: 'af_bella', name: 'Bella', description: 'American, warm', downloaded: false },
+      { id: 'af_heart', name: 'Heart', description: 'American, soft', downloaded: true },
+      { id: 'af_nicole', name: 'Nicole', description: 'American, hushed', downloaded: false },
+      { id: 'af_sarah', name: 'Sarah', description: 'American, even', downloaded: false },
       { id: 'am_adam', name: 'Adam', description: 'American, low', downloaded: false },
+      { id: 'am_michael', name: 'Michael', description: 'American, steady', downloaded: false },
+      { id: 'am_santa', name: 'Santa', description: 'American, deep', downloaded: false },
+      { id: 'bf_emma', name: 'Emma', description: 'British, bright', downloaded: false },
+      { id: 'bf_isabella', name: 'Isabella', description: 'British, warm', downloaded: false },
+      { id: 'bm_george', name: 'George', description: 'British, steady', downloaded: false },
+      { id: 'bm_lewis', name: 'Lewis', description: 'British, low', downloaded: false },
     ],
     current: 'af_sky',
   }),

@@ -9,14 +9,9 @@
     SYSTEM_DEVICE,
   } from '../lib/daemon';
   import { write } from '../lib/settings';
+  import { askForModels, fetching } from '../lib/downloads';
   import { PRESETS } from '../lib/presets';
-  import {
-    downloadModels,
-    listDevices,
-    listLanguages,
-    type Devices,
-    type Languages,
-  } from '../lib/tauri';
+  import { listDevices, listLanguages, type Devices, type Languages } from '../lib/tauri';
   import Row from '../controls/Row.svelte';
   import Field from '../controls/Field.svelte';
   import KeyRow from '../controls/KeyRow.svelte';
@@ -137,7 +132,10 @@
   $: absentModel =
     ($daemon.status?.missing_downloads ?? []).find((one) => one.role === 'speech') ?? null;
   $: presetNeedsFetching = provider === 'local' && absentModel !== null;
-  $: fetching = $daemon.download !== null;
+  // No guard here: `askForModels` claims the run before it awaits anything.
+  async function fetchModel() {
+    await askForModels().catch(() => report('The download did not start.'));
+  }
   $: presetSays = absentModel
     ? modelCost(presetName, absentModel.megabytes, Number($daemon.status?.download_megabytes ?? 0))
     : null;
@@ -269,15 +267,8 @@
       />
       <svelte:fragment slot="action">
         {#if presetNeedsFetching}
-          <!-- Wrapped, because the daemon refuses a second run while the first
-               holds the slot, and `fetching` only turns true once a progress
-               push lands. -->
-          <button
-            class="btn fetch"
-            disabled={fetching}
-            on:click={() => downloadModels().catch(() => report('The download did not start.'))}
-          >
-            {fetching ? 'Downloading' : 'Download'}
+          <button class="btn fetch" disabled={$fetching} on:click={fetchModel}>
+            {$fetching ? 'Downloading' : 'Download'}
           </button>
         {/if}
       </svelte:fragment>

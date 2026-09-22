@@ -54,6 +54,30 @@ mod tests {
     use super::describe;
 
     #[test]
+    fn the_window_mock_lists_every_voice_this_build_names() {
+        let bridge = include_str!("../../../../banshee-app/ui/src/mocks/bridge.ts");
+        let start = bridge
+            .find("list_voices:")
+            .expect("the mock answers list_voices");
+        let listed = &bridge[start..start + 2000];
+
+        for (id, name, description) in super::NAMED {
+            assert!(
+                listed.contains(&format!("id: '{id}'")),
+                "the mock is missing {id}"
+            );
+            assert!(
+                listed.contains(&format!("name: '{name}'")),
+                "the mock is missing the name {name}"
+            );
+            assert!(
+                listed.contains(&format!("description: '{description}'")),
+                "the mock describes {id} differently from this build"
+            );
+        }
+    }
+
+    #[test]
     fn a_known_voice_gets_a_name_and_one_word() {
         let voice = describe("af_sky", true);
         assert_eq!(voice.name, "Sky");

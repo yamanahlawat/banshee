@@ -45,6 +45,7 @@
     table,
   } from './lib/history';
   import { agents, refresh as readAgents } from './lib/agents';
+  import { forgetTheAsk } from './lib/downloads';
   import {
     listen,
     listVoices,
@@ -517,6 +518,7 @@
       listen<DownloadProgress>('daemon:downloads', (e) => {
         const progress = e.payload;
         const last = endsTheRun(progress);
+        forgetTheAsk();
         daemon.update((s) => ({ ...s, download: last ? null : progress }));
 
         // `downloadModels` answers as soon as the daemon takes the task, so a
