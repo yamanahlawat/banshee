@@ -11,7 +11,7 @@
 </script>
 
 <div class="absence" class:in-record={inRecord}>
-  <h2 class="label">{label}</h2>
+  <h2 class="box-head">{label}</h2>
   {#if detail}<p class="detail">{detail}</p>{/if}
   {#if action && act}
     <button {id} class="btn" on:click={act} disabled={busy}>{action}</button>
@@ -28,16 +28,6 @@
   /* 52px time gutter and a 12px gap: the turn grid, from the other side. */
   .in-record {
     margin-left: calc(var(--gutter) + 64px);
-  }
-
-  .label {
-    margin: 0;
-    font-variation-settings:
-      'wght' 750,
-      'wdth' 106;
-    font-size: 17px;
-    line-height: 1.3;
-    letter-spacing: -0.015em;
   }
 
   .detail {

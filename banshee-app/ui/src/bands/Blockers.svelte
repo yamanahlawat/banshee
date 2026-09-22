@@ -156,21 +156,20 @@
 {#if download}
   {@const done = percent(download.bytes, download.total)}
   <section class="blocker">
-    <h2 class="caps">{steps > 1 ? `1 of ${steps} · ` : ''}Getting Banshee's models</h2>
-    <!-- The daemon streams this percent, so the bar draws a real value. It has
-         no transition: the width moves because the number did, which is data
-         and not an authored motion. -->
+    <h2 class="box-head">{steps > 1 ? `1 of ${steps} · ` : ''}Getting Banshee's models</h2>
     {#if done !== null}
-      <div class="track"><div class="bar" style="width: {done}%"></div></div>
+      <div class="track"><div class="bar" style="transform: scaleX({done / 100})"></div></div>
     {/if}
     <p class="progress mono">{downloadLine(download)}</p>
-    <div class="actions">
-      <!-- No Try again here: a failed file does not end the run, and the daemon
-           refuses a second one while the first holds the slot. A run that ends
-           having failed clears this box and returns the blocker, whose own
-           Download is the way back. -->
-      <button class="btn" disabled>Downloading</button>
-    </div>
+    <p class="note reassure">
+      This resumes if the connection drops, and it keeps going if you close this window.
+    </p>
+    <!-- No Try again here: a failed file does not end the run, and the daemon
+         refuses a second one while the first holds the slot. A run that ends
+         having failed clears this box and returns the blocker, whose own
+         Download is the way back. No disabled button either: the heading and
+         the header both carry the state, and nobody can press it. -->
+    <span class="sr">Downloading</span>
     <!-- The daemon reports each percent, and a live region reads every change
          it is given, so what is said aloud steps in quarters instead. -->
     <span class="sr" aria-live="polite">{spokenProgress(download)}</span>
@@ -182,7 +181,7 @@
 {#each shown as { group, fix }, i (group[0].id)}
   {@const prose = fixProse(group[0])}
   <section class="blocker">
-    <h2 class="caps">{steps > 1 ? `${i + 1 + offset} of ${steps} · ` : ''}{fix.title}</h2>
+    <h2 class="box-head">{steps > 1 ? `${i + 1 + offset} of ${steps} · ` : ''}{fix.title}</h2>
     <p class="consequence">Until this is done, {group[0].consequence}.</p>
     {#if prose}<p class="fix">{prose}</p>{/if}
 
@@ -234,13 +233,8 @@
 {/each}
 
 <style>
-  h2,
   .label {
     color: var(--accent);
-  }
-
-  h2 {
-    margin: 0;
   }
 
   /* An absence is drawn, not omitted: the thing that is missing takes up the
@@ -314,11 +308,24 @@
   .bar {
     height: 1px;
     background: var(--accent);
+    transform-origin: left;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .bar {
+      transition: transform 250ms linear;
+    }
   }
 
   .progress {
     margin: 10px 0 0;
     font-size: 11px;
     color: var(--accent);
+  }
+
+  /* Quieter than a blocker's consequence: this steadies the wait. */
+  .reassure {
+    margin: 8px 0 0;
+    color: var(--dim);
   }
 </style>

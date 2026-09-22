@@ -33,7 +33,12 @@
   ];
 
   $: tts = ($daemon.status?.config?.tts ?? {}) as Record<string, unknown>;
-  $: speed = shownFloat(Number(tts.speed ?? 1.2));
+  // The rate the daemon assumes when the config names none. It is what the
+  // word beside the readout is measured against.
+  const ASSUMED_SPEED = 1.2;
+  $: speed = shownFloat(Number(tts.speed ?? ASSUMED_SPEED));
+  $: speedWord =
+    Number(speed) === ASSUMED_SPEED ? 'usual' : Number(speed) < ASSUMED_SPEED ? 'slower' : 'faster';
   // The config leads, so the mark moves to the voice a write just chose.
   $: current = String(tts.voice ?? voices.current ?? '');
   $: provider = String(tts.provider ?? 'local');
@@ -164,7 +169,10 @@
             <label for={`voice-${voice.id}`}>
               <span class="name" class:absent={!here}>{voice.name}</span>
               <span class="desc">{voice.description}</span>
-              {#if !here}<span class="sr">— not downloaded, 510 KB</span>{/if}
+              <!-- Said to the eye, not only to a screen reader: the dashed
+                   underline means one thing here and another in the foot. No
+                   size beside it, because `Voice` carries none. -->
+              {#if !here}<span class="readout">Not on this machine</span>{/if}
             </label>
             <button
               class="btn btn-ghost"
@@ -200,7 +208,7 @@
     value={speed}
     on:change={(e) => write('tts.speed', Number(e.currentTarget.value))}
   />
-  <span class="readout">{speed}&times;</span>
+  <span class="readout">{speed}&times; {speedWord}</span>
 </Row>
 
 <!-- `tts.fallback` is deliberately absent: it serves no job this audience has.

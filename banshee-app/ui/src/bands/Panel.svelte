@@ -66,11 +66,8 @@
     height: 42px;
   }
 
-  /* Focused only to carry the keyboard in, so it takes no ring: a reader who
-     moved nothing would be told a heading is a control. */
-  .title:focus {
-    outline: none;
-  }
+  /* No local focus rule on purpose: the global ring marks keyboard entry, and
+     :focus-visible keeps it off for pointer users. */
 
   /* The lead treatment, in the agent cut: Banshee stating what is true of
      itself, in the same voice it uses for everything it says. */

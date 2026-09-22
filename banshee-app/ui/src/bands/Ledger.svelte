@@ -6,7 +6,12 @@
   export let total: number;
   export let saving: boolean;
   export let open: () => void;
+  export let find: () => void;
   export let id: string;
+
+  // Read once: the chord names the platform's own key, which does not change
+  // under this window.
+  const chord = findChord();
 </script>
 
 <div class="ledger">
@@ -21,8 +26,18 @@
 
   <SaveSwitch {saving} />
 
-  {#if saving && total > 1}
-    <span class="hint caps mono">{findChord()} to find</span>
+  {#if saving && total > 0}
+    <!-- A control, not a hint: the chord alone opens search for nobody who
+         never presses it. The resting rule reads as the grip, the way the
+         saving switch beside it does. -->
+    <button
+      id="ledger-find"
+      class="find caps mono btn-underline"
+      aria-label="Find in what was said ({chord})"
+      on:click={find}
+    >
+      {chord} to find
+    </button>
   {/if}
 </div>
 
@@ -44,13 +59,17 @@
     font: inherit;
   }
 
+  /* The count opens a panel, so it rests with the same rule the two lesser
+     controls beside it carry. */
   .state {
     color: var(--accent);
+    border-bottom-color: currentcolor;
   }
 
   /* Lines up with the copy controls on the turns below. */
-  .hint {
+  .find {
     margin-left: auto;
     color: var(--dim);
+    border-bottom-color: currentcolor;
   }
 </style>

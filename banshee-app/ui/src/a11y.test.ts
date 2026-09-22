@@ -89,6 +89,13 @@ it('the conversation carries no accessibility violations', async () => {
   expect(await violations(container)).toEqual([]);
 });
 
+// The window opens on h2s, so a reader jumping by headings starts mid-rank.
+it('names itself once at the top of the heading order', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes.')).toBeTruthy());
+  expect(screen.getByRole('heading', { level: 1, name: 'Banshee' })).toBeTruthy();
+});
+
 it('a blocked machine carries none either', async () => {
   vi.mocked(status).mockResolvedValue({
     ...permissions,

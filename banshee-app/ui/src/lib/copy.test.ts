@@ -1,5 +1,5 @@
 import { get } from 'svelte/store';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./tauri', () => ({ copyText: vi.fn().mockResolvedValue(null) }));
 import {
   announcement,
@@ -11,6 +11,8 @@ import {
   speechLead,
   speechNote,
   TAKES_EFFECT,
+  languageNote,
+  modelCost,
 } from './copy';
 import type { Listening, Speech } from './daemon';
 beforeEach(() => vi.useFakeTimers());
@@ -294,4 +296,59 @@ const SPEECH_NOTES: [string, Partial<Speech>, string][] = [
 
 it.each(SPEECH_NOTES)('the speaking note, when %s', (_, over, says) => {
   expect(speechNote({ ...SPOKEN, ...over })).toBe(says);
+});
+
+describe('languageNote', () => {
+  const heard = {
+    languagesArrived: true,
+    englishOnly: false,
+    loading: false,
+    chosen: 'Balanced',
+    isFast: false,
+  };
+
+  it('names the language as a choice once any model hears more than English', () => {
+    expect(languageNote(heard)).toContain('The language you speak');
+  });
+
+  it('sends the reader to a heavier model when Fast is the one in force', () => {
+    expect(languageNote({ ...heard, englishOnly: true, isFast: true })).toContain(
+      'Choose Balanced or Quality',
+    );
+  });
+
+  // The control names the preset in the config; `englishOnly` names the model
+  // the listener holds. Both sit on one screen.
+  it('says the chosen model is not in force yet rather than naming Fast', () => {
+    const said = languageNote({ ...heard, englishOnly: true });
+    expect(said).toContain('has not picked up Balanced yet');
+    expect(said).not.toContain('Fast');
+  });
+
+  it('names the read while the daemon is doing one', () => {
+    expect(languageNote({ ...heard, englishOnly: true, loading: true })).toContain(
+      'reading Balanced off disk',
+    );
+  });
+
+  it('says the list failed before anything about a model', () => {
+    const said = languageNote({ ...heard, languagesArrived: false, englishOnly: true });
+    expect(said).toContain('could not list the languages');
+  });
+});
+
+describe('modelCost', () => {
+  it('prices the file when it is the only thing missing', () => {
+    expect(modelCost('Quality', 1031, 1031)).toBe(
+      'Quality is not on this machine. About 1.0 GB to fetch.',
+    );
+  });
+
+  // Download starts a run over everything absent, so the file's own size
+  // understates the press whenever the detector or a voice is missing too.
+  it('names the whole run when pressing brings more than the model', () => {
+    const said = modelCost('Quality', 1031, 1345);
+    expect(said).toContain('About 1.0 GB to fetch');
+    expect(said).toContain('1.3 GB in all');
+  });
 });

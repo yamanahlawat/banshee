@@ -18,6 +18,13 @@ export function countNewer(page: HistoryRow[], newestId: HistoryRow['id'] | null
   return at === -1 ? null : at;
 }
 
+export function freshLead(
+  debuted: HistoryRow['id'] | null,
+  lead: HistoryRow['id'] | null,
+): boolean {
+  return debuted !== null && lead !== null && debuted !== lead;
+}
+
 export function formatCount(n: number): string {
   return n.toLocaleString('en-US');
 }

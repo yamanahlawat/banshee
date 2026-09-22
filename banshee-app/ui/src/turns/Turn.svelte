@@ -6,13 +6,16 @@
   export let speaker: 'user' | 'agent' = 'user';
   export let lead = false;
   export let id = '';
+  // True only while this row is news: a fresh lead eases in, everything else
+  // is already here.
+  export let arrive = false;
 
   // The cut carries the speaker only for anyone looking, so it is said in
   // words too.
   const SAID = { user: 'You said', agent: 'Banshee said' };
 </script>
 
-<article class="turn" class:lead data-speaker={speaker}>
+<article class="turn" class:lead class:arrive data-speaker={speaker}>
   <span class="mono time" aria-hidden="true">{time}</span>
 
   <div class="col">
@@ -77,6 +80,25 @@
 
   .lead .time {
     padding-top: 8px;
+  }
+
+  /* A fresh lead eases in as it arrives. Keyframes, not script: the entrance
+     costs nothing where nothing plays, and reduced motion keeps still air. */
+  @media (prefers-reduced-motion: no-preference) {
+    .arrive {
+      animation: arrive 200ms ease-out;
+    }
+  }
+
+  @keyframes arrive {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
 
   /* Short enough to clear the first line box on its own. */

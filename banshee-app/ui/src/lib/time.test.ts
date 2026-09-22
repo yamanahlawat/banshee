@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatTime, formatWhen, sameLocalDay, toDate } from './time';
+import { formatTime, formatWhen, sinceDay, sameLocalDay, toDate } from './time';
 
 describe('formatTime', () => {
   // Two spellings of one instant must read alike. This holds under any host
@@ -56,5 +56,21 @@ describe('formatWhen', () => {
   it('counts back by the calendar, so a clock change cannot skip a day', () => {
     const firstOfMarch = new Date(2026, 2, 1, 0, 30, 0);
     expect(formatWhen(at(2026, 1, 28, 22, 0), firstOfMarch)).toBe('Yesterday 22:00');
+  });
+});
+
+describe('sinceDay', () => {
+  const now = new Date(2026, 8, 22, 21, 58, 0);
+  const at = (y: number, m: number, d: number) => new Date(y, m, d, 9, 0).toISOString();
+
+  it('names the reader’s own day in words, so the sentence still reads', () => {
+    expect(sinceDay(at(2026, 8, 22), now)).toBe('today');
+    expect(sinceDay(at(2026, 8, 21), now)).toBe('yesterday');
+  });
+  it('spells the month, because this sits in prose and not in the gutter', () => {
+    expect(sinceDay(at(2026, 7, 3), now)).toBe('3 August');
+  });
+  it('carries the year once the record reaches back past this one', () => {
+    expect(sinceDay(at(2025, 11, 30), now)).toBe('30 December 2025');
   });
 });
