@@ -59,6 +59,13 @@
     border-bottom-color: currentcolor;
   }
 
+  /* The pair sits in one control with no gap of its own, and each invisible
+     click box reaches 6px past its label. Twelve px meets the two reaches
+     exactly, and the word space adds the rest, so Remove keeps its clicks. */
+  .act + .act {
+    margin-left: 12px;
+  }
+
   /* The field's own box, so the row's baseline and its edge stay put when the
      line and the field swap places. */
   .held {

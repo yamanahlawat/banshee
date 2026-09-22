@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Microphone panel fetches a speech model it does not have.** Choosing
+  Balanced or Quality while its file is absent names what the download costs and
+  offers it in the row, instead of leaving the choice with nothing to press. The
+  state word reads Working while the file is read, and the model takes over
+  without a restart.
+- **The record ends where it starts.** Under the oldest turn, one line names the
+  day the record begins and says Banshee keeps it on this machine. Over a remote
+  listener it drops that second clause, because the audio does leave.
+- **The foot's four values read as the controls they are.** Each carries a rule
+  at rest, the treatment the ledger's own controls already use. The open cell
+  drops the rule and keeps the accent bar above it, so one mark says one thing.
+- **The record mounts only what is on screen.** A record of thousands of turns
+  scrolls without a paging control, and find still reads every row.
+
 - **The Voice panel sets the audio format of a remote speaker.** A `WAV`/`PCM`
   choice sits above the speech error, and a sample rate field shows only under
   `PCM`. An empty rate field goes back to 24000 Hz. The change takes effect when
@@ -29,6 +43,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Choosing a heavier speech model no longer leaves the window silent.** The
+  window judged what was missing by the model the listener had loaded, so a
+  preset whose file was absent raised nothing to press and no figure anywhere.
+  The daemon now reports every file it lacks with that file's own size, and the
+  panel offers the download where the choice is made.
+- **The Language note no longer names a model you did not choose.** It answered
+  for the model the listener held while the control beside it named the one in
+  the config, so the two disagreed on one screen for as long as a file took to
+  read. It now says the chosen model is not in force yet, and it leaves the
+  language reachable, because a language set now applies when the model lands.
+- **A failed dictation names a panel the window shows.** The notice pointed at
+  "the Microphone panel", and the cell that opens it is labelled Listening. It
+  takes the name from that cell now, and carries the button that opens it.
+- **The window reads the daemon again when you return to it.** A grant made in
+  System Settings, a hand-edited `config.toml` and a model file added outside
+  Banshee reach no push, so the window could show a setting that had moved. It
+  re-reads whenever it regains focus, and it starts no daemon you stopped.
+- **The download says what it costs and that it survives.** It showed a
+  percentage alone. It now names the size that percentage is a share of, says
+  the transfer resumes and keeps going if the window closes, and no longer draws
+  a disabled button under a heading that already says Downloading.
+- **The Voice panel states no size it does not hold.** Every undownloaded voice
+  carried the same invented figure. It now says only that the voice is not on
+  this machine, in words rather than a dashed underline alone.
 - **A `banshee` on your `PATH` that points at another install stays.** Linking
   the command took any link at that name, so a second copy of Banshee could
   have its link repointed. Only a link nobody can follow is replaced now, and

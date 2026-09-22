@@ -16,9 +16,14 @@ export type Blocker = {
   fix: string;
   command?: string;
 };
+/// A file the daemon has not got. Absent is not blocked: a heavier preset
+/// chosen while dictation runs on the loaded model is one of these and no
+/// blocker, so the two lists answer different questions.
+export type MissingFile = { name: string; role: FileRole; megabytes: number };
 export type Status = Record<string, unknown> & {
   english_only?: boolean;
   download_megabytes?: number;
+  missing_downloads?: MissingFile[];
   running: boolean;
   /// The daemon's own word for "nothing stops Banshee working".
   ready?: boolean;
@@ -51,6 +56,9 @@ export type Live = {
   speaking: boolean;
   armed: boolean;
   transcribing: boolean;
+  /// A Whisper file being read off disk. The listener answers on the model it
+  /// still holds while this runs, so it is work and not a stop.
+  loading_model: boolean;
   telling: boolean;
   audio_device: string | null;
   missing_device: string | null;
@@ -93,6 +101,7 @@ export function empty(): Daemon {
       speaking: false,
       armed: false,
       transcribing: false,
+      loading_model: false,
       telling: false,
       audio_device: null,
       missing_device: null,
@@ -232,14 +241,19 @@ function names(progress: Progress): string {
     : progress.model;
 }
 
+const megabytes = (bytes: number) => Math.round(bytes / 1_048_576);
+
 export function downloadLine(progress: Progress): string {
   const done = percent(progress.bytes, progress.total);
   const named = names(progress);
   // The run carries on to the next file, so a failure that says nothing leaves
   // a person clicking Download again with no idea what went wrong.
   if (progress.state === 'failed') return `${named} · failed`;
-  if (done === null) return `${named} · ${Math.round(progress.bytes / 1_048_576)} MB`;
-  return `${named} · ${done}%`;
+  if (done === null) return `${named} · ${megabytes(progress.bytes)} MB`;
+  // The percentage carries its own scale, because these files run to
+  // gigabytes. Under a megabyte it goes alone: `0 MB` is a size nobody has.
+  const mb = megabytes(progress.total ?? 0);
+  return mb >= 1 ? `${named} · ${done}% of ${mb} MB` : `${named} · ${done}%`;
 }
 
 /// The daemon reports each percent, and a live region reads every change it is

@@ -232,6 +232,26 @@ it('says which file is in flight and how far it has come', () => {
   ).toBe('Speech model, 1 of 4 · 40%');
 });
 
+it('carries the size the percentage is a share of', () => {
+  expect(
+    downloadLine({
+      label: 'Speech model',
+      model: 'ggml-x.bin',
+      index: 1,
+      count: 4,
+      bytes: 88 * 1_048_576,
+      total: 142 * 1_048_576,
+      state: 'downloading',
+    }),
+  ).toBe('Speech model, 1 of 4 · 61% of 142 MB');
+});
+
+it('leaves the size off a file that rounds to nothing', () => {
+  expect(
+    downloadLine({ model: 'tiny.bin', bytes: 120_000, total: 300_000, state: 'downloading' }),
+  ).toBe('tiny.bin · 40%');
+});
+
 // A daemon older than the label and count fields sends neither, and a run has
 // at least one file, so a zero count has no place to report.
 it('falls back to the filename when the daemon reports no place', () => {

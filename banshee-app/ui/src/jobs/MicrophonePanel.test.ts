@@ -98,12 +98,37 @@ it('offers the preset under a local listener and hides it under a remote one', (
   );
 });
 
-it('says the local model waits on a restart', () => {
-  daemon.set(reduceStatus(empty(), { ...localStatus, pending: ['stt.preset'] }));
+const absentSpeech = { name: 'ggml-large-v3-q5_0.bin', role: 'speech' as const, megabytes: 1031 };
+
+it('names what a chosen model still costs, and offers the fetch here', () => {
+  daemon.set(reduceStatus(empty(), { ...localStatus, missing_downloads: [absentSpeech] }));
   const { container } = render(MicrophonePanel);
-  const pending = container.querySelectorAll('.note.pending');
-  expect(pending).toHaveLength(1);
-  expect(pending[0].textContent).toBe(PENDING_SAYS);
+  const said = container.querySelector('.note.pending')?.textContent ?? '';
+  expect(said).toContain('1.0 GB');
+  expect(said).not.toBe(PENDING_SAYS);
+  expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy();
+});
+
+it('offers nothing while the speech model this preset names is here', () => {
+  daemon.set(reduceStatus(empty(), { ...localStatus, missing_downloads: [] }));
+  const { container } = render(MicrophonePanel);
+  expect(container.querySelector('.note.pending')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
+});
+
+// The run's total covers the detector, the engine and a voice, so a voice the
+// reader has not fetched would otherwise price a speech model that is present.
+it('says nothing about the model when only a voice is missing', () => {
+  daemon.set(
+    reduceStatus(empty(), {
+      ...localStatus,
+      download_megabytes: 1,
+      missing_downloads: [{ name: 'bf_emma.bin', role: 'voice' as const, megabytes: 1 }],
+    }),
+  );
+  const { container } = render(MicrophonePanel);
+  expect(container.querySelector('.note.pending')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
 });
 
 it('says the remote server waits on a restart', () => {
@@ -290,4 +315,54 @@ it('puts the key under the server it opens', () => {
   render(MicrophonePanel);
   const names = [...listenerGroup().querySelectorAll('.sub')].map((name) => name.textContent);
   expect(names).toEqual(['server', 'key', 'model']);
+});
+
+// Dictation carries on with the loaded model, so a heavier preset that is not
+// on disk raises no blocker at all.
+it('offers the fetch while the daemon is working and nothing is blocked', () => {
+  daemon.set(
+    reduceStatus(empty(), {
+      ...localStatus,
+      ready: true,
+      blockers: [],
+      missing_downloads: [absentSpeech],
+    }),
+  );
+  render(MicrophonePanel);
+  expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy();
+});
+
+// `english_only` answers for the model the listener loaded, and a heavier one
+// takes seconds to read off disk.
+it('says the listener has not picked the chosen model up yet, and leaves the language reachable', () => {
+  daemon.set(
+    reduceStatus(empty(), {
+      ...withStt({ provider: 'local', preset: 'balanced' }, LOCAL_IN_FORCE),
+      english_only: true,
+    }),
+  );
+  render(MicrophonePanel);
+
+  expect(screen.getByText(/has not picked up Balanced yet/)).toBeTruthy();
+  expect(screen.queryByText(/Fast hears English only/)).toBeNull();
+  expect((screen.getByRole('combobox', { name: 'Language' }) as HTMLSelectElement).disabled).toBe(
+    false,
+  );
+});
+
+// Fast loaded and Fast chosen is not a gap: the model really does hear English
+// alone, so the picker stays shut.
+it('keeps the language shut while Fast is both chosen and loaded', () => {
+  daemon.set(
+    reduceStatus(empty(), {
+      ...withStt({ provider: 'local', preset: 'fast' }, LOCAL_IN_FORCE),
+      english_only: true,
+    }),
+  );
+  render(MicrophonePanel);
+
+  expect(screen.getByText(/Fast hears English only/)).toBeTruthy();
+  expect((screen.getByRole('combobox', { name: 'Language' }) as HTMLSelectElement).disabled).toBe(
+    true,
+  );
 });

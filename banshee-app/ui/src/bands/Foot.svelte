@@ -50,21 +50,32 @@
   // For the eye alone: a screen reader reads the whole value, so a tooltip only on a clipped one.
   function clipped(node: HTMLElement, value: string) {
     let text = value;
+    let frame = 0;
+    let alive = true;
     // Measured after the frame that paints the value, or the width read is the
     // one the previous value had.
-    const mark = () =>
-      requestAnimationFrame(() => {
+    const mark = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (!alive) return;
         if (node.scrollWidth > node.clientWidth) node.title = text;
         else node.removeAttribute('title');
       });
+    };
     mark();
     // Until Archivo lands the widths are the fallback's, so a value that fits
     // at first paint may not once the real face is measured.
-    document.fonts?.ready?.then(mark);
+    document.fonts?.ready?.then(() => {
+      if (alive) mark();
+    });
     return {
       update(next: string) {
         text = next;
         mark();
+      },
+      destroy() {
+        alive = false;
+        cancelAnimationFrame(frame);
       },
     };
   }
@@ -85,7 +96,7 @@
           open(row.label, row.id);
         }}
       >
-        <span class="caps">{row.title ?? row.label}</span>
+        <span class="caps" use:clipped={row.title ?? row.label}>{row.title ?? row.label}</span>
         <span class="mono value" class:pending={row.pending} use:clipped={row.value}>
           {row.value || '—'}
         </span>
@@ -111,8 +122,15 @@
     gap: 10px;
   }
 
+  /* The label clips the way the value does: at 140% zoom and above the four
+     labels collide without it, and the tooltip keeps the full word. */
   .caps {
     color: var(--accent);
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .cell {
@@ -134,6 +152,16 @@
     border-top-color: var(--accent);
   }
 
+  /* One mark at a time: the bar above says this cell is open, so the rule that
+     offered the panel has nothing left to say. A value the daemon has not taken
+     keeps its dashed mark, which is about the value and not about the cell. */
+  .cell.on .value:not(.pending) {
+    border-bottom-color: transparent;
+  }
+
+  /* The rule is the affordance: these four cells are the only route to every
+     job in the window, and the accent and the top border both wait on an
+     interaction. It is the treatment the ledger's controls use one band up. */
   .value {
     font-size: 11px;
     color: var(--ink);
@@ -141,6 +169,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    border-bottom: 1px solid currentcolor;
   }
 
   .cell:hover .value {

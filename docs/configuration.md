@@ -158,7 +158,8 @@ Speak with one by: banshee config set tts.voice "<id>"
 - **After a change to `preset` or `voice`,** run `banshee setup` to fetch the
   new file.
 - **The window's Voice panel** lists every voice Banshee can name and fetches
-  the one you pick.
+  the one you pick, and its Microphone panel fetches a speech model you choose
+  and do not have.
 
 ## Tuning the listener
 

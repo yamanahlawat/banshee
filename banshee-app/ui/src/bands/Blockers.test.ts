@@ -186,7 +186,7 @@ it('draws the download against its own length', () => {
     },
     restart: () => {},
   });
-  expect(container.querySelector('.bar')?.getAttribute('style')).toMatch(/41%/);
+  expect(container.querySelector('.bar')?.getAttribute('style')).toMatch(/scaleX\(0\.41\)/);
 });
 
 // A failed file does not end the run: the daemon carries on to the next one and

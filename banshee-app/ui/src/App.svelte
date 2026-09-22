@@ -33,9 +33,17 @@
     RESTART_SAYS,
     SPEECH_FAILED,
     SPEECH_FAILURE,
+    failureReads,
     spell,
   } from './lib/copy';
-  import { followSaveHistory, readAll, readLatest, readNewest, table } from './lib/history';
+  import {
+    followSaveHistory,
+    freshLead,
+    readAll,
+    readLatest,
+    readNewest,
+    table,
+  } from './lib/history';
   import { agents, refresh as readAgents } from './lib/agents';
   import {
     listen,
@@ -45,11 +53,12 @@
     status,
     type Down,
     type DownloadProgress,
+    type HistoryRow,
     type Voices,
   } from './lib/tauri';
   import { humanize } from './lib/hotkey';
   import { keysClaimed } from './lib/keys';
-  import { formatWhen } from './lib/time';
+  import { formatWhen, sinceDay } from './lib/time';
   import { formatCount } from './lib/history';
   import Header from './bands/Header.svelte';
   import Foot from './bands/Foot.svelte';
@@ -59,6 +68,7 @@
   import Ledger from './bands/Ledger.svelte';
   import TheRecord from './bands/Record.svelte';
   import Turn from './turns/Turn.svelte';
+  import RecordList from './turns/RecordList.svelte';
   import Absence from './turns/Absence.svelte';
   import Pending from './turns/Pending.svelte';
   import MicrophonePanel from './jobs/MicrophonePanel.svelte';
@@ -67,6 +77,7 @@
   import AgentsPanel from './jobs/AgentsPanel.svelte';
 
   let wasTranscribing = false;
+  let wasLoadingModel = false;
   let voices: Voices = { voices: [], current: null };
   let voicesRead = false;
   let agentsRead = false;
@@ -83,11 +94,30 @@
   };
   let cameFrom = '';
 
+  // `updateCallbackDone` settles before the crossfade finishes.
+  type ViewTransition = { updateCallbackDone: Promise<void> };
+  // Awaited, because the platform runs the callback in a later task once it has
+  // the old snapshot. Returning before then leaves the focus move below looking
+  // for a panel that has not rendered.
+  async function swap(run: () => void): Promise<void> {
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const start = (
+      document as Document & { startViewTransition?: (run: () => void) => ViewTransition }
+    ).startViewTransition;
+    if (reduce || !start) {
+      run();
+      return;
+    }
+    await start.call(document, run).updateCallbackDone.catch(() => {});
+  }
+
   // `at` lands after the panel's own mount focus. It cannot live in the panel:
   // one already open never mounts again when the job changes under it.
   async function openJob(next: Job | null, from = '', at = '') {
     cameFrom = next === null ? cameFrom : from;
-    job = next;
+    await swap(() => {
+      job = next;
+    });
     if (next !== null) {
       if (at !== '') await land(() => document.getElementById(at));
       return;
@@ -112,10 +142,6 @@
     if (live.recording) return 'recording';
     return null;
   }
-  // The record runs to thousands of rows. Find still reads every one of them.
-  const PAGE = 40;
-  let limit = PAGE;
-
   function onKeydown(event: KeyboardEvent) {
     if (keysClaimed()) return;
     // `key`, so the shortcut follows the character the way macOS does: `code`
@@ -140,6 +166,12 @@
   function closeFind() {
     finding = false;
     query = '';
+    // The field unmounts under the focus it holds, so the keyboard lands back
+    // on the control that opened it. Absent when the record is empty, and then
+    // the skip link keeps the keyboard inside the window.
+    land(
+      () => document.getElementById('ledger-find') ?? document.querySelector<HTMLElement>('.skip'),
+    );
   }
 
   $: word = stateWord($daemon);
@@ -168,6 +200,7 @@
           job: 'Microphone' as Job,
           at: DICTATION_FAILURE,
           said: failureSays(DICTATION_FAILED, $daemon.live.last_error),
+          reads: failureReads(DICTATION_FAILED, $daemon.live.last_error),
         }
       : $daemon.live.last_speech_error
         ? {
@@ -175,6 +208,7 @@
             job: 'Voice' as Job,
             at: SPEECH_FAILURE,
             said: failureSays(SPEECH_FAILED, $daemon.live.last_speech_error),
+            reads: failureReads(SPEECH_FAILED, $daemon.live.last_speech_error),
           }
         : null;
 
@@ -238,9 +272,39 @@
   $: rows = $table.rows;
   $: needle = query.trim().toLowerCase();
   $: shown = needle ? rows.filter((r) => r.text.toLowerCase().includes(needle)) : rows;
-  $: (needle, (limit = PAGE));
-  $: visible = shown.slice(0, limit);
-  $: older = shown.length - visible.length;
+  // The record windows itself over any length, so no page control counts it.
+  // Find still reads every one of the rows above.
+  let body: HTMLElement;
+  let scrollTop = 0;
+  let viewportH = 0;
+  let scrollFrame = 0;
+  // Native scroll events outrun the display on a trackpad fling, and every one
+  // of them moves the record's window. One read a frame is all a paint can use.
+  function onScroll() {
+    if (scrollFrame || !body) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0;
+      scrollTop = body.scrollTop;
+    });
+  }
+  // The height changes only when the window does, so it stays off the scroll
+  // path, where reading it forces a layout for a value that did not move.
+  function readViewport() {
+    if (!body) return;
+    scrollTop = body.scrollTop;
+    viewportH = body.clientHeight;
+  }
+  // One block, so the flush lands with `leadArrives` still matching this id.
+  let debutedLead: HistoryRow['id'] | null = null;
+  let leadArrives = false;
+  $: leadId = rows[0]?.id ?? null;
+  $: if (leadId !== debutedLead) {
+    leadArrives = needle === '' && freshLead(debutedLead, leadId);
+    debutedLead = leadId;
+  }
+  // The column's bottom edge. Read from every row rather than the shown ones,
+  // so a filter cannot move the day the record starts.
+  $: origin = rows.length > 0 ? sinceDay(rows[rows.length - 1].timestamp, now) : '';
   // The daemon sets `armed` from `ask_user` alone, and sends no question with
   // it, so the turn can say an agent is waiting and nothing further.
   $: waiting = $daemon.live.armed;
@@ -347,13 +411,34 @@
     ];
   })();
 
+  // The name a job wears on screen is the foot cell's, not the internal one:
+  // the dictation cell is labelled Listening.
+  $: failedTitle = failed
+    ? (footValues.find((row) => row.label === failed.job)?.title ?? String(failed.job))
+    : '';
+
   $: if ($daemon.status) followSaveHistory(savingHistory);
+
+  // A grant, a hand-edited config.toml and a model file added outside Banshee
+  // reach no push, and returning is the one moment that catches them all.
+  // `andStart` stays off: a return is not a request to start a stopped daemon.
+  let rereading = false;
+  async function onReturn() {
+    if (document.visibilityState === 'hidden' || rereading) return;
+    rereading = true;
+    try {
+      await readStatus(false);
+    } finally {
+      rereading = false;
+    }
+  }
 
   /// andStart is off for the restart poll: launchd is already bringing the daemon back.
   async function readStatus(andStart = true): Promise<boolean> {
     try {
       await refreshStatus(status);
       wasTranscribing = $daemon.live.transcribing;
+      wasLoadingModel = $daemon.live.loading_model;
       return true;
     } catch (error) {
       const reason = (error as { message?: string })?.message || 'not running';
@@ -387,6 +472,27 @@
     agentsRead = gotAgents;
   }
 
+  onMount(() => {
+    // Focus alone misses a window unhidden without the pointer landing in it.
+    document.addEventListener('visibilitychange', onReturn);
+    return () => document.removeEventListener('visibilitychange', onReturn);
+  });
+
+  onMount(() => {
+    readViewport();
+    // The window grows taller under the reader, so the plan never trusts a
+    // viewport it read earlier. Absent where no observer exists.
+    if (typeof ResizeObserver === 'undefined' || !body) {
+      return () => cancelAnimationFrame(scrollFrame);
+    }
+    const watcher = new ResizeObserver(readViewport);
+    watcher.observe(body);
+    return () => {
+      cancelAnimationFrame(scrollFrame);
+      watcher.disconnect();
+    };
+  });
+
   onMount(async () => {
     // Before the first read, or a stopped daemon misses the push saying it
     // came back. None of these touches the daemon socket.
@@ -401,6 +507,12 @@
         applyPush(e.payload);
         if (e.payload.transcribing === false && wasTranscribing) readNewest().catch(() => {});
         if (e.payload.transcribing !== undefined) wasTranscribing = e.payload.transcribing;
+        // `stt_model` and `english_only` come only with a full status, and the
+        // read a write does happens before the file lands, so this is the only
+        // word that the model in force moved. Held rather than read off the
+        // store, which `applyPush` above has already advanced.
+        if (e.payload.loading_model === false && wasLoadingModel) readStatus(false);
+        if (e.payload.loading_model !== undefined) wasLoadingModel = e.payload.loading_model;
       }),
       listen<DownloadProgress>('daemon:downloads', (e) => {
         const progress = e.payload;
@@ -432,9 +544,10 @@
   });
 </script>
 
-<svelte:window on:keydown={onKeydown} />
+<svelte:window on:keydown={onKeydown} on:focus={onReturn} />
 
 <main>
+  <h1 class="sr">Banshee</h1>
   <!-- Invisible until it takes focus. The roving foot collapses four stops into
        one, but the copy controls are the bulk of them and they have to stay
        reachable, so the keyboard needs a way over the record entirely. -->
@@ -451,7 +564,7 @@
     showFailure={() => failed && openJob(failed.job, RETURNS_TO.failure, failed.at)}
   />
 
-  <div class="body">
+  <div class="body" bind:this={body} on:scroll={onScroll}>
     <!-- Outside the panel branch on purpose: a voice that will not play is
          reported from inside a panel, and the reader has to see it there. The
          region is always in the DOM, because one that arrives with its own
@@ -477,8 +590,19 @@
         {/if}
       </Panel>
     {:else}
-      {#if finding}
-        <Find bind:query matches={shown.length} close={closeFind} />
+      {#if failed}
+        <!-- The header names the failure in two words; this states it where the
+             reader looks, with the fix in a button like a blocker's. The header
+             keeps the notice, because only that band survives a scroll. -->
+        <div class="failure">
+          <p class="note">{failed.reads}</p>
+          <button
+            class="btn btn-ghost"
+            on:click={() => openJob(failed.job, RETURNS_TO.failure, failed.at)}
+          >
+            Open {failedTitle}
+          </button>
+        </div>
       {/if}
 
       {#if blockers.length > 0 || $daemon.download !== null}
@@ -505,16 +629,26 @@
         />
       {/if}
 
-      {#if live && !finding && ($table.total > 0 || !savingHistory)}
+      {#if live && ($table.total > 0 || !savingHistory)}
         <Ledger
           id={RETURNS_TO.ledger}
           total={$table.total}
           saving={savingHistory}
           open={() => openJob('Record', RETURNS_TO.ledger)}
+          find={() => {
+            finding = true;
+          }}
         />
+        <!-- With the record it searches, not above the blockers: the header
+             stays up while search is open, and DOM order matches the eye. -->
+        {#if finding}
+          <Find bind:query matches={shown.length} close={closeFind} />
+        {/if}
+      {:else if finding}
+        <Find bind:query matches={shown.length} close={closeFind} />
       {/if}
 
-      {#if noAgentYet && !nothingYet && blockers.length === 0}
+      {#if noAgentYet && !finding && blockers.length === 0}
         <Absence
           label="No agent can speak to you yet"
           detail="A connected agent can ask you questions out loud and hear your answer, so you can leave the screen while it works."
@@ -545,21 +679,29 @@
       {/if}
 
       {#if shown.length > 0}
-        {#each visible as row, i (row.id)}
-          <Turn
-            lead={i === 0 && !waiting}
-            speaker="user"
-            id={String(row.id)}
-            time={formatWhen(row.timestamp, now)}
-            text={row.text}
-          />
-        {/each}
-        {#if older > 0}
-          <div class="older">
-            <button class="btn btn-ghost" on:click={() => (limit += PAGE)}>
-              {older} older
-            </button>
-          </div>
+        <RecordList rows={shown} {scrollTop} viewport={viewportH} container={body}>
+          <svelte:fragment let:row let:index>
+            <Turn
+              lead={index === 0 && !waiting}
+              arrive={index === 0 && !waiting && leadArrives}
+              speaker="user"
+              id={String(row.id)}
+              time={formatWhen(row.timestamp, now)}
+              text={row.text}
+            />
+          </svelte:fragment>
+        </RecordList>
+        <!-- Reads as margin under the record rather than as a rule. -->
+        {#if !needle && origin}
+          <!-- The second clause is about the record, and it only stands while
+               the machine is also the one that hears. Over a remote listener
+               it would sit a band above a foot naming the host, and read as a
+               claim the window cannot back. -->
+          <p class="note colophon">
+            The record starts here, {origin}. Banshee keeps it on this machine{listening.remote
+              ? '.'
+              : ' and sends it nowhere.'}
+          </p>
         {/if}
       {:else if needle}
         <Absence
@@ -616,6 +758,25 @@
     min-height: 0;
     overflow-y: auto;
     padding-top: 22px;
+    /* Already the default; stated so it reads as chosen. */
+    overflow-anchor: auto;
+  }
+
+  /* Banshee's own voice closing the column, so it takes the agent cut and the
+     secondary readout's colour. The rule above it is the band-edge weight: it
+     ends the record the way the ledger's rule opens it. */
+  .colophon {
+    margin: 26px var(--gutter) 0;
+    padding-top: 14px;
+    border-top: 1px solid var(--rule);
+    color: var(--dim);
+  }
+
+  /* The swap hurries: a reader catching up never waits on it. Global, because
+     the snapshot tree lives outside any component's scope. */
+  :global(::view-transition-old(root)),
+  :global(::view-transition-new(root)) {
+    animation-duration: 180ms;
   }
 
   /* The readout voice: an instruction the config answers, not a thing anyone
@@ -627,8 +788,17 @@
     color: var(--accent);
   }
 
-  .older {
-    margin: 4px var(--gutter) 24px;
+  /* Ink, not the accent: this is prose, and the accent does not emphasise
+     prose. The header's own notice carries the alarm in the accent, and two
+     lines of it here would say the same thing a second time, louder. */
+  .failure {
+    max-width: 520px;
+    margin: 0 var(--gutter) 16px;
+  }
+
+  .failure p {
+    margin: 0 0 12px;
+    color: var(--ink);
   }
 
   .skip {

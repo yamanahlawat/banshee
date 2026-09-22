@@ -291,6 +291,18 @@ body {
   background: var(--accent);
 }
 
+/* The head a drawn box carries, absence and blocker alike, and the only
+   heading in the window set above the text it heads. */
+.box-head {
+  margin: 0;
+  font-variation-settings:
+    'wght' 750,
+    'wdth' 106;
+  font-size: 17px;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+
 .readout {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -338,8 +350,9 @@ body {
   content: '';
   position: absolute;
   /* Against the padding box, which stops above the 1px rule, so the two edges
-     are not the same distance from the label. Measured to 25.8px tall. */
-  inset: -5px -2px;
+     are not the same distance from the label. Six px a side fits the row gaps;
+     a tighter pair separates itself. */
+  inset: -8px -6px;
 }
 
 .btn-underline:hover:not(:disabled) {
