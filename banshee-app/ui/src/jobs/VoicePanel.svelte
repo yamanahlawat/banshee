@@ -1,7 +1,8 @@
 <script lang="ts">
   import { daemon, shownFloat, speechFacts, waitsOnARestart } from '../lib/daemon';
   import { write } from '../lib/settings';
-  import { downloadModels, previewVoice, type Voice, type Voices } from '../lib/tauri';
+  import { previewVoice, type Voice, type Voices } from '../lib/tauri';
+  import { claimTheRun, fetching, forgetTheAsk, runTheDownload } from '../lib/downloads';
   import {
     announce,
     announcer,
@@ -74,18 +75,24 @@
     return write('tts.remote.sample_rate', Number(rate));
   }
 
-  // The daemon applies a voice once its file lands, so choosing one is the whole interaction.
-  async function choose(voice: Voice, here: boolean) {
-    if (!(await write('tts.voice', voice.id))) {
-      // A refusal leaves `current` where it was, so nothing renders the mark
-      // back from where the browser moved it. Checking one clears the group.
-      const loaded = document.getElementById(`voice-${current}`);
-      if (loaded instanceof HTMLInputElement) loaded.checked = true;
+  async function select(voice: Voice): Promise<boolean> {
+    if (await write('tts.voice', voice.id)) return true;
+    // A refusal leaves `current` where it was, so nothing renders the mark back
+    // from where the browser moved it. Checking one clears the group.
+    const loaded = document.getElementById(`voice-${current}`);
+    if (loaded instanceof HTMLInputElement) loaded.checked = true;
+    return false;
+  }
+
+  // A run fetches whatever the config asks for, so a second voice pressed into
+  // it would be written down and left out of the run already going.
+  async function fetchVoice(voice: Voice) {
+    if (!claimTheRun()) return;
+    if (!(await select(voice))) {
+      forgetTheAsk();
       return;
     }
-    if (!here) {
-      await downloadModels().catch(() => report(`${voice.name} would not download.`));
-    }
+    await runTheDownload().catch(() => report(`${voice.name} would not download.`));
   }
 </script>
 
@@ -154,7 +161,7 @@
     {/if}
   {:else}
     <SubRow name="voice" pending={$waitsOnARestart.has('tts.voice')}>
-      <div class="voices">
+      <div class="voices" role="radiogroup" aria-label="Voice">
         {#each voices.voices as voice (voice.id)}
           {@const on = voice.id === current}
           {@const here = voice.downloaded !== false}
@@ -164,25 +171,36 @@
               name="voice"
               id={`voice-${voice.id}`}
               checked={on}
-              on:change={() => choose(voice, here)}
+              on:change={() => select(voice)}
             />
             <label for={`voice-${voice.id}`}>
               <span class="name" class:absent={!here}>{voice.name}</span>
               <span class="desc">{voice.description}</span>
-              <!-- Said to the eye, not only to a screen reader: the dashed
-                   underline means one thing here and another in the foot. No
-                   size beside it, because `Voice` carries none. -->
-              {#if !here}<span class="readout">Not on this machine</span>{/if}
+              <!-- The dashed name is the mark for the eye, and this is the same
+                   fact for a reader who hears the radio rather than sees it. -->
+              {#if !here}<span class="sr">, not on this machine</span>{/if}
             </label>
-            <button
-              class="btn btn-ghost"
-              aria-label={`Preview ${voice.name}`}
-              disabled={!here}
-              on:click={() =>
-                previewVoice(voice.id).catch(() => report(`${voice.name} will not play.`))}
-            >
-              Play
-            </button>
+            <!-- Get is the only thing that fetches, so arrowing down the list
+                 moves the choice without pulling a file on every step. -->
+            {#if here}
+              <button
+                class="btn btn-ghost pick"
+                aria-label={`Play ${voice.name}`}
+                on:click={() =>
+                  previewVoice(voice.id).catch(() => report(`${voice.name} will not play.`))}
+              >
+                Play
+              </button>
+            {:else}
+              <button
+                class="btn btn-ghost pick"
+                disabled={$fetching}
+                aria-label={`Get ${voice.name}, which is not on this machine`}
+                on:click={() => fetchVoice(voice)}
+              >
+                Get
+              </button>
+            {/if}
           </div>
         {:else}
           <p class="empty">No voices yet. They arrive with Banshee's models.</p>
@@ -250,12 +268,21 @@
     cursor: pointer;
   }
 
+  /* Wide enough for the longest name the daemon ships, so every quality word
+     starts at one edge down the list. */
   .name {
     font-variation-settings:
       'wght' 600,
       'wdth' 100;
     font-size: 15px;
-    width: 58px;
+    width: 72px;
+    flex: none;
+  }
+
+  /* One left edge for Play and Get, so the only strong vertical in the block
+     does not step in and out as the list changes. */
+  .pick {
+    width: 62px;
     flex: none;
   }
 

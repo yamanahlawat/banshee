@@ -13,9 +13,9 @@
   /// counts from the first row.
   export let container: HTMLElement | null = null;
   export let overscan = 3;
-  // Measured in a real window over 500 rows: median 42, from 21 to a 109px
+  // Measured in a real window over 500 rows: median 62, from 41 to a 137px
   // lead. Gauged rows replace it as they mount.
-  export let estimate = 44;
+  export let estimate = 62;
   let box: HTMLElement;
   // Nothing reads this for reactivity: `replan` is called outright when a
   // measurement lands, and a SvelteMap would suggest the block follows it.
@@ -69,6 +69,14 @@
     if (next !== head) head = next;
   }
 
+  // `offsetHeight` stops at the border box, and a turn carries its spacing as a
+  // margin, so a row measured without it leaves the spacers short by that much
+  // for every row they stand in for.
+  function outerHeight(el: HTMLElement): number {
+    const box = getComputedStyle(el);
+    return el.offsetHeight + parseFloat(box.marginTop) + parseFloat(box.marginBottom);
+  }
+
   function gauge() {
     measureHead();
     if (!box || !(viewport > 0)) return;
@@ -78,7 +86,7 @@
     // moving the window, and the heights held would be the old wrapping's.
     let moved = false;
     nodes.forEach((node, k) => {
-      const h = (node as HTMLElement).offsetHeight;
+      const h = outerHeight(node as HTMLElement);
       if (h > 0 && known.get(ids[k]) !== h) {
         known.set(ids[k], h);
         moved = true;

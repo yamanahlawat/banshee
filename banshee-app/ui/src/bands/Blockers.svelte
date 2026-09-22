@@ -12,7 +12,8 @@
   } from '../lib/daemon';
   import { PRESETS, downloadSize } from '../lib/presets';
   import { write } from '../lib/settings';
-  import { downloadModels, openPermissionPane } from '../lib/tauri';
+  import { openPermissionPane } from '../lib/tauri';
+  import { askForModels, fetching } from '../lib/downloads';
   import { report, spell } from '../lib/copy';
   import Segmented from '../controls/Segmented.svelte';
 
@@ -96,7 +97,7 @@
           label: 'Download',
           pane: '',
           confirmsWithRestart: false,
-          run: downloadModels,
+          run: askForModels,
           settledByADownload: true,
           // The preset decides which speech model is fetched, so it is worth
           // asking before a download that runs to gigabytes. A missing voice or
@@ -214,7 +215,7 @@
         {:else}
           <button
             class="btn"
-            disabled={busy}
+            disabled={busy || (fix.settledByADownload && $fetching)}
             on:click={() => {
               if (fix.confirmsWithRestart) asked = { ...asked, [group[0].id]: true };
               run(fix)();

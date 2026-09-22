@@ -8,6 +8,24 @@ use std::time::{Duration, Instant};
 use rdev::listen;
 
 use crate::audio::cues::{Cue, Cues};
+
+// Clears the flag however the load leaves, including an unwind: a panic in the
+// engine would otherwise leave every client reading Working for good.
+#[must_use = "dropping this at once sets the flag and clears it again"]
+struct Loading<'a>(&'a crate::state::DaemonState);
+
+impl<'a> Loading<'a> {
+    fn starts(state: &'a crate::state::DaemonState) -> Self {
+        state.set_loading_model(true);
+        Self(state)
+    }
+}
+
+impl Drop for Loading<'_> {
+    fn drop(&mut self) {
+        self.0.set_loading_model(false);
+    }
+}
 use crate::audio::utils::{StreamingResampler, resample_audio};
 use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
 use crate::config::HotkeyMode;
@@ -204,14 +222,14 @@ pub fn hotkey_listener(
                 // The load takes seconds and holds this thread. Nothing is lost:
                 // a press queues behind it and the ring still holds the audio.
                 ConsumerCommand::Reload(preset) => {
-                    pipeline.state.set_loading_model(true);
+                    let loading = Loading::starts(&pipeline.state);
                     match pipeline.speech_to_text.reload(preset) {
                         Ok(loaded) => pipeline.state.set_stt_model(loaded),
                         Err(error) => {
                             log::error!("the transcription model did not load: {error}")
                         }
                     }
-                    pipeline.state.set_loading_model(false);
+                    drop(loading);
                 }
                 ConsumerCommand::Shutdown => break,
             }
@@ -718,6 +736,27 @@ fn panic_reason(panic: Box<dyn std::any::Any + Send>) -> String {
 mod tell_tests {
     use super::*;
     use crate::tell::Told;
+
+    #[test]
+    fn a_load_that_unwinds_still_clears_the_flag() {
+        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
+        assert!(!state.is_loading_model());
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _loading = super::Loading::starts(&state);
+            assert!(
+                state.is_loading_model(),
+                "the flag is set while the load runs"
+            );
+            panic!("the engine gave up");
+        }));
+
+        assert!(unwound.is_err(), "the panic must reach the caller");
+        assert!(
+            !state.is_loading_model(),
+            "the guard clears the flag on the way out"
+        );
+    }
 
     /// Whether the player said nothing. The watcher thread hands a queued line
     /// to the backend, so the wait comes before the answer.

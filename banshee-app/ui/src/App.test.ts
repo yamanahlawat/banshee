@@ -39,6 +39,7 @@ import { get } from 'svelte/store';
 import { agents } from './lib/agents';
 import { table as historyTable } from './lib/history';
 import { daemon, empty, reduceStatus, type Blocker } from './lib/daemon';
+import { forgetTheAsk } from './lib/downloads';
 import { announcement, forgetCopy, DICTATION_FAILURE, RESTART_SAYS } from './lib/copy';
 import { forgetKeys } from './lib/keys';
 import App from './App.svelte';
@@ -61,6 +62,7 @@ beforeEach(async () => {
   agents.set([]);
   historyTable.set({ rows: [], total: 0, loaded: false, saving: null });
   forgetCopy();
+  forgetTheAsk();
   forgetKeys();
   vi.mocked(status).mockResolvedValue(ready);
   vi.mocked(history).mockResolvedValue(rows);
@@ -938,13 +940,11 @@ it('offers every voice, and fetches the one that is chosen', async () => {
   await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
   expect(screen.getByText('George')).toBeTruthy();
 
-  // Nothing to play until the file is here.
-  expect(screen.getByRole('button', { name: 'Preview George' }).hasAttribute('disabled')).toBe(
-    true,
-  );
-  expect(screen.getByRole('button', { name: 'Preview Sky' }).hasAttribute('disabled')).toBe(false);
+  expect(screen.queryByRole('button', { name: 'Play George' })).toBeNull();
+  expect(screen.getByRole('button', { name: /Get George/ })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Play Sky' }).hasAttribute('disabled')).toBe(false);
 
-  await fireEvent.change(screen.getByRole('radio', { name: /George/ }));
+  await fireEvent.click(screen.getByRole('button', { name: /Get George/ }));
   await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'bm_george'));
   expect(vi.mocked(downloadModels)).toHaveBeenCalled();
 });
@@ -2374,4 +2374,43 @@ it('does not read the daemon when the window is hidden', async () => {
   } finally {
     if (visible) Object.defineProperty(document, 'visibilityState', visible);
   }
+});
+
+it('releases the download controls once the run reports', async () => {
+  vi.mocked(downloadModels).mockResolvedValue(undefined);
+  vi.mocked(status).mockResolvedValue({
+    ...ready,
+    ready: false,
+    blockers: [
+      {
+        kind: 'model',
+        id: 'ggml-x.bin',
+        name: 'ggml-x.bin',
+        role: 'speech',
+        remedy: 'download',
+        consequence: 'recording does not work',
+        fix: 'run: banshee setup',
+        command: 'banshee setup',
+      },
+    ] as Blocker[],
+  });
+  render(App);
+  const start = await screen.findByRole('button', { name: /Download/ });
+  await fireEvent.click(start);
+
+  await waitFor(() =>
+    expect((screen.getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    ),
+  );
+
+  pushes.get('daemon:downloads')?.({
+    payload: { model: 'ggml-x.bin', bytes: 10, total: 100, state: 'done' },
+  });
+
+  await waitFor(() =>
+    expect((screen.getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(
+      false,
+    ),
+  );
 });

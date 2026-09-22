@@ -13,8 +13,9 @@ import {
   waitsOnARestart,
   type Status,
 } from '../lib/daemon';
-import { listDevices, listLanguages, setSetting, status } from '../lib/tauri';
+import { downloadModels, listDevices, listLanguages, setSetting, status } from '../lib/tauri';
 import { announcement, forgetCopy, listeningNote, PENDING_SAYS, TAKES_EFFECT } from '../lib/copy';
+import { forgetTheAsk } from '../lib/downloads';
 import MicrophonePanel from './MicrophonePanel.svelte';
 
 // The daemon's own reply under a remote listener, so each test states only what
@@ -58,6 +59,7 @@ function listenerGroup(): HTMLElement {
 
 // The panel reads the hardware and the language table as it mounts.
 beforeEach(() => {
+  forgetTheAsk();
   daemon.set(empty());
   forgetCopy();
   vi.clearAllMocks();
@@ -365,4 +367,17 @@ it('keeps the language shut while Fast is both chosen and loaded', () => {
   expect((screen.getByRole('combobox', { name: 'Language' }) as HTMLSelectElement).disabled).toBe(
     true,
   );
+});
+
+it('sends one download however fast the button is pressed', async () => {
+  vi.mocked(downloadModels).mockResolvedValue(undefined);
+  daemon.set(reduceStatus(empty(), { ...localStatus, missing_downloads: [absentSpeech] }));
+  render(MicrophonePanel);
+
+  const fetch = screen.getByRole('button', { name: 'Download' });
+  await fireEvent.click(fetch);
+  await fireEvent.click(fetch);
+
+  expect(vi.mocked(downloadModels)).toHaveBeenCalledTimes(1);
+  expect((fetch as HTMLButtonElement).disabled).toBe(true);
 });
