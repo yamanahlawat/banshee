@@ -203,12 +203,16 @@ pub fn hotkey_listener(
                 ConsumerCommand::Speak(speech) => pipeline.speech_to_text.set_speech(speech),
                 // The load takes seconds and holds this thread. Nothing is lost:
                 // a press queues behind it and the ring still holds the audio.
-                ConsumerCommand::Reload(preset) => match pipeline.speech_to_text.reload(preset) {
-                    Ok(loaded) => pipeline.state.set_stt_model(loaded),
-                    Err(error) => {
-                        log::error!("the transcription model did not load: {error}")
+                ConsumerCommand::Reload(preset) => {
+                    pipeline.state.set_loading_model(true);
+                    match pipeline.speech_to_text.reload(preset) {
+                        Ok(loaded) => pipeline.state.set_stt_model(loaded),
+                        Err(error) => {
+                            log::error!("the transcription model did not load: {error}")
+                        }
                     }
-                },
+                    pipeline.state.set_loading_model(false);
+                }
                 ConsumerCommand::Shutdown => break,
             }
         }

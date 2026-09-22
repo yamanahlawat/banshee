@@ -2,6 +2,7 @@
   "recording": true,
   "armed": false,
   "transcribing": false,
+  "loading_model": false,
   "telling": false,
   "speaking": false,
   "audio_device": "MacBook Pro Microphone",

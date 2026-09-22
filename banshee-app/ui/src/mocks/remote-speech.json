@@ -16,6 +16,7 @@
   "recording": false,
   "armed": false,
   "transcribing": false,
+  "loading_model": false,
   "speaking": false,
   "uptime_seconds": 3,
   "vad_threshold": 0.5,

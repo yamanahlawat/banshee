@@ -16,6 +16,7 @@
   "recording": false,
   "armed": false,
   "transcribing": false,
+  "loading_model": false,
   "telling": false,
   "speaking": false,
   "uptime_seconds": 5,

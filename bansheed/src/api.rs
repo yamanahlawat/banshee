@@ -236,6 +236,23 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             &daemon_state.wanted_downloads(),
             daemon_state.models_dir(),
         ),
+        // What is absent, which is not what stops Banshee working: a heavier
+        // preset chosen while dictation runs on the loaded one is a file to
+        // fetch and no blocker at all. A client pricing one of these must not
+        // reach for the sum above, which covers the detector and the voice too.
+        "missing_downloads": crate::models::download::still_missing(
+            &daemon_state.wanted_downloads(),
+            daemon_state.models_dir(),
+        )
+        .iter()
+        .map(|file| {
+            serde_json::json!({
+                "name": file.name,
+                "role": crate::models::download::role(&file.name),
+                "megabytes": file.megabytes,
+            })
+        })
+        .collect::<Vec<_>>(),
         // The English-only build reads English whatever `stt.language` says.
         // Read off the model the listener loaded, not the configured preset:
         // a preset applied without persist moves one and not the other.
@@ -324,6 +341,7 @@ fn live_state_at(
         "recording": daemon_state.is_recording(),
         "armed": daemon_state.is_armed(),
         "transcribing": daemon_state.is_transcribing(),
+        "loading_model": daemon_state.is_loading_model(),
         "telling": daemon_state.is_telling(),
         "speaking": daemon_state.speech().is_speaking(),
         "audio_device": daemon_state.audio_device(),
