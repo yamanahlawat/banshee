@@ -56,10 +56,9 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
 
 ## Not planned
 
-- Spoken-status hooks for agents other than Claude Code. Pi and OpenCode call
-  `speak_status` when the tool description tells them to; Claude Code did not always, so it
-  got a Stop hook. No other agent exposes a hook that can block a turn, and none has shown
-  the same need.
+- ~~Spoken-status hooks for agents other than Claude Code.~~ Codex and Antigravity expose a
+  Stop hook that can hold a turn, and `banshee connect` now writes one for each. Cursor's stop
+  hook can only send a follow-up message, and Windsurf, Zed and Amp have no turn-end hook.
 - `banshee narrate`. `banshee speak` is the primitive, and a shell line covers the use:
   `cargo build; banshee speak "build $([ $? = 0 ] && echo passed || echo failed)"`. Parsing
   arbitrary build output to guess the result is brittle, and an agent already speaks results

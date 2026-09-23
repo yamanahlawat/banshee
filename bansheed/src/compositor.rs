@@ -207,7 +207,6 @@ pub fn plan(hypr_dir: &Path, hotkey: Hotkey, mode: HotkeyMode) -> Result<Rebind,
             path: layout.path.clone(),
             before: Some(before),
             after,
-            executable: false,
         }]
     };
     Ok(Rebind {

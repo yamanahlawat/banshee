@@ -333,6 +333,7 @@ pub struct DaemonState {
     // Zero means it has never run, which reads as stalled.
     capture_tick: AtomicU64,
     shutdown: tokio::sync::Notify,
+    spoken: crate::turns::SpokenTurns,
     // Handed in, so a test decides what is on disk.
     models_dir: std::path::PathBuf,
 }
@@ -395,6 +396,7 @@ impl DaemonState {
             typing: AtomicBool::new(false),
             capture_tick: AtomicU64::new(0),
             shutdown: tokio::sync::Notify::new(),
+            spoken: crate::turns::SpokenTurns::default(),
         }
     }
 
@@ -513,6 +515,10 @@ impl DaemonState {
 
     pub fn speech(&self) -> &Arc<SpeechPlayer> {
         &self.speech
+    }
+
+    pub fn spoken(&self) -> &crate::turns::SpokenTurns {
+        &self.spoken
     }
 
     pub fn commands(&self) -> &std::sync::mpsc::Sender<ConsumerCommand> {

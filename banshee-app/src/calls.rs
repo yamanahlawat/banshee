@@ -11,7 +11,7 @@ use banshee_common::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const PREVIEW_SENTENCE: &str = "This is how I sound.";
+const PREVIEW_SENTENCE: &str = "The quick brown fox jumps over the lazy dog, while five brave friends quietly pack their bags for a bright Sunday morning walk by the river.";
 
 /// The daemon's code and message when it answered; the transport's or the window's own
 /// message when it did not.
@@ -158,15 +158,19 @@ pub async fn apply_connect(
     client: &mut Client,
     id: &str,
     disconnect: bool,
-) -> Result<(), CommandError> {
-    client
+) -> Result<Option<String>, CommandError> {
+    let result = client
         .call(
             BANSHEE_CONNECT_APPLY,
             json!({"agent": id, "disconnect": disconnect}),
         )
         .await
         .map_err(CommandError::from)?;
-    Ok(())
+    Ok(note_of(&result))
+}
+
+fn note_of(result: &Value) -> Option<String> {
+    result["note"].as_str().map(String::from)
 }
 
 /// `limit` is forwarded when present and omitted entirely when absent: the
@@ -197,4 +201,24 @@ pub async fn open_permission_pane(client: &mut Client, id: &str) -> Result<(), C
         .await
         .map_err(CommandError::from)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::note_of;
+    use serde_json::json;
+
+    #[test]
+    fn a_connect_reply_with_a_note_gives_its_text() {
+        let text = "Codex runs this hook only after you trust it: open Codex and run /hooks.";
+        assert_eq!(
+            note_of(&json!({"applied": 1, "note": text})),
+            Some(text.to_string())
+        );
+    }
+
+    #[test]
+    fn a_connect_reply_without_a_note_gives_none() {
+        assert_eq!(note_of(&json!({"applied": 1})), None);
+    }
 }

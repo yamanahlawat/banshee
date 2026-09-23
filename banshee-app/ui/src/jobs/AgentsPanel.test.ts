@@ -52,7 +52,7 @@ it('says the machine has no agents once a read has landed', async () => {
 it('states that the agent connected when the list cannot be read afterwards', async () => {
   vi.mocked(detectAgents).mockResolvedValueOnce([CLAUDE]);
   vi.mocked(planConnect).mockResolvedValue([{ path: '~/.claude.json', diff: '+ banshee' }]);
-  vi.mocked(applyConnect).mockResolvedValue(undefined);
+  vi.mocked(applyConnect).mockResolvedValue(null);
   const { getByRole, getByText } = render(AgentsPanel);
 
   await waitFor(() => expect(getByText('Claude Code')).toBeTruthy());
@@ -100,7 +100,7 @@ it('puts focus back on the connect button the cancel came from', async () => {
 it('moves focus onto the row an apply just changed', async () => {
   vi.mocked(detectAgents).mockResolvedValueOnce([CLAUDE]);
   vi.mocked(planConnect).mockResolvedValue([{ path: '~/.claude.json', diff: '+ banshee' }]);
-  vi.mocked(applyConnect).mockResolvedValue(undefined);
+  vi.mocked(applyConnect).mockResolvedValue(null);
   const { getByRole, getByText } = render(AgentsPanel);
 
   await waitFor(() => expect(getByText('Claude Code')).toBeTruthy());
@@ -114,6 +114,121 @@ it('moves focus onto the row an apply just changed', async () => {
   // `body` holds the whole panel, so its text matches anything: name the node.
   const landed = document.activeElement as HTMLElement;
   expect(landed).not.toBe(document.body);
-  expect(landed.classList.contains('row')).toBe(true);
+  expect(landed.classList.contains('agent')).toBe(true);
   expect(landed.textContent).toMatch(/Claude Code/);
+});
+
+const CODEX: AgentRow = {
+  id: 'codex',
+  name: 'Codex',
+  presence: 'found',
+  note: 'Installed, not connected',
+};
+const TRUST = 'Codex runs this hook only after you trust it: open Codex and run /hooks.';
+
+// Codex skips a hook nobody trusted. A window user has no terminal line that says so.
+it('shows what is left to do after a connect that needs a step', async () => {
+  vi.mocked(detectAgents)
+    .mockResolvedValueOnce([CODEX])
+    .mockResolvedValueOnce([{ ...CODEX, presence: 'connected', note: 'Connected' }]);
+  vi.mocked(planConnect).mockResolvedValue([{ path: '~/.codex/hooks.json', diff: '+ turn-end' }]);
+  vi.mocked(applyConnect).mockResolvedValue(TRUST);
+  const { getByRole, getByText } = render(AgentsPanel);
+
+  await waitFor(() => expect(getByText('Codex')).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: /Connect/ }));
+  await waitFor(() => expect(getByRole('button', { name: /Apply/ })).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: /Apply/ }));
+
+  await waitFor(() => expect(getByText(TRUST)).toBeTruthy());
+});
+
+it('shows no step after a connect that failed', async () => {
+  vi.mocked(detectAgents).mockResolvedValue([CODEX]);
+  vi.mocked(planConnect).mockResolvedValue([{ path: '~/.codex/hooks.json', diff: '+ turn-end' }]);
+  vi.mocked(applyConnect).mockRejectedValue(new Error('config.toml changed after the plan'));
+  const { getByRole, getByText, queryByText } = render(AgentsPanel);
+
+  await waitFor(() => expect(getByText('Codex')).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: /Connect/ }));
+  await waitFor(() => expect(getByRole('button', { name: /Apply/ })).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: /Apply/ }));
+
+  await waitFor(() => expect(getByText(/changed after the plan/)).toBeTruthy());
+  expect(queryByText(TRUST)).toBeNull();
+});
+
+it('drops the step when a later connect fails', async () => {
+  vi.mocked(detectAgents)
+    .mockResolvedValueOnce([CODEX])
+    .mockRejectedValueOnce(new Error('no daemon'));
+  vi.mocked(planConnect).mockResolvedValue([{ path: '~/.codex/hooks.json', diff: '+ turn-end' }]);
+  vi.mocked(applyConnect)
+    .mockResolvedValueOnce(TRUST)
+    .mockRejectedValueOnce(new Error('config.toml changed after the plan'));
+  const { getByRole, getByText, queryByText } = render(AgentsPanel);
+
+  await waitFor(() => expect(getByText('Codex')).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: /Connect/ }));
+  await waitFor(() => expect(getByRole('button', { name: /Apply/ })).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: /Apply/ }));
+  await waitFor(() => expect(getByText(TRUST)).toBeTruthy());
+
+  await fireEvent.click(getByRole('button', { name: /Connect/ }));
+  await waitFor(() => expect(getByRole('button', { name: /Apply/ })).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: /Apply/ }));
+
+  await waitFor(() => expect(getByText(/changed after the plan/)).toBeTruthy());
+  expect(queryByText(TRUST)).toBeNull();
+});
+
+// A long diff scrolls inside its own box, and a keyboard user has no wheel.
+it('lets the keyboard reach each change in the review by its name', async () => {
+  vi.mocked(detectAgents).mockResolvedValueOnce([CODEX]);
+  vi.mocked(planConnect).mockResolvedValue([
+    { path: '~/.codex/hooks.json', diff: '+ turn-end' },
+    { path: null, diff: '$ codex mcp add banshee' },
+  ]);
+  const { getByRole, getByText } = render(AgentsPanel);
+
+  await waitFor(() => expect(getByText('Codex')).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: /Connect/ }));
+  await waitFor(() => expect(getByRole('button', { name: /Apply/ })).toBeTruthy());
+
+  const file = getByRole('region', { name: 'Changes to ~/.codex/hooks.json' });
+  const command = getByRole('region', { name: 'Command to run' });
+  expect(file.textContent).toBe('+ turn-end');
+  expect(file.tabIndex).toBe(0);
+  expect(command.tabIndex).toBe(0);
+});
+
+// The header repeats the path shown above the box, and `--- /dev/null` is the
+// only other sign of a new file.
+it("marks a new file beside its path and drops both diff's headers", async () => {
+  const created = {
+    path: '~/.codex/hooks.json',
+    diff: '--- /dev/null\n+++ b/.codex/hooks.json\n@@ -0,0 +1,2 @@\n+line one\n+line two\n',
+  };
+  const changed = {
+    path: '~/.codex/config.toml',
+    diff: '--- a/.codex/config.toml\n+++ b/.codex/config.toml\n@@ -1,2 +1,2 @@\n-old\n+new\n',
+  };
+  vi.mocked(detectAgents).mockResolvedValueOnce([CODEX]);
+  vi.mocked(planConnect).mockResolvedValue([created, changed]);
+  const { getByRole, getByText, queryByText } = render(AgentsPanel);
+
+  await waitFor(() => expect(getByText('Codex')).toBeTruthy());
+  await fireEvent.click(getByRole('button', { name: /Connect/ }));
+  await waitFor(() => expect(getByRole('button', { name: /Apply/ })).toBeTruthy());
+
+  expect(getByText('~/.codex/hooks.json (new file)')).toBeTruthy();
+  expect(getByText('~/.codex/config.toml')).toBeTruthy();
+  expect(queryByText('~/.codex/config.toml (new file)')).toBeNull();
+
+  const file = getByRole('region', { name: 'New file ~/.codex/hooks.json' });
+  const other = getByRole('region', { name: 'Changes to ~/.codex/config.toml' });
+  expect(file.textContent).not.toContain('/dev/null');
+  expect(file.textContent).not.toContain('+++');
+  expect(other.textContent).not.toContain('---');
+  expect(other.textContent).not.toContain('+++');
 });

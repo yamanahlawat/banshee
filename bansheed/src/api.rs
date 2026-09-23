@@ -8,7 +8,7 @@ use banshee_common::{
     BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_LANGUAGES,
     BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP,
     BANSHEE_RECORD_TOGGLE, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
-    BANSHEE_SUBSCRIBE,
+    BANSHEE_SUBSCRIBE, BANSHEE_TURN_ENDED,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
@@ -76,7 +76,15 @@ fn read_the_plan(agent: connect::Agent) -> Result<serde_json::Value, BansheeErro
 fn write_the_plan(agent: connect::Agent) -> Result<serde_json::Value, BansheeError> {
     let (env, changes) = the_plan(agent)?;
     connect::apply_all(&changes, &env.path, |_| {})?;
-    Ok(serde_json::json!({"applied": changes.len()}))
+    Ok(apply_reply(agent, changes.len()))
+}
+
+fn apply_reply(agent: connect::Agent, applied: usize) -> serde_json::Value {
+    let mut reply = serde_json::json!({"applied": applied});
+    if let Some(note) = agent.connect_note() {
+        reply["note"] = serde_json::json!(note);
+    }
+    reply
 }
 
 /// Carries the request id, so a reader can answer -32602 without every handler
@@ -158,6 +166,24 @@ impl<'a> Params<'a> {
     fn optional_u64(&self, key: &str) -> Result<Option<u64>, Box<JsonRpcResponse>> {
         self.typed(key, serde_json::Value::as_u64, "a non-negative integer")
     }
+
+    fn optional_pid(&self, key: &str) -> Result<Option<u32>, Box<JsonRpcResponse>> {
+        self.typed(
+            key,
+            |value| value.as_u64().and_then(|number| u32::try_from(number).ok()),
+            "a process ID",
+        )
+    }
+}
+
+fn count_speech(
+    params: &Params<'_>,
+    daemon_state: &DaemonState,
+) -> Result<(), Box<JsonRpcResponse>> {
+    if let Some(agent_pid) = params.optional_pid("agent_pid")? {
+        daemon_state.spoken().spoke(agent_pid);
+    }
+    Ok(())
 }
 
 // The daemon started without a pipeline. The code says which fix applies, so a
@@ -368,6 +394,9 @@ fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse
         Ok(value) => value,
         Err(response) => return *response,
     };
+    if let Err(response) = count_speech(&params, daemon_state) {
+        return *response;
+    }
 
     let clean_text = sanitize(raw_text);
 
@@ -383,6 +412,26 @@ fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse
 fn stop_speaking(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     daemon_state.speech().stop();
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
+}
+
+fn turn_ended(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+    let agent_pid = match params.optional_pid("agent_pid") {
+        Ok(Some(agent_pid)) => agent_pid,
+        Ok(None) => {
+            return JsonRpcResponse::error(
+                params.id(),
+                rpc_code::INVALID_PARAMS,
+                "'agent_pid' is required.",
+            );
+        }
+        Err(response) => return *response,
+    };
+    let verdict = match params.flag("repeat") {
+        Ok(true) => daemon_state.spoken().repeated_stop(agent_pid),
+        Ok(false) => daemon_state.spoken().turn_ended(agent_pid),
+        Err(response) => return *response,
+    };
+    JsonRpcResponse::success(params.id(), serde_json::json!({ "verdict": verdict }))
 }
 
 fn stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
@@ -470,6 +519,9 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         Ok(value) => value.min(MAX_ASK_WAIT_MS),
         Err(response) => return *response,
     };
+    if let Err(response) = count_speech(&params, daemon_state) {
+        return *response;
+    }
 
     if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
         return *response;
@@ -813,6 +865,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_RECORD_STOP => record_stop(params, daemon_state),
         BANSHEE_RECORD_TOGGLE => record_toggle(params, daemon_state),
         BANSHEE_ASK_USER => ask_user(params, daemon_state).await,
+        BANSHEE_TURN_ENDED => turn_ended(params, daemon_state),
         BANSHEE_GET_TRANSCRIPTION => get_transcription(params, daemon_state).await,
         BANSHEE_CONFIGURE => configure(params, daemon_state),
         BANSHEE_DOWNLOAD_MODELS => download_models(params, daemon_state),
