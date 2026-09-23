@@ -143,10 +143,7 @@ bind = SUPER, F9, exec, banshee record toggle --tell
 
 - **The window** is a Tauri app. It needs WebKitGTK, GTK 3 and Node: 22 from
   22.22.2, 24 from 24.15, or 26 or newer.
-- **The tray** needs GTK 3.
-- **The daemon and the CLI** need none of them to run.
-- **A build from source** still needs the GTK 3 headers, because one crate holds
-  the daemon, the CLI and the tray.
+- **The daemon, the CLI and the tray** need none of them.
 
 ```bash
 # Arch

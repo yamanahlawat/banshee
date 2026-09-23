@@ -93,10 +93,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # libgtk-3-dev is for the tray, which links gtk on every platform but macOS.
       # espeak-ng is the out-of-vocabulary fallback the speaker uses, and its
       # test skips without it.
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxtst-dev libxi-dev libxdo-dev libgtk-3-dev espeak-ng
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxtst-dev libxi-dev libxdo-dev espeak-ng
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # rustfmt reads no platform, so one job gates the whole workspace.
