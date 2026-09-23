@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A daemon stopped during a command no longer blocks the next one.** Banshee
+  refused every command as "already running" for five and a half minutes. The
+  lock now frees when the process that holds it exits. A lock file that cannot
+  open now gives its path, not "already running".
+
 ## [0.15.1] - 2026-09-22
 
 ### Added

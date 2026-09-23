@@ -472,23 +472,15 @@ fn a_config_with_no_tell_section_still_loads() {
     assert_eq!(config.tell.thread_timeout_min, 10);
 }
 
-/// Every `RunLock` shares one process-wide atomic, so these tests run one at a
-/// time.
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|held| held.into_inner())
-}
-
 #[test]
 fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
-    let _serial = serial();
-    let long = std::time::Duration::from_secs(600);
     let dir = crate::test_support::scratch("tell-lock");
     {
-        let _first = RunLock::take(&dir, long).expect("the first run takes the lock");
+        let _first = RunLock::take(&dir)
+            .unwrap()
+            .expect("the first run takes the lock");
         assert!(
-            RunLock::take(&dir, long).is_none(),
+            RunLock::take(&dir).unwrap().is_none(),
             "a second run must be refused"
         );
 
@@ -502,79 +494,87 @@ fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
         );
     }
     assert!(
-        RunLock::take(&dir, long).is_some(),
+        RunLock::take(&dir).unwrap().is_some(),
         "the lock must free on drop"
     );
+}
 
-    let short = std::time::Duration::from_secs(60);
-    let young_dir = crate::test_support::scratch("tell-lock-young");
-    std::fs::write(
-        young_dir.join("run.lock"),
-        format!("{} 424242", now_seconds() - 30),
-    )
-    .unwrap();
+#[test]
+fn a_lock_that_cannot_open_names_the_file_rather_than_a_busy_run() {
+    let dir = crate::test_support::scratch("tell-lock-unopenable");
+    std::fs::create_dir_all(dir.join("run.lock")).unwrap();
+
+    let error = RunLock::take(&dir)
+        .err()
+        .expect("a directory cannot be the lock");
     assert!(
-        RunLock::take(&young_dir, short).is_none(),
-        "a lock younger than the deadline is a live run"
-    );
-
-    let stale_dir = crate::test_support::scratch("tell-lock-stale");
-    std::fs::write(
-        stale_dir.join("run.lock"),
-        (now_seconds() - 1_000).to_string(),
-    )
-    .unwrap();
-    assert!(
-        RunLock::take(&stale_dir, short).is_some(),
-        "a lock older than the deadline must be taken over"
-    );
-
-    let garbled_dir = crate::test_support::scratch("tell-lock-garbled");
-    std::fs::write(garbled_dir.join("run.lock"), "not a timestamp").unwrap();
-    assert!(
-        RunLock::take(&garbled_dir, long).is_some(),
-        "a garbled lock file must be treated as stale"
-    );
-
-    let token_dir = crate::test_support::scratch("tell-lock-token");
-    let taken = RunLock::take(&token_dir, long).expect("the lock is free");
-    std::fs::write(token_dir.join("run.lock"), "999999999 424242").unwrap();
-    drop(taken);
-    assert_eq!(
-        std::fs::read_to_string(token_dir.join("run.lock")).unwrap(),
-        "999999999 424242",
-        "a lock file carrying someone else's token must survive this drop"
+        error.to_string().contains("run.lock"),
+        "the user must hear which file failed: {error}"
     );
 }
 
 #[test]
-fn a_takeover_that_finds_a_live_lock_puts_it_back_rather_than_stealing_it() {
-    let dir = crate::test_support::scratch("tell-lock-live");
-    let path = dir.join("run.lock");
-    let live = format!("{} 424242", now_seconds());
-    std::fs::write(&path, &live).unwrap();
+fn taking_the_lock_leaves_what_a_linked_lock_points_at_unchanged() {
+    let dir = crate::test_support::scratch("tell-lock-linked");
+    let target = dir.join("someone-elses-file");
+    std::fs::write(&target, "kept\n").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join("run.lock")).unwrap();
 
-    assert!(!claim_stale(&path, std::time::Duration::from_secs(60)));
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        live,
-        "a process a step behind must not remove a fresh lock"
-    );
+    let _lock = RunLock::take(&dir).unwrap().expect("the lock is free");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept\n");
+}
+
+const HOLD_THE_LOCK_IN: &str = "BANSHEE_TEST_HOLD_THE_LOCK_IN";
+
+/// libtest names a test by its path without the crate.
+fn this_test(name: &str) -> String {
+    let (_crate, module) = module_path!().split_once("::").unwrap();
+    format!("{module}::{name}")
 }
 
 #[test]
-fn one_caller_takes_over_a_dead_lock_and_the_next_one_finds_nothing_to_move() {
-    let dir = crate::test_support::scratch("tell-lock-takeover");
-    let path = dir.join("run.lock");
-    std::fs::write(&path, format!("{} 424242", now_seconds() - 1_000)).unwrap();
-    let short = std::time::Duration::from_secs(60);
+fn a_killed_holder_frees_the_lock() {
+    use std::io::BufRead;
 
-    assert!(claim_stale(&path, short), "a dead lock is taken over");
+    // The copy of this test that the test starts below is the holder.
+    if let Some(dir) = std::env::var_os(HOLD_THE_LOCK_IN) {
+        let _lock = RunLock::take(Path::new(&dir))
+            .unwrap()
+            .expect("the lock is free");
+        eprintln!("held");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    let dir = crate::test_support::scratch("tell-lock-killed");
+    let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &this_test("a_killed_holder_frees_the_lock"),
+            "--nocapture",
+        ])
+        .env(HOLD_THE_LOCK_IN, &dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = std::io::BufReader::new(holder.stderr.take().unwrap());
     assert!(
-        !claim_stale(&path, short),
-        "the second caller finds no file to move"
+        output
+            .lines()
+            .map_while(Result::ok)
+            .any(|line| line == "held"),
+        "the holder never took the lock"
     );
-    assert!(!path.exists());
+    let refused = RunLock::take(&dir).unwrap().is_none();
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    assert!(refused, "a holder in another process must refuse this one");
+    assert!(
+        RunLock::take(&dir).unwrap().is_some(),
+        "a daemon killed mid-run must not block the next command"
+    );
 }
 
 #[test]
@@ -1267,7 +1267,6 @@ fn config_watching(targets: &[&Path]) -> TellConfig {
 
 #[test]
 fn an_undo_that_restored_nothing_fails_while_the_sentence_stays_the_same() {
-    let _serial = serial();
     let dir = crate::test_support::scratch("tell-undo-all-failed");
     let target = snapshot_holding(&dir, "hypr", "gaps = 5\n");
     // A symlinked folder is refused rather than replaced, so this restore has
@@ -1287,7 +1286,6 @@ fn an_undo_that_restored_nothing_fails_while_the_sentence_stays_the_same() {
 
 #[test]
 fn an_undo_that_restored_one_folder_succeeds() {
-    let _serial = serial();
     let dir = crate::test_support::scratch("tell-undo-partial");
     let kept = snapshot_holding(&dir, "hypr", "gaps = 5\n");
     let lost = snapshot_holding(&dir, "ghostty", "font = 12\n");
@@ -1312,7 +1310,6 @@ fn a_run_timeout_of_a_lifetime_is_clamped_rather_than_overflowing() {
         ..TellConfig::default()
     };
     assert_eq!(run_deadline(&config), MAX_SPAN);
-    let _lock_deadline = run_deadline(&config) + PRE_SPAWN_MARGIN;
     let _poll_deadline = Instant::now() + run_deadline(&config);
 }
 
@@ -1506,10 +1503,7 @@ fn a_home_holding_a_space_or_a_quote_stays_one_word() {
 }
 
 fn executable(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let file = dir.join(name);
-    std::fs::write(&file, body).unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_support::write_executable(&dir.join(name), body);
 }
 
 fn only_path(dir: &Path) -> std::ffi::OsString {

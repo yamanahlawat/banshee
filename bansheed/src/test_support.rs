@@ -57,6 +57,32 @@ pub fn tool_is_installed(path: &str) {
     );
 }
 
+/// Writes `body` to `path` as an executable script.
+///
+/// A child process writes the file, so this process never holds it open for
+/// writing. A process another test starts meanwhile would inherit that handle,
+/// and the script would then fail to run with "Text file busy".
+pub fn write_executable(path: &std::path::Path, body: &str) {
+    use std::io::Write;
+    let mut writer = std::process::Command::new("/bin/sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    writer
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    assert!(
+        writer.wait().unwrap().success(),
+        "could not write {}",
+        path.display()
+    );
+}
+
 /// Makes a fresh temp directory. Deletes a leftover from a killed run first.
 pub fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("banshee-{name}-{}", std::process::id()));

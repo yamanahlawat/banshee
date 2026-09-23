@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub use crate::config::TellConfig;
@@ -254,103 +253,30 @@ fn objects(stdout: &str) -> impl DoubleEndedIterator<Item = serde_json::Value> +
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
 }
 
-static RUNNING: AtomicBool = AtomicBool::new(false);
-
-/// One run at a time. The atomic guards two calls inside one daemon. The lock
-/// file guards two `banshee tell` processes, which share no memory.
+/// One run at a time, across the daemon and every `banshee tell` process. The
+/// kernel frees the lock when its holder exits, however it exits.
 pub struct RunLock {
-    path: PathBuf,
-    /// What this holder wrote into the file. `Drop` compares it again. After a
-    /// takeover the file names another holder, and a blind delete would remove
-    /// a live lock.
-    token: String,
+    _file: std::fs::File,
 }
 
 impl RunLock {
-    /// `stale_after` is the run's own deadline. A lock file older than that
-    /// belonged to a killed process, so this takes it over.
-    pub fn take(dir: &Path, stale_after: Duration) -> Option<RunLock> {
-        if RUNNING
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return None;
-        }
+    /// `None` when another run holds the lock.
+    // The file is never deleted. A delete lets a second holder lock a new file
+    // while the first still holds the old one.
+    pub fn take(dir: &Path) -> Result<Option<RunLock>, BansheeError> {
         let path = dir.join("run.lock");
-        let token = format!("{} {}", now_seconds(), std::process::id());
-        if acquire_file_lock(&path, stale_after, &token) {
-            Some(RunLock { path, token })
-        } else {
-            RUNNING.store(false, Ordering::Release);
-            None
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|cause| BansheeError::file(&path, cause))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(RunLock { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(cause)) => Err(BansheeError::file(&path, cause)),
         }
     }
-}
-
-impl Drop for RunLock {
-    fn drop(&mut self) {
-        if std::fs::read_to_string(&self.path).ok().as_deref() == Some(self.token.as_str()) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-        RUNNING.store(false, Ordering::Release);
-    }
-}
-
-/// Creates `path` as the lock. `create_new` is atomic on POSIX, so the
-/// creation is the lock.
-fn acquire_file_lock(path: &Path, stale_after: Duration, token: &str) -> bool {
-    if write_lock_file(path, token) {
-        return true;
-    }
-    lock_is_stale(path, stale_after)
-        && claim_stale(path, stale_after)
-        && write_lock_file(path, token)
-}
-
-/// Moves a dead lock out of the way, and answers whether this caller moved it.
-/// One caller can rename a given file, so two callers that both read it as
-/// stale cannot both take it over.
-///
-/// std has no atomic "delete this file if it is still that one", so the second
-/// check reads the file after the move. A caller that moved a live lock puts it
-/// straight back.
-fn claim_stale(path: &Path, stale_after: Duration) -> bool {
-    let aside = with_suffix(path, &format!(".taken-{}", std::process::id()));
-    if std::fs::rename(path, &aside).is_err() {
-        return false;
-    }
-    if lock_is_stale(&aside, stale_after) {
-        let _ = std::fs::remove_file(&aside);
-        return true;
-    }
-    let _ = std::fs::rename(&aside, path);
-    false
-}
-
-fn write_lock_file(path: &Path, token: &str) -> bool {
-    use std::io::Write;
-    std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .is_ok_and(|mut file| write!(file, "{token}").is_ok())
-}
-
-/// A lock file is dead once its start time is older than `stale_after`.
-/// Garbled or unreadable content reads as dead too: an unreadable lock must
-/// not wedge the feature for ever either.
-fn lock_is_stale(path: &Path, stale_after: Duration) -> bool {
-    match std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| text.split_whitespace().next()?.parse::<u64>().ok())
-    {
-        Some(started) => stale(started, now_seconds(), stale_after),
-        None => true,
-    }
-}
-
-fn stale(started: u64, now: u64, stale_after: Duration) -> bool {
-    now.saturating_sub(started) > stale_after.as_secs()
 }
 
 /// `~` is the only expansion: a person writes the config file, not a shell.
@@ -566,9 +492,7 @@ pub fn undo(config: &TellConfig) -> Result<String, BansheeError> {
 
 /// `state` is Banshee's own directory, the one `run` locks and snapshots into.
 fn undo_in(state: &Path, config: &TellConfig) -> Result<String, BansheeError> {
-    // The margin matches `run`'s own, so undo never judges a still-active run
-    // stale and steps on the folders it is mid-edit in.
-    let Some(_lock) = RunLock::take(state, run_deadline(config) + PRE_SPAWN_MARGIN) else {
+    let Some(_lock) = RunLock::take(state)? else {
         return Err(BansheeError::Rejected(
             "a command is already running. Try again once it finishes.".into(),
         ));
@@ -847,21 +771,12 @@ fn collect(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> (Vec<u8>, bool) {
     }
 }
 
-/// A stated allowance, not a measurement, for the checks `run` makes before it
-/// writes the lock file. `omarchy_default`, `ready` and `agent_for` each spawn
-/// or probe outside this process with no bound of their own.
-///
-/// Without this margin a slow prefix could hold the lock past
-/// `run_timeout_min`. A second command would then judge a live lock stale.
-const PRE_SPAWN_MARGIN: Duration = Duration::from_secs(30);
-
 /// The ceiling on every configured span, stated and not measured. A day is past
 /// any run a person waits through.
 ///
-/// Without it a large value overflows three things: the `Duration` the lock
-/// adds its margin to, the `Instant` the poll compares against, and the seconds
-/// `resume` counts. All three panic, and the hotkey path runs in a thread where
-/// a panic reaches nobody.
+/// Without it a large value overflows two things: the `Instant` the poll
+/// compares against, and the seconds `resume` counts. Both panic, and the
+/// hotkey path runs in a thread where a panic reaches nobody.
 const MAX_SPAN: Duration = Duration::from_secs(24 * 60 * 60);
 
 fn span(minutes: u64) -> Duration {
@@ -1029,7 +944,7 @@ fn show(
 pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<Told, BansheeError> {
     let state = state_dir()?;
     let run_in = agent_dir(&state);
-    let Some(_lock) = RunLock::take(&state, run_deadline(config) + PRE_SPAWN_MARGIN) else {
+    let Some(_lock) = RunLock::take(&state)? else {
         return Err(BansheeError::Rejected(
             "a command is already running. Wait for it to finish.".into(),
         ));

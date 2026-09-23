@@ -239,13 +239,10 @@ mod tests {
 
     #[test]
     fn resolve_wayland_typer_returns_the_absolute_path_and_its_args() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = std::env::temp_dir().join(format!("banshee-typer-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let wtype = dir.join("wtype");
-        std::fs::write(&wtype, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&wtype, "#!/bin/sh\n");
 
         let found = resolve_wayland_typer(dir.as_os_str());
 
@@ -258,8 +255,6 @@ mod tests {
 
     // A fresh directory per script, so concurrent tests never share a path.
     fn write_script(name: &str, exit_code: u8, stderr: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = std::env::temp_dir().join(format!(
             "banshee-typer-{}-{name}-{:?}",
             std::process::id(),
@@ -267,12 +262,10 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join(name);
-        std::fs::write(
+        crate::test_support::write_executable(
             &script,
-            format!("#!/bin/sh\necho '{stderr}' >&2\nexit {exit_code}\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\necho '{stderr}' >&2\nexit {exit_code}\n"),
+        );
         script
     }
 
