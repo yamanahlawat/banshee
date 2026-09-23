@@ -798,6 +798,21 @@ async fn an_unknown_agent_slug_is_refused_by_plan_and_apply() {
     );
 }
 
+#[test]
+fn connect_apply_carries_the_codex_note_and_no_note_for_claude_code() {
+    assert_eq!(
+        apply_reply(connect::Agent::Codex, 2),
+        serde_json::json!({
+            "applied": 2,
+            "note": "Codex runs this hook only after you trust it: open Codex and run /hooks.",
+        })
+    );
+    assert_eq!(
+        apply_reply(connect::Agent::ClaudeCode, 1),
+        serde_json::json!({"applied": 1})
+    );
+}
+
 #[tokio::test]
 async fn disconnect_true_is_refused_before_the_agent_is_resolved() {
     let state = test_state(std::sync::mpsc::channel().0);
@@ -1363,4 +1378,145 @@ fn a_dropped_ask_leaves_a_recording_someone_else_started() {
     drop(session);
 
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+}
+
+#[tokio::test]
+async fn a_speech_from_an_agent_counts_for_that_agent_only() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    dispatch(
+        request(
+            BANSHEE_SPEAK,
+            Some(serde_json::json!({"text": "hi", "agent_pid": 41})),
+        ),
+        &state,
+    )
+    .await;
+    assert_eq!(
+        state.spoken().turn_ended(41),
+        banshee_common::TurnVerdict::Pass
+    );
+    assert_eq!(
+        state.spoken().turn_ended(42),
+        banshee_common::TurnVerdict::Speak
+    );
+}
+
+#[tokio::test]
+async fn a_question_refused_as_busy_still_counts() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_recording_mode(RecordingMode::Armed);
+    let response = dispatch(
+        request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "ready?", "agent_pid": 41})),
+        ),
+        &state,
+    )
+    .await;
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected the busy refusal");
+    };
+    assert_eq!(error.code, rpc_code::BUSY);
+    assert_eq!(
+        state.spoken().turn_ended(41),
+        banshee_common::TurnVerdict::Pass
+    );
+}
+
+#[tokio::test]
+async fn a_request_missing_its_text_counts_for_nobody() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    for method in [BANSHEE_SPEAK, BANSHEE_ASK_USER] {
+        dispatch(
+            request(method, Some(serde_json::json!({"agent_pid": 41}))),
+            &state,
+        )
+        .await;
+    }
+    assert_eq!(
+        state.spoken().turn_ended(41),
+        banshee_common::TurnVerdict::Speak
+    );
+}
+
+#[tokio::test]
+async fn an_agent_pid_that_is_not_a_process_id_is_refused() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let response = dispatch(
+        request(
+            BANSHEE_SPEAK,
+            Some(serde_json::json!({"text": "hi", "agent_pid": -1})),
+        ),
+        &state,
+    )
+    .await;
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected an error response");
+    };
+    assert_eq!(error.code, rpc_code::INVALID_PARAMS);
+}
+
+#[tokio::test]
+async fn turn_ended_with_no_repeat_answers_the_records_verdict() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let JsonRpcResponse::Success { result, .. } = dispatch(
+        request(
+            BANSHEE_TURN_ENDED,
+            Some(serde_json::json!({"agent_pid": 7})),
+        ),
+        &state,
+    )
+    .await
+    else {
+        panic!("expected success response");
+    };
+    assert_eq!(result["verdict"], "speak");
+}
+
+#[tokio::test]
+async fn turn_ended_needs_the_agent() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let response = dispatch(
+        request(BANSHEE_TURN_ENDED, Some(serde_json::json!({}))),
+        &state,
+    )
+    .await;
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected an error response");
+    };
+    assert_eq!(error.code, rpc_code::INVALID_PARAMS);
+}
+
+#[tokio::test]
+async fn turn_ended_with_repeat_true_answers_pass() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let JsonRpcResponse::Success { result, .. } = dispatch(
+        request(
+            BANSHEE_TURN_ENDED,
+            Some(serde_json::json!({"agent_pid": 7, "repeat": true})),
+        ),
+        &state,
+    )
+    .await
+    else {
+        panic!("expected success response");
+    };
+    assert_eq!(result["verdict"], "pass", "even on a silent turn");
+}
+
+#[tokio::test]
+async fn a_repeat_that_is_not_a_boolean_is_refused() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let response = dispatch(
+        request(
+            BANSHEE_TURN_ENDED,
+            Some(serde_json::json!({"agent_pid": 7, "repeat": "yes"})),
+        ),
+        &state,
+    )
+    .await;
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected an error response");
+    };
+    assert_eq!(error.code, rpc_code::INVALID_PARAMS);
 }

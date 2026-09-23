@@ -74,7 +74,7 @@ export function detectAgents(): Promise<AgentRow[]> {
 export function planConnect(id: string, disconnect: boolean): Promise<PlannedChange[]> {
   return call('plan_connect', { id, disconnect });
 }
-export function applyConnect(id: string, disconnect: boolean): Promise<void> {
+export function applyConnect(id: string, disconnect: boolean): Promise<string | null> {
   return call('apply_connect', { id, disconnect });
 }
 export function history(limit?: number): Promise<HistoryRow[]> {

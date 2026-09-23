@@ -95,6 +95,12 @@ pub enum CommandType {
         #[clap(long)]
         yes: bool,
     },
+    /// Answers an agent's Stop hook: whether the agent spoke this turn
+    #[clap(hide = true)]
+    TurnEnd {
+        /// The agent whose hook runs this
+        agent: crate::turn_end::GatedAgent,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
