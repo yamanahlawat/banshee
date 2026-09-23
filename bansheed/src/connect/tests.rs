@@ -45,12 +45,9 @@ const SHIM: &str = "/opt/banshee/bin/banshee-mcp-shim";
 
 #[test]
 fn detection_searches_the_resolved_path_not_the_process_path() {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = scratch("resolved-path");
     // Executable, because an installed CLI is: a file it cannot run is not one
-    std::fs::write(dir.join("codex"), "#!/bin/sh\n").unwrap();
-    std::fs::set_permissions(dir.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_support::write_executable(&dir.join("codex"), "#!/bin/sh\n");
 
     let env = Env::with_shell_path(Some(OsString::from(&dir))).unwrap();
     let expected = dir.join("codex");
@@ -163,11 +160,8 @@ fn every_caller_of_the_resolved_path_gets_the_installer_directory() {
 }
 
 fn fake_shell(name: &str, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let shell = scratch(name).join("shell");
-    std::fs::write(&shell, body).unwrap();
-    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_support::write_executable(&shell, body);
     shell
 }
 
@@ -1224,12 +1218,9 @@ fn applying_a_file_write_creates_parents_and_sets_the_mode() {
 
 #[test]
 fn a_failing_command_is_an_error() {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = scratch("failing-command");
     let script = dir.join("fails");
-    std::fs::write(&script, "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_support::write_executable(&script, "#!/bin/sh\nexit 1\n");
 
     let error = apply(
         &Change::Run {
@@ -1270,17 +1261,13 @@ fn every_program_a_plan_runs_is_absolute() {
 // interpreter is found on the PATH the child is handed.
 #[test]
 fn a_command_runs_with_the_path_it_was_given() {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = scratch("run-path");
     let script = dir.join("writes-path");
     let seen = dir.join("seen");
-    std::fs::write(
+    crate::test_support::write_executable(
         &script,
-        format!("#!/bin/sh\nprintf '%s' \"$PATH\" > '{}'\n", seen.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("#!/bin/sh\nprintf '%s' \"$PATH\" > '{}'\n", seen.display()),
+    );
 
     apply(
         &Change::Run {

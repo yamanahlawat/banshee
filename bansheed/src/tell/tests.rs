@@ -1503,10 +1503,7 @@ fn a_home_holding_a_space_or_a_quote_stays_one_word() {
 }
 
 fn executable(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let file = dir.join(name);
-    std::fs::write(&file, body).unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_support::write_executable(&dir.join(name), body);
 }
 
 fn only_path(dir: &Path) -> std::ffi::OsString {

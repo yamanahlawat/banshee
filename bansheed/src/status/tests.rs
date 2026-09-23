@@ -196,15 +196,12 @@ fn the_key_press_note_states_what_the_daemon_measured() {
 // answer: a bare name let the kernel skip one.
 #[test]
 fn resolve_skips_a_file_it_cannot_run() {
-    use std::os::unix::fs::PermissionsExt;
-
     let root = std::env::temp_dir().join(format!("banshee-resolve-{}", std::process::id()));
     let (early, late) = (root.join("early"), root.join("late"));
     std::fs::create_dir_all(&early).unwrap();
     std::fs::create_dir_all(&late).unwrap();
     std::fs::write(early.join("claude"), "not a program").unwrap();
-    std::fs::write(late.join("claude"), "#!/bin/sh\n").unwrap();
-    std::fs::set_permissions(late.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_support::write_executable(&late.join("claude"), "#!/bin/sh\n");
 
     let path = std::ffi::OsString::from(format!("{}:{}", early.display(), late.display()));
     assert_eq!(super::resolve("claude", &path), Some(late.join("claude")));
