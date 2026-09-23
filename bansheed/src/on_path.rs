@@ -127,8 +127,7 @@ mod tests {
         let inside = dir.join("Banshee.app/Contents/MacOS");
         std::fs::create_dir_all(&inside).unwrap();
         let exe = inside.join(NAME);
-        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&exe, "#!/bin/sh\n");
         exe
     }
 
