@@ -192,10 +192,17 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   after hearing the alternative. A reset that fails still sounds the error cue, so silence
   means the thread cleared. The cost is that a dead key and a cleared thread sound alike.
   Left here so real use can say whether that matters.
-- A leaked run lock can still be taken twice, in a three-process race. The takeover is a
+- ~~A leaked run lock can still be taken twice, in a three-process race. The takeover is a
   rename, so two processes cannot both hold it, but the standard library has no atomic
   compare-and-delete. A third process can enter between the check and the rename. It needs
-  a leaked lock and two processes racing, so it is narrower than the case it replaced.
+  a leaked lock and two processes racing, so it is narrower than the case it replaced.~~
+  No longer true: the run lock is a kernel lock that frees when its holder exits, so it
+  never leaks and has no takeover.
+- An agent can outlive a `banshee tell` killed by its own PID. The run lock frees at once,
+  and no deadline stops that agent. A second run can then start while it still edits. The
+  service stop and Ctrl-C kill the agent too. A process group does not close the SIGKILL
+  case, because a killed holder runs no code. The agent must watch its parent, for example
+  with `PR_SET_PDEATHSIG`.
 - Several io errors in `tell` still reach the user as a bare errno. `BansheeError::file`
   gives a path, and `clear_thread` and the daemon socket use it, but `snapshot`,
   `copy_tree`, `write_session` and `state_dir` do not. A user who cannot see the screen
