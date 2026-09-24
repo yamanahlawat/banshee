@@ -185,8 +185,12 @@ pub fn argv_for(
         Headless::ClaudeCode => {
             let mut claude: Vec<String> = vec![
                 "--print".into(),
+                // Plain json is one object at the end, so a run killed at the
+                // deadline never names its thread. `--print` refuses
+                // stream-json without --verbose.
                 "--output-format".into(),
-                "json".into(),
+                "stream-json".into(),
+                "--verbose".into(),
                 "--permission-mode".into(),
                 "acceptEdits".into(),
                 // Without this the agent edits the config and stays silent.
@@ -211,8 +215,7 @@ pub fn argv_for(
     argv
 }
 
-/// The thread the agent just used. OpenCode names it on every NDJSON line;
-/// Claude Code names it once in a single object.
+/// The thread the agent just used. Both agents name it on every NDJSON line.
 pub fn session_id(agent: Headless, stdout: &str) -> Option<String> {
     let key = match agent {
         Headless::OpenCode => "sessionID",
@@ -672,7 +675,8 @@ enum Ran {
         output: std::process::Output,
         stdout_lost: bool,
     },
-    TimedOut,
+    /// `stdout` holds what the child wrote before the kill.
+    TimedOut { stdout: Vec<u8>, stdout_lost: bool },
 }
 
 /// A stated allowance, not a measurement, for a reader thread to finish once
@@ -721,11 +725,15 @@ fn run_bounded(
         }
         if Instant::now() >= deadline {
             // A descendant the child left running can still hold the pipe's
-            // write end open. A kill of the child does not close it, so this
-            // waits on the child and never on the pipes.
+            // write end open. A kill of the child does not close it, so the
+            // read of stdout below is bounded by DRAIN_GRACE.
             let _ = child.kill();
             let _ = child.wait();
-            return Ok(Ran::TimedOut);
+            let (stdout, stdout_lost) = collect(stdout_rx);
+            return Ok(Ran::TimedOut {
+                stdout,
+                stdout_lost,
+            });
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -890,9 +898,31 @@ fn thread_to_show(
         ));
     };
     let Some(id) = resume(saved, &session.agent, now, window) else {
-        return Err("The last thread has timed out. Say something to start a new one.".into());
+        let Some(elapsed) = now.checked_sub(session.at) else {
+            return Err(
+                "The last thread is dated ahead of this clock. Say something to start a new one."
+                    .into(),
+            );
+        };
+        return Err(format!(
+            "The last saved thread is {} old, too old to open. Say something to start a new one.",
+            age(elapsed)
+        ));
     };
     Ok((agent, id))
+}
+
+/// Seconds as the largest whole unit a listener takes in at once. Minutes
+/// round up: a thread one second past the window is not the window's age.
+fn age(seconds: u64) -> String {
+    let minutes = seconds.div_ceil(60);
+    let (count, unit) = match minutes {
+        0..120 => (minutes, "minute"),
+        120..2_880 => (minutes / 60, "hour"),
+        _ => (minutes / 1_440, "day"),
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural}")
 }
 
 /// Opens the stored thread in a terminal, and runs no agent. The hotkey path
@@ -986,36 +1016,53 @@ pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<To
         thread_window(config),
     );
     let argv = argv_for(agent, words, resume_id.as_deref(), &run_in, &present);
+    let deadline = run_deadline(config);
     let ran = announce_then_start(notify, agent, resume_id.as_deref(), || {
-        run_bounded(&program, &argv, &run_in, &env.path, run_deadline(config))
+        run_bounded(&program, &argv, &run_in, &env.path, deadline)
     })?;
-    let Ran::Finished {
-        output,
-        stdout_lost,
-    } = ran
-    else {
-        return Err(BansheeError::Rejected(timed_out(
-            agent,
-            run_deadline(config),
-        )));
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    finish(&state, agent, ran, resume_id.as_deref(), deadline)
+}
 
-    let thread = thread_to_save(
-        session_id(agent, &stdout),
-        resume_id.as_deref(),
-        stdout_lost,
-    );
-    if let Some(id) = &thread {
+/// Saves the thread the run named, then turns the run into its answer. A run
+/// that timed out still saves: "show me" then opens how far the agent got.
+fn finish(
+    state: &Path,
+    agent: Headless,
+    ran: Ran,
+    resume_id: Option<&str>,
+    deadline: Duration,
+) -> Result<Told, BansheeError> {
+    let (stdout, stdout_lost, finished) = match &ran {
+        Ran::Finished {
+            output,
+            stdout_lost,
+        } => (&output.stdout, *stdout_lost, Some(output)),
+        Ran::TimedOut {
+            stdout,
+            stdout_lost,
+        } => (stdout, *stdout_lost, None),
+    };
+    let stdout = String::from_utf8_lossy(stdout);
+
+    let thread = thread_to_save(session_id(agent, &stdout), resume_id, stdout_lost);
+    let saved = thread.as_ref().map_or(Ok(()), |id| {
         write_session(
-            &state,
+            state,
             &Session {
                 agent: agent.name().to_string(),
                 id: id.clone(),
                 at: now_seconds(),
             },
-        )?;
-    }
+        )
+    });
+    let Some(output) = finished else {
+        let mut said = timed_out(agent, deadline);
+        if let Err(cause) = saved {
+            said.push_str(&format!(" Its thread was not saved: {cause}"));
+        }
+        return Err(BansheeError::Rejected(said));
+    };
+    saved?;
     let mut warnings: Vec<Warning> = denied_warning(agent, &denied_tools(&stdout))
         .into_iter()
         .collect();
