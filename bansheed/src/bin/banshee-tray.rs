@@ -1,8 +1,8 @@
 //! The menu bar indicator.
 //!
-//! A separate process from the daemon. AppKit owns the main thread on macOS and
-//! gtk owns it elsewhere, while the daemon's thread belongs to tokio. Reading
-//! the socket is all this does, so it needs no TCC grants of its own.
+//! A separate process from the daemon. AppKit owns the main thread on macOS,
+//! while the daemon's thread belongs to tokio. Reading the socket is all this
+//! does, so it needs no TCC grants of its own.
 
 fn main() {
     if let Err(error) = tray::run() {
@@ -15,11 +15,11 @@ mod tray {
     use std::time::Duration;
 
     use banshee_common::{Activity, BANSHEE_HISTORY, BANSHEE_STATE_CHANGED, EVENT_STATE, utils};
-    #[cfg(not(target_os = "macos"))]
-    use gtk::glib;
     use serde_json::Value;
     use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+    #[cfg(not(target_os = "macos"))]
+    use tray_icon::{MouseButton, TrayIconEvent};
     #[cfg(target_os = "macos")]
     use winit::application::ApplicationHandler;
     #[cfg(target_os = "macos")]
@@ -45,12 +45,6 @@ mod tray {
     // stale `Not running` after the daemon returns against how often an idle
     // machine wakes to a failing connect.
     const RETRY: Duration = Duration::from_secs(2);
-
-    // The gtk loop keeps no queue for these messages, so it reads the channel on
-    // a timer. Nothing measured this number. It trades how soon the icon answers
-    // a click against how often an idle loop wakes to an empty channel.
-    #[cfg(not(target_os = "macos"))]
-    const POLL: Duration = Duration::from_millis(100);
 
     /// What the menu bar shows. `Activity` ranks the booleans the daemon
     /// pushes; the last state is the daemon failing to answer at all.
@@ -147,7 +141,7 @@ mod tray {
     }
 
     /// Hands a `Message` to whoever owns the tray. winit carries one as a user
-    /// event, and the gtk loop reads one from a channel.
+    /// event, and the loop off macOS reads one from a channel.
     trait Postbox: Clone + Send + 'static {
         /// False once the far end is gone, which means the process is on its way
         /// out and this thread with it.
@@ -661,6 +655,20 @@ mod tray {
         }
     }
 
+    // A StatusNotifierItem host sends a left click as `Activate`. Linux trays
+    // open their window on it and keep the menu for a right click, which the
+    // host shows without asking the tray.
+    #[cfg(not(target_os = "macos"))]
+    fn click_message(event: &TrayIconEvent) -> Option<Message> {
+        match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                ..
+            } => Some(Message::Open),
+            _ => None,
+        }
+    }
+
     // The subscription needs a runtime, and the loop owns this thread
     fn spawn_watch(postbox: impl Postbox) {
         std::thread::spawn(move || {
@@ -699,16 +707,21 @@ mod tray {
         Ok(())
     }
 
-    // tray-icon builds its menu out of gtk widgets, so a gtk loop must own the
-    // thread that builds the icon. winit's loop is not one.
+    // KSNI serves the icon from its own thread, so this thread only has to
+    // take the messages.
     #[cfg(not(target_os = "macos"))]
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Held for the whole run: dropping it would free the lock
         let _lock = claim_the_menu_bar()?;
 
-        gtk::init()?;
-
         let (sender, receiver) = std::sync::mpsc::channel::<Message>();
+
+        let click_sender = sender.clone();
+        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+            if let Some(message) = click_message(&event) {
+                click_sender.post(message);
+            }
+        }));
 
         let menu_sender = sender.clone();
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -722,19 +735,11 @@ mod tray {
         let mut app = App::new(sender);
         app.start();
 
-        glib::timeout_add_local(POLL, move || {
-            while let Ok(message) = receiver.try_recv() {
-                match app.handle(message) {
-                    Flow::Stay => {}
-                    Flow::Exit => {
-                        gtk::main_quit();
-                        return glib::ControlFlow::Break;
-                    }
-                }
+        for message in receiver {
+            if let Flow::Exit = app.handle(message) {
+                break;
             }
-            glib::ControlFlow::Continue
-        });
-        gtk::main();
+        }
         Ok(())
     }
 
@@ -1122,6 +1127,28 @@ mod tray {
                     assert_eq!(alpha(row, w - 1), 0, "{indicator:?} touches the right");
                 }
             }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        fn click(button: MouseButton) -> TrayIconEvent {
+            TrayIconEvent::Click {
+                id: tray_icon::TrayIconId::new("banshee"),
+                position: tray_icon::dpi::PhysicalPosition::new(0.0, 0.0),
+                rect: tray_icon::Rect::default(),
+                button,
+                button_state: tray_icon::MouseButtonState::Up,
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        #[test]
+        fn a_left_click_opens_the_window_and_no_other_click_does() {
+            assert!(matches!(
+                click_message(&click(MouseButton::Left)),
+                Some(Message::Open)
+            ));
+            assert!(click_message(&click(MouseButton::Middle)).is_none());
+            assert!(click_message(&click(MouseButton::Right)).is_none());
         }
     }
 }

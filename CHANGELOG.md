@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused every command as "already running" for five and a half minutes. The
   lock now frees when the process that holds it exits. A lock file that cannot
   open now gives its path, not "already running".
+- **A left click on the Linux tray icon opens the window.** It did nothing
+  before. A right click still opens the menu. The icon now reports the id
+  `banshee`, so a bar that pinned it under the old id shows it unpinned. Pin it
+  again once. In the Omarchy bar, right click the tray arrow and press Pin.
 
 ## [0.15.1] - 2026-09-22
 

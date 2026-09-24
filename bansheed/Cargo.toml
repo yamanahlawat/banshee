@@ -54,12 +54,11 @@ log.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies.tray-icon]
 workspace = true
 
-# `libxdo` is a default feature, and muda uses it only to work the predefined
-# Copy, Cut, Paste and SelectAll menu items. This menu has none of them, so the
-# feature would buy a build dependency on xdotool and nothing else.
+# KSNI speaks StatusNotifierItem over D-Bus, so a left click reaches the tray
+# as `Activate`. The default AppIndicator backend drops that click.
 [target.'cfg(not(target_os = "macos"))'.dependencies.tray-icon]
 workspace = true
-features = ["gtk"]
+features = ["ksni"]
 
 # arboard talks X11 by default. A Wayland session has no X11 clipboard of its
 # own, so without this feature the text is set where nothing reads it.
@@ -69,13 +68,10 @@ features = ["wayland-data-control"]
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 enigo = "0.6.1"
-# The tray builds gtk widgets, so a gtk loop must own the thread. macOS needs no
-# entry here: AppKit's own loop already serves the icon.
-gtk = "0.18.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The menu bar indicator's loop. winit runs it because tray-icon tests against
-# it and it commits to no toolkit. The gtk loop serves every other platform.
+# it and it commits to no toolkit. KSNI runs its own thread everywhere else.
 winit = "0.30.13"
 # The options dictionary AXIsProcessTrustedWithOptions takes; see permissions.rs.
 core-foundation = "0.10"
