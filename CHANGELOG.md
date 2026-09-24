@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused every command as "already running" for five and a half minutes. The
   lock now frees when the process that holds it exits. A lock file that cannot
   open now gives its path, not "already running".
+- **A command that runs out of time keeps its thread.** "Show me" now opens the
+  thread that hung, so you see how far the agent got. Your next command continues
+  it. Claude Code now runs with `--output-format stream-json`, so it names its thread
+  on its first line, as OpenCode does.
+- **"Show me" says how old the saved thread is.** It said "The last thread has timed
+  out", which read as the run timing out. It now gives the age of the thread.
+- **`banshee watch | head -n 1` ends.** `watch` stopped only at its next write, and an
+  idle daemon sends none. It now ends when its reader closes the pipe. Measured on
+  Linux. The macOS path is not measured.
 
 ## [0.15.1] - 2026-09-22
 
