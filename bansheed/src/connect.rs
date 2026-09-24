@@ -4,6 +4,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+mod hooks;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
     Antigravity,
@@ -44,6 +46,16 @@ impl Agent {
             Agent::Cursor => "Cursor",
             Agent::OpenCode => "OpenCode",
             Agent::Pi => "Pi",
+        }
+    }
+
+    /// What the user must still do after connecting, for an agent that needs a step.
+    pub fn connect_note(self) -> Option<&'static str> {
+        match self {
+            Agent::Codex => {
+                Some("Codex runs this hook only after you trust it: open Codex and run /hooks.")
+            }
+            _ => None,
         }
     }
 
@@ -113,7 +125,10 @@ pub enum Change {
         path: PathBuf,
         before: Option<String>,
         after: String,
-        executable: bool,
+    },
+    RemoveFile {
+        path: PathBuf,
+        before: String,
     },
 }
 
@@ -151,7 +166,9 @@ pub fn row(agent: Agent, env: &Env) -> AgentRow {
 pub fn planned_change(change: &Change) -> PlannedChange {
     PlannedChange {
         path: match change {
-            Change::WriteFile { path, .. } => Some(path.display().to_string()),
+            Change::WriteFile { path, .. } | Change::RemoveFile { path, .. } => {
+                Some(path.display().to_string())
+            }
             Change::Run { .. } => None,
         },
         diff: render(change),
@@ -159,13 +176,6 @@ pub fn planned_change(change: &Change) -> PlannedChange {
 }
 
 const PI_EXTENSION: &str = include_str!("../../integrations/pi/banshee.ts");
-
-const HOOK_SCRIPT: &str = include_str!("../../integrations/claude-code/banshee-speak-check.sh");
-
-// A hook does not get the login shell's PATH, so the script carries the path
-fn hook_script(banshee: &Path) -> String {
-    HOOK_SCRIPT.replace("@BANSHEE_BIN@", &banshee.display().to_string())
-}
 
 fn require_shim(env: &Env) -> Result<&Path, BansheeError> {
     env.shim.as_deref().ok_or_else(|| {
@@ -237,49 +247,72 @@ fn plan_claude(env: &Env) -> Result<Vec<Change>, BansheeError> {
         });
     }
 
-    let script_path = env.claude_config_dir.join("hooks").join(HOOK_SCRIPT_NAME);
-    let script = hook_script(&env.banshee);
-    match registered_stop_hook(&env.claude_config_dir)?
-        .as_deref()
-        .and_then(hook_script_path)
-    {
-        None => {
-            changes.extend(write_if_changed(script_path.clone(), &script, true)?);
-            let command = format!("bash '{}'", script_path.display());
-            changes.extend(rewrite(
-                env.claude_config_dir.join("settings.json"),
-                |settings| with_stop_hook(settings, &command),
-            )?);
-        }
-        Some(registered) if registered == script_path || !registered.exists() => {
-            changes.extend(write_if_changed(registered, &script, true)?);
-        }
-        // A working hook of the user's own, at a path of their own
-        Some(_) => {}
-    }
+    let command = hooks::turn_end_command(crate::turn_end::GatedAgent::Claude, &env.banshee);
+    let settings_path = env.claude_config_dir.join("settings.json");
+    let local_path = env.claude_config_dir.join("settings.local.json");
+    let settings_text = read_if_present(&settings_path)?;
+    let local_text = read_if_present(&local_path)?;
+    // Claude Code merges both files, so the file that already holds Banshee's hook keeps it
+    let (path, before) = if !hooks::holds_banshee_hook(
+        settings_text.as_deref(),
+        crate::turn_end::GatedAgent::Claude,
+    ) && hooks::holds_banshee_hook(
+        local_text.as_deref(),
+        crate::turn_end::GatedAgent::Claude,
+    ) {
+        (local_path, local_text)
+    } else {
+        (settings_path, settings_text)
+    };
+    changes.extend(claude_hook(path, before, &command)?);
     Ok(changes)
 }
 
-// Claude Code merges hooks from both files, so a hook in either one counts
-fn registered_stop_hook(claude_config_dir: &Path) -> Result<Option<String>, BansheeError> {
-    for file in ["settings.json", "settings.local.json"] {
-        let settings = read_if_present(&claude_config_dir.join(file))?;
-        if let Some(command) = stop_hook_command(&parse_settings(settings.as_deref())?) {
-            return Ok(Some(command));
-        }
-    }
-    Ok(None)
+/// Sets Banshee's Stop hook to `command` at `path`, whose text the plan
+/// already read as `before`, and removes the `banshee-speak-check.sh` script
+/// that the file's Stop hook names.
+fn claude_hook(
+    path: PathBuf,
+    before: Option<String>,
+    command: &str,
+) -> Result<Vec<Change>, BansheeError> {
+    let file = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("settings.json")
+        .to_string();
+    let retired = old_script(before.as_deref(), &file)?;
+    let mut changes = rewrite_from(path, before, |before| {
+        hooks::with_turn_end(before, &file, command, crate::turn_end::GatedAgent::Claude)
+    })?;
+    changes.extend(retired);
+    Ok(changes)
+}
+
+/// The removal of the script that the Stop hook in `file` runs, whatever the script holds.
+fn old_script(settings: Option<&str>, file: &str) -> Result<Option<Change>, BansheeError> {
+    let root = parse_settings(settings, file)?;
+    let Some(script) = hooks::stop_hook_commands(&root).find_map(hook_script_path) else {
+        return Ok(None);
+    };
+    Ok(read_if_present(&script)?.map(|before| Change::RemoveFile {
+        path: script,
+        before,
+    }))
 }
 
 /// The command's words, with a quoted one kept whole and its quotes dropped.
+/// Outside quotes, a backslash keeps the next character as it is.
 fn command_words(command: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quote = None;
-    for character in command.chars() {
+    let mut characters = command.chars();
+    while let Some(character) = characters.next() {
         match (quote, character) {
             (Some(open), _) if character == open => quote = None,
             (Some(_), _) => word.push(character),
+            (None, '\\') => word.extend(characters.next()),
             (None, '\'' | '"') => quote = Some(character),
             (None, _) if character.is_whitespace() => {
                 if !word.is_empty() {
@@ -307,9 +340,15 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
         Agent::ClaudeCode => plan_claude(env),
         Agent::Codex => {
             let shim = require_shim(env)?;
-            rewrite(env.home.join(".codex/config.toml"), |before| {
+            let gate = crate::turn_end::GatedAgent::Codex;
+            let command = hooks::turn_end_command(gate, &env.banshee);
+            let mut changes = rewrite(env.home.join(".codex/config.toml"), |before| {
                 with_codex_server(before, shim)
-            })
+            })?;
+            changes.extend(rewrite(env.home.join(".codex/hooks.json"), |before| {
+                hooks::with_turn_end(before, "hooks.json", &command, gate)
+            })?);
+            Ok(changes)
         }
         Agent::Cursor => {
             let shim = require_shim(env)?;
@@ -320,9 +359,16 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
         // The IDE, the `agy` CLI and the SDK share this one file
         Agent::Antigravity => {
             let shim = require_shim(env)?;
-            rewrite(env.home.join(".gemini/config/mcp_config.json"), |before| {
+            let gate = crate::turn_end::GatedAgent::Antigravity;
+            let command = hooks::turn_end_command(gate, &env.banshee);
+            let mut changes = rewrite(env.home.join(".gemini/config/mcp_config.json"), |before| {
                 with_mcp_server(before, "mcp_config.json", shim)
-            })
+            })?;
+            changes.extend(rewrite(
+                env.home.join(".gemini/config/hooks.json"),
+                |before| hooks::with_antigravity_turn_end(before, &command),
+            )?);
+            Ok(changes)
         }
         Agent::OpenCode => {
             let shim = require_shim(env)?;
@@ -333,7 +379,6 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
         Agent::Pi => Ok(write_if_changed(
             env.home.join(".pi/agent/extensions/banshee.ts"),
             PI_EXTENSION,
-            false,
         )?
         .into_iter()
         .collect()),
@@ -403,12 +448,20 @@ fn rewrite(
     edit: impl FnOnce(Option<&str>) -> Result<Option<String>, BansheeError>,
 ) -> Result<Vec<Change>, BansheeError> {
     let before = read_if_present(&path)?;
+    rewrite_from(path, before, edit)
+}
+
+/// `rewrite`, for a file already read as `before`.
+fn rewrite_from(
+    path: PathBuf,
+    before: Option<String>,
+    edit: impl FnOnce(Option<&str>) -> Result<Option<String>, BansheeError>,
+) -> Result<Vec<Change>, BansheeError> {
     Ok(edit(before.as_deref())?
         .map(|after| Change::WriteFile {
             path,
             before,
             after,
-            executable: false,
         })
         .into_iter()
         .collect())
@@ -475,11 +528,7 @@ fn with_codex_server(config: Option<&str>, shim: &Path) -> Result<Option<String>
     Ok(Some(document.to_string()))
 }
 
-fn write_if_changed(
-    path: PathBuf,
-    after: &str,
-    executable: bool,
-) -> Result<Option<Change>, BansheeError> {
+fn write_if_changed(path: PathBuf, after: &str) -> Result<Option<Change>, BansheeError> {
     let before = read_if_present(&path)?;
     if before.as_deref() == Some(after) {
         return Ok(None);
@@ -488,57 +537,17 @@ fn write_if_changed(
         path,
         before,
         after: after.to_string(),
-        executable,
     }))
 }
 
 pub(crate) const HOOK_SCRIPT_NAME: &str = "banshee-speak-check.sh";
 
-fn parse_settings(settings: Option<&str>) -> Result<serde_json::Value, BansheeError> {
+fn parse_settings(settings: Option<&str>, file: &str) -> Result<serde_json::Value, BansheeError> {
     match settings {
         Some(text) => serde_json::from_str(text)
-            .map_err(|error| malformed("settings.json", &format!("is not valid JSON: {error}"))),
+            .map_err(|error| malformed(file, &format!("is not valid JSON: {error}"))),
         None => Ok(serde_json::json!({})),
     }
-}
-
-fn stop_hook_command(root: &serde_json::Value) -> Option<String> {
-    root["hooks"]["Stop"]
-        .as_array()?
-        .iter()
-        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
-        .filter_map(|hook| hook["command"].as_str())
-        .find(|command| hook_script_path(command).is_some())
-        .map(String::from)
-}
-
-// Whole file in, whole file out, so key order matches what Claude Code writes
-fn with_stop_hook(settings: Option<&str>, command: &str) -> Result<Option<String>, BansheeError> {
-    let mut root = parse_settings(settings)?;
-    if stop_hook_command(&root).is_some() {
-        return Ok(None);
-    }
-    let object = root
-        .as_object_mut()
-        .ok_or_else(|| malformed("settings.json", "is not a JSON object"))?;
-    let stop = object
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| malformed("settings.json", "hooks is not an object"))?
-        .entry("Stop")
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .ok_or_else(|| malformed("settings.json", "hooks.Stop is not a list"))?;
-    stop.push(serde_json::json!({
-        "hooks": [{
-            "type": "command",
-            "command": command,
-            "timeout": 15,
-            "statusMessage": "Checking you spoke",
-        }]
-    }));
-    Ok(Some(pretty_json(&root)?))
 }
 
 pub fn render(change: &Change) -> String {
@@ -549,32 +558,21 @@ pub fn render(change: &Change) -> String {
         }
         Change::WriteFile {
             path,
-            before: None,
+            before,
             after,
-            ..
-        } => {
-            format!(
-                "new file {}, {} lines\n",
-                path.display(),
-                after.lines().count()
-            )
-        }
-        Change::WriteFile {
-            path,
-            before: Some(before),
-            after,
-            ..
         } => {
             let name = path.display().to_string();
-            similar::TextDiff::from_lines(before.as_str(), after.as_str())
+            let old_name = if before.is_some() { &name } else { "/dev/null" };
+            similar::TextDiff::from_lines(before.as_deref().unwrap_or(""), after.as_str())
                 .unified_diff()
-                .header(&name, &name)
+                .header(old_name, &name)
                 .to_string()
         }
+        Change::RemoveFile { path, .. } => format!("remove {}\n", path.display()),
     }
 }
 
-// Single quotes are enough for a path; the command is shown, never re-parsed
+// POSIX single quotes, which a shell and `command_words` both read back as the one word
 fn shell_word(word: &str) -> String {
     let plain = word
         .chars()
@@ -608,7 +606,6 @@ pub fn apply(change: &Change, path: &OsStr) -> Result<(), BansheeError> {
             path,
             before,
             after,
-            executable,
         } => {
             if read_if_present(path)? != *before {
                 return Err(BansheeError::Rejected(format!(
@@ -616,8 +613,17 @@ pub fn apply(change: &Change, path: &OsStr) -> Result<(), BansheeError> {
                     path.display()
                 )));
             }
-            let mode = executable.then_some(0o755);
-            banshee_common::utils::write_atomically(path, after.as_bytes(), mode)?;
+            banshee_common::utils::write_atomically(path, after.as_bytes(), None)?;
+            Ok(())
+        }
+        Change::RemoveFile { path, before } => {
+            if read_if_present(path)?.as_deref() != Some(before.as_str()) {
+                return Err(BansheeError::Rejected(format!(
+                    "{} changed after the plan was made. Nothing was removed; run the command again.",
+                    path.display()
+                )));
+            }
+            std::fs::remove_file(path)?;
             Ok(())
         }
     }
@@ -1000,15 +1006,15 @@ pub fn run(agent: Option<Agent>, yes: bool) -> Result<(), BansheeError> {
         println!("{} is already connected.", agent.name());
         return Ok(());
     }
-    apply_plan(
-        &changes,
-        &env.path,
-        yes,
-        &format!(
-            "{} is connected. Restart it to pick up the change.",
-            agent.name()
-        ),
-    )
+    let mut done = format!(
+        "{} is connected. Restart it to pick up the change.",
+        agent.name()
+    );
+    if let Some(note) = agent.connect_note() {
+        done.push('\n');
+        done.push_str(note);
+    }
+    apply_plan(&changes, &env.path, yes, &done)
 }
 
 /// Shows every change, asks unless `yes`, applies them in order, then prints
@@ -1026,10 +1032,10 @@ pub fn apply_plan(
     if !yes && !confirm("Apply? [y/N] ")? {
         return Err(BansheeError::Rejected("Nothing written.".into()));
     }
-    apply_all(changes, path, |change| {
-        if let Change::WriteFile { path, .. } = change {
-            println!("wrote {}", path.display());
-        }
+    apply_all(changes, path, |change| match change {
+        Change::WriteFile { path, .. } => println!("wrote {}", path.display()),
+        Change::RemoveFile { path, .. } => println!("removed {}", path.display()),
+        Change::Run { .. } => {}
     })?;
     println!("{done}");
     Ok(())

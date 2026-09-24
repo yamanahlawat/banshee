@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: Claude Code, Codex and Antigravity are sent back once to speak when a turn ends
+  in silence.** Each gets a Stop hook that runs `banshee turn-end`. The daemon counts each
+  agent's voice calls, so no hook reads a transcript and nothing needs `jq`.
+  Rerun `banshee connect claude`: it replaces the old hook and removes
+  `banshee-speak-check.sh`. Rerun `banshee connect codex` and `banshee connect antigravity` to
+  add theirs, and trust the Codex hook once in `/hooks`. Restart each agent after.
+
 ### Fixed
 
 - **A daemon stopped during a command no longer blocks the next one.** Banshee

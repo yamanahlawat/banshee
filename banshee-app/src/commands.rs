@@ -326,7 +326,7 @@ pub async fn apply_connect(
     daemon: State<'_, Daemon>,
     id: String,
     disconnect: bool,
-) -> Result<(), CommandError> {
+) -> Result<Option<String>, CommandError> {
     daemon
         .call(|client| {
             let id = id.clone();

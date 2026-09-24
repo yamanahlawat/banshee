@@ -6,6 +6,8 @@
 
   let reviewing: { agent: AgentRow; plan: PlannedChange[] } | null = null;
   let rowErrors: Record<string, string> = {};
+  /// What is left to do after a connect, per agent, as the daemon said it.
+  let rowNotes: Record<string, string> = {};
   /// What the list has to say about itself. `failed` separates a fault from a
   /// caveat, because the accent is the colour of something being wrong.
   let listNote: { text: string; failed: boolean } | null = null;
@@ -52,6 +54,7 @@
   // it, so a review always plans a connect.
   async function review(agent: AgentRow) {
     rowErrors = { ...rowErrors, [agent.id]: '' };
+    rowNotes = { ...rowNotes, [agent.id]: '' };
     try {
       const changes = await planConnect(agent.id, false);
       // An empty plan has nothing to show a review for; the row's own state
@@ -74,7 +77,8 @@
     const id = reviewing.agent.id;
     const reviewing_name = reviewing.agent.name;
     try {
-      await applyConnect(id, false);
+      const note = await applyConnect(id, false);
+      if (note) rowNotes = { ...rowNotes, [id]: note };
       const read = await refresh();
       reviewing = null;
       // The agent is connected, so its Connect button is gone. The row is what
@@ -101,14 +105,40 @@
     reviewing = null;
     if (id !== undefined) land(() => connectButtons[id]);
   }
+
+  // The path above the box already names the file, so both header lines go.
+  function body(diff: string) {
+    const created = /^--- \/dev\/null\n/.test(diff);
+    return {
+      created,
+      lines: diff
+        .replace(/^--- .*\n\+\+\+ .*\n/, '')
+        .replace(/\n$/, '')
+        .split('\n'),
+    };
+  }
 </script>
 
 {#if reviewing}
   <div class="review">
     <span class="caps">What this changes</span>
     {#each reviewing.plan as change (change.diff)}
-      {#if change.path}<p class="path mono">{change.path}</p>{/if}
-      <pre class="diff">{change.diff}</pre>
+      {@const view = body(change.diff)}
+      {#if change.path}<p class="path mono">
+          {change.path}{view.created ? ' (new file)' : ''}
+        </p>{/if}
+      <!-- A box that scrolls needs a tab stop, or a keyboard cannot scroll it. -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <pre
+        class="diff"
+        role="region"
+        tabindex="0"
+        aria-label={change.path
+          ? view.created
+            ? `New file ${change.path}`
+            : `Changes to ${change.path}`
+          : 'Command to run'}>{#each view.lines as line, i (i)}<span class="line">{line}</span
+          >{/each}</pre>
     {/each}
     <div class="actions">
       <button class="btn" bind:this={applyButton} on:click={apply}>Apply</button>
@@ -124,18 +154,21 @@
   {/if}
   <div class="rows">
     {#each here as agent (agent.id)}
-      <div class="row" tabindex="-1" bind:this={rows[agent.id]}>
-        <span class="name">{agent.name}</span>
-        <span class="presence caps" class:on={agent.presence === 'connected'}>
-          {SAYS[agent.presence] ?? agent.presence}
-        </span>
-        {#if agent.presence === 'found'}
-          <button class="btn" bind:this={connectButtons[agent.id]} on:click={() => review(agent)}>
-            Connect
-          </button>
-        {/if}
+      <div class="agent" tabindex="-1" bind:this={rows[agent.id]}>
+        <div class="row">
+          <span class="name">{agent.name}</span>
+          <span class="presence caps" class:on={agent.presence === 'connected'}>
+            {SAYS[agent.presence] ?? agent.presence}
+          </span>
+          {#if agent.presence === 'found'}
+            <button class="btn" bind:this={connectButtons[agent.id]} on:click={() => review(agent)}>
+              Connect
+            </button>
+          {/if}
+        </div>
+        {#if rowErrors[agent.id]}<p class="error">{rowErrors[agent.id]}</p>{/if}
+        {#if rowNotes[agent.id]}<p class="note pending">{rowNotes[agent.id]}</p>{/if}
       </div>
-      {#if rowErrors[agent.id]}<p class="error">{rowErrors[agent.id]}</p>{/if}
     {:else}
       {#if !looked}
         <p class="lede">Looking for agents on this machine.</p>
@@ -235,6 +268,10 @@
     overflow-x: auto;
   }
 
+  .note {
+    margin: 0 0 10px;
+  }
+
   .path {
     margin: 12px 0 4px;
     font-size: 11px;
@@ -247,14 +284,30 @@
     font-size: 11px;
     line-height: 1.5;
     white-space: pre-wrap;
-    overflow-x: auto;
+    /* A whole number of rows minus half a row, so the last one is always cut
+       and the box shows that it scrolls. Half the window, less a row, keeps
+       Apply above the foot. */
+    max-height: calc(round(down, min(36em, 50vh - 1.5em), 1.5em) - 0.75em);
+    overflow: auto;
     border-left: 1px solid var(--rule);
     padding-left: 12px;
+    font-variant-ligatures: none;
+  }
+
+  .line {
+    display: block;
+    min-height: 1.5em;
+    padding-left: 1.2em;
+    text-indent: -1.2em;
   }
 
   .actions {
     display: flex;
     gap: 8px;
     margin-top: 18px;
+  }
+
+  .actions .btn {
+    scroll-margin: 6px;
   }
 </style>

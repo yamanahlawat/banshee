@@ -1,26 +1,13 @@
 # Claude Code
 
-`banshee-speak-check.sh` is a Stop hook. It reads the turn that is about to end
-and looks for a call to the `speak_status` or `ask_user` tool of the Banshee MCP
-server. If the turn made neither call, the hook blocks the end of the turn and
-tells the agent to speak. Every other path lets the turn end, so a broken
-assumption costs a missed reminder, not a stuck session.
-
-## Install
+A Stop hook sends a turn that ended in silence back once, to speak its status.
 
 ```bash
 banshee connect claude
 ```
 
-That writes the script into `$CLAUDE_CONFIG_DIR/hooks/` and registers it in
-`settings.json`, after it shows you both changes.
-
-## Install by hand
-
-Copy `banshee-speak-check.sh` into `$CLAUDE_CONFIG_DIR/hooks/` (by default
-`~/.claude/hooks/`) and make it executable. Replace `@BANSHEE_BIN@` in the script
-with the absolute path of your `banshee` binary. Then add the hook to
-`settings.json`:
+It writes this entry into `settings.json` in `$CLAUDE_CONFIG_DIR` (by default
+`~/.claude`), after it shows the change:
 
 ```json
 {
@@ -30,7 +17,7 @@ with the absolute path of your `banshee` binary. Then add the hook to
         "hooks": [
           {
             "type": "command",
-            "command": "bash '/Users/you/.claude/hooks/banshee-speak-check.sh'",
+            "command": "/bin/sh -c 'b=\"$0\"; [ -x \"$b\" ] || b=$(command -v banshee) || exit 0; \"$b\" turn-end claude || exit 0' /Applications/Banshee.app/Contents/MacOS/banshee",
             "timeout": 15,
             "statusMessage": "Checking you spoke"
           }
@@ -41,7 +28,12 @@ with the absolute path of your `banshee` binary. Then add the hook to
 }
 ```
 
-## Requirement
+- The daemon counts each Claude Code session's `speak_status` and `ask_user` calls. The hook
+  asks it whether the session spoke since its last turn ended.
+- It sends a turn back once. A second silent stop in the same turn ends it.
+- Any failure lets the turn end: Banshee removed, the daemon stopped, no answer in two seconds.
 
-The script reads the hook payload and the transcript with `jq`. Put `jq` on your
-PATH, or the hook exits without a check.
+Where it falls short:
+
+- A subagent's speech counts for the session that started it.
+- An interrupted turn fires no Stop, so the next silent turn can pass.

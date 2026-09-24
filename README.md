@@ -40,7 +40,7 @@ banshee connect claude
 - `banshee setup` downloads the models (~860 MB). `banshee start` then finds them and needs no restart.
 - `banshee bind hyprland` shows the block before it writes. Omarchy ships `wtype`, so nothing more is installed.
 - `banshee connect claude` shows the change before it writes.
-- The Claude Code hook needs `jq`. Restart Claude Code.
+- Restart Claude Code.
 - **Hold `F9`** and speak. The text is typed into the app you are focused on. [All three keys](#the-keys)
 - Omarchy's own dictation tool also uses `F9`. Unbind one if both are there.
 - `banshee status` names the fix, and changes nothing itself.
@@ -85,7 +85,6 @@ This is the step that closes the voice loop: the agent speaks, and you answer ou
 2. Press **Apply**.
 3. Restart the agent. It speaks its decisions and asks you questions out loud.
 
-- The Claude Code hook needs `jq` on your PATH.
 - Antigravity, Claude Code, OpenCode and Pi are verified on a real install. Codex and Cursor follow their published formats, and wait for a report.
 - Pi has its own extension API, so it gets a [native extension](integrations/pi) instead.
 
@@ -95,9 +94,9 @@ This is the step that closes the voice loop: the agent speaks, and you answer ou
 
 ```bash
 banshee connect            # which agents are installed, and which are connected
-banshee connect antigravity # Antigravity IDE, agy CLI and SDK: the MCP server in ~/.gemini/config/mcp_config.json
-banshee connect claude      # Claude Code: the MCP server and a stop hook that refuses to end a turn with no spoken status
-banshee connect codex       # Codex CLI: the MCP server in ~/.codex/config.toml
+banshee connect antigravity # Antigravity IDE, agy CLI and SDK: the MCP server in ~/.gemini/config/mcp_config.json and the stop hook in ~/.gemini/config/hooks.json
+banshee connect claude      # Claude Code: the MCP server and a stop hook that sends a silent turn back once to speak
+banshee connect codex       # Codex CLI: the MCP server in ~/.codex/config.toml and the same stop hook in ~/.codex/hooks.json; trust it once in /hooks
 banshee connect cursor      # Cursor: the MCP server in ~/.cursor/mcp.json
 banshee connect opencode    # OpenCode: the MCP server
 banshee connect pi          # Pi: the native extension

@@ -26,6 +26,8 @@ mod tell;
 #[cfg(test)]
 mod test_support;
 mod text_to_speech;
+mod turn_end;
+mod turns;
 mod uninstall;
 
 use std::process::ExitCode;
@@ -72,6 +74,10 @@ async fn main() -> ExitCode {
         CommandType::Bind { compositor, yes } => cli::bind(compositor, yes, config_result).await,
         CommandType::Service { action } => cli::service(action),
         CommandType::Uninstall { data, yes } => cli::uninstall(data, yes).await,
+        CommandType::TurnEnd { agent } => {
+            turn_end::run(agent).await;
+            Ok(())
+        }
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,

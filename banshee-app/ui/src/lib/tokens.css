@@ -101,8 +101,7 @@ body {
 #app {
   position: fixed;
   inset: 0;
-  /* Exactly one element in the window may scroll. Two scrollbars means two
-     scrollable ancestors, and the outer one is always the accident. */
+  /* Nothing outside the body band may scroll. */
   overflow: hidden;
 }
 
@@ -140,8 +139,8 @@ body {
     'wdth' var(--cut-agent-width);
 }
 
-/* A value the daemon has not taken yet. A row says it beneath its control and a
-   sub-row beneath its own, so the colour is stated once for both. */
+/* A row, a sub-row and an agent row each state a pending step beneath what it
+   is about, so the colour is stated once for all three. */
 .note.pending {
   color: var(--accent);
 }
