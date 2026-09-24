@@ -372,6 +372,18 @@ async fn watch_ends_when_its_reader_closes_the_pipe() {
 }
 
 #[tokio::test]
+async fn watch_ends_when_its_reader_closes_while_it_waits() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    let gone = tokio::spawn(super::reader_gone(writer));
+    tokio::time::sleep(SETTLE).await;
+    drop(reader);
+    tokio::time::timeout(SETTLE, gone)
+        .await
+        .expect("a reader that closes later must still end the watch")
+        .unwrap();
+}
+
+#[tokio::test]
 async fn watch_keeps_running_while_its_reader_is_open() {
     let (_reader, writer) = std::io::pipe().unwrap();
     let gone = tokio::spawn(super::reader_gone(writer));

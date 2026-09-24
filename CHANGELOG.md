@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread that hung, so you see how far the agent got. Your next command continues
   it. Claude Code now runs with `--output-format stream-json`, so it names its thread
   on its first line, as OpenCode does.
+- **A reply arrives even when the agent's server outlives the run.** OpenCode leaves
+  its server holding the output open. Banshee lost the reply after a 2-second
+  wait. A new thread was lost with it. The warning said "its output did not
+  arrive in time". Banshee now keeps what arrived, and the warning is gone.
 - **"Show me" says how old the saved thread is.** It said "The last thread has timed
   out", which read as the run timing out. It now gives the age of the thread.
 - **`banshee watch | head -n 1` ends.** `watch` stopped only at its next write, and an
