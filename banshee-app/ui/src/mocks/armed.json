@@ -10,5 +10,6 @@
   "last_error": null,
   "last_speech_error": null,
   "pipeline": "open",
+  "feedback": "both",
   "activity": "listening"
 }

@@ -1,6 +1,9 @@
-use super::{Assignments, Outcome, edit, startup_only};
+use super::{Assignments, Outcome, edit, startup_only, write_first_feedback};
 use crate::config::Config;
+#[cfg(target_os = "macos")]
+use crate::config::FeedbackMode;
 use crate::credentials::RemoteKey;
+use crate::models::download::Download;
 use banshee_common::error::BansheeError;
 
 /// A write against a config.toml of this test's own, so whose machine runs the
@@ -59,38 +62,41 @@ fn a_write_keeps_the_comment_above_the_key_it_changes() {
 
 #[test]
 fn a_setting_two_sections_deep_is_reachable() {
-    let (rendered, config) =
-        edit("", &assignments(&[("audio.cues.enabled", false.into())])).unwrap();
-    assert!(
-        rendered.contains("[audio.cues]"),
-        "the key must land under its own section, not quoted under [audio]: {rendered}"
-    );
-    assert!(
-        !rendered.contains("[audio]"),
-        "a parent invented only to hold the subtable needs no header: {rendered}"
-    );
-    assert!(!config.audio.cues.enabled);
-}
-
-// An [audio] that holds keys of its own keeps its header either way, so the
-// section here is empty: only then does suppressing it lose the comment.
-#[test]
-fn a_nested_write_keeps_a_section_that_was_already_written() {
-    let existing = "# audio settings, see docs\n[audio]\n\n[stt]\nvad_threshold = 0.5\n";
-    let (rendered, _) = edit(
-        existing,
-        &assignments(&[("audio.cues.enabled", false.into())]),
+    let (rendered, config) = edit(
+        "",
+        &assignments(&[("stt.remote.base_url", "http://listener.example/v1".into())]),
     )
     .unwrap();
     assert!(
-        rendered.contains("# audio settings, see docs"),
+        rendered.contains("[stt.remote]"),
+        "the key must land under its own section, not quoted under [stt]: {rendered}"
+    );
+    assert!(
+        !rendered.contains("[stt]"),
+        "a parent invented only to hold the subtable needs no header: {rendered}"
+    );
+    assert_eq!(config.stt.remote.base_url, "http://listener.example/v1");
+}
+
+// An [stt] that holds keys of its own keeps its header either way, so the
+// section here is empty: only then does suppressing it lose the comment.
+#[test]
+fn a_nested_write_keeps_a_section_that_was_already_written() {
+    let existing = "# listener settings, see docs\n[stt]\n\n[tts]\nvoice = \"af_sky\"\n";
+    let (rendered, _) = edit(
+        existing,
+        &assignments(&[("stt.remote.base_url", "http://listener.example/v1".into())]),
+    )
+    .unwrap();
+    assert!(
+        rendered.contains("# listener settings, see docs"),
         "the comment above the section must survive: {rendered}"
     );
     assert!(
-        rendered.contains("[audio]"),
+        rendered.contains("[stt]"),
         "a section the user wrote must keep its header: {rendered}"
     );
-    assert!(rendered.contains("[audio.cues]"), "{rendered}");
+    assert!(rendered.contains("[stt.remote]"), "{rendered}");
 }
 
 /// Whisper reads the language and the task per utterance, so a write moves
@@ -164,23 +170,95 @@ fn a_barge_in_write_reaches_the_running_daemon() {
 }
 
 #[test]
-fn a_cues_write_reaches_the_running_daemon() {
+fn a_feedback_write_reaches_the_running_daemon() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    assert!(!state.cues_enabled());
+    assert_eq!(state.feedback_mode(), crate::config::FeedbackMode::Off);
 
     let outcome = configure_in_scratch(
         Some(&state),
-        assignments(&[("audio.cues.enabled", true.into())]),
+        assignments(&[("feedback.mode", "visual".into())]),
         false,
     )
     .expect("a known key and a legal value must apply");
 
-    assert!(
-        state.cues_enabled(),
-        "the next cue must be heard, without a restart"
-    );
-    assert_eq!(outcome.applied, vec!["audio.cues.enabled".to_string()]);
+    assert_eq!(state.feedback_mode(), crate::config::FeedbackMode::Visual);
+    assert_eq!(outcome.applied, vec!["feedback.mode".to_string()]);
     assert!(outcome.restart_required.is_empty());
+}
+
+#[test]
+fn the_old_cue_switch_is_refused_and_names_its_replacement() {
+    let refused = configure_in_scratch(
+        None,
+        assignments(&[("audio.cues.enabled", false.into())]),
+        true,
+    )
+    .expect_err("the retired key must be refused");
+    assert!(
+        refused.to_string().contains("feedback.mode"),
+        "the refusal must name the key that replaced it: {refused}"
+    );
+}
+
+#[test]
+fn a_null_write_removes_the_old_cue_switch() {
+    let dir = crate::test_support::unique_scratch("settings");
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[audio.cues]\nenabled = false\n").unwrap();
+
+    super::configure_at(
+        &path,
+        None,
+        assignments(&[("audio.cues.enabled", serde_json::Value::Null)]),
+        true,
+    )
+    .expect("a null write removes the retired key");
+
+    let config = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(config.feedback_mode(), crate::config::FeedbackMode::Both);
+}
+
+#[test]
+fn a_null_write_to_the_old_cue_switch_applies_live() {
+    let dir = crate::test_support::unique_scratch("settings");
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[audio.cues]\nenabled = false\n").unwrap();
+
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    assert_eq!(state.feedback_mode(), crate::config::FeedbackMode::Off);
+
+    let outcome = super::configure_at(
+        &path,
+        Some(&state),
+        assignments(&[("audio.cues.enabled", serde_json::Value::Null)]),
+        true,
+    )
+    .expect("a null write to the retired key applies live");
+
+    assert_eq!(outcome.applied, vec!["audio.cues.enabled".to_string()]);
+    assert_eq!(state.feedback_mode(), crate::config::FeedbackMode::Both);
+}
+
+#[test]
+fn removing_the_feedback_mode_falls_back_to_the_old_rule() {
+    let dir = crate::test_support::unique_scratch("settings");
+    let path = dir.join("config.toml");
+    std::fs::write(
+        &path,
+        "[audio.cues]\nenabled = false\n[feedback]\nmode = \"both\"\n",
+    )
+    .unwrap();
+
+    super::configure_at(
+        &path,
+        None,
+        assignments(&[("feedback.mode", serde_json::Value::Null)]),
+        true,
+    )
+    .expect("a null write removes the key");
+
+    let config = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(config.feedback_mode(), crate::config::FeedbackMode::Off);
 }
 
 // Only the off direction runs here: turning history on opens the real file
@@ -562,10 +640,10 @@ fn a_value_of_the_wrong_type_is_refused() {
 #[test]
 fn a_setting_that_was_waiting_on_a_file_applies_once_the_download_ends() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    // `audio.cues.enabled` is live and needs no file, so it stands in for a
+    // `audio.barge_in` is live and needs no file, so it stands in for a
     // key whose apply succeeds the moment it is asked again.
-    state.record_outcome(&[], &["audio.cues.enabled".to_string()]);
-    assert_eq!(state.pending(), vec!["audio.cues.enabled".to_string()]);
+    state.record_outcome(&[], &["audio.barge_in".to_string()]);
+    assert_eq!(state.pending(), vec!["audio.barge_in".to_string()]);
 
     super::reapply_pending(&state);
     assert!(
@@ -615,11 +693,11 @@ fn a_key_that_needs_a_restart_becomes_pending_and_a_live_one_does_not() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
     state.record_outcome(
         &["stt.vad_threshold".to_string()],
-        &["audio.cues.enabled".to_string()],
+        &["audio.barge_in".to_string()],
     );
-    assert_eq!(state.pending(), vec!["audio.cues.enabled".to_string()]);
+    assert_eq!(state.pending(), vec!["audio.barge_in".to_string()]);
 
-    state.record_outcome(&["audio.cues.enabled".to_string()], &[]);
+    state.record_outcome(&["audio.barge_in".to_string()], &[]);
     assert!(state.pending().is_empty());
 }
 
@@ -776,4 +854,167 @@ fn both_api_keys_need_a_restart_like_the_other_startup_keys() {
             Some(&key.to_string())
         );
     }
+}
+
+/// A scratch folder's `config.toml`, holding `text` unless it is empty, and
+/// two `Download`s a test can call `write_first_feedback` as wanted or missing.
+fn scratch_config(text: &str) -> (std::path::PathBuf, Vec<Download>) {
+    let dir = crate::test_support::unique_scratch("settings");
+    let path = dir.join("config.toml");
+    if !text.is_empty() {
+        std::fs::write(&path, text).unwrap();
+    }
+    let wanted = vec![
+        Download {
+            megabytes: 1,
+            name: "one.bin".to_string(),
+            url: "https://example.test/one".to_string(),
+        },
+        Download {
+            megabytes: 1,
+            name: "two.bin".to_string(),
+            url: "https://example.test/two".to_string(),
+        },
+    ];
+    (path, wanted)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_fetch_into_an_empty_folder_chooses_the_chip() {
+    let (path, wanted) = scratch_config("");
+    let chosen = write_first_feedback(&path, None, &wanted, &wanted, || false).unwrap();
+    assert_eq!(chosen, Some(FeedbackMode::Visual));
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("mode = \"visual\"")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn voiceover_starts_on_both() {
+    let (path, wanted) = scratch_config("");
+    let chosen = write_first_feedback(&path, None, &wanted, &wanted, || true).unwrap();
+    assert_eq!(chosen, Some(FeedbackMode::Both));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_that_holds_a_model_is_no_new_install() {
+    let (path, wanted) = scratch_config("");
+    let chosen = write_first_feedback(&path, None, &wanted, &wanted[1..], || {
+        panic!("a folder that holds a model never reads VoiceOver")
+    })
+    .unwrap();
+    assert_eq!(chosen, None);
+    assert!(!path.exists(), "nothing is written");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_file_that_chose_keeps_its_choice() {
+    for text in [
+        "[feedback]\nmode = \"sound\"\n",
+        "[audio.cues]\nenabled = false\n",
+    ] {
+        let (path, wanted) = scratch_config(text);
+        assert_eq!(
+            write_first_feedback(&path, None, &wanted, &wanted, || {
+                panic!("an install that chose never reads VoiceOver")
+            })
+            .unwrap(),
+            None,
+            "{text}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_first_write_keeps_the_comments() {
+    let text = "# my settings\n[audio]\nhotkey = \"F5\" # the key\n";
+    let (path, wanted) = scratch_config(text);
+    write_first_feedback(&path, None, &wanted, &wanted, || false).unwrap();
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(written.contains("# my settings") && written.contains("# the key"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_first_write_goes_through_a_symlinked_config() {
+    let (target, wanted) = scratch_config("");
+    let link = target.with_file_name("linked-config.toml");
+    std::fs::write(&target, "").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    write_first_feedback(&link, None, &wanted, &wanted, || false).unwrap();
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(std::fs::read_to_string(&target).unwrap().contains("visual"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_config_that_never_chose_a_mode_is_a_new_install() {
+    for text in [
+        "[tts]\nvoice = \"af_sky\"\n",
+        "[audio.cues]\nenabled = true\n",
+    ] {
+        let (path, wanted) = scratch_config(text);
+        assert_eq!(
+            write_first_feedback(&path, None, &wanted, &wanted, || false).unwrap(),
+            Some(FeedbackMode::Visual),
+            "{text}"
+        );
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with(text), "{written}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_config_of_blank_lines_and_comments_is_a_new_install() {
+    let (path, wanted) = scratch_config("\n  \n# my settings\n");
+    let chosen = write_first_feedback(&path, None, &wanted, &wanted, || false).unwrap();
+    assert_eq!(chosen, Some(FeedbackMode::Visual));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_mode_set_while_the_first_write_waits_wins() {
+    let (path, wanted) = scratch_config("");
+    let writing = super::WRITING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let first = {
+        let path = path.clone();
+        std::thread::spawn(move || write_first_feedback(&path, None, &wanted, &wanted, || false))
+    };
+    // The locked check passes at any delay. The wait gives a check outside the
+    // lock time to read the file before the write below.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let chosen = "[feedback]\nmode = \"sound\"\n";
+    std::fs::write(&path, chosen).unwrap();
+    drop(writing);
+
+    assert_eq!(first.join().unwrap().unwrap(), None);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), chosen);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn off_macos_a_new_install_keeps_the_absent_key() {
+    let (path, wanted) = scratch_config("");
+    let chosen = write_first_feedback(&path, None, &wanted, &wanted, || {
+        panic!("off macos this never reads VoiceOver")
+    })
+    .unwrap();
+    assert_eq!(chosen, None);
+    assert!(!path.exists(), "nothing is written");
 }

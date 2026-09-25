@@ -1,6 +1,6 @@
 use super::*;
 use crate::state::RecordingMode;
-use banshee_common::{BANSHEE_ASK_USER, BANSHEE_STATUS};
+use banshee_common::{BANSHEE_ASK_USER, BANSHEE_STATUS, DownloadProgress};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
@@ -80,6 +80,209 @@ fn an_unknown_event_is_passed_over() {
     assert!(!asked.downloads);
 }
 
+#[test]
+fn cues_level_and_draws_are_asked_for_by_name() {
+    let params = serde_json::json!({"events": ["cues", "level"], "draws": true});
+    let asked = requested_events(Some(&params));
+    assert!(asked.cues && asked.level && asked.draws);
+    assert!(!asked.state);
+
+    let quiet = serde_json::json!({"events": ["cues"]});
+    assert!(
+        !requested_events(Some(&quiet)).draws,
+        "draws is off unless it is said"
+    );
+}
+
+#[tokio::test]
+async fn a_cue_subscriber_hears_a_signal() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["cues"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+
+    state.cues().emit(crate::audio::cues::Signal::Arm);
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_CUE);
+    assert_eq!(pushed["params"]["cue"], "arm");
+}
+
+// The channel holds 128 signals, so 300 emits leave this subscriber behind.
+#[tokio::test]
+async fn a_cue_subscriber_that_lags_still_hears_what_comes_next() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["cues"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+
+    for _ in 0..300 {
+        state.cues().emit(crate::audio::cues::Signal::Disarm);
+    }
+    state.cues().emit(crate::audio::cues::Signal::Told);
+
+    let told = tokio::time::timeout(ARRIVES * 5, async {
+        loop {
+            let pushed = next_message(&mut lines).await;
+            if pushed["params"]["cue"] == "told" {
+                return pushed;
+            }
+        }
+    })
+    .await
+    .expect("the signal after the lag never arrived");
+    assert_eq!(told["method"], banshee_common::BANSHEE_CUE);
+}
+
+#[tokio::test]
+async fn a_drawing_subscriber_counts_as_a_chip_until_it_goes() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["cues"], "draws": true}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+    assert_eq!(state.cues().drawers(), 1);
+
+    drop(writer);
+    drop(lines);
+    let deadline = std::time::Instant::now() + ARRIVES;
+    while state.cues().drawers() != 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        state.cues().drawers(),
+        0,
+        "a chip that left must not keep the sound off"
+    );
+}
+
+#[tokio::test]
+async fn two_subscribes_on_one_connection_count_one_chip() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["cues"], "draws": true}),
+    )
+    .await;
+    next_message(&mut lines).await;
+
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["cues", "level"], "draws": true}),
+    )
+    .await;
+    next_message(&mut lines).await;
+
+    assert_eq!(
+        state.cues().drawers(),
+        1,
+        "one connection is one chip, however many times it subscribes"
+    );
+}
+
+#[tokio::test]
+async fn a_level_subscriber_counts_as_a_watcher_until_it_goes() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["level"]}),
+    )
+    .await;
+    next_message(&mut lines).await;
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["cues", "level"]}),
+    )
+    .await;
+    next_message(&mut lines).await;
+    assert_eq!(
+        state.level_watchers(),
+        1,
+        "one connection is one watcher, however many times it subscribes"
+    );
+
+    drop(writer);
+    drop(lines);
+    let deadline = std::time::Instant::now() + ARRIVES;
+    while state.level_watchers() != 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        state.level_watchers(),
+        0,
+        "a watcher that left must not keep the sampler running"
+    );
+}
+
+#[tokio::test]
+async fn a_subscriber_that_asks_for_no_level_is_no_watcher() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["cues"], "draws": true}),
+    )
+    .await;
+    next_message(&mut lines).await;
+    assert_eq!(state.level_watchers(), 0);
+}
+
+#[tokio::test]
+async fn a_level_subscriber_hears_the_level() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["level"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+
+    state.publish_level(0.5);
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_LEVEL);
+    assert_eq!(pushed["params"]["level"], 0.5);
+
+    state.publish_level(0.1234);
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(
+        pushed["params"]["level"], 0.123,
+        "the wire carries 3 decimal places, not an f32 widened to its f64 tail"
+    );
+
+    state.publish_level(0.1234);
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(
+        pushed["params"]["level"], 0.123,
+        "a repeated sample is pushed again"
+    );
+}
+
 // The select loop is the only thing that writes a notification, so no unit
 // test reaches it. These drive a real socket.
 #[tokio::test]
@@ -99,11 +302,27 @@ async fn a_subscriber_hears_the_microphone_open() {
     assert!(pushed.get("id").is_none(), "a notification carries no id");
 }
 
+#[tokio::test]
+async fn a_subscriber_hears_the_feedback_mode_change() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, _writer, reply) = subscribed(&state).await;
+    assert_eq!(
+        reply["result"]["feedback"], "none",
+        "the fixture must start elsewhere"
+    );
+
+    state.set_feedback_mode(crate::config::FeedbackMode::Sound);
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_STATE_CHANGED);
+    assert_eq!(pushed["params"]["feedback"], "sound");
+}
+
 // A window connects while the pipeline opens and reads "not ready". Without
 // this push it keeps that answer until it happens to read the status again.
 #[tokio::test]
 async fn a_subscriber_hears_the_pipeline_open() {
-    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+    let state = crate::test_support::daemon_state_before_the_pipeline();
     let (mut lines, _writer, reply) = subscribed(&state).await;
     assert_eq!(reply["result"]["pipeline"], "opening");
 
@@ -322,7 +541,7 @@ async fn a_line_that_is_not_a_request_is_answered_with_a_parse_error() {
 // that connects in that gap must be answered, not left waiting for a device.
 #[tokio::test]
 async fn a_client_is_answered_while_the_pipeline_is_still_opening() {
-    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+    let state = crate::test_support::daemon_state_before_the_pipeline();
 
     let (mut lines, mut writer) = connect(&state);
     send(&mut writer, BANSHEE_STATUS, serde_json::json!({})).await;

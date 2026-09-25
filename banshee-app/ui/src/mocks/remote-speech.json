@@ -38,6 +38,9 @@
         "enabled": true
       }
     },
+    "feedback": {
+      "mode": "both"
+    },
     "stt": {
       "provider": "remote",
       "remote": {

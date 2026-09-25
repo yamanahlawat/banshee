@@ -214,7 +214,6 @@ function statusNow(): unknown {
     Record<string, unknown>
   >;
   for (const [key, value] of Object.entries(written)) {
-    // `audio.cues.enabled` is three segments deep, not two.
     const path = key.split('.');
     const leaf = path.pop() as string;
     let node = config as Record<string, unknown>;

@@ -12,6 +12,7 @@ use std::time::Duration;
 use banshee_common::{KokoroTTSConfig, error::BansheeError};
 use tokio::sync::watch;
 
+use crate::audio::cues::{Cues, Reason, ReasonCode, Signal};
 use crate::config::{Provider, TTSConfig, TTSFallback};
 use local::kokoro::{KokoroBackend, KokoroEngine};
 use local::say::SayBackend;
@@ -38,14 +39,17 @@ pub enum Fault {
 /// started once the state exists.
 pub fn drain_faults(
     state: Arc<crate::state::DaemonState>,
-    cues: crate::audio::cues::Cues,
+    cues: Cues,
     faults: std::sync::mpsc::Receiver<Fault>,
 ) {
     for fault in faults {
         match fault {
             Fault::Failed(reason) => {
                 log::error!("the reply was not spoken: {reason}");
-                cues.send(crate::audio::cues::Cue::Error);
+                cues.emit(Signal::Error {
+                    reason: Reason::new(ReasonCode::SpeechFailed, None),
+                    target: None,
+                });
                 state.set_last_speech_error(Some(reason));
             }
             Fault::Played => state.set_last_speech_error(None),

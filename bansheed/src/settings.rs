@@ -5,8 +5,9 @@ use banshee_common::error::BansheeError;
 use serde::Serialize;
 use toml_edit::DocumentMut;
 
-use crate::config::Config;
+use crate::config::{Config, FeedbackMode};
 use crate::credentials::RemoteKey;
+use crate::models::download::Download;
 use crate::state::DaemonState;
 
 /// Dotted `section.field` keys, spelled as `config.toml` spells them.
@@ -17,7 +18,7 @@ enum Live {
     VadThreshold,
     InputDevice,
     BargeIn,
-    Cues,
+    Feedback,
     SaveHistory,
     Tts,
     Vocabulary,
@@ -30,7 +31,7 @@ fn live(key: &str) -> Option<Live> {
         "stt.vad_threshold" => Some(Live::VadThreshold),
         "audio.input_device" => Some(Live::InputDevice),
         "audio.barge_in" => Some(Live::BargeIn),
-        "audio.cues.enabled" => Some(Live::Cues),
+        "feedback.mode" | "audio.cues.enabled" => Some(Live::Feedback),
         "daemon.save_history" => Some(Live::SaveHistory),
         // `tts.fallback` is not here: it decides what to do when Kokoro will
         // not load, which is settled once, at startup.
@@ -62,9 +63,9 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
             state.set_barge_in(config.audio.barge_in);
             true
         }
-        // The player reads this as each cue reaches it
-        Live::Cues => {
-            state.set_cues_enabled(config.audio.cues.enabled);
+        // The next cue reads this, so the next dictation obeys it
+        Live::Feedback => {
+            state.set_feedback_mode(config.feedback_mode());
             true
         }
         // Opening the file is the whole of the setting, so a failure to open
@@ -318,14 +319,31 @@ fn apply_each<'a>(
     outcome
 }
 
+// A null write passes, because it is the only way `config set` removes the key.
+fn refuse_retired_keys(assignments: &Assignments) -> Result<(), BansheeError> {
+    if assignments
+        .get("audio.cues.enabled")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(BansheeError::Rejected(
+            "'audio.cues.enabled' is replaced by feedback.mode: set it to visual, sound, both or none"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Pass no `state` when no daemon is running: nothing to apply live, and no
-/// second writer to race with.
+/// second writer to race with. A running daemon writes the config it names.
 pub fn configure(
     state: Option<&DaemonState>,
     assignments: Assignments,
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
-    configure_at(&Config::path()?, state, assignments, persist)
+    match state {
+        Some(state) => configure_at(state.config_path(), Some(state), assignments, persist),
+        None => configure_at(&Config::path()?, None, assignments, persist),
+    }
 }
 
 /// `path` is the config.toml the write reads and, with `persist`, replaces.
@@ -335,6 +353,7 @@ fn configure_at(
     mut assignments: Assignments,
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
+    refuse_retired_keys(&assignments)?;
     refuse_unknown_language(&assignments)?;
 
     if !persist && let Some(key) = startup_only(&assignments) {
@@ -345,13 +364,33 @@ fn configure_at(
 
     let api_keys = take_api_keys(&mut assignments)?;
 
-    let _writing = WRITING
+    let writing = WRITING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-
     let existing = Config::read(path)?;
+    write_locked(
+        &writing,
+        path,
+        &existing,
+        state,
+        assignments,
+        api_keys,
+        persist,
+    )
+}
 
-    let (rendered, config) = edit(&existing, &assignments)?;
+/// The rest of a checked write, with `existing` read under the guard. The
+/// guard proves the caller holds `WRITING`, which does not re-enter.
+fn write_locked(
+    _writing: &std::sync::MutexGuard<'_, ()>,
+    path: &std::path::Path,
+    existing: &str,
+    state: Option<&DaemonState>,
+    assignments: Assignments,
+    api_keys: Vec<(RemoteKey, String)>,
+    persist: bool,
+) -> Result<Outcome, BansheeError> {
+    let (rendered, config) = edit(existing, &assignments)?;
 
     // Last of the checks, first of the writes: a key stored before `edit`
     // refused a value beside it would be on disk under an error the caller
@@ -390,6 +429,109 @@ fn configure_at(
     }
 
     Ok(outcome)
+}
+
+/// A file chose its feedback when it sets `feedback.mode`, or turns the old
+/// `audio.cues.enabled` switch off.
+#[cfg(target_os = "macos")]
+fn chose_feedback(text: &str) -> Result<bool, BansheeError> {
+    let document: DocumentMut = text
+        .parse()
+        .map_err(|error| BansheeError::Other(format!("config.toml does not parse: {error}")))?;
+    let mode = document
+        .get("feedback")
+        .and_then(|feedback| feedback.get("mode"))
+        .is_some();
+    let cues = document
+        .get("audio")
+        .and_then(|audio| audio.get("cues"))
+        .and_then(|cues| cues.get("enabled"))
+        .and_then(toml_edit::Item::as_bool);
+    Ok(mode || cues == Some(false))
+}
+
+/// True when VoiceOver is running. Off macOS this build never runs the
+/// accessibility API it reads, so it answers false.
+///
+/// Not `NSWorkspace::isVoiceOverEnabled`: that reads false inside a launchd
+/// agent with VoiceOver on.
+#[cfg(target_os = "macos")]
+pub fn voiceover_on() -> bool {
+    use objc2_core_foundation::{
+        CFPreferencesAppSynchronize, CFPreferencesGetAppBooleanValue, CFString,
+    };
+
+    let domain = CFString::from_static_str("com.apple.universalaccess");
+    CFPreferencesAppSynchronize(&domain);
+    let key = CFString::from_static_str("voiceOverOnOffKey");
+    // SAFETY: a null pointer means the caller does not ask whether the key
+    // exists; a missing or malformed key then answers false.
+    unsafe { CFPreferencesGetAppBooleanValue(&key, &domain, std::ptr::null_mut()) }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn voiceover_on() -> bool {
+    false
+}
+
+/// A fetch into a models folder that holds none of the wanted files, with a
+/// config at `path` that never chose its feedback, is a new install, so it
+/// writes `visual` there. VoiceOver users start on `both`, because nothing is
+/// announced while the microphone waits for an answer. Answers the mode it wrote.
+///
+/// The chip only draws on macOS, so off macOS this leaves the key absent
+/// rather than writing a mode with no figure to show it.
+#[cfg(target_os = "macos")]
+pub fn write_first_feedback(
+    path: &std::path::Path,
+    state: Option<&DaemonState>,
+    wanted: &[Download],
+    missing: &[Download],
+    voiceover: impl FnOnce() -> bool,
+) -> Result<Option<FeedbackMode>, BansheeError> {
+    if wanted.is_empty() || missing.len() != wanted.len() {
+        return Ok(None);
+    }
+    // The VoiceOver read takes seconds in some processes, so it runs only for a
+    // file that has not chosen, and outside the lock. The check under the lock
+    // decides.
+    if chose_feedback(&Config::read(path)?)? {
+        return Ok(None);
+    }
+    let mode = if voiceover() {
+        FeedbackMode::Both
+    } else {
+        FeedbackMode::Visual
+    };
+    let writing = WRITING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let existing = Config::read(path)?;
+    if chose_feedback(&existing)? {
+        return Ok(None);
+    }
+    let assignments = [("feedback.mode".to_string(), mode.word().into())].into();
+    write_locked(
+        &writing,
+        path,
+        &existing,
+        state,
+        assignments,
+        Vec::new(),
+        true,
+    )?;
+    Ok(Some(mode))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn write_first_feedback(
+    _path: &std::path::Path,
+    _state: Option<&DaemonState>,
+    _wanted: &[Download],
+    _missing: &[Download],
+    _voiceover: impl FnOnce() -> bool,
+) -> Result<Option<FeedbackMode>, BansheeError> {
+    Ok(None)
 }
 
 #[cfg(test)]

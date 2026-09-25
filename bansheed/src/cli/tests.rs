@@ -404,3 +404,26 @@ async fn watch_into_a_file_never_reads_as_a_closed_reader() {
     assert!(!gone.is_finished(), "a file has no reader to lose");
     gone.abort();
 }
+
+#[test]
+fn only_cues_and_level_can_be_watched_as_events() {
+    let names = vec!["cues".to_string(), "level".to_string()];
+    assert_eq!(
+        super::watched_events(&names).unwrap(),
+        vec!["cues", "level"]
+    );
+    assert!(super::watched_events(&["downloads".to_string()]).is_err());
+}
+
+#[test]
+fn an_event_prints_as_one_json_line() {
+    let pushed = banshee_common::JsonRpcNotification::new(
+        banshee_common::BANSHEE_CUE,
+        serde_json::json!({"cue": "arm"}),
+    );
+    let line = super::event_line(&pushed);
+    assert!(!line.contains('\n'));
+    let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed["method"], "banshee.cue");
+    assert_eq!(parsed["params"]["cue"], "arm");
+}

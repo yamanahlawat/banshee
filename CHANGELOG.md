@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A small rust capsule above the Dock shows what Banshee does.** On
+  macOS, the Banshee figure appears there while Banshee records, works, waits
+  for your answer or fails, and shows nothing at rest. The figure moves with
+  your voice. When an agent asks a question, it waits in headphones and tilts
+  its head in once you start answering. The menu bar icon draws this
+  figure. A new install starts on On screen, or on Both when VoiceOver is on.
+- **`banshee watch --events cues,level` prints each event as a JSON line.** Follow the
+  earcons and the microphone level from a script.
+- **`banshee.subscribe` takes the events `cues` and `level`, and a `draws` flag.** `draws`
+  marks the connection as a chip that draws the figure, so `visual` stays silent for it.
+- **`transcribing` now also covers the speech check and the typing.** `banshee watch`,
+  waybar and the menu bar icon report busy for the whole handling, not only the
+  transcription itself.
+
 ### Changed
 
 - **Breaking: Claude Code, Codex and Antigravity are sent back once to speak when a turn ends
@@ -15,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Rerun `banshee connect claude`: it replaces the old hook and removes
   `banshee-speak-check.sh`. Rerun `banshee connect codex` and `banshee connect antigravity` to
   add theirs, and trust the Codex hook once in `/hooks`. Restart each agent after.
+- **Breaking: `feedback.mode` replaces `audio.cues.enabled`.** It takes `sound`, `both`,
+  `visual` or `none`, and the window's Sounds row is now Feedback. `visual` (On screen in
+  the window) plays no earcons while the menu bar icon draws the figure, and plays every
+  sound with no menu bar icon running. `both` (Both in the window) adds every sound to the
+  figure. A file that still sets `audio.cues.enabled = false` reads as `none` until it sets
+  `feedback.mode`. `banshee config set audio.cues.enabled` is refused and names the new key.
 
 ### Fixed
 

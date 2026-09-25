@@ -34,6 +34,9 @@ pub enum CommandType {
         /// Emit Waybar custom-module JSON instead of one word
         #[clap(long)]
         waybar: bool,
+        /// Print these events as JSON lines instead: cues, level
+        #[clap(long, value_delimiter = ',', conflicts_with = "waybar")]
+        events: Vec<String>,
     },
     /// List the text-to-speech voices that are on disk
     Voices,
@@ -159,4 +162,19 @@ pub enum RecordAction {
         #[clap(long, conflicts_with = "dictate")]
         tell: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Cli;
+
+    #[test]
+    fn watch_refuses_waybar_together_with_events() {
+        Cli::try_parse_from(["banshee", "watch", "--events", "cues"])
+            .expect("events alone must parse");
+        Cli::try_parse_from(["banshee", "watch", "--waybar", "--events", "cues"])
+            .expect_err("waybar and events together must be refused");
+    }
 }
