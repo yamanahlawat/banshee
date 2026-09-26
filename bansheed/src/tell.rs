@@ -4,11 +4,13 @@
 //! so a second copy here would be a second version to keep correct.
 
 use crate::connect::Agent;
+use crate::text_to_speech::lock;
 use banshee_common::error::BansheeError;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 pub use crate::config::TellConfig;
@@ -185,8 +187,12 @@ pub fn argv_for(
         Headless::ClaudeCode => {
             let mut claude: Vec<String> = vec![
                 "--print".into(),
+                // Plain json is one object at the end, so a run killed at the
+                // deadline never names its thread. `--print` refuses
+                // stream-json without --verbose.
                 "--output-format".into(),
-                "json".into(),
+                "stream-json".into(),
+                "--verbose".into(),
                 "--permission-mode".into(),
                 "acceptEdits".into(),
                 // Without this the agent edits the config and stays silent.
@@ -211,8 +217,7 @@ pub fn argv_for(
     argv
 }
 
-/// The thread the agent just used. OpenCode names it on every NDJSON line;
-/// Claude Code names it once in a single object.
+/// The thread the agent just used. Both agents name it on every NDJSON line.
 pub fn session_id(agent: Headless, stdout: &str) -> Option<String> {
     let key = match agent {
         Headless::OpenCode => "sessionID",
@@ -665,14 +670,13 @@ fn opening_announcement(agent: Headless, resume_id: Option<&str>) -> Option<Stri
 }
 
 enum Ran {
-    /// `stdout_lost` says the read of stdout gave up before the bytes came. An
-    /// empty `output.stdout` then means the pipe stayed open, not that the
-    /// child stayed quiet. The session id and the reply are in there.
     Finished {
         output: std::process::Output,
-        stdout_lost: bool,
     },
-    TimedOut,
+    /// `stdout` holds what the child wrote before the kill.
+    TimedOut {
+        stdout: Vec<u8>,
+    },
 }
 
 /// A stated allowance, not a measurement, for a reader thread to finish once
@@ -703,71 +707,75 @@ fn run_bounded(
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let stdout_rx = drain(child.stdout.take().expect("stdout was piped"));
-    let stderr_rx = drain(child.stderr.take().expect("stderr was piped"));
+    let stdout = drain(child.stdout.take().expect("stdout was piped"));
+    let stderr = drain(child.stderr.take().expect("stderr was piped"));
 
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
-            let (stdout, stderr, stdout_lost) = collect_both(stdout_rx, stderr_rx);
+            let grace = Instant::now() + DRAIN_GRACE;
             return Ok(Ran::Finished {
                 output: std::process::Output {
                     status,
-                    stdout,
-                    stderr,
+                    stdout: stdout.collect_by(grace),
+                    stderr: stderr.collect_by(grace),
                 },
-                stdout_lost,
             });
         }
         if Instant::now() >= deadline {
             // A descendant the child left running can still hold the pipe's
-            // write end open. A kill of the child does not close it, so this
-            // waits on the child and never on the pipes.
+            // write end open. A kill of the child does not close it, so the
+            // read of stdout below is bounded by DRAIN_GRACE.
             let _ = child.kill();
             let _ = child.wait();
-            return Ok(Ran::TimedOut);
+            return Ok(Ran::TimedOut {
+                stdout: stdout.collect_by(Instant::now() + DRAIN_GRACE),
+            });
         }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-/// Reads a pipe to the end on its own thread, then sends the bytes. The caller
-/// gets a channel, not a `JoinHandle`.
+/// Reads a pipe on its own thread.
 ///
 /// A descendant can hold the write end open after the child is gone, so the
-/// send may never happen. Every read of this channel is bounded by
-/// `DRAIN_GRACE`, and an orphaned reader is never joined.
-fn drain(mut pipe: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = std::sync::mpsc::channel();
+/// read may never end. An orphaned reader is never joined.
+fn drain(mut pipe: impl Read + Send + 'static) -> Drain {
+    let read = Arc::new(Mutex::new(Vec::new()));
+    let (ended, end) = mpsc::channel();
+    let into = Arc::downgrade(&read);
     std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = pipe.read_to_end(&mut buf);
-        let _ = tx.send(buf);
+        let mut chunk = [0; 8192];
+        loop {
+            let count = match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            // After the collect the bytes go nowhere. The read goes on: a
+            // closed pipe would kill a descendant that still writes to it.
+            if let Some(read) = into.upgrade() {
+                lock(&read).extend_from_slice(&chunk[..count]);
+            }
+        }
+        let _ = ended.send(());
     });
-    rx
+    Drain { read, end }
 }
 
-/// Collects both channels concurrently, so two `DRAIN_GRACE` waits cost one
-/// `DRAIN_GRACE`, not two. Stderr carries no lost flag of its own: it only
-/// decorates the message of a run that already failed.
-fn collect_both(
-    stdout_rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    stderr_rx: std::sync::mpsc::Receiver<Vec<u8>>,
-) -> (Vec<u8>, Vec<u8>, bool) {
-    // This join cannot hang: the thread's own wait is bounded by DRAIN_GRACE.
-    let stderr_thread = std::thread::spawn(move || collect(stderr_rx).0);
-    let (stdout, stdout_lost) = collect(stdout_rx);
-    let stderr = stderr_thread.join().unwrap_or_default();
-    (stdout, stderr, stdout_lost)
+struct Drain {
+    read: Arc<Mutex<Vec<u8>>>,
+    end: mpsc::Receiver<()>,
 }
 
-/// The bytes, and whether the read gave up before they came.
-fn collect(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> (Vec<u8>, bool) {
-    match rx.recv_timeout(DRAIN_GRACE) {
-        Ok(bytes) => (bytes, false),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (Vec::new(), true),
-        // The reader ended without sending, so the pipe held nothing.
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => (Vec::new(), false),
+impl Drain {
+    /// Every byte read by the end of the pipe, or by `deadline`.
+    fn collect_by(self, deadline: Instant) -> Vec<u8> {
+        let _ = self
+            .end
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        std::mem::take(&mut *lock(&self.read))
     }
 }
 
@@ -804,23 +812,13 @@ pub struct Told {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Warning {
     DeniedTools(String),
-    LostOutput(String),
 }
 
 impl Warning {
     pub fn text(&self) -> &str {
         match self {
-            Warning::DeniedTools(line) | Warning::LostOutput(line) => line,
+            Warning::DeniedTools(line) => line,
         }
-    }
-
-    /// Whether the user perceives nothing at all. A refused `speak_status`
-    /// sounds like a run that worked, so only that kind needs a cue.
-    ///
-    /// A lost reply still reaches the user: the agent spoke over MCP while it
-    /// ran.
-    pub fn leaves_the_user_with_silence(&self) -> bool {
-        matches!(self, Warning::DeniedTools(_))
     }
 }
 
@@ -890,9 +888,31 @@ fn thread_to_show(
         ));
     };
     let Some(id) = resume(saved, &session.agent, now, window) else {
-        return Err("The last thread has timed out. Say something to start a new one.".into());
+        let Some(elapsed) = now.checked_sub(session.at) else {
+            return Err(
+                "The last thread is dated ahead of this clock. Say something to start a new one."
+                    .into(),
+            );
+        };
+        return Err(format!(
+            "The last saved thread is {} old, too old to open. Say something to start a new one.",
+            age(elapsed)
+        ));
     };
     Ok((agent, id))
+}
+
+/// Seconds as the largest whole unit a listener takes in at once. Minutes
+/// round up: a thread one second past the window is not the window's age.
+fn age(seconds: u64) -> String {
+    let minutes = seconds.div_ceil(60);
+    let (count, unit) = match minutes {
+        0..120 => (minutes, "minute"),
+        120..2_880 => (minutes / 60, "hour"),
+        _ => (minutes / 1_440, "day"),
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural}")
 }
 
 /// Opens the stored thread in a terminal, and runs no agent. The hotkey path
@@ -986,42 +1006,49 @@ pub fn run(words: &str, config: &TellConfig, notify: &dyn Fn(&str)) -> Result<To
         thread_window(config),
     );
     let argv = argv_for(agent, words, resume_id.as_deref(), &run_in, &present);
+    let deadline = run_deadline(config);
     let ran = announce_then_start(notify, agent, resume_id.as_deref(), || {
-        run_bounded(&program, &argv, &run_in, &env.path, run_deadline(config))
+        run_bounded(&program, &argv, &run_in, &env.path, deadline)
     })?;
-    let Ran::Finished {
-        output,
-        stdout_lost,
-    } = ran
-    else {
-        return Err(BansheeError::Rejected(timed_out(
-            agent,
-            run_deadline(config),
-        )));
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    finish(&state, agent, ran, deadline)
+}
 
-    let thread = thread_to_save(
-        session_id(agent, &stdout),
-        resume_id.as_deref(),
-        stdout_lost,
-    );
-    if let Some(id) = &thread {
+/// Saves the thread the run named, then turns the run into its answer. A run
+/// that timed out still saves: "show me" then opens how far the agent got.
+fn finish(
+    state: &Path,
+    agent: Headless,
+    ran: Ran,
+    deadline: Duration,
+) -> Result<Told, BansheeError> {
+    let (stdout, finished) = match &ran {
+        Ran::Finished { output } => (&output.stdout, Some(output)),
+        Ran::TimedOut { stdout } => (stdout, None),
+    };
+    let stdout = String::from_utf8_lossy(stdout);
+
+    let thread = session_id(agent, &stdout);
+    let saved = thread.as_ref().map_or(Ok(()), |id| {
         write_session(
-            &state,
+            state,
             &Session {
                 agent: agent.name().to_string(),
                 id: id.clone(),
                 at: now_seconds(),
             },
-        )?;
-    }
-    let mut warnings: Vec<Warning> = denied_warning(agent, &denied_tools(&stdout))
+        )
+    });
+    let Some(output) = finished else {
+        let mut said = timed_out(agent, deadline);
+        if let Err(cause) = saved {
+            said.push_str(&format!(" Its thread was not saved: {cause}"));
+        }
+        return Err(BansheeError::Rejected(said));
+    };
+    saved?;
+    let warnings: Vec<Warning> = denied_warning(agent, &denied_tools(&stdout))
         .into_iter()
         .collect();
-    if stdout_lost {
-        warnings.push(lost_output_warning(agent, thread.is_some()));
-    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(BansheeError::Other(
@@ -1059,34 +1086,6 @@ fn timed_out(agent: Headless, deadline: Duration) -> String {
         "{} did not answer within {minutes} minutes. Raise tell.run_timeout_min to give it longer.",
         agent.name()
     )
-}
-
-/// The thread to save. A lost stdout carries no id away. A resumed run still
-/// knows which thread it asked for, and "a bit more" needs it.
-fn thread_to_save(
-    found: Option<String>,
-    resume_id: Option<&str>,
-    stdout_lost: bool,
-) -> Option<String> {
-    match found {
-        Some(id) => Some(id),
-        None if stdout_lost => resume_id.map(str::to_string),
-        None => None,
-    }
-}
-
-/// What the user reads when the read of stdout gave up. `kept` says whether
-/// the thread survived, because the next command behaves differently.
-fn lost_output_warning(agent: Headless, kept: bool) -> Warning {
-    let thread = if kept {
-        "The thread is kept."
-    } else {
-        "The next command starts a new thread."
-    };
-    Warning::LostOutput(format!(
-        "{} finished, but its output did not arrive in time. Its reply is lost. {thread}",
-        agent.name()
-    ))
 }
 
 fn denied_warning(agent: Headless, denied: &[String]) -> Option<Warning> {

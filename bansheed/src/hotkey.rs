@@ -708,12 +708,7 @@ fn warn_tell(state: &DaemonState, cues: &Cues, warnings: &[crate::tell::Warning]
         .join(" ");
     log::warn!("tell warned: {reason}");
     state.set_tell_error(Some(reason));
-    if warnings
-        .iter()
-        .any(crate::tell::Warning::leaves_the_user_with_silence)
-    {
-        cues.send(Cue::Error);
-    }
+    cues.send(Cue::Error);
 }
 
 fn fail_tell(state: &DaemonState, cues: &Cues, reason: String) {
@@ -878,30 +873,6 @@ mod tell_tests {
         assert!(
             reason.contains("mcp__banshee__speak_status"),
             "status must name the tool: {reason}"
-        );
-        assert!(said_nothing(&lines));
-    }
-
-    #[test]
-    fn a_lost_reply_is_kept_for_status_without_a_cue() {
-        let (state, lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, sounded) = Cues::recording();
-        deliver_tell(&state, &cues, || {
-            Ok(Told {
-                reply: None,
-                warnings: vec![crate::tell::Warning::LostOutput(
-                    "opencode finished, but its output did not arrive in time.".to_string(),
-                )],
-            })
-        });
-        assert!(
-            sounded.try_recv().is_err(),
-            "the agent spoke while it ran, so the failure cue would say the run failed"
-        );
-        assert_eq!(
-            state.last_error(),
-            Some("opencode finished, but its output did not arrive in time.".to_string()),
-            "the loss still has to reach status"
         );
         assert!(said_nothing(&lines));
     }

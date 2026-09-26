@@ -357,3 +357,50 @@ fn a_daemon_that_answered_is_never_read_as_an_orphaned_socket() {
         "anything else".to_string()
     )));
 }
+
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
+#[tokio::test]
+async fn watch_ends_when_its_reader_closes_the_pipe() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    let gone = tokio::spawn(super::reader_gone(writer));
+    drop(reader);
+    tokio::time::timeout(SETTLE, gone)
+        .await
+        .expect("a closed reader must end the watch without a write")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn watch_ends_when_its_reader_closes_while_it_waits() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    let gone = tokio::spawn(super::reader_gone(writer));
+    tokio::time::sleep(SETTLE).await;
+    drop(reader);
+    tokio::time::timeout(SETTLE, gone)
+        .await
+        .expect("a reader that closes later must still end the watch")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn watch_keeps_running_while_its_reader_is_open() {
+    let (_reader, writer) = std::io::pipe().unwrap();
+    let gone = tokio::spawn(super::reader_gone(writer));
+    tokio::time::sleep(SETTLE).await;
+    assert!(
+        !gone.is_finished(),
+        "a reader that stays must keep the watch"
+    );
+    gone.abort();
+}
+
+#[tokio::test]
+async fn watch_into_a_file_never_reads_as_a_closed_reader() {
+    let dir = crate::test_support::scratch("watch-into-a-file");
+    let file = std::fs::File::create(dir.join("states")).unwrap();
+    let gone = tokio::spawn(super::reader_gone(file));
+    tokio::time::sleep(SETTLE).await;
+    assert!(!gone.is_finished(), "a file has no reader to lose");
+    gone.abort();
+}

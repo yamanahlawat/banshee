@@ -328,6 +328,8 @@ pub async fn watch(waybar: bool) -> Result<(), BansheeError> {
         };
     // No real line is empty, so the first one always prints
     let mut shown = String::new();
+    let gone = reader_gone(std::io::stdout());
+    tokio::pin!(gone);
     loop {
         let line = watch_line(
             waybar,
@@ -344,7 +346,11 @@ pub async fn watch(waybar: bool) -> Result<(), BansheeError> {
             }
             shown = line;
         }
-        state = match changes.next_of(banshee_common::BANSHEE_STATE_CHANGED).await {
+        let next = tokio::select! {
+            next = changes.next_of(banshee_common::BANSHEE_STATE_CHANGED) => next,
+            () = &mut gone => return Ok(()),
+        };
+        state = match next {
             Ok(Some(params)) => params,
             // There is no other clean end, so a supervisor can read the
             // exit code as one
@@ -354,6 +360,25 @@ pub async fn watch(waybar: bool) -> Result<(), BansheeError> {
             }
             Err(error) => return Err(error),
         };
+    }
+}
+
+/// Ends when the reader of `out` closes it. A closed reader fails only the
+/// next write, and an idle daemon sends nothing to write. Output that cannot be
+/// polled, such as a file, has no reader to lose, so this never ends.
+async fn reader_gone(out: impl std::os::fd::AsRawFd) {
+    let Ok(out) = tokio::io::unix::AsyncFd::with_interest(out, tokio::io::Interest::WRITABLE)
+    else {
+        return std::future::pending().await;
+    };
+    loop {
+        let Ok(mut ready) = out.writable().await else {
+            return std::future::pending().await;
+        };
+        if ready.ready().is_write_closed() {
+            return;
+        }
+        ready.clear_ready();
     }
 }
 

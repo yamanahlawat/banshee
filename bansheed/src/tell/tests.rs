@@ -243,7 +243,8 @@ fn claude_is_allowed_to_speak_and_to_reach_the_folders() {
         vec![
             "--print",
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
             "--permission-mode",
             "acceptEdits",
             "--allowedTools",
@@ -493,10 +494,13 @@ fn one_run_at_a_time_and_the_lock_frees_when_it_ends() {
             "a command is already running. Try again once it finishes."
         );
     }
-    assert!(
-        RunLock::take(&dir).unwrap().is_some(),
-        "the lock must free on drop"
-    );
+    // Another test's child can hold a copy of the lock until it runs its
+    // program. Measured over 40 parallel runs: held at most 0.35 ms after drop.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while RunLock::take(&dir).unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the lock must free on drop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -590,11 +594,128 @@ fn a_child_past_its_deadline_is_killed_rather_than_waited_on() {
         std::time::Duration::from_millis(200),
     )
     .unwrap();
-    assert!(matches!(ran, Ran::TimedOut));
+    assert!(matches!(ran, Ran::TimedOut { .. }));
     assert!(
         start.elapsed() < std::time::Duration::from_secs(2),
         "the wait must not run out the child's own sleep"
     );
+}
+
+#[test]
+fn a_child_past_its_deadline_keeps_what_it_wrote_before_the_kill() {
+    // Each agent names its thread on the first line it writes, long before a
+    // hung tool runs out the deadline.
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let sh = crate::status::resolve("sh", &path).expect("sh must be on PATH to test this");
+    let ran = run_bounded(
+        &sh,
+        &[
+            "-c".to_string(),
+            "echo first-line; exec sleep 5".to_string(),
+        ],
+        &std::env::temp_dir(),
+        &path,
+        std::time::Duration::from_millis(500),
+    )
+    .unwrap();
+    let Ran::TimedOut { stdout } = ran else {
+        panic!("a child that outlives its deadline must read as timed out");
+    };
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "first-line");
+}
+
+#[test]
+fn a_timed_out_child_keeps_what_it_wrote_while_a_descendant_holds_the_pipe() {
+    // `opencode run` names its thread first, and its server outlives the kill.
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let sh = crate::status::resolve("sh", &path).expect("sh must be on PATH to test this");
+    let ran = run_bounded(
+        &sh,
+        &[
+            "-c".to_string(),
+            "echo first-line; sleep 5 & exec sleep 5".to_string(),
+        ],
+        &std::env::temp_dir(),
+        &path,
+        std::time::Duration::from_millis(500),
+    )
+    .unwrap();
+    let Ran::TimedOut { stdout } = ran else {
+        panic!("a child that outlives its deadline must read as timed out");
+    };
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "first-line");
+}
+
+#[test]
+fn a_collect_waits_for_bytes_that_arrive_inside_the_grace() {
+    use std::io::Write;
+
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let late = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        writer.write_all(b"late").unwrap();
+    });
+    assert_eq!(
+        drain(reader).collect_by(Instant::now() + DRAIN_GRACE),
+        b"late"
+    );
+    late.join().unwrap();
+}
+
+/// The first line each agent writes, in the shape measured from its own output.
+fn first_line(agent: Headless) -> &'static str {
+    match agent {
+        Headless::OpenCode => {
+            "{\"type\":\"step_start\",\"sessionID\":\"ses_hung\",\"part\":{\"type\":\"step-start\"}}\n"
+        }
+        Headless::ClaudeCode => {
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"ses_hung\"}\n"
+        }
+    }
+}
+
+#[test]
+fn a_run_that_times_out_still_saves_the_thread_it_named() {
+    for agent in Headless::ALL {
+        let state = crate::test_support::scratch(&format!("tell-timeout-saves-{}", agent.name()));
+        let ran = Ran::TimedOut {
+            stdout: first_line(agent).as_bytes().to_vec(),
+        };
+        let error = finish(&state, agent, ran, span(5)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("did not answer within 5 minutes"),
+            "{error}"
+        );
+        let session = read_session(&state).expect("the hung thread must be saved");
+        assert_eq!(
+            (session.agent.as_str(), session.id.as_str()),
+            (agent.name(), "ses_hung"),
+            "\"show me\" opens this thread, so the user sees how far the agent got"
+        );
+    }
+}
+
+#[test]
+fn a_thread_that_cannot_be_saved_does_not_hide_the_timeout() {
+    let missing = crate::test_support::scratch("tell-timeout-unsaved").join("gone");
+    let ran = Ran::TimedOut {
+        stdout: first_line(Headless::OpenCode).as_bytes().to_vec(),
+    };
+    let error = finish(&missing, Headless::OpenCode, ran, span(5)).unwrap_err();
+    let said = error.to_string();
+    assert!(said.contains("did not answer within 5 minutes"), "{said}");
+    assert!(said.contains("not saved"), "{said}");
+}
+
+#[test]
+fn a_run_that_times_out_before_naming_a_thread_leaves_the_saved_one() {
+    let state = crate::test_support::scratch("tell-timeout-nothing");
+    write_session(&state, &saved("opencode", 1_000)).unwrap();
+    let ran = Ran::TimedOut { stdout: Vec::new() };
+    finish(&state, Headless::OpenCode, ran, span(5)).unwrap_err();
+    assert_eq!(read_session(&state), Some(saved("opencode", 1_000)));
 }
 
 #[test]
@@ -609,19 +730,11 @@ fn a_child_that_finishes_in_time_is_read_normally() {
         std::time::Duration::from_secs(5),
     )
     .unwrap();
-    let Ran::Finished {
-        output,
-        stdout_lost,
-    } = ran
-    else {
+    let Ran::Finished { output } = ran else {
         panic!("a command that finishes in time must not read as timed out");
     };
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
-    assert!(
-        !stdout_lost,
-        "a pipe that closed must not read as a lost one"
-    );
 }
 
 #[test]
@@ -637,8 +750,7 @@ fn a_descendant_holding_the_pipe_does_not_hold_the_call_open() {
         &sh,
         &[
             "-c".to_string(),
-            // The echo proves the loss: the child did write, and the bytes sit
-            // in a pipe the backgrounded sleep still holds open.
+            // The echo lands in a pipe the backgrounded sleep still holds open.
             "echo written-but-unread; sleep 100 & exit 0".to_string(),
         ],
         &std::env::temp_dir(),
@@ -646,25 +758,17 @@ fn a_descendant_holding_the_pipe_does_not_hold_the_call_open() {
         std::time::Duration::from_secs(5),
     )
     .unwrap();
-    let Ran::Finished {
-        output,
-        stdout_lost,
-    } = ran
-    else {
+    let Ran::Finished { output } = ran else {
         panic!("a child that exits must not read as timed out");
     };
     assert!(
         start.elapsed() < std::time::Duration::from_secs(5),
         "a descendant holding the pipe must not hold the call open"
     );
-    assert!(
-        output.stdout.is_empty(),
-        "the read gave up, so nothing arrived"
-    );
-    assert!(
-        stdout_lost,
-        "empty output here must not read as a quiet child: the reply and the \
-         session id were both in there"
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "written-but-unread",
+        "the reply and the session id are in what the child wrote"
     );
 }
 
@@ -1455,8 +1559,31 @@ fn a_run_that_never_happened_is_said_rather_than_shown() {
 #[test]
 fn a_thread_past_the_window_is_said_rather_than_shown() {
     let session = saved("opencode", 1_000);
-    let answer = thread_to_show(Some(&session), 1_000 + 11 * 60, span(10)).unwrap_err();
-    assert!(answer.contains("timed out"), "{answer}");
+    let answer = thread_to_show(Some(&session), 1_000 + 10 * 60 + 1, span(10)).unwrap_err();
+    assert!(
+        answer.contains("11 minutes old, too old to open"),
+        "{answer}"
+    );
+}
+
+#[test]
+fn an_old_thread_says_its_age_rather_than_that_it_timed_out() {
+    // "Timed out" reads as the run's own timeout, not the thread's.
+    let session = saved("opencode", 1_000);
+    let answer = thread_to_show(Some(&session), 1_000 + 5 * 24 * 60 * 60, span(10)).unwrap_err();
+    assert!(answer.contains("5 days old"), "{answer}");
+    assert!(!answer.contains("timed out"), "{answer}");
+}
+
+#[test]
+fn an_age_uses_the_largest_whole_unit() {
+    assert_eq!(age(1), "1 minute");
+    assert_eq!(age(60), "1 minute");
+    assert_eq!(age(61), "2 minutes");
+    assert_eq!(age(119 * 60), "119 minutes");
+    assert_eq!(age(2 * 60 * 60), "2 hours");
+    assert_eq!(age(47 * 60 * 60), "47 hours");
+    assert_eq!(age(48 * 60 * 60), "2 days");
 }
 
 #[test]
@@ -1681,53 +1808,6 @@ fn show_opens_nothing_when_there_is_no_thread() {
     assert!(
         !dir.join("kitty.args").exists(),
         "an empty agent must not be opened"
-    );
-}
-
-#[test]
-fn a_lost_stdout_keeps_the_thread_the_run_asked_to_resume() {
-    assert_eq!(
-        thread_to_save(None, Some("ses_one"), true),
-        Some("ses_one".to_string()),
-        "the run knows the thread it asked for, and \"a bit more\" needs it"
-    );
-}
-
-#[test]
-fn a_lost_stdout_on_a_fresh_thread_saves_nothing() {
-    assert_eq!(thread_to_save(None, None, true), None);
-}
-
-#[test]
-fn an_id_in_the_output_wins_over_the_one_the_run_asked_for() {
-    assert_eq!(
-        thread_to_save(Some("ses_two".to_string()), Some("ses_one"), true),
-        Some("ses_two".to_string())
-    );
-}
-
-#[test]
-fn a_read_that_finished_saves_only_what_the_output_named() {
-    // Without the `stdout_lost` guard a resumed run with no id in its output
-    // would keep writing the same thread back for ever.
-    assert_eq!(thread_to_save(None, Some("ses_one"), false), None);
-}
-
-#[test]
-fn a_lost_reply_says_whether_the_thread_survived() {
-    assert_eq!(
-        lost_output_warning(Headless::OpenCode, true),
-        Warning::LostOutput(
-            "opencode finished, but its output did not arrive in time. Its reply is lost. \
-             The thread is kept."
-                .to_string()
-        )
-    );
-    assert!(
-        lost_output_warning(Headless::OpenCode, false)
-            .text()
-            .ends_with("starts a new thread."),
-        "a lost thread must not read as a kept one"
     );
 }
 
