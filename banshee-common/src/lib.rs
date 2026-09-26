@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod cue;
 pub mod error;
+pub mod feedback;
 pub mod logging;
 pub mod utils;
 
@@ -136,6 +138,8 @@ pub const BANSHEE_OPEN_PERMISSION: &str = "banshee.open_permission";
 // Sent by the daemon, not called by a client
 pub const BANSHEE_STATE_CHANGED: &str = "banshee.state_changed";
 pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
+pub const BANSHEE_CUE: &str = "banshee.cue";
+pub const BANSHEE_LEVEL: &str = "banshee.level";
 
 /// The codes a reply carries. JSON-RPC reserves -32700 to -32600; the
 /// -32000 block is this daemon's, one code per fix a client can offer.
@@ -162,6 +166,8 @@ pub mod rpc_code {
 // What `banshee.subscribe` accepts in `events`, spelled once for both sides
 pub const EVENT_STATE: &str = "state";
 pub const EVENT_DOWNLOADS: &str = "downloads";
+pub const EVENT_CUES: &str = "cues";
+pub const EVENT_LEVEL: &str = "level";
 
 /// The microphone the daemon records from. A `banshee.status` reply and a
 /// `state_changed` push both carry it, so a subscriber reads it from every
@@ -220,6 +226,11 @@ pub fn microphone_label(open: Option<&str>, missing: Option<&str>) -> String {
     }
 }
 
+/// True only where `state[name]` is JSON's own `true`.
+pub fn flag(state: &Value, name: &str) -> bool {
+    state.get(name).and_then(Value::as_bool) == Some(true)
+}
+
 /// What the daemon is doing, read from the `armed`, `recording`, `speaking`,
 /// `transcribing` and `telling` flags. Both a `banshee.status` reply and a
 /// `state_changed` push carry them. The ranking is defined here; `stateWord`
@@ -246,14 +257,16 @@ impl Activity {
     // part of ranks under all three: a speaker the user can hear says more
     // than a machine they cannot.
     pub fn of(state: &Value) -> Self {
-        let flag = |name| state.get(name).and_then(Value::as_bool) == Some(true);
-        if flag("armed") {
+        if flag(state, "armed") {
             Activity::Listening
-        } else if flag("recording") {
+        } else if flag(state, "recording") {
             Activity::Recording
-        } else if flag("speaking") {
+        } else if flag(state, "speaking") {
             Activity::Speaking
-        } else if flag("transcribing") || flag("telling") || flag("loading_model") {
+        } else if flag(state, "transcribing")
+            || flag(state, "telling")
+            || flag(state, "loading_model")
+        {
             Activity::Busy
         } else {
             Activity::Idle

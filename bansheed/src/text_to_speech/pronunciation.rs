@@ -190,9 +190,10 @@ mod tests {
         let mut g2p = G2P::new(Language::EnglishUS);
         super::install_dictionary(&mut g2p);
         for (word, expected) in super::DICTIONARY {
-            let mut chars = word.chars();
-            let first = chars.next().unwrap().to_uppercase().collect::<String>();
-            let sentence = format!("{first}{} is fine.", chars.as_str());
+            let sentence = format!(
+                "{} is fine.",
+                crate::speech_to_text::local::languages::capitalised(word)
+            );
             let (phonemes, _) = g2p.g2p(&sentence).unwrap();
             assert!(
                 phonemes.contains(expected),

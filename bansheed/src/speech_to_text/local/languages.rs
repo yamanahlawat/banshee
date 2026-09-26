@@ -18,15 +18,17 @@ pub fn all() -> Vec<Language> {
 /// device and voice names that are not.
 fn titled(name: &str) -> String {
     name.split(' ')
-        .map(|word| {
-            let mut letters = word.chars();
-            match letters.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + letters.as_str(),
-                None => String::new(),
-            }
-        })
+        .map(capitalised)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub(crate) fn capitalised(text: &str) -> String {
+    let mut letters = text.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + letters.as_str(),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]

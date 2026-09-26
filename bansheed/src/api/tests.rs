@@ -696,9 +696,71 @@ async fn a_second_download_is_refused_while_one_runs() {
         panic!("expected the busy error");
     };
     assert_eq!(error.code, rpc_code::DOWNLOAD_RUNNING);
+    assert!(
+        !state.config_path().exists(),
+        "a refused download chooses no feedback mode"
+    );
 
     drop(slot);
     assert!(state.start_downloading().is_some(), "the slot came back");
+}
+
+#[cfg(target_os = "macos")]
+fn slow_voiceover() -> bool {
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    true
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_first_download_writes_the_mode_into_the_daemons_own_config_after_the_reply() {
+    let state = Arc::new(DaemonState::new(
+        Arc::new(crate::config::Config::default()),
+        None,
+        crate::text_to_speech::SpeechPlayer::default(),
+        crate::text_to_speech::Speaker::Fallback,
+        std::sync::mpsc::channel().0,
+        crate::audio::cues::Cues::silent(),
+        crate::state::Machine {
+            voiceover: slow_voiceover,
+            ..crate::test_support::scratch_machine("api-first-run")
+        },
+    ));
+    // A port nothing listens on, so the fetch fails at once and off the network
+    state.set_wanted_downloads(vec![crate::models::download::Download {
+        megabytes: 1,
+        name: "no-such-model-4c1d.bin".to_string(),
+        url: "http://127.0.0.1:9/no-such-model-4c1d.bin".to_string(),
+    }]);
+
+    let JsonRpcResponse::Success { .. } =
+        dispatch(request(BANSHEE_DOWNLOAD_MODELS, None), &state).await
+    else {
+        panic!("expected the download to start");
+    };
+    assert!(
+        !state.config_path().exists(),
+        "the reply does not wait on the VoiceOver read"
+    );
+
+    let written = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(written) = std::fs::read_to_string(state.config_path()) {
+                return written;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the mode lands in the config the daemon state names");
+    assert_eq!(
+        crate::config::Config::parse(&written)
+            .unwrap()
+            .feedback
+            .mode,
+        Some(crate::config::FeedbackMode::Both),
+        "{written}"
+    );
 }
 
 #[tokio::test]
@@ -880,7 +942,7 @@ async fn speak_passes_the_voice_parameter_to_the_backend() {
         crate::text_to_speech::Speaker::Fallback,
         std::sync::mpsc::channel().0,
         crate::audio::cues::Cues::silent(),
-        crate::test_support::scratch("api-models"),
+        crate::test_support::scratch_machine("api-models"),
     ));
 
     let response = dispatch(
@@ -1210,7 +1272,7 @@ fn dictate_and_tell_together_are_refused_rather_than_guessed() {
 // that cannot record.
 #[tokio::test]
 async fn status_says_the_pipeline_is_opening_until_it_stands() {
-    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+    let state = crate::test_support::daemon_state_before_the_pipeline();
 
     let opening = dispatch(request(BANSHEE_STATUS, None), &state).await;
     let JsonRpcResponse::Success { result, .. } = opening else {
@@ -1257,7 +1319,7 @@ fn anything_that_stops_banshee_working_is_not_ready() {
 
 #[tokio::test]
 async fn ask_user_is_refused_while_the_pipeline_is_still_opening() {
-    let state = crate::test_support::daemon_state_before_the_pipeline(std::sync::mpsc::channel().0);
+    let state = crate::test_support::daemon_state_before_the_pipeline();
 
     let asked = request(
         BANSHEE_ASK_USER,

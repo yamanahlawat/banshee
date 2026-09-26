@@ -1,7 +1,7 @@
 use banshee_common::utils::socket_path;
 use banshee_common::{
-    BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_STATE_CHANGED, BANSHEE_SUBSCRIBE, DownloadProgress,
-    JsonRpcNotification, JsonRpcRequest, SileroVADConfig, error::BansheeError,
+    BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED,
+    BANSHEE_SUBSCRIBE, JsonRpcNotification, JsonRpcRequest, SileroVADConfig, error::BansheeError,
 };
 use std::fs;
 use std::io;
@@ -133,7 +133,7 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
     let output = Arc::new(text_to_speech::output::Output::lazy());
     let speech = text_to_speech::select_backend(&config.tts, faults, Arc::clone(&output))?;
     let (commands, command_receiver) = std::sync::mpsc::channel();
-    let cues = audio::cues::start_cue_player(config.audio.cues.enabled, output);
+    let cues = audio::cues::start_cue_player(config.feedback_mode(), output);
     let daemon_state = Arc::new(DaemonState::new(
         Arc::clone(&config),
         db_connection,
@@ -141,8 +141,13 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         speech.speaker,
         commands,
         cues.clone(),
-        models::download::models_dir()?,
+        crate::state::Machine {
+            models: models::download::models_dir()?,
+            config: Config::path()?,
+            voiceover: crate::settings::voiceover_on,
+        },
     ));
+    tokio::spawn(crate::level::sample(Arc::clone(&daemon_state)));
 
     if let Some(reason) = speech.fault {
         daemon_state.set_last_speech_error(Some(reason));
@@ -286,9 +291,13 @@ async fn write_line(
     writer.write_all(line.as_bytes()).await
 }
 
+#[derive(Default)]
 struct Events {
     state: bool,
     downloads: bool,
+    cues: bool,
+    level: bool,
+    draws: bool,
 }
 
 // What a `subscribe` call asked to be sent. Absent means state alone, so a
@@ -300,32 +309,54 @@ fn requested_events(params: Option<&serde_json::Value>) -> Events {
     else {
         return Events {
             state: true,
-            downloads: false,
+            ..Default::default()
         };
     };
     let asked = |name: &str| named.iter().any(|event| event.as_str() == Some(name));
     Events {
         state: asked(banshee_common::EVENT_STATE),
         downloads: asked(banshee_common::EVENT_DOWNLOADS),
+        cues: asked(banshee_common::EVENT_CUES),
+        level: asked(banshee_common::EVENT_LEVEL),
+        draws: params
+            .and_then(|params| params.get("draws"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
     }
 }
 
-async fn push_downloads(
+// A receiver that lags skips what it missed, because what still comes is worth having.
+async fn push_broadcast<T: serde::Serialize + Clone>(
     writer: Arc<Mutex<OwnedWriteHalf>>,
-    mut downloads: broadcast::Receiver<DownloadProgress>,
+    mut rx: broadcast::Receiver<T>,
+    method: &'static str,
 ) {
     loop {
-        let progress = match downloads.recv().await {
-            Ok(progress) => progress,
-            // Too far behind to catch up on the ones it missed, but the ones
-            // still coming are worth having
+        let value = match rx.recv().await {
+            Ok(value) => value,
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         };
-        let Ok(params) = serde_json::to_value(progress) else {
+        let Ok(params) = serde_json::to_value(value) else {
             continue;
         };
-        let notification = JsonRpcNotification::new(BANSHEE_DOWNLOAD_PROGRESS, params);
+        let notification = JsonRpcNotification::new(method, params);
+        if write_line(&mut *writer.lock().await, &notification)
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+async fn push_level(writer: Arc<Mutex<OwnedWriteHalf>>, mut level: watch::Receiver<f32>) {
+    while level.changed().await.is_ok() {
+        let now = *level.borrow_and_update();
+        // `f64::from` gives the f32 a long binary tail, which the rounding cuts.
+        let now = (f64::from(now) * 1000.0).round() / 1000.0;
+        let notification =
+            JsonRpcNotification::new(BANSHEE_LEVEL, serde_json::json!({"level": now}));
         if write_line(&mut *writer.lock().await, &notification)
             .await
             .is_err()
@@ -346,6 +377,7 @@ struct StateWatches {
     pipeline: watch::Receiver<crate::state::Pipeline>,
     last_error: watch::Receiver<Option<crate::state::Failed>>,
     last_speech_error: watch::Receiver<Option<String>>,
+    feedback: watch::Receiver<crate::config::FeedbackMode>,
 }
 
 /// Sends one connection its state changes, until the daemon stops or the client
@@ -369,6 +401,7 @@ async fn push_changes(
             woken = watches.pipeline.changed() => woken,
             woken = watches.last_error.changed() => woken,
             woken = watches.last_speech_error.changed() => woken,
+            woken = watches.feedback.changed() => woken,
         };
         if woken.is_err() {
             break;
@@ -399,6 +432,10 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
     // that has none
     let mut pushing_state: Option<tokio::task::JoinHandle<()>> = None;
     let mut pushing_downloads: Option<tokio::task::JoinHandle<()>> = None;
+    let mut pushing_cues: Option<tokio::task::JoinHandle<()>> = None;
+    let mut pushing_level: Option<tokio::task::JoinHandle<()>> = None;
+    let mut drawn: Option<crate::audio::cues::Drawn> = None;
+    let mut watching_level: Option<crate::state::LevelWatch> = None;
     // A request that arrived while an earlier call was still running. The
     // connection is read throughout a call, so a pipelined one cannot be lost.
     let mut queued: std::collections::VecDeque<String> = std::collections::VecDeque::new();
@@ -429,10 +466,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         let asked = if request.method == BANSHEE_SUBSCRIBE {
             requested_events(request.params.as_ref())
         } else {
-            Events {
-                state: false,
-                downloads: false,
-            }
+            Events::default()
         };
         let opening_state = (asked.state && pushing_state.is_none()).then(|| {
             (
@@ -446,12 +480,23 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
                     pipeline: state.subscribe_pipeline(),
                     last_error: state.subscribe_last_error(),
                     last_speech_error: state.subscribe_last_speech_error(),
+                    feedback: state.subscribe_feedback(),
                 },
                 live_state(&state),
             )
         });
         let opening_downloads =
             (asked.downloads && pushing_downloads.is_none()).then(|| state.subscribe_downloads());
+        let opening_cues =
+            (asked.cues && pushing_cues.is_none()).then(|| state.cues().subscribe_signals());
+        let opening_level =
+            (asked.level && pushing_level.is_none()).then(|| state.subscribe_level());
+        if asked.cues && asked.draws && drawn.is_none() {
+            drawn = Some(state.cues().drawn());
+        }
+        if asked.level && watching_level.is_none() {
+            watching_level = Some(state.watch_level());
+        }
 
         // Watched while it runs: `ask_user` parks here for minutes holding the
         // microphone, and a client that goes away in the meantime is asking
@@ -483,11 +528,33 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             )));
         }
         if let Some(downloads) = opening_downloads {
-            pushing_downloads = Some(tokio::spawn(push_downloads(Arc::clone(&writer), downloads)));
+            pushing_downloads = Some(tokio::spawn(push_broadcast(
+                Arc::clone(&writer),
+                downloads,
+                BANSHEE_DOWNLOAD_PROGRESS,
+            )));
+        }
+        if let Some(signals) = opening_cues {
+            pushing_cues = Some(tokio::spawn(push_broadcast(
+                Arc::clone(&writer),
+                signals,
+                BANSHEE_CUE,
+            )));
+        }
+        if let Some(level) = opening_level {
+            pushing_level = Some(tokio::spawn(push_level(Arc::clone(&writer), level)));
         }
     }
 
-    for task in [pushing_state, pushing_downloads].into_iter().flatten() {
+    for task in [
+        pushing_state,
+        pushing_downloads,
+        pushing_cues,
+        pushing_level,
+    ]
+    .into_iter()
+    .flatten()
+    {
         task.abort();
     }
 }

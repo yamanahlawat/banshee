@@ -44,6 +44,15 @@ impl Default for AudioCuesConfig {
     }
 }
 
+pub use banshee_common::feedback::FeedbackMode;
+
+// `None` is a file that never chose, and `Config::feedback_mode` resolves it.
+#[derive(Deserialize, Serialize, Debug, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeedbackConfig {
+    pub mode: Option<FeedbackMode>,
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
@@ -453,6 +462,7 @@ impl TellConfig {
 pub struct Config {
     pub daemon: DaemonConfig,
     pub audio: AudioConfig,
+    pub feedback: FeedbackConfig,
     pub stt: STTConfig,
     pub tts: TTSConfig,
     pub tell: TellConfig,
@@ -475,7 +485,7 @@ impl Config {
 
     /// Parses a config document, and refuses an `api_key` in it.
     pub fn parse(text: &str) -> Result<Self, BansheeError> {
-        toml::from_str(text).map_err(|error| {
+        let mut config: Config = toml::from_str(text).map_err(|error| {
             // toml renders a parse error with the offending line above it, so
             // the parser's own text would carry the key into stderr, the log and
             // an RPC reply. Every other fault keeps its span, which is how a
@@ -485,6 +495,18 @@ impl Config {
             } else {
                 error.into()
             }
+        })?;
+        // The window reads the mode from the status reply, so a parsed config carries the
+        // resolved mode.
+        config.feedback.mode = Some(config.feedback_mode());
+        Ok(config)
+    }
+
+    pub fn feedback_mode(&self) -> FeedbackMode {
+        self.feedback.mode.unwrap_or(if self.audio.cues.enabled {
+            FeedbackMode::Both
+        } else {
+            FeedbackMode::Off
         })
     }
 
@@ -586,6 +608,51 @@ mod tests {
             error.to_string().contains("start"),
             "the error must name the offending key: {error}"
         );
+    }
+
+    #[test]
+    fn an_absent_feedback_mode_keeps_both() {
+        let config = Config::parse("").unwrap();
+        assert_eq!(config.feedback_mode(), FeedbackMode::Both);
+    }
+
+    #[test]
+    fn an_old_cue_switch_that_is_off_reads_as_none() {
+        let config = Config::parse("[audio.cues]\nenabled = false\n").unwrap();
+        assert_eq!(config.feedback_mode(), FeedbackMode::Off);
+    }
+
+    #[test]
+    fn the_feedback_mode_wins_over_the_old_cue_switch() {
+        let config =
+            Config::parse("[audio.cues]\nenabled = false\n[feedback]\nmode = \"both\"\n").unwrap();
+        assert_eq!(config.feedback_mode(), FeedbackMode::Both);
+    }
+
+    #[test]
+    fn every_feedback_mode_is_read_by_its_word() {
+        for (word, mode) in [
+            ("visual", FeedbackMode::Visual),
+            ("sound", FeedbackMode::Sound),
+            ("both", FeedbackMode::Both),
+            ("none", FeedbackMode::Off),
+        ] {
+            let config = Config::parse(&format!("[feedback]\nmode = \"{word}\"\n")).unwrap();
+            assert_eq!(config.feedback_mode(), mode);
+            assert_eq!(mode.word(), word);
+        }
+    }
+
+    #[test]
+    fn an_unknown_feedback_mode_is_refused() {
+        assert!(Config::parse("[feedback]\nmode = \"chip\"\n").is_err());
+    }
+
+    #[test]
+    fn a_parsed_config_serializes_the_resolved_mode() {
+        let config = Config::parse("[audio.cues]\nenabled = false\n").unwrap();
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["feedback"]["mode"], "none");
     }
 
     // A removed key is refused by name, the way every other removed key is.

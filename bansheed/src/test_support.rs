@@ -48,6 +48,19 @@ pub fn unique_scratch(prefix: &str) -> PathBuf {
     scratch(&format!("{prefix}-{serial}"))
 }
 
+/// A models folder and a config path inside a fresh temp directory, and
+/// VoiceOver off, so no test reads or writes the machine that runs it.
+pub fn scratch_machine(prefix: &str) -> crate::state::Machine {
+    let dir = unique_scratch(prefix);
+    let models = dir.join("models");
+    std::fs::create_dir_all(&models).unwrap();
+    crate::state::Machine {
+        models,
+        config: dir.join("config.toml"),
+        voiceover: || false,
+    }
+}
+
 /// The daemon runs under a supervisor that hands it a short PATH, so a system
 /// tool is named by where it lives. This checks it lives there.
 pub fn tool_is_installed(path: &str) {
@@ -227,16 +240,8 @@ fn state(
 
 /// A daemon caught before its pipeline stands, which is what the real one is
 /// from `claim()` until the build thread finishes.
-pub fn daemon_state_before_the_pipeline(
-    commands: std::sync::mpsc::Sender<ConsumerCommand>,
-) -> Arc<DaemonState> {
-    fresh(
-        Config::default(),
-        None,
-        SpeechPlayer::new(Box::new(NullBackend)),
-        Speaker::Fallback,
-        commands,
-    )
+pub fn daemon_state_before_the_pipeline() -> Arc<DaemonState> {
+    daemon_state_before_the_pipeline_with_cues(crate::audio::cues::Cues::silent())
 }
 
 /// Every other fixture stands for a daemon whose pipeline is up, which is the
@@ -253,6 +258,25 @@ fn state_running(
     state
 }
 
+pub fn daemon_state_with_cues(cues: crate::audio::cues::Cues) -> Arc<DaemonState> {
+    let state = daemon_state_before_the_pipeline_with_cues(cues);
+    state.set_pipeline(crate::state::Pipeline::Open);
+    state
+}
+
+pub fn daemon_state_before_the_pipeline_with_cues(
+    cues: crate::audio::cues::Cues,
+) -> Arc<DaemonState> {
+    built(
+        Config::default(),
+        None,
+        SpeechPlayer::new(Box::new(NullBackend)),
+        Speaker::Fallback,
+        std::sync::mpsc::channel().0,
+        cues,
+    )
+}
+
 fn fresh(
     config: Config,
     history: Option<rusqlite::Connection>,
@@ -260,14 +284,32 @@ fn fresh(
     speaker: Speaker,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
 ) -> Arc<DaemonState> {
+    built(
+        config,
+        history,
+        speech,
+        speaker,
+        commands,
+        crate::audio::cues::Cues::silent(),
+    )
+}
+
+fn built(
+    config: Config,
+    history: Option<rusqlite::Connection>,
+    speech: SpeechPlayer,
+    speaker: Speaker,
+    commands: std::sync::mpsc::Sender<ConsumerCommand>,
+    cues: crate::audio::cues::Cues,
+) -> Arc<DaemonState> {
     Arc::new(DaemonState::new(
         Arc::new(config),
         history,
         speech,
         speaker,
         commands,
-        crate::audio::cues::Cues::silent(),
-        unique_scratch("models"),
+        cues,
+        scratch_machine("models"),
     ))
 }
 

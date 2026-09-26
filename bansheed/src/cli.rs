@@ -316,7 +316,61 @@ pub async fn voices() -> Result<(), BansheeError> {
     Ok(())
 }
 
-pub async fn watch(waybar: bool) -> Result<(), BansheeError> {
+fn watched_events(names: &[String]) -> Result<Vec<&'static str>, BansheeError> {
+    names
+        .iter()
+        .map(|name| match name.as_str() {
+            "cues" => Ok(banshee_common::EVENT_CUES),
+            "level" => Ok(banshee_common::EVENT_LEVEL),
+            other => Err(BansheeError::Rejected(format!(
+                "'{other}' is not an event watch prints. Use cues or level."
+            ))),
+        })
+        .collect()
+}
+
+fn event_line(notification: &banshee_common::JsonRpcNotification) -> String {
+    serde_json::to_string(notification).expect("a notification always serializes")
+}
+
+async fn watch_events(events: &[&str]) -> Result<(), BansheeError> {
+    let (_, mut pushed) = match utils::Subscription::open(events).await {
+        Ok(subscription) => subscription,
+        Err(error) if daemon_is_down(&error) => {
+            eprintln!("Daemon is not running.");
+            std::process::exit(1);
+        }
+        Err(error) => return Err(error),
+    };
+    let gone = reader_gone(std::io::stdout());
+    tokio::pin!(gone);
+    loop {
+        let next = tokio::select! {
+            next = pushed.next() => next?,
+            () = &mut gone => return Ok(()),
+        };
+        match next {
+            Some(notification) => {
+                // `banshee watch --events … | head` closes the pipe: the reader
+                // has seen enough, and this command did not fail.
+                if writeln!(std::io::stdout(), "{}", event_line(&notification)).is_err() {
+                    return Ok(());
+                }
+            }
+            // There is no other clean end, so a supervisor can read the
+            // exit code as one
+            None => {
+                eprintln!("The daemon closed the connection.");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+pub async fn watch(waybar: bool, events: Vec<String>) -> Result<(), BansheeError> {
+    if !events.is_empty() {
+        return watch_events(&watched_events(&events)?).await;
+    }
     let (mut state, mut changes) =
         match utils::Subscription::open(&[banshee_common::EVENT_STATE]).await {
             Ok(subscription) => subscription,
@@ -606,10 +660,22 @@ pub async fn download_missing(config: Option<&Config>) -> Result<(), BansheeErro
                 )
             })?;
             let dir = models::download::models_dir()?;
-            let missing = models::download::still_missing(&models::download::wanted(config), &dir);
+            let wanted = models::download::wanted(config);
+            let missing = models::download::still_missing(&wanted, &dir);
             if missing.is_empty() {
                 println!("Everything is already downloaded.");
                 return Ok(());
+            }
+            if let Err(error) = Config::path().and_then(|path| {
+                settings::write_first_feedback(
+                    &path,
+                    None,
+                    &wanted,
+                    &missing,
+                    settings::voiceover_on,
+                )
+            }) {
+                eprintln!("Failed to choose a first feedback mode: {error}");
             }
             // Printed here: `failure_line` reads a missing file as the daemon
             // being away, and this one is the model's

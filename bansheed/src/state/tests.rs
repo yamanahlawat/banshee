@@ -1,4 +1,37 @@
 #[test]
+fn the_peak_keeps_the_loudest_sample_until_it_is_read() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    state.note_peak(0.2);
+    state.note_peak(0.7);
+    state.note_peak(0.4);
+    assert_eq!(state.take_peak(), 0.7);
+    assert_eq!(
+        state.take_peak(),
+        0.0,
+        "a read starts the next window at silence"
+    );
+}
+
+#[test]
+fn a_new_press_starts_from_silence() {
+    let state = test_state();
+    state.note_peak(0.9);
+    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert_eq!(
+        state.take_peak(),
+        0.0,
+        "the last session's peak must not carry into the new one"
+    );
+}
+
+#[test]
+fn a_published_level_is_clamped_to_one() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    state.publish_level(1.4);
+    assert_eq!(*state.subscribe_level().borrow(), 1.0);
+}
+
+#[test]
 fn the_models_wanted_follow_the_preset_the_config_names() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
     let mut config = Config::default();
@@ -149,7 +182,7 @@ fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<Consume
         crate::text_to_speech::Speaker::Fallback,
         commands,
         crate::audio::cues::Cues::silent(),
-        crate::test_support::scratch("state-models"),
+        crate::test_support::scratch_machine("state-models"),
     );
     // These stand for a daemon whose pipeline is up: the tests below record,
     // arm and fault, none of which a daemon still opening its microphone does.
@@ -376,6 +409,27 @@ fn cancel_discards_the_session_instead_of_routing_it() {
         requests.try_recv().is_err(),
         "the armed session owns the ring"
     );
+}
+
+#[test]
+fn a_cancelled_push_to_talk_emits_a_silent_signal() {
+    let (cues, heard) = crate::audio::cues::Cues::recording();
+    let mut signals = cues.subscribe_signals();
+    let state = crate::test_support::daemon_state_with_cues(cues);
+
+    assert!(state.record_start(TranscribeTarget::Dictate));
+    heard.try_recv().expect("the start cue plays");
+    signals.try_recv().expect("the start signal broadcasts");
+
+    state.record_cancel();
+
+    assert_eq!(
+        signals.try_recv().unwrap(),
+        crate::audio::cues::Signal::Cancelled {
+            target: crate::audio::cues::Target::Dictate
+        }
+    );
+    assert!(heard.try_recv().is_err(), "a cancel sounds nothing");
 }
 
 #[test]
@@ -612,7 +666,7 @@ fn the_drain_sounds_the_cue_for_a_failure_and_clears_the_reason_when_one_plays()
 
     assert!(
         matches!(heard.try_recv(), Ok(crate::audio::cues::Cue::Error)),
-        "a failed utterance sounds the error cue"
+        "a failed utterance sounds its cue"
     );
     assert_eq!(
         state.last_speech_error().as_deref(),
@@ -702,7 +756,7 @@ fn the_watchdog_does_not_expire_a_press_whose_start_is_still_running() {
         crate::text_to_speech::Speaker::Fallback,
         std::sync::mpsc::channel().0,
         crate::audio::cues::Cues::silent(),
-        crate::test_support::scratch("state-press"),
+        crate::test_support::scratch_machine("state-press"),
     ));
     state.set_pipeline(Pipeline::Open);
     std::sync::Arc::clone(state.speech())
@@ -733,4 +787,114 @@ fn an_older_ask_cannot_close_the_one_armed_after_it() {
 
     assert!(state.armed_mode(newer).is_some());
     assert!(state.armed_mode(older).is_none());
+}
+
+#[test]
+fn the_answer_flag_opens_only_for_the_session_still_armed() {
+    let state = test_state();
+    let session = state.arm_for_ask().expect("an idle daemon arms");
+
+    assert!(
+        !state.open_answer(session + 1),
+        "another session cannot open it"
+    );
+    assert!(!state.is_answer_open());
+
+    assert!(state.open_answer(session));
+    assert!(state.is_answer_open());
+
+    state.disarm(session);
+    assert!(
+        !state.open_answer(session),
+        "a disarmed session cannot open it"
+    );
+    assert!(!state.is_answer_open());
+}
+
+#[test]
+fn the_target_and_the_arming_decide_the_press_cue() {
+    use crate::audio::cues::Cue;
+
+    let cases = [
+        (TranscribeTarget::Dictate, true, true, Cue::RecordStart),
+        (TranscribeTarget::Tell, false, true, Cue::RecordStart),
+        (TranscribeTarget::Dictate, false, true, Cue::RecordStart),
+        (TranscribeTarget::Dictate, true, false, Cue::Error),
+    ];
+    for (target, armed, pipeline_open, expected) in cases {
+        let (cues, heard) = crate::audio::cues::Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues);
+        if armed {
+            state.arm_for_ask().expect("an idle daemon arms");
+        }
+        if !pipeline_open {
+            state.set_pipeline(Pipeline::Opening);
+        }
+
+        assert_eq!(
+            state.record_start(target),
+            pipeline_open,
+            "{target:?} armed {armed} open {pipeline_open}"
+        );
+        assert_eq!(
+            heard.try_recv().ok(),
+            Some(expected),
+            "{target:?} armed {armed} open {pipeline_open}"
+        );
+    }
+}
+
+#[test]
+fn a_press_while_the_pipeline_opens_says_banshee_is_starting() {
+    let (cues, _heard) = crate::audio::cues::Cues::recording();
+    let mut signals = cues.subscribe_signals();
+    let state = crate::test_support::daemon_state_before_the_pipeline_with_cues(cues);
+    assert!(!state.record_start(TranscribeTarget::Dictate));
+    match signals.try_recv() {
+        Ok(crate::audio::cues::Signal::Error { reason, .. }) => {
+            assert_eq!(reason.code, crate::audio::cues::ReasonCode::Starting);
+        }
+        other => panic!("expected a starting error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_refused_press_names_the_press_or_the_answer_when_armed() {
+    use crate::audio::cues::{Signal, Target};
+    for (press, armed, named) in [
+        (TranscribeTarget::Dictate, false, Target::Dictate),
+        (TranscribeTarget::Mailbox, false, Target::Mailbox),
+        (TranscribeTarget::Tell, false, Target::Tell),
+        (TranscribeTarget::Mailbox, true, Target::Answer),
+    ] {
+        let (cues, _heard) = crate::audio::cues::Cues::recording();
+        let mut signals = cues.subscribe_signals();
+        let state = crate::test_support::daemon_state_with_cues(cues);
+        if armed {
+            state.arm_for_ask().expect("an idle daemon arms");
+        }
+        state.set_pipeline(Pipeline::Opening);
+        assert!(!state.record_start(press));
+        match signals.try_recv() {
+            Ok(Signal::Error { target, .. }) => {
+                assert_eq!(target, Some(named), "{press:?} armed {armed}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_answer_press_carries_the_answer_target() {
+    let (cues, _heard) = crate::audio::cues::Cues::recording();
+    let mut signals = cues.subscribe_signals();
+    let state = crate::test_support::daemon_state_with_cues(cues);
+    state.arm_for_ask().expect("an idle daemon arms");
+    assert!(state.record_start(TranscribeTarget::Dictate));
+    assert_eq!(
+        signals.try_recv().unwrap(),
+        crate::audio::cues::Signal::RecordStart {
+            target: crate::audio::cues::Target::Answer
+        }
+    );
 }

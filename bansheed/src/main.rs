@@ -11,6 +11,7 @@ mod daemon;
 mod dictation;
 mod history;
 mod hotkey;
+mod level;
 mod models;
 mod on_path;
 mod permissions;
@@ -53,7 +54,7 @@ async fn main() -> ExitCode {
         CommandType::Stop => cli::stop().await,
         CommandType::Devices => cli::devices().await,
         CommandType::Voices => cli::voices().await,
-        CommandType::Watch { waybar } => cli::watch(waybar).await,
+        CommandType::Watch { waybar, events } => cli::watch(waybar, events).await,
         CommandType::Config {
             action: args::ConfigAction::Set { key, value },
         } => cli::config(key, value).await,

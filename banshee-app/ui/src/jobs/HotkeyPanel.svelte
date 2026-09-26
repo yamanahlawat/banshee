@@ -3,7 +3,7 @@
   import { daemon, hotkeyListens } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { hotkeyFrom, humanize, isModifier } from '../lib/hotkey';
-  import { claimKeys } from '../lib/keys';
+  import { claimKeys, onMac } from '../lib/keys';
   import Row from '../controls/Row.svelte';
   import Segmented from '../controls/Segmented.svelte';
 
@@ -30,7 +30,39 @@
   $: key = String(audio.hotkey ?? '');
   $: mode = String(audio.hotkey_mode ?? 'hold');
   $: bargeIn = String(audio.barge_in ?? 'stop');
-  $: cues = ((audio.cues ?? {}) as Record<string, unknown>).enabled !== false;
+  // An older daemon sends no [feedback] table, so its cue switch decides.
+  $: cues = (audio.cues ?? {}) as Record<string, unknown>;
+  $: feedbackConfig = ($daemon.status?.config?.feedback ?? {}) as Record<string, unknown>;
+  $: feedback = String(feedbackConfig.mode ?? (cues.enabled === false ? 'none' : 'both'));
+  // The menu bar icon draws the figure only on macOS, so only there does the
+  // row offer On screen. Read once: the platform does not change under this window.
+  const mac = onMac();
+  const FEEDBACK_BASE_OPTIONS = [
+    { value: 'sound', label: 'Sound' },
+    { value: 'both', label: 'Both' },
+    { value: 'none', label: 'Off' },
+  ];
+  const FEEDBACK_OPTIONS = mac
+    ? [{ value: 'visual', label: 'On screen' }, ...FEEDBACK_BASE_OPTIONS]
+    : FEEDBACK_BASE_OPTIONS;
+  // Off macOS the row has no On screen radio, so a daemon set to visual still needs a selection.
+  $: visualWithoutFigure = feedback === 'visual' && !mac;
+  $: feedbackSelected = visualWithoutFigure ? 'both' : feedback;
+  const FEEDBACK_NOTE = 'feedback-note';
+  const FEEDBACK_NOTES: Record<string, string> = {
+    ...(mac && {
+      visual:
+        "A small Banshee figure above the Dock shows what Banshee does, with no sounds. An agent's questions are still spoken aloud. Using VoiceOver? Choose Both, so you hear when recording starts.",
+    }),
+    sound: 'A short sound when Banshee starts and stops listening, and when it fails.',
+    both: mac ? 'The Banshee figure and every sound.' : 'Every sound.',
+    none: mac
+      ? "No figure and no sound. An agent's questions are still spoken aloud."
+      : "No sound. An agent's questions are still spoken aloud.",
+  };
+  $: feedbackNote = visualWithoutFigure
+    ? 'Set to visual outside this window. Without the on-screen figure, Banshee plays every sound.'
+    : (FEEDBACK_NOTES[feedback] ?? '');
 
   function stop() {
     recording = false;
@@ -137,15 +169,18 @@ banshee record stop</pre>
   />
 </Row>
 
-<Row name="Sounds" pending={$daemon.pending.has('audio.cues.enabled')}>
+<Row
+  name="Feedback"
+  note={feedbackNote}
+  noteId={FEEDBACK_NOTE}
+  pending={$daemon.pending.has('feedback.mode')}
+>
   <Segmented
-    label="Sounds"
-    value={cues ? 'on' : 'off'}
-    options={[
-      { value: 'on', label: 'On' },
-      { value: 'off', label: 'Off' },
-    ]}
-    change={(next) => write('audio.cues.enabled', next === 'on')}
+    label="Feedback"
+    value={feedbackSelected}
+    options={FEEDBACK_OPTIONS}
+    describedBy={FEEDBACK_NOTE}
+    change={(next) => write('feedback.mode', next)}
   />
 </Row>
 
