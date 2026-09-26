@@ -32,6 +32,9 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
   there. The icon sits in any bar that hosts StatusNotifierItem. The
   blockers band names a missing Wayland typer. On Wayland the compositor holds the hotkey,
   and the window says so instead of naming a key nothing binds.
+- On macOS, a rust capsule above the Dock shows what Banshee does, and the Banshee figure in
+  it moves with your voice. `feedback.mode` decides whether the earcons, the figure or both
+  report each step.
 
 ## Next, maintainer
 

@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "banshee"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "arboard",
  "audioadapter-buffers",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "banshee-app"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "banshee-common",
  "serde",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "banshee-common"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
