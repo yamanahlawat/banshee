@@ -22,6 +22,11 @@ This page lists what breaks, and the fix.
   - It names the download as the fix.
   - Run `banshee setup`, then `banshee start`; the line then names your
     device.
+- **A new Mac install plays no earcons.**
+  - A new install on macOS starts on `visual`. It shows the figure above the
+    Dock and plays no earcons while the menu bar icon draws the figure.
+  - Run `banshee config set feedback.mode both` for the figure and the
+    earcons, or `sound` for the earcons alone.
 - **`banshee record start` says the microphone is busy.**
   - A previous push-to-talk never got its `stop`.
   - Run `banshee record stop`, or wait two minutes for the daemon to

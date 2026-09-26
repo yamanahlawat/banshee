@@ -142,6 +142,7 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 
 - **Talk over it.** The hotkey stops whatever Banshee says. `barge_in = "none"` lets it finish.
 - **The window.** `Open Banshee` in the menu bar: the last dictation with a copy button, the day's history, every setting. Quit it and dictation carries on.
+- **The figure above the Dock.** On macOS, a small rust capsule shows while Banshee records, works, waits for your answer or fails. Nothing shows at rest. `feedback.mode` picks the figure, the earcons or both. [Feedback](docs/configuration.md)
 
 <p align="center"><img src="assets/window.png" width="360" alt="The Banshee window: the last dictation in large type with a copy button, the day's earlier dictations beneath it, and a footer naming the microphone, hotkey, voice and connected agents."></p>
 
