@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-26
+
 ### Added
 
 - **A small rust capsule above the Dock shows what Banshee does.** On
@@ -1284,7 +1286,8 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/yamanahlawat/banshee/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/yamanahlawat/banshee/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/yamanahlawat/banshee/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/yamanahlawat/banshee/compare/v0.13.1...v0.14.0

@@ -69,20 +69,6 @@ pub enum Segment {
     Close,
 }
 
-/// The mark's resting shroud, as the window's mark draws it.
-pub const SHROUD_REST: [Segment; 10] = [
-    Segment::Move(21.0, 70.0),
-    Segment::Line(24.0, 46.0),
-    Segment::Cubic([24.0, 27.0, 34.0, 14.0, 50.0, 14.0]),
-    Segment::Cubic([66.0, 14.0, 76.0, 27.0, 76.0, 46.0]),
-    Segment::Line(79.0, 70.0),
-    Segment::Cubic([79.0, 80.0, 72.0, 88.0, 64.0, 86.0]),
-    Segment::Cubic([57.0, 84.0, 55.0, 72.0, 50.0, 72.0]),
-    Segment::Cubic([45.0, 72.0, 43.0, 84.0, 36.0, 86.0]),
-    Segment::Cubic([28.0, 88.0, 21.0, 80.0, 21.0, 70.0]),
-    Segment::Close,
-];
-
 /// `depth` deepens the hem's folds and `sway` moves them sideways. Both are 0
 /// at rest.
 pub fn shroud(depth: f64, sway: f64) -> [Segment; 10] {
@@ -104,8 +90,7 @@ pub fn shroud(depth: f64, sway: f64) -> [Segment; 10] {
     ]
 }
 
-/// The length SVG's `pathLength` stands for. Each cubic counts as 64 straight
-/// pieces.
+/// The length SVG's `pathLength` stands for.
 pub fn path_length(segments: &[Segment]) -> f64 {
     const PIECES: usize = 64;
     let distance = |(x0, y0): (f64, f64), (x1, y1): (f64, f64)| (x1 - x0).hypot(y1 - y0);
@@ -216,9 +201,23 @@ mod tests {
         assert_eq!(pose(0.0, 123.0, false), rest);
     }
 
+    /// The mark's shroud, as the window's mark draws it.
+    const MARK_SHROUD: [Segment; 10] = [
+        Segment::Move(21.0, 70.0),
+        Segment::Line(24.0, 46.0),
+        Segment::Cubic([24.0, 27.0, 34.0, 14.0, 50.0, 14.0]),
+        Segment::Cubic([66.0, 14.0, 76.0, 27.0, 76.0, 46.0]),
+        Segment::Line(79.0, 70.0),
+        Segment::Cubic([79.0, 80.0, 72.0, 88.0, 64.0, 86.0]),
+        Segment::Cubic([57.0, 84.0, 55.0, 72.0, 50.0, 72.0]),
+        Segment::Cubic([45.0, 72.0, 43.0, 84.0, 36.0, 86.0]),
+        Segment::Cubic([28.0, 88.0, 21.0, 80.0, 21.0, 70.0]),
+        Segment::Close,
+    ];
+
     #[test]
     fn the_resting_shroud_is_the_marks_path() {
-        assert_eq!(shroud(0.0, 0.0), SHROUD_REST);
+        assert_eq!(shroud(0.0, 0.0), MARK_SHROUD);
     }
 
     #[test]

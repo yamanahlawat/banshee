@@ -70,8 +70,6 @@ pub fn tool_is_installed(path: &str) {
     );
 }
 
-/// Writes `body` to `path` as an executable script.
-///
 /// A child process writes the file, so this process never holds it open for
 /// writing. A process another test starts meanwhile would inherit that handle,
 /// and the script would then fail to run with "Text file busy".

@@ -475,24 +475,16 @@ mod tray {
                     return Flow::Exit;
                 }
                 Message::State(indicator) => {
-                    let moved = self.indicator != indicator;
-                    self.indicator = indicator;
-                    moved
+                    std::mem::replace(&mut self.indicator, indicator) != self.indicator
                 }
                 Message::Device(device) => {
-                    let moved = self.device != device;
-                    self.device = device;
-                    moved
+                    std::mem::replace(&mut self.device, device) != self.device
                 }
                 Message::History(enabled) => {
-                    let moved = self.history_enabled != enabled;
-                    self.history_enabled = enabled;
-                    moved
+                    std::mem::replace(&mut self.history_enabled, enabled) != self.history_enabled
                 }
                 Message::Remote(remote) => {
-                    let moved = self.remote != remote;
-                    self.remote = remote;
-                    moved
+                    std::mem::replace(&mut self.remote, remote) != self.remote
                 }
                 Message::Chip(input) => {
                     self.chip.feed(input, Instant::now());

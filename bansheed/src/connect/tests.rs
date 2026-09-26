@@ -1250,10 +1250,8 @@ fn the_turn_end_command_runs_the_binary_and_passes_on_failure() {
 
 /// An executable that prints `says` and its arguments, then fails.
 fn failing_stub(at: &Path, says: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-    std::fs::write(at, format!("#!/bin/sh\necho \"{says} $*\"\nexit 3\n")).unwrap();
-    std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_support::write_executable(at, &format!("#!/bin/sh\necho \"{says} $*\"\nexit 3\n"));
 }
 
 /// Runs `command` through a shell, as an agent does, with `path` as the only PATH.
