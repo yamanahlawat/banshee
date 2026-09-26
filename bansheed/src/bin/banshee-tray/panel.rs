@@ -35,7 +35,7 @@ use objc2_quartz_core::{
 };
 
 use super::chip::{Scene, Show};
-use super::figure::{self, Pose, SHROUD_REST, Segment, Voice};
+use super::figure::{self, Pose, Segment, Voice};
 
 mod motion;
 
@@ -132,7 +132,7 @@ fn ellipses(
     path
 }
 
-/// Archivo from the window's own font file, at the board's axes. `None` when
+/// Archivo from the window's own font file, at `WORDS_WEIGHT` and `WORDS_WIDTH`. `None` when
 /// Core Text cannot read the file.
 fn archivo() -> Option<CFRetained<CTFont>> {
     static ARCHIVO: &[u8] =
@@ -680,15 +680,15 @@ impl Panel {
         view.setWantsLayer(true);
         window.setContentView(Some(&view));
         // AppKit reads a borderless, status-level panel as a system dialog to
-        // VoiceOver. The panel never holds text or controls, so hide the window
-        // and its view rather than let VoiceOver announce and describe them
-        // while an agent's question leaves the microphone open.
+        // VoiceOver. The panel holds no text or controls, so the window and its
+        // view stay hidden. VoiceOver must not speak while an agent's question
+        // keeps the microphone open.
         window.setAccessibilityElement(false);
         window.setAccessibilityHidden(true);
         view.setAccessibilityElement(false);
         view.setAccessibilityHidden(true);
 
-        let rest = figure::path_length(&SHROUD_REST);
+        let rest = figure::path_length(&figure::shroud(0.0, 0.0));
         let font = words_font();
         let text_attributes = font.as_deref().map(text_attributes_of);
         let ellipsis = text_attributes

@@ -88,9 +88,8 @@ mod tests {
         assert_eq!(*level.borrow_and_update(), 0.0, "nobody watches the level");
 
         let _watch = state.watch_level();
-        // The sampler's first tick after a watch appears resolves without a real
-        // wait, so one yield is enough to run it through before it self-corrects
-        // on the next real tick.
+        // The sampler's first tick after a watch appears completes at once, so
+        // one yield runs it.
         tokio::task::yield_now().await;
         assert_eq!(
             *level.borrow_and_update(),

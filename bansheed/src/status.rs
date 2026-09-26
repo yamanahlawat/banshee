@@ -187,8 +187,8 @@ fn report_tell(config: &Config) {
     }
 }
 
-/// None gives a failed tell no sign. Visual gives none too, unless macOS shows
-/// the figure instead.
+/// The note for a mode where a failed tell makes no sound: `none`, and `visual`
+/// on macOS, where the figure shows the failure.
 fn silent_tell_line(agent_found: bool, mode: crate::config::FeedbackMode) -> Option<&'static str> {
     if !agent_found {
         return None;

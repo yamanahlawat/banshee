@@ -88,7 +88,6 @@ pub fn agent_pid(rows: &[ProcessRow], me: u32) -> Option<u32> {
     None
 }
 
-/// Whether the hook's payload says this stop is not a plain end of a turn.
 pub fn not_a_plain_end(agent: GatedAgent, payload: &serde_json::Value) -> bool {
     match agent {
         GatedAgent::Claude | GatedAgent::Codex => payload["stop_hook_active"] == true,

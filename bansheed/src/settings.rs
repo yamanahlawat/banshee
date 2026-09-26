@@ -431,8 +431,8 @@ fn write_locked(
     Ok(outcome)
 }
 
-/// A file chose its feedback when it sets `feedback.mode`, or turns the old
-/// `audio.cues.enabled` switch off.
+/// A file chose its feedback when it sets `feedback.mode`, or turns
+/// `audio.cues.enabled` off.
 #[cfg(target_os = "macos")]
 fn chose_feedback(text: &str) -> Result<bool, BansheeError> {
     let document: DocumentMut = text
