@@ -12,17 +12,17 @@ beforeEach(() => {
 });
 
 it('marks a setting pending when the daemon says it needs a restart', async () => {
-  vi.mocked(setSetting).mockResolvedValue(['audio.cues.enabled']);
+  vi.mocked(setSetting).mockResolvedValue(['feedback.mode']);
   // The daemon keeps the pending set itself, and its status carries it.
-  vi.mocked(status).mockResolvedValue({ running: true, pending: ['audio.cues.enabled'] });
-  await set('audio.cues.enabled', true);
-  expect(get(daemon).pending.has('audio.cues.enabled')).toBe(true);
+  vi.mocked(status).mockResolvedValue({ running: true, pending: ['feedback.mode'] });
+  await set('feedback.mode', 'none');
+  expect(get(daemon).pending.has('feedback.mode')).toBe(true);
 });
 
 it('drops a mark the daemon no longer reports', async () => {
-  vi.mocked(setSetting).mockResolvedValue(['audio.cues.enabled']);
+  vi.mocked(setSetting).mockResolvedValue(['feedback.mode']);
   vi.mocked(status).mockResolvedValue({ running: true, pending: [] });
-  await set('audio.cues.enabled', true);
+  await set('feedback.mode', 'none');
   expect(get(daemon).pending.size).toBe(0);
 });
 

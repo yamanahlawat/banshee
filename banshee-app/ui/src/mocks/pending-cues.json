@@ -29,12 +29,15 @@
     },
     "audio": {
       "input_device": "default",
-      "hotkey": "RightCommand",
+      "hotkey": "F8",
       "hotkey_mode": "toggle",
       "barge_in": "stop",
       "cues": {
-        "enabled": false
+        "enabled": true
       }
+    },
+    "feedback": {
+      "mode": "both"
     },
     "stt": {
       "provider": "local",
@@ -90,7 +93,7 @@
     }
   },
   "pending": [
-    "audio.cues.enabled"
+    "audio.hotkey"
   ],
   "telling": false,
   "last_error": null,

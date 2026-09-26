@@ -10,8 +10,8 @@ use std::{
 use banshee_common::DownloadProgress;
 use tokio::sync::{broadcast, watch};
 
-use crate::audio::cues::{Cue, Cues};
-use crate::config::{BargeInMode, Config};
+use crate::audio::cues::{Cues, Reason, ReasonCode, Signal, Target, broken};
+use crate::config::{BargeInMode, Config, FeedbackMode};
 use crate::text_to_speech::{SpeechPlayer, lock};
 
 const TRANSCRIPTION_RING_CAPACITY: usize = 16;
@@ -34,6 +34,14 @@ pub enum TranscribeTarget {
     Dictate,
     /// Hand the words to a coding agent, which changes the desktop.
     Tell,
+}
+
+/// What the daemon reads from the machine it runs on: its files, and whether
+/// VoiceOver is on. Handed in, so a test decides.
+pub struct Machine {
+    pub models: std::path::PathBuf,
+    pub config: std::path::PathBuf,
+    pub voiceover: fn() -> bool,
 }
 
 struct PushToTalk {
@@ -216,6 +224,15 @@ impl Drop for DownloadSlot {
     }
 }
 
+/// One client that shows the level. Its drop is the client going away.
+pub struct LevelWatch(Arc<watch::Sender<usize>>);
+
+impl Drop for LevelWatch {
+    fn drop(&mut self) {
+        self.0.send_modify(|watchers| *watchers -= 1);
+    }
+}
+
 fn replace_if_new(field: &RwLock<Option<String>>, name: Option<String>) -> bool {
     let mut held = field.write().unwrap();
     if *held == name {
@@ -334,8 +351,11 @@ pub struct DaemonState {
     capture_tick: AtomicU64,
     shutdown: tokio::sync::Notify,
     spoken: crate::turns::SpokenTurns,
-    // Handed in, so a test decides what is on disk.
-    models_dir: std::path::PathBuf,
+    machine: Machine,
+    peak: AtomicU32,
+    answer_open: AtomicBool,
+    level: watch::Sender<f32>,
+    level_watchers: Arc<watch::Sender<usize>>,
 }
 
 impl DaemonState {
@@ -346,11 +366,11 @@ impl DaemonState {
         speaker: crate::text_to_speech::Speaker,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
         cues: Cues,
-        models_dir: std::path::PathBuf,
+        machine: Machine,
     ) -> Self {
         let wanted_downloads = crate::models::download::wanted(&config);
         Self {
-            models_dir,
+            machine,
             version: env!("CARGO_PKG_VERSION"),
             stt_model: RwLock::new(crate::models::stt_file(&config)),
             vad_model: crate::models::VAD_MODEL,
@@ -397,6 +417,10 @@ impl DaemonState {
             capture_tick: AtomicU64::new(0),
             shutdown: tokio::sync::Notify::new(),
             spoken: crate::turns::SpokenTurns::default(),
+            peak: AtomicU32::new(0),
+            answer_open: AtomicBool::new(false),
+            level: watch::channel(0.0).0,
+            level_watchers: Arc::new(watch::channel(0).0),
         }
     }
 
@@ -404,8 +428,21 @@ impl DaemonState {
     pub fn record_start(&self, action: TranscribeTarget) -> bool {
         // The hotkey arrives here too, so a deaf daemon answers a press with the
         // error cue. Arming a session nothing can transcribe would be silent.
-        if !self.pipeline().is_open() {
-            self.cues.send(Cue::Error);
+        let reason = match self.pipeline() {
+            Pipeline::Open => None,
+            Pipeline::Broken(fault) => Some(broken(&fault)),
+            Pipeline::Opening => Some(Reason::new(ReasonCode::Starting, None)),
+        };
+        if let Some(reason) = reason {
+            let target = if self.is_armed() {
+                Target::Answer
+            } else {
+                action.into()
+            };
+            self.cues.emit(Signal::Error {
+                reason,
+                target: Some(target),
+            });
             return false;
         }
         if self.try_transition(RecordingMode::Armed, RecordingMode::ArmedHold) {
@@ -413,14 +450,18 @@ impl DaemonState {
             if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
-            self.cues.send(Cue::RecordStart);
+            self.cues.emit(Signal::RecordStart {
+                target: Target::Answer,
+            });
             true
         } else if self.start_push_to_talk(action) {
             // Silence the daemon's own voice before the mic opens
             if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
-            self.cues.send(Cue::RecordStart);
+            self.cues.emit(Signal::RecordStart {
+                target: action.into(),
+            });
             log::info!("Recording started...");
             true
         } else {
@@ -434,7 +475,9 @@ impl DaemonState {
         if !self.stop_push_to_talk(lock(&self.push_to_talk))
             && self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed)
         {
-            self.cues.send(Cue::RecordStop);
+            self.cues.emit(Signal::RecordStop {
+                target: Target::Answer,
+            });
         }
     }
 
@@ -443,6 +486,8 @@ impl DaemonState {
         if !self.try_transition(RecordingMode::Idle, RecordingMode::PushToTalk) {
             return false;
         }
+        // Discarded: a press starts from silence, not the last session's peak.
+        self.take_peak();
         *session = PushToTalk {
             deadline: Instant::now() + MAX_PUSH_TO_TALK,
             target,
@@ -457,7 +502,9 @@ impl DaemonState {
         let target = session.target;
         drop(session);
         log::info!("Recording stopped");
-        self.cues.send(Cue::RecordStop);
+        self.cues.emit(Signal::RecordStop {
+            target: target.into(),
+        });
         let _ = self.commands.send(ConsumerCommand::Transcribe(target));
         true
     }
@@ -477,16 +524,26 @@ impl DaemonState {
     }
 
     // The user pressed a chord through the hotkey, so the session it opened
-    // is a mistake: discard the audio rather than route it. No stop cue for
-    // push-to-talk: the start cue was already noise, a second cue doubles it.
+    // is a mistake: discard the audio rather than route it. No sound for
+    // push-to-talk: the start cue was already noise, a second cue doubles it,
+    // but a silent signal still tells a subscriber the session is gone.
     pub fn record_cancel(&self) {
+        let session = lock(&self.push_to_talk);
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             log::info!("Recording cancelled");
+            let target: Target = session.target.into();
+            drop(session);
+            self.cues.emit(Signal::Cancelled { target });
             let _ = self.commands.send(ConsumerCommand::Discard);
-        } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
-            // The armed session keeps its audio; only the manual hold ends.
-            // This cue answers the start cue the hold played.
-            self.cues.send(Cue::RecordStop);
+        } else {
+            drop(session);
+            if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
+                // The armed session keeps its audio; only the manual hold ends.
+                // This cue answers the start cue the hold played.
+                self.cues.emit(Signal::RecordStop {
+                    target: Target::Answer,
+                });
+            }
         }
     }
 
@@ -758,7 +815,15 @@ impl DaemonState {
     }
 
     pub fn models_dir(&self) -> &std::path::Path {
-        &self.models_dir
+        &self.machine.models
+    }
+
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.machine.config
+    }
+
+    pub fn voiceover_on(&self) -> bool {
+        (self.machine.voiceover)()
     }
 
     pub fn version(&self) -> &'static str {
@@ -868,11 +933,24 @@ impl DaemonState {
         (*current == session && self.is_armed()).then_some(mode)
     }
 
+    /// Opens the answer flag only if `session` is still the one armed, and
+    /// answers whether it opened.
+    pub fn open_answer(&self, session: u64) -> bool {
+        // The same lock as `disarm`, so no disarm lands between the check and the open.
+        let current = lock(&self.armed_session);
+        let opened = *current == session && self.is_armed();
+        if opened {
+            self.set_answer_open(true);
+        }
+        opened
+    }
+
     pub fn disarm(&self, session: u64) {
         let current = lock(&self.armed_session);
         if *current == session {
             let _ = self.try_transition(RecordingMode::Armed, RecordingMode::Idle)
                 || self.try_transition(RecordingMode::ArmedHold, RecordingMode::Idle);
+            self.set_answer_open(false);
         }
     }
 
@@ -962,15 +1040,17 @@ impl DaemonState {
         }
     }
 
-    // The player reads this as each cue reaches it, so a write between two
-    // dictations decides whether the next one is heard.
-    pub fn set_cues_enabled(&self, on: bool) {
-        self.cues.set_enabled(on);
+    pub fn set_feedback_mode(&self, mode: FeedbackMode) {
+        self.cues.set_mode(mode);
     }
 
     #[cfg(test)]
-    pub fn cues_enabled(&self) -> bool {
-        self.cues.enabled()
+    pub fn feedback_mode(&self) -> FeedbackMode {
+        self.cues.mode()
+    }
+
+    pub fn subscribe_feedback(&self) -> watch::Receiver<FeedbackMode> {
+        self.cues.subscribe_mode()
     }
 
     pub fn barge_in(&self) -> BargeInMode {
@@ -1054,6 +1134,57 @@ impl DaemonState {
         }
         let now = self.started_at.elapsed().as_millis() as u64;
         Duration::from_millis(now.saturating_sub(last)) > CAPTURE_SILENCE_LIMIT
+    }
+
+    // The bits of a non-negative f32 order as its values do, so the max bits are the max peak.
+    pub fn note_peak(&self, peak: f32) {
+        self.peak
+            .fetch_max(peak.abs().to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn take_peak(&self) -> f32 {
+        f32::from_bits(self.peak.swap(0, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn set_answer_open(&self, open: bool) {
+        self.answer_open
+            .store(open, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_answer_open(&self) -> bool {
+        self.answer_open.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Every call wakes each receiver, the same value too, so a client's
+    /// smoothing settles when the level stops moving.
+    pub fn publish_level(&self, level: f32) {
+        self.level.send_replace(level.min(1.0));
+    }
+
+    pub fn subscribe_level(&self) -> watch::Receiver<f32> {
+        self.level.subscribe()
+    }
+
+    pub fn watch_level(&self) -> LevelWatch {
+        self.level_watchers.send_modify(|watchers| *watchers += 1);
+        LevelWatch(Arc::clone(&self.level_watchers))
+    }
+
+    pub fn is_level_watched(&self) -> bool {
+        *self.level_watchers.borrow() > 0
+    }
+
+    pub fn subscribe_level_watchers(&self) -> watch::Receiver<usize> {
+        self.level_watchers.subscribe()
+    }
+
+    #[cfg(test)]
+    pub fn level_watchers(&self) -> usize {
+        *self.level_watchers.borrow()
+    }
+
+    pub fn cues(&self) -> &Cues {
+        &self.cues
     }
 }
 

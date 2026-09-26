@@ -11,25 +11,39 @@ fn main() {
     }
 }
 
-mod tray {
-    use std::time::Duration;
+mod chip;
+#[cfg(any(target_os = "macos", test))]
+mod figure;
+#[cfg(target_os = "macos")]
+mod panel;
 
-    use banshee_common::{Activity, BANSHEE_HISTORY, BANSHEE_STATE_CHANGED, EVENT_STATE, utils};
+mod tray {
+    use std::time::{Duration, Instant};
+
+    use banshee_common::cue::Signal;
+    use banshee_common::feedback::FeedbackMode;
+    use banshee_common::{
+        Activity, BANSHEE_CUE, BANSHEE_HISTORY, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED, EVENT_CUES,
+        EVENT_LEVEL, EVENT_STATE, utils,
+    };
     #[cfg(not(target_os = "macos"))]
     use gtk::glib;
+    use serde::Deserialize;
     use serde_json::Value;
     use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
     #[cfg(target_os = "macos")]
     use winit::application::ApplicationHandler;
     #[cfg(target_os = "macos")]
-    use winit::event::WindowEvent;
+    use winit::event::{StartCause, WindowEvent};
     #[cfg(target_os = "macos")]
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     #[cfg(target_os = "macos")]
     use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
     #[cfg(target_os = "macos")]
     use winit::window::WindowId;
+
+    use super::chip;
 
     const QUIT_ID: &str = "quit";
     // A daemon that accepts the connection and never answers would hold this
@@ -95,12 +109,12 @@ mod tray {
     // any icon 18pt tall, which makes 36px its 2x asset.
     fn glyph(indicator: Indicator) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error>> {
         let asset: &[u8] = match indicator {
-            Indicator::Idle => include_bytes!("../../assets/tray/mark-idle.png"),
-            Indicator::Recording => include_bytes!("../../assets/tray/mark-recording.png"),
-            Indicator::Speaking => include_bytes!("../../assets/tray/mark-speaking.png"),
-            Indicator::Listening => include_bytes!("../../assets/tray/mark-listening.png"),
-            Indicator::Busy => include_bytes!("../../assets/tray/mark-busy.png"),
-            Indicator::NotRunning => include_bytes!("../../assets/tray/mark-notrunning.png"),
+            Indicator::Idle => include_bytes!("../../../assets/tray/mark-idle.png"),
+            Indicator::Recording => include_bytes!("../../../assets/tray/mark-recording.png"),
+            Indicator::Speaking => include_bytes!("../../../assets/tray/mark-speaking.png"),
+            Indicator::Listening => include_bytes!("../../../assets/tray/mark-listening.png"),
+            Indicator::Busy => include_bytes!("../../../assets/tray/mark-busy.png"),
+            Indicator::NotRunning => include_bytes!("../../../assets/tray/mark-notrunning.png"),
         };
         let mut reader = png::Decoder::new(std::io::Cursor::new(asset)).read_info()?;
         let mut pixels = vec![0; reader.output_buffer_size().ok_or("icon too large")?];
@@ -140,10 +154,48 @@ mod tray {
         Device(Device),
         History(bool),
         Remote(Remote),
+        Chip(chip::Input),
+        Level(f32),
+        Draws(bool),
         Quit,
         Open,
         CopyLast,
         Copied(String),
+    }
+
+    /// Draws a scene. The panel is macOS only; elsewhere there is nothing to draw.
+    trait Surface {
+        fn show(&mut self, scene: Option<&chip::Scene>);
+        fn level(&mut self, level: f32);
+        fn announce(&self, words: &str);
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Surface for super::panel::Panel {
+        fn show(&mut self, scene: Option<&chip::Scene>) {
+            self.show(scene);
+        }
+
+        fn level(&mut self, level: f32) {
+            self.level(level);
+        }
+
+        fn announce(&self, words: &str) {
+            self.announce(words);
+        }
+    }
+
+    /// `None` leaves the tray to the menu bar alone, and the daemon to its earcons.
+    #[cfg(target_os = "macos")]
+    fn build_panel(postbox: impl Postbox) -> Option<Box<dyn Surface>> {
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            eprintln!("banshee-tray: the chip must be built on the main thread");
+            return None;
+        };
+        let open = Box::new(move || {
+            postbox.post(Message::Open);
+        });
+        Some(Box::new(super::panel::Panel::new(mtm, open)))
     }
 
     /// Hands a `Message` to whoever owns the tray. winit carries one as a user
@@ -161,7 +213,7 @@ mod tray {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(not(target_os = "macos"), test))]
     impl Postbox for std::sync::mpsc::Sender<Message> {
         fn post(&self, message: Message) -> bool {
             self.send(message).is_ok()
@@ -194,6 +246,20 @@ mod tray {
             .get("history_enabled")
             .and_then(Value::as_bool)
             .unwrap_or(false)
+    }
+
+    /// A daemon older than the `feedback` field, or one that sends a mode this
+    /// tray does not know, draws nothing.
+    fn draws(state: &Value) -> bool {
+        state
+            .get("feedback")
+            .and_then(|mode| FeedbackMode::deserialize(mode).ok())
+            .is_some_and(FeedbackMode::draws)
+    }
+
+    /// `None` for a cue this tray does not know: a newer daemon may send one.
+    fn signal_of(params: &Value) -> Option<Signal> {
+        Signal::deserialize(params).ok()
     }
 
     /// Where the audio goes and where the text goes. Both `None` on a machine
@@ -318,7 +384,12 @@ mod tray {
         device: Device,
         history_enabled: bool,
         remote: Remote,
+        chip: chip::Chip,
+        drawing: bool,
+        scene: Option<chip::Scene>,
+        surface: Option<Box<dyn Surface>>,
         postbox: P,
+        begun: bool,
     }
 
     impl<P: Postbox> App<P> {
@@ -329,20 +400,64 @@ mod tray {
                 device: Device::default(),
                 history_enabled: false,
                 remote: Remote::default(),
+                chip: chip::Chip::default(),
+                drawing: false,
+                scene: None,
+                surface: None,
                 postbox,
+                begun: false,
             }
         }
 
         fn start(&mut self) {
-            if self.ui.is_some() {
+            self.start_with(build_ui, Self::begin);
+        }
+
+        /// Builds the menu until one build works. `begin` runs on the first
+        /// call only, whether or not the menu built.
+        fn start_with(
+            &mut self,
+            build: impl FnOnce() -> Result<Ui, Box<dyn std::error::Error>>,
+            begin: impl FnOnce(&mut Self),
+        ) {
+            if self.ui.is_none() {
+                match build() {
+                    Ok(ui) => {
+                        self.ui = Some(ui);
+                        self.show();
+                    }
+                    Err(error) => eprintln!("banshee-tray: {error}"),
+                }
+            }
+            if !std::mem::replace(&mut self.begun, true) {
+                begin(self);
+            }
+        }
+
+        /// The panel and the watch, which must each exist once.
+        fn begin(&mut self) {
+            #[cfg(target_os = "macos")]
+            {
+                self.surface = build_panel(self.postbox.clone());
+                spawn_watch(self.postbox.clone(), self.surface.is_some());
+            }
+        }
+
+        /// After every chip input and every tick: hides the surface while
+        /// `drawing` is false, and speaks the announcement only while it is true.
+        fn redraw(&mut self) {
+            let before = self.scene.take();
+            self.scene = self.chip.scene();
+            let Some(surface) = self.surface.as_deref_mut() else {
+                return;
+            };
+            if !self.drawing {
+                surface.show(None);
                 return;
             }
-            match build_ui() {
-                Ok(ui) => {
-                    self.ui = Some(ui);
-                    self.show();
-                }
-                Err(error) => eprintln!("banshee-tray: {error}"),
+            surface.show(self.scene.as_ref());
+            if let Some(words) = chip::announcement(before.as_ref(), self.scene.as_ref()) {
+                surface.announce(&words);
             }
         }
 
@@ -378,6 +493,24 @@ mod tray {
                     let moved = self.remote != remote;
                     self.remote = remote;
                     moved
+                }
+                Message::Chip(input) => {
+                    self.chip.feed(input, Instant::now());
+                    self.redraw();
+                    return Flow::Stay;
+                }
+                Message::Level(level) => {
+                    if self.drawing
+                        && let Some(surface) = self.surface.as_deref_mut()
+                    {
+                        surface.level(level);
+                    }
+                    return Flow::Stay;
+                }
+                Message::Draws(drawing) => {
+                    self.drawing = drawing;
+                    self.redraw();
+                    return Flow::Stay;
                 }
                 Message::Open => {
                     open_the_window().unwrap_or_else(|error| eprintln!("banshee-tray: {error}"));
@@ -431,6 +564,13 @@ mod tray {
             self.start();
         }
 
+        fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+            if matches!(cause, StartCause::ResumeTimeReached { .. }) {
+                self.chip.tick(Instant::now());
+                self.redraw();
+            }
+        }
+
         fn user_event(&mut self, event_loop: &ActiveEventLoop, message: Message) {
             match self.handle(message) {
                 Flow::Stay => {}
@@ -439,6 +579,13 @@ mod tray {
         }
 
         fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            event_loop.set_control_flow(match self.chip.deadline() {
+                Some(deadline) => ControlFlow::WaitUntil(deadline),
+                None => ControlFlow::Wait,
+            });
+        }
     }
 
     fn build_ui() -> Result<Ui, Box<dyn std::error::Error>> {
@@ -497,29 +644,66 @@ mod tray {
     }
 
     /// Any failure to read the socket is the daemon being unreachable: a state to show, not an
-    /// error to report.
-    async fn watch(postbox: impl Postbox) {
+    /// error to report. `to_draw` asks for the cue and level events too, and silences the
+    /// earcons `visual` gives the screen instead.
+    async fn watch(postbox: impl Postbox, to_draw: bool) {
         let send = |message| postbox.post(message);
+        let events: &[&str] = if to_draw {
+            &[EVENT_STATE, EVENT_CUES, EVENT_LEVEL]
+        } else {
+            &[EVENT_STATE]
+        };
         loop {
-            if let Ok((status, mut changes)) = utils::Subscription::open(&[EVENT_STATE]).await {
+            let opened = if to_draw {
+                utils::Subscription::open_to_draw(events).await
+            } else {
+                utils::Subscription::open(events).await
+            };
+            if let Ok((status, mut changes)) = opened {
                 if !send(Message::Device(Device::of(&status)))
                     || !send(Message::State(Indicator::of(Some(&status))))
                     || !send(Message::History(history_enabled_of(&status)))
                     || !send(Message::Remote(Remote::of(&status)))
+                    || !send(Message::Draws(draws(&status)))
+                    || !send(Message::Chip(chip::Input::Seed(chip::Live::of(&status))))
                 {
                     return;
                 }
                 // Every push carries the device too: the watchdog rebinds while
                 // the daemon idles, so no other field has to move with it
-                while let Ok(Some(state)) = changes.next_of(BANSHEE_STATE_CHANGED).await {
-                    if !send(Message::Device(Device::of(&state)))
-                        || !send(Message::State(Indicator::of(Some(&state))))
-                    {
+                loop {
+                    let Ok(Some(notification)) = changes.next().await else {
+                        break;
+                    };
+                    let delivered = match notification.method.as_str() {
+                        BANSHEE_STATE_CHANGED => {
+                            send(Message::Device(Device::of(&notification.params)))
+                                && send(Message::State(Indicator::of(Some(&notification.params))))
+                                && send(Message::Draws(draws(&notification.params)))
+                                && send(Message::Chip(chip::Input::Live(chip::Live::of(
+                                    &notification.params,
+                                ))))
+                        }
+                        BANSHEE_CUE => match signal_of(&notification.params) {
+                            Some(signal) => send(Message::Chip(chip::Input::Signal(signal))),
+                            None => true,
+                        },
+                        BANSHEE_LEVEL => {
+                            match notification.params.get("level").and_then(Value::as_f64) {
+                                Some(level) => send(Message::Level(level as f32)),
+                                None => true,
+                            }
+                        }
+                        _ => true,
+                    };
+                    if !delivered {
                         return;
                     }
                 }
             }
-            if !send(Message::State(Indicator::NotRunning)) {
+            if !send(Message::State(Indicator::NotRunning))
+                || !send(Message::Chip(chip::Input::Gone))
+            {
                 return;
             }
             tokio::time::sleep(RETRY).await;
@@ -576,7 +760,6 @@ mod tray {
     #[cfg(not(target_os = "macos"))]
     fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
         use arboard::SetExtLinux;
-        use std::time::Instant;
 
         // A copy a person asked for survives a detour to another window. The
         // number is a judgement, not a measurement.
@@ -662,13 +845,13 @@ mod tray {
     }
 
     // The subscription needs a runtime, and the loop owns this thread
-    fn spawn_watch(postbox: impl Postbox) {
+    fn spawn_watch(postbox: impl Postbox, to_draw: bool) {
         std::thread::spawn(move || {
             match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
-                Ok(runtime) => runtime.block_on(watch(postbox)),
+                Ok(runtime) => runtime.block_on(watch(postbox, to_draw)),
                 Err(error) => eprintln!("banshee-tray: {error}"),
             }
         });
@@ -692,8 +875,8 @@ mod tray {
             }
         }));
 
-        spawn_watch(event_loop.create_proxy());
-
+        // The watch starts from `App::start`, once the panel has had its chance
+        // to build.
         let mut app = App::new(event_loop.create_proxy());
         event_loop.run_app(&mut app)?;
         Ok(())
@@ -717,7 +900,7 @@ mod tray {
             }
         }));
 
-        spawn_watch(sender.clone());
+        spawn_watch(sender.clone(), false);
 
         let mut app = App::new(sender);
         app.start();
@@ -744,6 +927,45 @@ mod tray {
 
         fn live(recording: bool, speaking: bool) -> Value {
             serde_json::json!({"recording": recording, "speaking": speaking})
+        }
+
+        #[test]
+        fn the_chip_draws_only_in_visual_and_both() {
+            for (mode, drawn) in [
+                ("visual", true),
+                ("both", true),
+                ("sound", false),
+                ("none", false),
+            ] {
+                assert_eq!(
+                    draws(&serde_json::json!({"feedback": mode})),
+                    drawn,
+                    "{mode}"
+                );
+            }
+            assert!(
+                !draws(&serde_json::json!({})),
+                "an older daemon sends no cues to draw"
+            );
+        }
+
+        #[test]
+        fn a_menu_that_fails_to_build_still_begins_the_panel_and_watch_once() {
+            let mut app = App::new(std::sync::mpsc::channel::<Message>().0);
+            let mut begun = 0;
+            for _ in 0..2 {
+                app.start_with(|| Err("no menu bar".into()), |_| begun += 1);
+            }
+            assert_eq!(begun, 1);
+        }
+
+        #[test]
+        fn a_cue_line_this_tray_does_not_know_is_skipped() {
+            assert!(signal_of(&serde_json::json!({"cue": "levitate"})).is_none());
+            assert_eq!(
+                signal_of(&serde_json::json!({"cue": "arm"})),
+                Some(Signal::Arm)
+            );
         }
 
         const STATES: [Indicator; 6] = [
@@ -785,7 +1007,7 @@ mod tray {
         fn the_tint_leaves_the_shape_alone() {
             let (tinted, w, h) = glyph(Indicator::Recording).expect("the asset decodes");
             let raw = png::Decoder::new(std::io::Cursor::new(
-                &include_bytes!("../../assets/tray/mark-recording.png")[..],
+                &include_bytes!("../../../assets/tray/mark-recording.png")[..],
             ))
             .read_info()
             .and_then(|mut r| {

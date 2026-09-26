@@ -182,18 +182,28 @@ fn report_tell(config: &Config) {
         .and_then(|env| crate::tell::resolved_agent(&config.tell, &env, &env.home));
     let found = agent.is_ok();
     note(&tell_line(agent));
-    if let Some(line) = silent_tell_line(found, config.audio.cues.enabled) {
+    if let Some(line) = silent_tell_line(found, config.feedback_mode()) {
         note(line);
     }
 }
 
-/// What a user who turned cues off no longer hears. The cue is the only sign
-/// the key path gives that a run failed, and nothing else takes its place.
-fn silent_tell_line(agent_found: bool, cues_on: bool) -> Option<&'static str> {
-    (agent_found && !cues_on).then_some(
-        "cues are off, so a failed tell makes no sound; \
-         set [audio.cues] enabled = true to hear it",
-    )
+/// None gives a failed tell no sign. Visual gives none too, unless macOS shows
+/// the figure instead.
+fn silent_tell_line(agent_found: bool, mode: crate::config::FeedbackMode) -> Option<&'static str> {
+    if !agent_found {
+        return None;
+    }
+    match mode {
+        crate::config::FeedbackMode::Off => Some(
+            "feedback is none, so a failed tell makes no sound; \
+             run banshee config set feedback.mode sound to hear it",
+        ),
+        crate::config::FeedbackMode::Visual if cfg!(target_os = "macos") => Some(
+            "feedback is visual, so a failed tell makes no sound while the menu bar icon \
+             draws the figure; the figure shows the failure instead",
+        ),
+        _ => None,
+    }
 }
 
 /// The failure carries its own fix, so this adds none.
@@ -676,9 +686,9 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     let on_off = |enabled: bool| if enabled { "on" } else { "off" };
 
     note(&format!(
-        "hotkey {} {hotkey_mode}, barge-in {barge_in}, cues {}",
+        "hotkey {} {hotkey_mode}, barge-in {barge_in}, feedback {}",
         config.audio.hotkey,
-        on_off(config.audio.cues.enabled)
+        config.feedback_mode().word()
     ));
     let vad_threshold = live(daemon, |status| {
         status.get("vad_threshold").and_then(|v| v.as_f64())

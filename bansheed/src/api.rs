@@ -375,6 +375,7 @@ fn live_state_at(
         "last_error": daemon_state.last_error(),
         "last_speech_error": daemon_state.last_speech_error(),
         "pipeline": pipeline.as_str(),
+        "feedback": daemon_state.cues().mode().word(),
     });
     // Ranked once, in banshee-common, so no client ranks the flags itself.
     live["activity"] = banshee_common::Activity::of(&live).word().into();
@@ -671,7 +672,8 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
 
 fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     let dir = daemon_state.models_dir().to_path_buf();
-    let missing = crate::models::download::still_missing(&daemon_state.wanted_downloads(), &dir);
+    let wanted = daemon_state.wanted_downloads();
+    let missing = crate::models::download::still_missing(&wanted, &dir);
     if missing.is_empty() {
         return JsonRpcResponse::success(
             params.id(),
@@ -685,7 +687,6 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
             "A download is already running.",
         );
     };
-
     let names: Vec<&str> = missing.iter().map(|d| d.name.as_str()).collect();
     let response = JsonRpcResponse::success(
         params.id(),
@@ -695,6 +696,23 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
     let state = Arc::clone(daemon_state);
     let dir = dir.clone();
     tokio::spawn(async move {
+        let first = Arc::clone(&state);
+        let fetching = missing.clone();
+        let chosen = tokio::task::spawn_blocking(move || {
+            settings::write_first_feedback(
+                first.config_path(),
+                Some(&first),
+                &wanted,
+                &fetching,
+                || first.voiceover_on(),
+            )
+        })
+        .await;
+        match chosen {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => log::error!("Failed to choose a first feedback mode: {error}"),
+            Err(error) => log::error!("The first feedback mode write stopped: {error}"),
+        }
         {
             let mut report = |progress| state.report_download(progress);
             if let Err(error) =

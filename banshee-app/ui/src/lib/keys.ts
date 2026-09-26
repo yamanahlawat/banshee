@@ -32,10 +32,13 @@ export function forgetKeys(): void {
   held = false;
 }
 
+/// True on macOS. Tauri names no platform without a plugin, so the user agent
+/// is what is left to read.
+export function onMac(userAgent: string = navigator.userAgent): boolean {
+  return userAgent.includes('Mac OS X');
+}
+
 /// The chord that opens Find, written the way the host platform names it.
-/// macOS draws the Command glyph; every other platform holds Control. The
-/// window runs inside the platform's own webview, and Tauri names no platform
-/// without a plugin, so the user agent is what is left to read.
 export function findChord(userAgent: string = navigator.userAgent): string {
-  return userAgent.includes('Mac OS X') ? '\u2318F' : 'Ctrl+F';
+  return onMac(userAgent) ? '\u2318F' : 'Ctrl+F';
 }

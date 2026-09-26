@@ -47,6 +47,9 @@
         "enabled": true
       }
     },
+    "feedback": {
+      "mode": "both"
+    },
     "stt": {
       "provider": "local",
       "remote": {

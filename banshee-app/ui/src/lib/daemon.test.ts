@@ -143,14 +143,14 @@ describe('readiness', () => {
 describe('pending', () => {
   it('is whatever the daemon says waits for a restart', () => {
     const state = reduceStatus(empty(), pendingCues);
-    expect(state.pending.has('audio.cues.enabled')).toBe(true);
+    expect(state.pending.has('audio.hotkey')).toBe(true);
   });
   it('clears when the daemon stops reporting the key', () => {
     let state = markPending(reduceStatus(empty(), pendingCues), ['stt.language']);
     expect(state.pending.has('stt.language')).toBe(true);
     state = reduceStatus(state, ready);
     expect(state.pending.has('stt.language')).toBe(false);
-    expect(state.pending.has('audio.cues.enabled')).toBe(false);
+    expect(state.pending.has('audio.hotkey')).toBe(false);
   });
 });
 

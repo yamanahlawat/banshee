@@ -44,8 +44,8 @@ hotkey = "RightOption" # F1-F12, a lone modifier, or a chord like "Ctrl+Alt+D"
 hotkey_mode = "hold"   # hold = record while the hotkey is down | toggle = tap to start, tap to stop
 barge_in = "stop"      # stop = the record hotkey cuts off whatever Banshee is saying | none
 
-[audio.cues]
-enabled = true         # tones on record start/stop, success, and errors
+[feedback]
+mode = "both"          # visual | sound | both | none
 
 [tell]
 agent = ""              # empty asks Omarchy's default agent, then the connected agents
@@ -58,6 +58,14 @@ paths = [               # the folders Banshee copies, and the list a scoped agen
 ]
 ```
 
+- **A new install on macOS starts on `visual`.** Its first model download writes
+  `visual`, or `both` when VoiceOver is on. Elsewhere the absent key means both.
+- **`audio.cues.enabled` is replaced by `feedback.mode`.** A file that still
+  sets it to false reads as none, until it sets `feedback.mode`.
+- **`visual` draws a small Banshee figure above the Dock on macOS.** The menu
+  bar icon draws it, and the window starts the icon. `visual` plays no earcons
+  while the menu bar icon draws the figure, and plays every sound with no
+  menu bar icon running.
 - **`input_device` is a case-insensitive substring** of the microphone name, so
   `"yeti"` matches `Blue Yeti Stereo Microphone`.
 - **An exact name wins** over a longer name that contains it, so a `Yeti` next
@@ -97,7 +105,7 @@ $ banshee devices
 banshee config set audio.hotkey RightOption
 banshee config set stt.vad_threshold 0.7
 banshee config set stt.vocabulary '["tokio", "clippy"]'
-banshee config set audio.cues.enabled false
+banshee config set feedback.mode none
 ```
 
 - **The key is the section and the field,** as they appear in the file.
@@ -111,7 +119,7 @@ banshee config set audio.cues.enabled false
 - **Most settings take effect at once:**
   - `stt.vad_threshold`, `stt.vocabulary`, `stt.preset`, `stt.language`,
     `stt.translate`
-  - `audio.input_device`, `audio.barge_in`, `audio.cues.enabled`
+  - `audio.input_device`, `audio.barge_in`, `feedback.mode`
   - `tts.voice`, `tts.speed`, `daemon.save_history`
 - **The rest are read when the daemon starts,** so the command tells you to
   restart. Among them:
@@ -330,8 +338,9 @@ The `preset` picks which Whisper model Banshee uses:
 - **"start over" clears the thread and sounds nothing.** Silence is the chosen
   answer for a reset that works. A reset that fails sounds the error cue, and
   `banshee status` names the file Banshee could not remove.
-- **The cues carry every tell failure, so `audio.cues.enabled = false` hides
-  them.** `banshee status` says so while the cues are off.
+- **A tell failure makes no sound in none, and in visual while the menu bar
+  icon draws the figure.** The figure shows the failure in visual. `banshee
+  status` names both cases.
 - **A dictation no longer hides a tell failure.** `banshee status` keeps the last
   tell failure until the next tell run, whatever else you dictate in between.
 - **`thread_timeout_min` is how long the same conversation stays open.** Within

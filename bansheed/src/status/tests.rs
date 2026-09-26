@@ -136,24 +136,47 @@ fn the_tell_line_says_whether_the_agent_is_scoped() {
     );
 }
 
-// The cue is the whole failure signal the key path has, and the user does not
-// read the screen.
 #[test]
-fn the_checklist_says_a_failed_tell_is_silent_while_cues_are_off() {
-    let line = super::silent_tell_line(true, false).expect("cues off must be named");
+fn the_checklist_names_none_as_the_mode_with_no_cue() {
+    use crate::config::FeedbackMode;
+    let none = super::silent_tell_line(true, FeedbackMode::Off).expect("none must be named");
     assert!(
-        line.contains("makes no sound") && line.contains("[audio.cues]"),
-        "the line must say what is lost and which key restores it: {line}"
+        none.contains("makes no sound") && none.contains("feedback.mode"),
+        "the line must say what is lost and which key restores it: {none}"
     );
+    for heard in [FeedbackMode::Sound, FeedbackMode::Both] {
+        assert_eq!(
+            super::silent_tell_line(true, heard),
+            None,
+            "{heard:?} sounds a tell"
+        );
+    }
     assert_eq!(
-        super::silent_tell_line(true, true),
-        None,
-        "the cue still sounds, so there is nothing to warn about"
-    );
-    assert_eq!(
-        super::silent_tell_line(false, false),
+        super::silent_tell_line(false, FeedbackMode::Off),
         None,
         "no agent can fail, and the line above already says so"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn visual_names_the_figure_on_macos() {
+    use crate::config::FeedbackMode;
+    let visual = super::silent_tell_line(true, FeedbackMode::Visual).expect("visual must be named");
+    assert!(
+        visual.contains("makes no sound") && visual.contains("figure"),
+        "the line must say the figure stands in for the sound: {visual}"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn visual_sounds_a_tell_with_no_figure_to_show_it() {
+    use crate::config::FeedbackMode;
+    assert_eq!(
+        super::silent_tell_line(true, FeedbackMode::Visual),
+        None,
+        "with no figure, visual plays every sound"
     );
 }
 

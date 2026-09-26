@@ -28,7 +28,7 @@ The top level of a status mock is not guarded, so `english_only`,
 | --- | --- | --- |
 | `ready.json` | `banshee.status` on a clear machine | `banshee status --json` |
 | `permissions.json` | `banshee.status` with the one permission blocker a daemon can report | `tccutil reset Accessibility com.banshee.app` and the same for `ListenEvent`, daemon restarted, `banshee status --json`, Accessibility granted again |
-| `pending-cues.json` | `banshee.status` with a key accepted but not applied | `banshee config set audio.cues.enabled false`, `banshee status --json`, value set back to `true` |
+| `pending-cues.json` | `banshee.status` with a key accepted but not applied | `banshee config set audio.hotkey F8`, `banshee status --json`, value set back to `RightOption` |
 | `not-running.json` | what the window sees with no daemon | Constructed, not captured |
 | `recording.json` | `banshee.state_changed` params | Subscribed to `state`, then `banshee record start` |
 | `transcribing.json` | `banshee.state_changed` params | Same subscription, after `banshee record stop` |

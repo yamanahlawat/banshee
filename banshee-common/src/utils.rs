@@ -39,10 +39,27 @@ pub const TRAY_AGENT: &str = "com.banshee.tray";
 /// write never truncates a file the user hand-edits, and the bytes reach the
 /// disk before the rename, so a power loss leaves the old file or the new one.
 /// `mode` applies from the first byte on disk, and the rename carries it with
-/// the inode.
+/// the inode. A symlink at `path` is followed, so the write lands on the file
+/// it names, and the link stays. A link whose target is missing fails the
+/// write, and the error names the link and the target.
 pub fn write_atomically(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+
+    // A rename replaces a symlink, so a dotfile manager's link would become a
+    // plain file.
+    let resolved = if path.is_symlink() {
+        std::fs::canonicalize(path).map_err(|error| {
+            let target = std::fs::read_link(path).unwrap_or_default();
+            std::io::Error::new(
+                error.kind(),
+                format!("{} links to {}: {error}", path.display(), target.display()),
+            )
+        })?
+    } else {
+        path.to_path_buf()
+    };
+    let path = resolved.as_path();
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -142,19 +159,34 @@ impl Subscription {
     /// state is the whole `banshee.status` reply, and a change carries only the
     /// fields that move on their own. Re-read `banshee.status` for the rest.
     pub async fn open(events: &[&str]) -> Result<(Value, Self), BansheeError> {
-        let (state, lines) =
-            call(BANSHEE_SUBSCRIBE, serde_json::json!({ "events": events })).await?;
+        Self::subscribe(serde_json::json!({ "events": events })).await
+    }
+
+    /// As `open`, and the daemon counts this connection as a chip that draws
+    /// the cues, which silences the earcons `visual` gives to the screen.
+    pub async fn open_to_draw(events: &[&str]) -> Result<(Value, Self), BansheeError> {
+        Self::subscribe(serde_json::json!({ "events": events, "draws": true })).await
+    }
+
+    async fn subscribe(params: Value) -> Result<(Value, Self), BansheeError> {
+        let (state, lines) = call(BANSHEE_SUBSCRIBE, params).await?;
         Ok((state, Subscription { lines }))
+    }
+
+    pub async fn next(&mut self) -> Result<Option<JsonRpcNotification>, BansheeError> {
+        let Some(line) = self.lines.next_line().await? else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::from_str(&line)?))
     }
 
     /// The next notification of one method, skipping the kinds this caller did
     /// not ask about. `None` once the daemon closes the connection.
     pub async fn next_of(&mut self, method: &str) -> Result<Option<Value>, BansheeError> {
         loop {
-            let Some(line) = self.lines.next_line().await? else {
+            let Some(pushed) = self.next().await? else {
                 return Ok(None);
             };
-            let pushed: JsonRpcNotification = serde_json::from_str(&line)?;
             if pushed.method == method {
                 return Ok(Some(pushed.params));
             }
@@ -280,5 +312,50 @@ mod tests {
         let extension = target.extension().unwrap_or_default().to_string_lossy();
         let staged = target.with_extension(format!("{extension}.{}", std::process::id()));
         assert!(!staged.exists());
+    }
+
+    #[test]
+    fn a_write_through_a_symlink_changes_the_target_and_keeps_the_link() {
+        let dir = TempDir(std::env::temp_dir().join(format!(
+            "banshee-common-test-{}-{}",
+            std::process::id(),
+            "a_write_through_a_symlink_changes_the_target_and_keeps_the_link"
+        )));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let target = dir.0.join("dotfiles-config.toml");
+        std::fs::write(&target, "old").unwrap();
+        let link = dir.0.join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_atomically(&link, b"new", None).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    #[test]
+    fn a_write_through_a_dangling_symlink_names_the_link_and_its_missing_target() {
+        let dir = TempDir(std::env::temp_dir().join(format!(
+            "banshee-common-test-{}-{}",
+            std::process::id(),
+            "a_write_through_a_dangling_symlink_names_the_link_and_its_missing_target"
+        )));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let target = dir.0.join("gone").join("dotfiles-config.toml");
+        let link = dir.0.join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let refusal = write_atomically(&link, b"new", None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(refusal.contains(&*link.to_string_lossy()), "{refusal}");
+        assert!(refusal.contains(&*target.to_string_lossy()), "{refusal}");
+        assert!(!target.exists(), "the write fails and makes no target");
     }
 }

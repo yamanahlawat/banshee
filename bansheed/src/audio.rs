@@ -222,7 +222,11 @@ impl CaptureSink {
     {
         self.state.mark_capture_alive();
         if self.state.is_recording() {
+            // A full ring stops pulling from the iterator, so the peak reads every frame first.
+            let peak =
+                downmix(data, self.channels).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
             self.producer.push_iter(downmix(data, self.channels));
+            self.state.note_peak(peak);
         }
     }
 }
@@ -358,6 +362,22 @@ pub fn open_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_peak_reads_the_frames_a_full_ring_refuses() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        assert!(state.record_start(crate::state::TranscribeTarget::Mailbox));
+        let (producer, _consumer) = HeapRb::<f32>::new(1).split();
+        let mut sink = CaptureSink {
+            state: Arc::clone(&state),
+            producer,
+            channels: 2,
+        };
+
+        sink.take(&[0.25f32, 0.25, 0.5, 0.25]);
+
+        assert_eq!(state.take_peak(), 0.375, "the peak of the mono downmix");
+    }
 
     fn devices(names: &[&str]) -> Vec<String> {
         names.iter().map(|n| n.to_string()).collect()

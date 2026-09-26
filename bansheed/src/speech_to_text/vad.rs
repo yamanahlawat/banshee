@@ -95,27 +95,27 @@ impl VADEngine {
     }
 }
 
+/// 3.2s of 16kHz mono speech, embedded so tests need no external files.
+#[cfg(test)]
+pub fn test_speech() -> Vec<f32> {
+    const TEST_WAV: &[u8] = include_bytes!("../../tests/data/vad_speech_16k.wav");
+    let mut reader =
+        hound::WavReader::new(std::io::Cursor::new(TEST_WAV)).expect("invalid test wav");
+    assert_eq!(reader.spec().sample_rate, 16000);
+    crate::speech_to_text::remote::wav::pcm16_samples(
+        reader
+            .samples::<i16>()
+            .map(|sample| sample.expect("a sample")),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
-
-    // 3.2s of 16kHz mono 16-bit speech, embedded so tests need no external files
-    const TEST_WAV: &[u8] = include_bytes!("../../tests/data/vad_speech_16k.wav");
-
-    fn load_test_audio() -> Vec<f32> {
-        let mut reader = hound::WavReader::new(Cursor::new(TEST_WAV)).expect("invalid test wav");
-        assert_eq!(reader.spec().sample_rate, 16000);
-        crate::speech_to_text::remote::wav::pcm16_samples(
-            reader
-                .samples::<i16>()
-                .map(|sample| sample.expect("a sample")),
-        )
-    }
 
     #[test]
     fn detects_speech_in_tts_audio() {
-        let samples = load_test_audio();
+        let samples = test_speech();
         let mut vad = VADEngine::new(SileroVADConfig::new("silero_vad.onnx")).unwrap();
 
         let mut speech = 0;

@@ -1,18 +1,25 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use rodio::source::{SineWave, Source};
+use tokio::sync::{broadcast, watch};
 
+use crate::config::FeedbackMode;
 use crate::text_to_speech::ActiveUtterance;
 use crate::text_to_speech::output::{Chunk, Output};
+
+pub use banshee_common::cue::{Reason, ReasonCode, Signal, Target};
+
+/// A receiver that falls this far behind loses the oldest signals.
+const SIGNAL_BACKLOG: usize = 128;
 
 /// How often a cue that is playing is given the chance to follow the device.
 const CUE_POLL: Duration = Duration::from_millis(20);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cue {
     RecordStart,
     RecordStop,
@@ -49,94 +56,174 @@ impl Cue {
     }
 }
 
-/// The cue channel and the switch that decides whether a cue sounds. One value,
-/// because a cue sent while cues are off must still reach a live player for the
-/// moment they come back on.
+pub fn sounds(mode: FeedbackMode, drawn: bool) -> bool {
+    match mode {
+        FeedbackMode::Off => false,
+        FeedbackMode::Sound | FeedbackMode::Both => true,
+        FeedbackMode::Visual => !drawn,
+    }
+}
+
+impl From<crate::state::TranscribeTarget> for Target {
+    fn from(target: crate::state::TranscribeTarget) -> Self {
+        match target {
+            crate::state::TranscribeTarget::Dictate => Target::Dictate,
+            crate::state::TranscribeTarget::Mailbox => Target::Mailbox,
+            crate::state::TranscribeTarget::Tell => Target::Tell,
+        }
+    }
+}
+
+pub fn broken(fault: &crate::state::RecordingError) -> Reason {
+    Reason {
+        code: ReasonCode::PipelineBroken,
+        text: crate::speech_to_text::local::languages::capitalised(&fault.consequence()),
+    }
+}
+
+pub fn cue_of(signal: &Signal) -> Option<Cue> {
+    match signal {
+        Signal::RecordStart { .. } => Some(Cue::RecordStart),
+        Signal::RecordStop { .. } => Some(Cue::RecordStop),
+        Signal::Ready { .. } => Some(Cue::Ready),
+        Signal::Error { .. } => Some(Cue::Error),
+        Signal::Arm => Some(Cue::Arm),
+        Signal::Disarm => Some(Cue::Disarm),
+        Signal::Answered { .. } | Signal::Told | Signal::Cancelled { .. } | Signal::Onset => None,
+    }
+}
+
+#[derive(Clone)]
+struct Gate {
+    mode: Arc<watch::Sender<FeedbackMode>>,
+    drawers: Arc<AtomicUsize>,
+}
+
+impl Gate {
+    fn mode(&self) -> FeedbackMode {
+        *self.mode.borrow()
+    }
+
+    fn sounds(&self) -> bool {
+        sounds(self.mode(), self.drawers.load(Ordering::Relaxed) > 0)
+    }
+}
+
 #[derive(Clone)]
 pub struct Cues {
     sender: mpsc::Sender<Cue>,
-    enabled: Arc<AtomicBool>,
+    gate: Gate,
+    signals: broadcast::Sender<Signal>,
 }
 
 impl Cues {
     /// A cue nobody can hear is not an error, so this swallows a dead player.
-    pub fn send(&self, cue: Cue) {
-        let _ = self.sender.send(cue);
+    fn send(&self, cue: Cue) {
+        if self.gate.sounds() {
+            let _ = self.sender.send(cue);
+        }
     }
 
-    /// The player thread reads the flag itself, so this serves the tests that
-    /// ask whether a write reached it.
-    #[cfg(test)]
-    pub fn enabled(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed)
+    /// The signal goes out whatever the mode.
+    pub fn emit(&self, signal: Signal) {
+        if let Some(cue) = cue_of(&signal) {
+            self.send(cue);
+        }
+        // `send` fails only when no one subscribes, which is not a fault.
+        let _ = self.signals.send(signal);
     }
 
-    pub fn set_enabled(&self, on: bool) {
-        self.enabled.store(on, Ordering::Relaxed);
+    pub fn subscribe_signals(&self) -> broadcast::Receiver<Signal> {
+        self.signals.subscribe()
     }
 
-    /// No player behind it, for tests that never sound a cue.
+    pub fn mode(&self) -> FeedbackMode {
+        self.gate.mode()
+    }
+
+    pub fn set_mode(&self, mode: FeedbackMode) {
+        self.gate.mode.send_replace(mode);
+    }
+
+    pub fn subscribe_mode(&self) -> watch::Receiver<FeedbackMode> {
+        self.gate.mode.subscribe()
+    }
+
+    fn with_sender(sender: mpsc::Sender<Cue>, mode: FeedbackMode) -> Self {
+        Cues {
+            sender,
+            gate: Gate {
+                mode: Arc::new(watch::channel(mode).0),
+                drawers: Arc::new(AtomicUsize::new(0)),
+            },
+            signals: broadcast::channel(SIGNAL_BACKLOG).0,
+        }
+    }
+
     #[cfg(test)]
     pub fn silent() -> Self {
-        Cues {
-            sender: mpsc::channel().0,
-            enabled: Arc::new(AtomicBool::new(false)),
-        }
+        Cues::with_sender(mpsc::channel().0, FeedbackMode::Off)
     }
 
-    /// A live receiver, for a test that asks which cue a path sounds.
     #[cfg(test)]
     pub fn recording() -> (Self, mpsc::Receiver<Cue>) {
+        Cues::recording_in(FeedbackMode::Both)
+    }
+
+    #[cfg(test)]
+    pub fn recording_in(mode: FeedbackMode) -> (Self, mpsc::Receiver<Cue>) {
         let (sender, receiver) = mpsc::channel();
-        (
-            Cues {
-                sender,
-                enabled: Arc::new(AtomicBool::new(true)),
-            },
-            receiver,
-        )
+        (Cues::with_sender(sender, mode), receiver)
+    }
+
+    #[cfg(test)]
+    pub fn drawers(&self) -> usize {
+        self.gate.drawers.load(Ordering::Relaxed)
+    }
+
+    pub fn drawn(&self) -> Drawn {
+        self.gate.drawers.fetch_add(1, Ordering::Relaxed);
+        Drawn(Arc::clone(&self.gate.drawers))
     }
 }
 
-fn next_playable(receiver: &mpsc::Receiver<Cue>, enabled: &AtomicBool) -> Option<Cue> {
-    loop {
-        let cue = receiver.recv().ok()?;
-        if enabled.load(Ordering::Relaxed) {
-            return Some(cue);
-        }
+/// One client that draws the cues. Its drop is the client going away.
+pub struct Drawn(Arc<AtomicUsize>);
+
+impl Drop for Drawn {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
-/// The player holds the receiver whether or not cues sound, so turning them on
-/// reaches a thread that is already listening. It opens no output device until
-/// the first cue it must play, so cues left off hold no audio hardware.
-pub fn start_cue_player(enabled: bool, output: Arc<Output>) -> Cues {
+/// Opens no output device until the first cue it must play, so a mode with no
+/// sound holds no audio hardware.
+pub fn start_cue_player(mode: FeedbackMode, output: Arc<Output>) -> Cues {
     let (sender, receiver) = mpsc::channel::<Cue>();
-    let cues = Cues {
-        sender,
-        enabled: Arc::new(AtomicBool::new(enabled)),
-    };
-    let enabled = cues.enabled.clone();
+    let cues = Cues::with_sender(sender, mode);
+    let gate = cues.gate.clone();
 
+    // The thread lives whatever the mode, so a mode that sounds again finds it listening.
     thread::spawn(move || {
-        let Some(mut cue) = next_playable(&receiver, &enabled) else {
-            return;
-        };
         // A cue that cannot play is not a reply that was not spoken, so its
         // faults stay out of `last_speech_error`, and the receiver goes rather
         // than buffering them for the life of the daemon. `play` logs them.
         let (faults, unread) = mpsc::channel();
         drop(unread);
-        loop {
-            play(&output, cue, &faults);
-            cue = match next_playable(&receiver, &enabled) {
-                Some(next) => next,
-                None => return,
-            };
-        }
+        serve_cues(receiver, &gate, |cue| play(&output, cue, &faults));
     });
 
     cues
+}
+
+/// The mode can change while a cue waits behind another, so each is asked again
+/// as it comes up.
+fn serve_cues(receiver: mpsc::Receiver<Cue>, gate: &Gate, mut play: impl FnMut(Cue)) {
+    for cue in receiver {
+        if gate.sounds() {
+            play(cue);
+        }
+    }
 }
 
 /// Plays one cue through the daemon's output and stays with it to the end, so a
@@ -185,6 +272,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_the_silent_signals_have_no_cue() {
+        assert_eq!(cue_of(&Signal::Answered { heard: true }), None);
+        assert_eq!(cue_of(&Signal::Told), None);
+        assert_eq!(cue_of(&Signal::Onset), None);
+        assert_eq!(
+            cue_of(&Signal::Cancelled {
+                target: Target::Dictate
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn a_signal_reaches_a_subscriber_whatever_the_mode() {
+        let (cues, heard) = Cues::recording_in(FeedbackMode::Off);
+        let mut signals = cues.subscribe_signals();
+        cues.emit(Signal::Ready {
+            target: Target::Dictate,
+        });
+        assert!(matches!(signals.try_recv(), Ok(Signal::Ready { .. })));
+        assert!(heard.try_recv().is_err(), "none still plays nothing");
+    }
+
+    #[test]
+    fn nothing_heard_names_the_device_when_there_is_one() {
+        assert_eq!(
+            Reason::new(ReasonCode::NoSpeech, None).text,
+            "Nothing heard"
+        );
+        assert_eq!(
+            Reason::new(ReasonCode::EmptyTranscript, Some("USB Mic")).text,
+            "Nothing heard on USB Mic"
+        );
+    }
+
+    #[test]
     fn every_cue_has_audible_tones() {
         for cue in [
             Cue::RecordStart,
@@ -201,12 +324,107 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_mode_and_whether_a_chip_draws_decide_what_sounds() {
+        let cases = [
+            (FeedbackMode::Off, false, false),
+            (FeedbackMode::Off, true, false),
+            (FeedbackMode::Sound, false, true),
+            (FeedbackMode::Sound, true, true),
+            (FeedbackMode::Both, false, true),
+            (FeedbackMode::Both, true, true),
+            (FeedbackMode::Visual, false, true),
+            (FeedbackMode::Visual, true, false),
+        ];
+        for (mode, drawn, heard) in cases {
+            assert_eq!(sounds(mode, drawn), heard, "{mode:?} drawn {drawn}");
+        }
+    }
+
+    // The gate reads only the mode and the drawn count, so a dictation, an
+    // agent's question, a tell failure and a speech failure share one answer.
+    #[test]
+    fn a_chip_in_visual_silences_every_job_and_no_chip_sounds_them_all() {
+        let jobs = [
+            Signal::RecordStart {
+                target: Target::Dictate,
+            },
+            Signal::Error {
+                reason: Reason::new(ReasonCode::ListenFailed, None),
+                target: Some(Target::Answer),
+            },
+            Signal::Error {
+                reason: Reason::new(ReasonCode::TellFailed, None),
+                target: Some(Target::Tell),
+            },
+            Signal::Error {
+                reason: Reason::new(ReasonCode::SpeechFailed, None),
+                target: None,
+            },
+        ];
+
+        let (cues, heard) = Cues::recording_in(FeedbackMode::Visual);
+        let chip = cues.drawn();
+        for job in jobs.clone() {
+            cues.emit(job);
+        }
+        assert!(
+            heard.try_recv().is_err(),
+            "a chip drawn in visual silences every job"
+        );
+
+        drop(chip);
+        for job in jobs {
+            cues.emit(job);
+        }
+        assert_eq!(
+            heard.try_iter().count(),
+            4,
+            "with no chip, every job sounds again"
+        );
+    }
+
+    #[test]
+    fn a_cue_the_mode_silences_never_reaches_the_player() {
+        let (cues, heard) = Cues::recording_in(FeedbackMode::Off);
+        cues.send(Cue::Ready);
+        assert!(heard.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_drawn_chip_silences_visual_until_it_drops() {
+        let (cues, heard) = Cues::recording_in(FeedbackMode::Visual);
+        let chip = cues.drawn();
+        cues.send(Cue::Ready);
+        assert!(heard.try_recv().is_err(), "a chip drawn silences visual");
+
+        drop(chip);
+        cues.send(Cue::Ready);
+        assert!(
+            matches!(heard.try_recv(), Ok(Cue::Ready)),
+            "with no chip left, visual must sound again"
+        );
+    }
+
+    #[test]
+    fn a_queued_cue_the_mode_now_silences_does_not_play() {
+        let (cues, queued) = Cues::recording_in(FeedbackMode::Both);
+        cues.send(Cue::Ready);
+        cues.set_mode(FeedbackMode::Off);
+        let gate = cues.gate.clone();
+        drop(cues);
+
+        let mut played = Vec::new();
+        serve_cues(queued, &gate, |cue| played.push(cue));
+        assert!(played.is_empty(), "played {played:?}");
+    }
+
     // The cue and the voice must come out of one device, which they can only do
     // by going through one output.
     #[test]
     fn a_cue_plays_through_the_daemon_output() {
         let (output, mut mixed) = Output::readable();
-        let cues = start_cue_player(true, Arc::new(output));
+        let cues = start_cue_player(FeedbackMode::Both, Arc::new(output));
         cues.send(Cue::Ready);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -224,7 +442,7 @@ mod tests {
     #[test]
     fn a_cue_follows_a_device_that_dies_under_it() {
         let (output, opened) = Output::counting();
-        let cues = start_cue_player(true, Arc::new(output));
+        let cues = start_cue_player(FeedbackMode::Both, Arc::new(output));
         cues.send(Cue::Ready);
 
         // Nothing takes the audio from a counting output, so the cue stalls
@@ -244,36 +462,11 @@ mod tests {
     // restart to get a thread back.
     #[test]
     fn a_player_that_starts_off_still_takes_cues() {
-        let cues = start_cue_player(false, Arc::new(Output::silent()));
+        let cues = start_cue_player(FeedbackMode::Off, Arc::new(Output::silent()));
         assert!(
             cues.sender.send(Cue::Ready).is_ok(),
-            "the player must still hold the receiver, or turning cues on would \
+            "the player must still hold the receiver, or turning sound on would \
              need a restart to get a thread back"
         );
-    }
-
-    #[test]
-    fn nothing_is_played_while_cues_are_off() {
-        let (sender, receiver) = mpsc::channel();
-        sender.send(Cue::Ready).unwrap();
-        sender.send(Cue::Error).unwrap();
-        drop(sender);
-
-        assert!(
-            next_playable(&receiver, &AtomicBool::new(false)).is_none(),
-            "a cue that arrives while cues are off must not reach the speaker"
-        );
-    }
-
-    #[test]
-    fn the_first_cue_after_cues_come_on_is_played() {
-        let (sender, receiver) = mpsc::channel();
-        sender.send(Cue::Ready).unwrap();
-        sender.send(Cue::Error).unwrap();
-
-        assert!(matches!(
-            next_playable(&receiver, &AtomicBool::new(true)),
-            Some(Cue::Ready)
-        ));
     }
 }
