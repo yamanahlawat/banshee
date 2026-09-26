@@ -524,9 +524,10 @@ impl DaemonState {
     }
 
     // The user pressed a chord through the hotkey, so the session it opened
-    // is a mistake: discard the audio rather than route it. No sound for
-    // push-to-talk: the start cue was already noise, a second cue doubles it,
-    // but a silent signal still tells a subscriber the session is gone.
+    // is a mistake: discard the audio rather than route it. A push-to-talk
+    // cancel plays no sound, because the start cue is already noise and a
+    // second cue doubles it. A silent signal still tells a subscriber the
+    // session is gone.
     pub fn record_cancel(&self) {
         let session = lock(&self.push_to_talk);
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
