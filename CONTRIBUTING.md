@@ -175,6 +175,61 @@ make install
 - There is no signing step.
 - `banshee tray` puts the mark in the bar.
 
+## Benchmarks and profiling
+
+The `speech_out` bench measures the speech-out text path, G2P and Kokoro synthesis.
+
+```sh
+cargo bench -p banshee --bench speech_out
+cargo bench -p banshee --bench speech_out -- g2p
+```
+
+- The `kokoro` group needs the Kokoro model and the `af_sky` voice. Without them, it prints
+  one line and skips the group.
+- `banshee setup` downloads only the voice that `tts.voice` names. Set it to `af_sky` first
+  if yours differs.
+- The `g2p` group runs G2P once per sentence, as the daemon does.
+- The bench uses the daemon's default settings, not your `config.toml`.
+- It prints the voice, the speed, the thread count and whether espeak-ng is present.
+- Elements per second divided by 24000 gives the realtime factor.
+- Machine load changes Kokoro timing by a large margin. Compare runs only on an idle machine.
+- These numbers are for the `release` profile. Shipped archives use `dist`, which adds thin LTO.
+- A filter such as `-- g2p` still loads the Kokoro model and synthesizes two texts, when the
+  model is on disk.
+- When espeak-ng is absent, every engine load probes for it again. `warm_cache_load` and
+  `first_speech` include that probe.
+- A full run takes about 4 minutes on an Apple M5 Pro. `docs/benchmarks.md` records the time
+  and load of each run.
+
+Compare a change against a saved baseline:
+
+```sh
+cargo bench -p banshee --bench speech_out -- --save-baseline before
+cargo bench -p banshee --bench speech_out -- --baseline before
+```
+
+Profile with [samply](https://github.com/mstange/samply). The `profiling` profile adds line
+tables to a release build.
+
+```sh
+cargo bench -p banshee --profile profiling --bench speech_out --no-run
+samply record target/profiling/deps/speech_out-<hash> --bench --profile-time 10 kokoro/synthesize_long_windowed
+```
+
+`--profile-time` runs the bench for the given number of seconds and skips Criterion's
+analysis. Most synthesis time runs inside ONNX Runtime. Its frames carry function names but no
+source lines. samply is more useful for the G2P and text-path frames.
+
+On Linux, samply reads the kernel's perf events. Most distributions allow these only when
+`/proc/sys/kernel/perf_event_paranoid` is 1 or lower. Set it for the session, and set the old
+value back after the recording:
+
+```sh
+echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+```
+
+Record each run that matters in [docs/benchmarks.md](docs/benchmarks.md).
+
 ## Submit a change
 
 - Branch from `develop` and open your PR against it; `main` tracks releases.

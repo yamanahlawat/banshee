@@ -17,6 +17,23 @@ categories.workspace = true
 [lints]
 workspace = true
 
+# libtest rejects Criterion flags, so only the speech_out target takes `cargo bench`.
+[lib]
+bench = false
+doctest = false
+
+[[bin]]
+name = "banshee"
+bench = false
+
+[[bin]]
+name = "banshee-mcp-shim"
+bench = false
+
+[[bin]]
+name = "banshee-tray"
+bench = false
+
 [dependencies]
 arboard.workspace = true
 audioadapter-buffers = "5.2.0"
@@ -97,7 +114,12 @@ objc2-core-text = { version = "0.3", default-features = false, features = ["std"
 whisper-rs = { workspace = true, features = ["metal", "coreml"] }
 
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false }
 hound = "3.5"
+
+[[bench]]
+name = "speech_out"
+harness = false
 
 [features]
 # NVIDIA GPUs on Linux/Windows; opt-in because CUDA needs the toolkit installed.
