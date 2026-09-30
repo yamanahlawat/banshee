@@ -321,6 +321,26 @@ impl SpeechPlayer {
         interrupt: bool,
         voice: Option<&str>,
     ) -> Result<u64, BansheeError> {
+        self.submit(text, interrupt, voice, false)
+    }
+
+    /// Speaks `text` and, in the same step, keeps back every utterance after
+    /// it until `release`. What is already playing or queued up to it still plays.
+    pub fn speak_and_hold(
+        self: &Arc<Self>,
+        text: &str,
+        interrupt: bool,
+    ) -> Result<(), BansheeError> {
+        self.submit(text, interrupt, None, true).map(drop)
+    }
+
+    fn submit(
+        self: &Arc<Self>,
+        text: &str,
+        interrupt: bool,
+        voice: Option<&str>,
+        hold: bool,
+    ) -> Result<u64, BansheeError> {
         let normalized = pronunciation::normalize(text);
         let text = normalized.as_str();
         let mut playback = self.lock();
@@ -331,6 +351,9 @@ impl SpeechPlayer {
 
         playback.utterance_id += 1;
         let utterance_id = playback.utterance_id;
+        if hold {
+            playback.hold = Hold(Some(utterance_id));
+        }
 
         // normalize can leave nothing speakable (e.g. input was only underscores);
         // keep the id sequence but start no playback
@@ -374,12 +397,6 @@ impl SpeechPlayer {
         playback.stop_active();
         playback.drop_unheld();
         self.publish(&playback);
-    }
-
-    /// Keeps back every utterance after `utterance_id` until `release`. What
-    /// is already playing or queued up to it still plays.
-    pub fn hold_after(&self, utterance_id: u64) {
-        self.lock().hold = Hold(Some(utterance_id));
     }
 
     pub fn release(self: &Arc<Self>) {
@@ -722,10 +739,9 @@ mod tests {
     async fn a_line_sent_after_the_question_waits_for_the_release() {
         let (player, started, ends) = gated();
         ends.store(true, std::sync::atomic::Ordering::SeqCst);
-        let question = player.speak("The question.", false, None).unwrap();
+        player.speak_and_hold("The question.", false).unwrap();
         falls_silent(&player).await;
 
-        player.hold_after(question);
         player.speak("Agent B reports.", false, None).unwrap();
         assert_eq!(started_lines(&started), ["The question."]);
         assert!(
@@ -746,8 +762,7 @@ mod tests {
         player
             .speak("Agent C was mid-sentence.", false, None)
             .unwrap();
-        let question = player.speak("The question.", false, None).unwrap();
-        player.hold_after(question);
+        player.speak_and_hold("The question.", false).unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
         ends.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -774,8 +789,7 @@ mod tests {
         player
             .speak("Agent C was mid-sentence.", false, None)
             .unwrap();
-        let question = player.speak("The question.", false, None).unwrap();
-        player.hold_after(question);
+        player.speak_and_hold("The question.", false).unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
         player.stop();
@@ -791,8 +805,7 @@ mod tests {
     #[test]
     fn an_interrupt_the_hold_keeps_back_leaves_nothing_speaking() {
         let (player, _started, _ends) = gated();
-        let question = player.speak("The question.", false, None).unwrap();
-        player.hold_after(question);
+        player.speak_and_hold("The question.", false).unwrap();
 
         player.speak("Agent B interrupts.", true, None).unwrap();
         assert!(
@@ -804,8 +817,7 @@ mod tests {
     #[test]
     fn an_interrupt_during_a_hold_leaves_only_itself_to_play() {
         let (player, started, _ends) = gated();
-        let question = player.speak("The question.", false, None).unwrap();
-        player.hold_after(question);
+        player.speak_and_hold("The question.", false).unwrap();
         player
             .speak("Agent B is still testing.", false, None)
             .unwrap();
@@ -824,8 +836,7 @@ mod tests {
         player
             .speak("Agent C was mid-sentence.", false, None)
             .unwrap();
-        let question = player.speak(REFUSED, false, None).unwrap();
-        player.hold_after(question);
+        player.speak_and_hold(REFUSED, false).unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
         ends.store(true, std::sync::atomic::Ordering::SeqCst);
