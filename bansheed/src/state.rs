@@ -946,12 +946,15 @@ impl DaemonState {
         opened
     }
 
+    /// Also lets through the speech `ask_user` held back while the session listened.
     pub fn disarm(&self, session: u64) {
         let current = lock(&self.armed_session);
         if *current == session {
             let _ = self.try_transition(RecordingMode::Armed, RecordingMode::Idle)
                 || self.try_transition(RecordingMode::ArmedHold, RecordingMode::Idle);
             self.set_answer_open(false);
+            // Under the lock, so no ask armed after this one has its hold lifted
+            self.speech.release();
         }
     }
 

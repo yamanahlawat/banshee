@@ -159,6 +159,43 @@ async fn ask_user_lets_speech_from_the_same_turn_finish() {
 }
 
 #[tokio::test]
+async fn another_agent_speaks_only_after_the_answer_closes() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let (state, spoken) = crate::test_support::daemon_state_recording_speech_for(commands);
+
+    // Stand-in for the consumer thread: another agent speaks while it listens
+    let session_state = Arc::clone(&state);
+    let listening = std::thread::spawn(move || {
+        let Ok(ConsumerCommand::Ask(ask)) = command_receiver.recv() else {
+            panic!("the ask never reached the listener");
+        };
+        session_state
+            .speech()
+            .speak("Agent B reports.", false, None)
+            .unwrap();
+        let heard_while_listening = session_state.speech().is_speaking();
+        session_state.disarm(ask.session);
+        let _ = ask.reply.send(Ok("yes".to_string()));
+        heard_while_listening
+    });
+
+    let request = request(
+        BANSHEE_ASK_USER,
+        Some(serde_json::json!({"question": "Ready to ship?"})),
+    );
+    dispatch(request, &state).await;
+
+    assert!(
+        !listening.join().unwrap(),
+        "speech while the answer listens deafens the microphone"
+    );
+    assert_eq!(
+        *spoken.lock().unwrap(),
+        ["Ready to ship?", "Agent B reports."]
+    );
+}
+
+#[tokio::test]
 async fn ask_user_returns_the_scoped_answer() {
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let state = test_state(commands);

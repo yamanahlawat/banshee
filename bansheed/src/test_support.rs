@@ -210,9 +210,15 @@ impl TtsBackend for SpeakingBackend {
 /// reaches the backend from the watcher thread, so a test waits for it rather
 /// than reading the list at once.
 pub fn daemon_state_recording_speech() -> (Arc<DaemonState>, SpokenLines) {
+    daemon_state_recording_speech_for(std::sync::mpsc::channel().0)
+}
+
+pub fn daemon_state_recording_speech_for(
+    commands: std::sync::mpsc::Sender<ConsumerCommand>,
+) -> (Arc<DaemonState>, SpokenLines) {
     let spoken: SpokenLines = Arc::default();
     let speech = SpeechPlayer::new(Box::new(SpeakingBackend(spoken.clone())));
-    (state(None, speech, std::sync::mpsc::channel().0), spoken)
+    (state(None, speech, commands), spoken)
 }
 
 /// A daemon state whose backend keeps what it was last told to speak in.
