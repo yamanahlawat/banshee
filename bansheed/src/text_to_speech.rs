@@ -253,11 +253,39 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+struct Line {
+    utterance_id: u64,
+    text: String,
+    voice: Option<String>,
+}
+
+struct Hold(Option<u64>);
+
+impl Hold {
+    fn keeps_back(&self, utterance_id: u64) -> bool {
+        self.0.is_some_and(|after| utterance_id > after)
+    }
+}
+
 struct Playback {
     utterance_id: u64,
     active: Option<Box<dyn ActiveUtterance>>,
-    queue: VecDeque<(String, Option<String>)>,
+    queue: VecDeque<Line>,
     watcher_running: bool,
+    hold: Hold,
+}
+
+impl Playback {
+    fn stop_active(&mut self) {
+        if let Some(mut active) = self.active.take() {
+            active.stop();
+        }
+    }
+
+    fn drop_unheld(&mut self) {
+        self.queue
+            .retain(|line| self.hold.keeps_back(line.utterance_id));
+    }
 }
 
 pub struct SpeechPlayer {
@@ -281,6 +309,7 @@ impl SpeechPlayer {
                 active: None,
                 queue: VecDeque::new(),
                 watcher_running: false,
+                hold: Hold(None),
             }),
             speaking: watch::channel(false).0,
         }
@@ -296,8 +325,8 @@ impl SpeechPlayer {
         let text = normalized.as_str();
         let mut playback = self.lock();
         if interrupt {
+            playback.stop_active();
             playback.queue.clear();
-            stop_active(&mut playback);
         }
 
         playback.utterance_id += 1;
@@ -310,14 +339,18 @@ impl SpeechPlayer {
             return Ok(utterance_id);
         }
 
-        if playback.active.is_some() {
-            playback
-                .queue
-                .push_back((text.to_string(), voice.map(str::to_string)));
+        if playback.active.is_some() || playback.hold.keeps_back(utterance_id) {
+            playback.queue.push_back(Line {
+                utterance_id,
+                text: text.to_string(),
+                voice: voice.map(str::to_string),
+            });
             // drop the oldest backlog rather than droning through stale updates
             if playback.queue.len() > MAX_QUEUED_UTTERANCES {
                 playback.queue.pop_front();
             }
+            // The interrupt above may have stopped what played
+            self.publish(&playback);
             return Ok(utterance_id);
         }
 
@@ -332,23 +365,29 @@ impl SpeechPlayer {
                 return Err(error);
             }
         }
-        let needs_watcher = !playback.watcher_running;
-        playback.watcher_running = true;
-        self.publish(&playback);
-        drop(playback);
-
-        if needs_watcher {
-            let player = Arc::clone(self);
-            thread::spawn(move || player.watch_playback());
-        }
+        self.publish_and_watch(playback);
         Ok(utterance_id)
     }
 
     pub fn stop(&self) {
         let mut playback = self.lock();
-        playback.queue.clear();
-        stop_active(&mut playback);
+        playback.stop_active();
+        playback.drop_unheld();
         self.publish(&playback);
+    }
+
+    /// Keeps back every utterance after `utterance_id` until `release`. What
+    /// is already playing or queued up to it still plays.
+    pub fn hold_after(&self, utterance_id: u64) {
+        self.lock().hold = Hold(Some(utterance_id));
+    }
+
+    pub fn release(self: &Arc<Self>) {
+        let mut playback = self.lock();
+        playback.hold = Hold(None);
+        if playback.active.is_none() && self.start_next(&mut playback) {
+            self.publish_and_watch(playback);
+        }
     }
 
     pub fn is_speaking(&self) -> bool {
@@ -372,23 +411,43 @@ impl SpeechPlayer {
                 continue;
             }
             playback.active = None;
-            match playback.queue.pop_front() {
-                Some((next, voice)) => match self.backend.start(&next, voice.as_deref()) {
-                    Ok(utterance) => playback.active = Some(utterance),
-                    Err(e) => {
-                        log::error!("Failed to speak queued utterance: {e}");
-                        playback.queue.clear();
-                        playback.watcher_running = false;
-                        self.publish(&playback);
-                        return;
-                    }
-                },
-                None => {
-                    playback.watcher_running = false;
-                    self.publish(&playback);
-                    return;
-                }
+            if !self.start_next(&mut playback) {
+                playback.watcher_running = false;
+                self.publish(&playback);
+                return;
             }
+        }
+    }
+
+    fn start_next(&self, playback: &mut Playback) -> bool {
+        let Some(line) = playback
+            .queue
+            .pop_front_if(|line| !playback.hold.keeps_back(line.utterance_id))
+        else {
+            return false;
+        };
+        match self.backend.start(&line.text, line.voice.as_deref()) {
+            Ok(utterance) => {
+                playback.active = Some(utterance);
+                true
+            }
+            Err(e) => {
+                log::error!("Failed to speak queued utterance: {e}");
+                playback.drop_unheld();
+                false
+            }
+        }
+    }
+
+    fn publish_and_watch(self: &Arc<Self>, mut playback: MutexGuard<'_, Playback>) {
+        let needs_watcher = !playback.watcher_running;
+        playback.watcher_running = true;
+        self.publish(&playback);
+        drop(playback);
+
+        if needs_watcher {
+            let player = Arc::clone(self);
+            thread::spawn(move || player.watch_playback());
         }
     }
 
@@ -406,12 +465,6 @@ impl SpeechPlayer {
 impl Default for SpeechPlayer {
     fn default() -> Self {
         Self::new(Box::new(SayBackend))
-    }
-}
-
-fn stop_active(playback: &mut Playback) {
-    if let Some(mut active) = playback.active.take() {
-        active.stop();
     }
 }
 
@@ -605,6 +658,183 @@ mod tests {
                 ))
             }
         }
+    }
+
+    const REFUSED: &str = "A line the backend refuses.";
+
+    /// Keeps each line it starts and refuses `REFUSED`. Every utterance plays
+    /// until `ends` goes true.
+    struct Gated {
+        started: crate::test_support::SpokenLines,
+        ends: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct UntilEnds(Arc<std::sync::atomic::AtomicBool>);
+
+    impl ActiveUtterance for UntilEnds {
+        fn is_finished(&mut self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn stop(&mut self) {}
+    }
+
+    impl TtsBackend for Gated {
+        fn start(
+            &self,
+            text: &str,
+            _voice: Option<&str>,
+        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+            if text == REFUSED {
+                return Err(BansheeError::Other("refused".to_string()));
+            }
+            self.started.lock().unwrap().push(text.to_string());
+            Ok(Box::new(UntilEnds(Arc::clone(&self.ends))))
+        }
+    }
+
+    fn gated() -> (
+        Arc<SpeechPlayer>,
+        crate::test_support::SpokenLines,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let started: crate::test_support::SpokenLines = Arc::default();
+        let ends: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let player = Arc::new(SpeechPlayer::new(Box::new(Gated {
+            started: Arc::clone(&started),
+            ends: Arc::clone(&ends),
+        })));
+        (player, started, ends)
+    }
+
+    async fn falls_silent(player: &SpeechPlayer) {
+        let mut speaking = player.subscribe_speaking();
+        tokio::time::timeout(Duration::from_secs(3), speaking.wait_for(|s| !s))
+            .await
+            .expect("playback never fell silent")
+            .expect("speaking sender dropped");
+    }
+
+    fn started_lines(started: &Mutex<Vec<String>>) -> Vec<String> {
+        started.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn a_line_sent_after_the_question_waits_for_the_release() {
+        let (player, started, ends) = gated();
+        ends.store(true, std::sync::atomic::Ordering::SeqCst);
+        let question = player.speak("The question.", false, None).unwrap();
+        falls_silent(&player).await;
+
+        player.hold_after(question);
+        player.speak("Agent B reports.", false, None).unwrap();
+        assert_eq!(started_lines(&started), ["The question."]);
+        assert!(
+            !player.is_speaking(),
+            "held speech must not deafen the microphone"
+        );
+
+        player.release();
+        assert_eq!(
+            started_lines(&started),
+            ["The question.", "Agent B reports."]
+        );
+    }
+
+    #[tokio::test]
+    async fn lines_queued_up_to_the_question_play_and_the_rest_wait() {
+        let (player, started, ends) = gated();
+        player
+            .speak("Agent C was mid-sentence.", false, None)
+            .unwrap();
+        let question = player.speak("The question.", false, None).unwrap();
+        player.hold_after(question);
+        player.speak("Agent B reports.", false, None).unwrap();
+
+        ends.store(true, std::sync::atomic::Ordering::SeqCst);
+        falls_silent(&player).await;
+        assert_eq!(
+            started_lines(&started),
+            ["Agent C was mid-sentence.", "The question."]
+        );
+
+        player.release();
+        assert_eq!(
+            started_lines(&started),
+            [
+                "Agent C was mid-sentence.",
+                "The question.",
+                "Agent B reports."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stop_during_a_hold_drops_the_backlog_and_keeps_the_lines_it_holds() {
+        let (player, started, _ends) = gated();
+        player
+            .speak("Agent C was mid-sentence.", false, None)
+            .unwrap();
+        let question = player.speak("The question.", false, None).unwrap();
+        player.hold_after(question);
+        player.speak("Agent B reports.", false, None).unwrap();
+
+        player.stop();
+        assert!(!player.is_speaking());
+
+        player.release();
+        assert_eq!(
+            started_lines(&started),
+            ["Agent C was mid-sentence.", "Agent B reports."]
+        );
+    }
+
+    #[test]
+    fn an_interrupt_the_hold_keeps_back_leaves_nothing_speaking() {
+        let (player, _started, _ends) = gated();
+        let question = player.speak("The question.", false, None).unwrap();
+        player.hold_after(question);
+
+        player.speak("Agent B interrupts.", true, None).unwrap();
+        assert!(
+            !player.is_speaking(),
+            "a speaking flag with nothing playing deafens the microphone"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_during_a_hold_leaves_only_itself_to_play() {
+        let (player, started, _ends) = gated();
+        let question = player.speak("The question.", false, None).unwrap();
+        player.hold_after(question);
+        player
+            .speak("Agent B is still testing.", false, None)
+            .unwrap();
+
+        player.speak("Agent B is done.", true, None).unwrap();
+        player.release();
+        assert_eq!(
+            started_lines(&started),
+            ["The question.", "Agent B is done."]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_line_that_will_not_start_keeps_the_lines_the_hold_keeps_back() {
+        let (player, started, ends) = gated();
+        player
+            .speak("Agent C was mid-sentence.", false, None)
+            .unwrap();
+        let question = player.speak(REFUSED, false, None).unwrap();
+        player.hold_after(question);
+        player.speak("Agent B reports.", false, None).unwrap();
+
+        ends.store(true, std::sync::atomic::Ordering::SeqCst);
+        falls_silent(&player).await;
+        player.release();
+        assert_eq!(
+            started_lines(&started),
+            ["Agent C was mid-sentence.", "Agent B reports."]
+        );
     }
 
     #[tokio::test]
