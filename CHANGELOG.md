@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A left click on the Linux tray icon opens the window.** It did nothing
+  before. A right click still opens the menu. The icon now reports the id
+  `banshee`, so a bar that pinned it under the old id shows it unpinned. Pin it
+  again once. In the Omarchy bar, right click the tray arrow and press Pin.
+
 ## [0.16.0] - 2026-09-26
 
 ### Added
