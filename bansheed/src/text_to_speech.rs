@@ -259,8 +259,6 @@ struct Line {
     voice: Option<String>,
 }
 
-/// The utterance after which nothing starts. The microphone discards what it
-/// captures while anything plays, so a question's answer needs silence.
 struct Hold(Option<u64>);
 
 impl Hold {
@@ -278,19 +276,13 @@ struct Playback {
 }
 
 impl Playback {
-    /// Stops what plays and drops the backlog. What a hold keeps back stays.
-    fn cut(&mut self) {
-        self.stop_active();
-        self.drop_backlog();
-    }
-
     fn stop_active(&mut self) {
         if let Some(mut active) = self.active.take() {
             active.stop();
         }
     }
 
-    fn drop_backlog(&mut self) {
+    fn drop_unheld(&mut self) {
         self.queue
             .retain(|line| self.hold.keeps_back(line.utterance_id));
     }
@@ -357,6 +349,8 @@ impl SpeechPlayer {
             if playback.queue.len() > MAX_QUEUED_UTTERANCES {
                 playback.queue.pop_front();
             }
+            // The interrupt above may have stopped what played
+            self.publish(&playback);
             return Ok(utterance_id);
         }
 
@@ -377,7 +371,8 @@ impl SpeechPlayer {
 
     pub fn stop(&self) {
         let mut playback = self.lock();
-        playback.cut();
+        playback.stop_active();
+        playback.drop_unheld();
         self.publish(&playback);
     }
 
@@ -424,8 +419,6 @@ impl SpeechPlayer {
         }
     }
 
-    /// Starts the next queued line unless a hold keeps it back. A line that
-    /// will not start takes the backlog with it.
     fn start_next(&self, playback: &mut Playback) -> bool {
         let Some(line) = playback
             .queue
@@ -440,14 +433,12 @@ impl SpeechPlayer {
             }
             Err(e) => {
                 log::error!("Failed to speak queued utterance: {e}");
-                playback.drop_backlog();
+                playback.drop_unheld();
                 false
             }
         }
     }
 
-    /// Publishes what now plays, and starts the watcher that plays the queue
-    /// after it.
     fn publish_and_watch(self: &Arc<Self>, mut playback: MutexGuard<'_, Playback>) {
         let needs_watcher = !playback.watcher_running;
         playback.watcher_running = true;
@@ -794,6 +785,19 @@ mod tests {
         assert_eq!(
             started_lines(&started),
             ["Agent C was mid-sentence.", "Agent B reports."]
+        );
+    }
+
+    #[test]
+    fn an_interrupt_the_hold_keeps_back_leaves_nothing_speaking() {
+        let (player, _started, _ends) = gated();
+        let question = player.speak("The question.", false, None).unwrap();
+        player.hold_after(question);
+
+        player.speak("Agent B interrupts.", true, None).unwrap();
+        assert!(
+            !player.is_speaking(),
+            "a speaking flag with nothing playing deafens the microphone"
         );
     }
 
