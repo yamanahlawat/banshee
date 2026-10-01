@@ -14,7 +14,7 @@ use crate::text_to_speech::{ActiveUtterance, Fault, TtsBackend, lock};
 // Voice files hold one style row per input token count: 510 rows x 256 floats
 const STYLE_DIM: usize = 256;
 // Model context is 512 with a mandatory pad token at both ends
-const MAX_TOKENS: usize = 509;
+pub(crate) const MAX_TOKENS: usize = 509;
 
 // Phoneme char -> model token id, from the model repo's tokenizer.json
 const VOCAB: &[(char, i64)] = &[
@@ -139,6 +139,10 @@ fn token_id(c: char) -> Option<i64> {
     VOCAB.iter().find(|(v, _)| *v == c).map(|(_, id)| *id)
 }
 
+pub(crate) fn token_ids(phonemes: &str) -> Vec<i64> {
+    phonemes.chars().filter_map(token_id).collect()
+}
+
 fn read_voice_file(voice_path: &std::path::Path) -> Result<Vec<f32>, BansheeError> {
     let voice_bytes = fs::read(voice_path).map_err(|e| {
         BansheeError::Other(format!("Failed to read voice file {voice_path:?}: {e}"))
@@ -177,7 +181,7 @@ fn installed(voice: &str) -> Result<(), BansheeError> {
 const CLOSERS: [char; 7] = ['"', '\'', '\u{201d}', '\u{2019}', ')', ']', '}'];
 
 // Streaming boundary only; the token cap is enforced per window in synthesize
-fn sentences(text: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn sentences(text: &str) -> impl Iterator<Item = &str> {
     let mut chunks = Vec::new();
     let mut start = 0;
     for (at, terminator) in text.char_indices() {
@@ -202,6 +206,12 @@ fn sentences(text: &str) -> impl Iterator<Item = &str> {
     }
     chunks.push(text[start..].trim());
     chunks.into_iter().filter(|s| !s.is_empty())
+}
+
+pub(crate) fn english_g2p() -> G2P {
+    let mut g2p = G2P::new(Language::EnglishUS);
+    crate::text_to_speech::pronunciation::install_dictionary(&mut g2p);
+    g2p
 }
 
 pub struct KokoroEngine {
@@ -230,8 +240,7 @@ impl KokoroEngine {
 
         let voice = read_voice_file(&voice_path)?;
 
-        let mut g2p = G2P::new(Language::EnglishUS);
-        crate::text_to_speech::pronunciation::install_dictionary(&mut g2p);
+        let g2p = english_g2p();
 
         let oov = OovFallback::detect();
         if oov.is_none() {
@@ -307,7 +316,7 @@ impl KokoroEngine {
         self.note_letter_spelled(&tokens);
 
         // Unknown phonemes (e.g. the OOV marker) simply drop out here
-        let ids: Vec<i64> = phonemes.chars().filter_map(token_id).collect();
+        let ids = token_ids(&phonemes);
 
         // Windowing guarantees the model's context cap even for
         // terminator-less text that arrives as one giant chunk
@@ -509,7 +518,7 @@ fn curated(lexicon: &Lexicon, word: &str) -> bool {
     lexicon.in_gold(word) || lexicon.in_gold(&word.to_lowercase())
 }
 
-fn is_letter_spelled(tk: &MToken) -> bool {
+pub(crate) fn is_letter_spelled(tk: &MToken) -> bool {
     let w = tk.text.trim();
     let is_word = w.chars().count() > 1 && w.chars().all(|c| c.is_alphabetic());
     is_word && tk.phonemes.as_deref().is_some_and(|p| p.contains(' '))

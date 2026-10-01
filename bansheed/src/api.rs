@@ -551,7 +551,11 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
 
     // Interrupts only what outran the wait, so a stalled backend costs one budget.
     let clean_question = sanitize(question);
-    if let Err(e) = daemon_state.speech().speak(&clean_question, !settled, None) {
+    // Released by the disarm that ends the session
+    if let Err(e) = daemon_state
+        .speech()
+        .speak_and_hold(&clean_question, !settled)
+    {
         return JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
