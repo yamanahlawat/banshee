@@ -29,6 +29,15 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   machine is macOS.
 - Past eight queued utterances the oldest is dropped silently, and `speak` still answers with
   an id for it.
+- A second `ask_user` is refused with `BUSY` while another agent's question holds the
+  microphone. The agent then writes its question on screen, which an eyes-free user does not
+  see. Seen on 2026-10-03: two `ask_user` calls in a row got "Microphone is busy". A fix: the
+  second question waits its turn, and plays once the first answer closes. A caller that gives
+  up while it waits must leave the line. Not measured: how long an agent's MCP client waits on
+  one tool call before it gives up.
+- When the remote speaker times out before the first sample, the fallback voice speaks the
+  sentence, but the log still says "the reply was not spoken". The log line should say that
+  the fallback spoke it.
 - `banshee status` one second after `banshee start` reports "the daemon is not running": the
   socket is not bound yet while Whisper loads. Measured on a fresh 0.12.0 install; the same
   command a few seconds later reports running. `start` should wait for the socket, or `status`
