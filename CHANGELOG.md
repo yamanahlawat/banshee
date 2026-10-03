@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A question waits its turn behind what agents already said.** Before, a
+  question waited at most two minutes for queued statuses, then cut off the one
+  that was speaking. A status sent while it waited could also play first. Now the
+  question joins the queue when it is asked, and the statuses before it play to
+  their end. If the speaker hangs for two minutes, the statuses still before the
+  question are dropped and the question plays. If a question is dropped before
+  it plays, the agent gets an error and the microphone stays closed, unless you
+  already pressed the key to answer. A question whose agent gives up before it
+  plays is never spoken.
+
 ## [0.16.1] - 2026-10-01
 
 ### Fixed

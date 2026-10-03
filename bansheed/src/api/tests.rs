@@ -123,7 +123,9 @@ async fn history_takes_an_explicit_zero_literally() {
 #[tokio::test]
 async fn ask_user_lets_speech_from_the_same_turn_finish() {
     let (commands, command_receiver) = std::sync::mpsc::channel();
-    let (state, cut_short) = crate::test_support::daemon_state_holding_speech(
+    let crate::test_support::HoldingSpeech {
+        state, cut_short, ..
+    } = crate::test_support::daemon_state_holding_speech(
         std::time::Duration::from_millis(80),
         commands,
     );
@@ -155,6 +157,231 @@ async fn ask_user_lets_speech_from_the_same_turn_finish() {
     assert!(
         !cut_short.load(std::sync::atomic::Ordering::SeqCst),
         "a status from the same turn must not be cut off mid-sentence"
+    );
+}
+
+#[tokio::test]
+async fn a_line_sent_while_the_question_waits_plays_after_the_answer() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let crate::test_support::HoldingSpeech {
+        state,
+        cut_short,
+        spoken,
+    } = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_millis(300),
+        commands,
+    );
+    state
+        .speech()
+        .speak("Agent C reports.", false, None)
+        .unwrap();
+
+    let listening = std::thread::spawn({
+        let state = Arc::clone(&state);
+        let spoken = Arc::clone(&spoken);
+        move || {
+            let Ok(ConsumerCommand::Ask(ask)) =
+                command_receiver.recv_timeout(std::time::Duration::from_secs(5))
+            else {
+                panic!("the ask never reached the listener");
+            };
+            let heard_before_the_answer = spoken.lock().unwrap().clone();
+            state.disarm(ask.session);
+            let _ = ask.reply.send(Ok("yes".to_string()));
+            heard_before_the_answer
+        }
+    });
+    let asking = spawn_ask(&state);
+    wait_for(&state, "the session arms", |state| {
+        state.recording_mode() == RecordingMode::Armed
+    })
+    .await;
+    state
+        .speech()
+        .speak("Agent B reports.", false, None)
+        .unwrap();
+
+    asking.await.unwrap();
+    assert_eq!(
+        listening.join().unwrap(),
+        ["Agent C reports.", "Ready to ship?"],
+        "a line sent after the question waits for the answer"
+    );
+    assert!(!cut_short.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn a_stalled_status_is_skipped_and_the_question_still_plays() {
+    let held = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_millis(50),
+        std::sync::mpsc::channel().0,
+    );
+    let speech = held.state.speech();
+    speech.speak("Agent C reports.", false, None).unwrap();
+    speech
+        .speak(crate::test_support::STALLS, false, None)
+        .unwrap();
+    speech.speak("Agent B reports.", false, None).unwrap();
+    let question = speech.speak_and_hold("Ready to ship?").unwrap();
+
+    let asked = question_played(
+        &held.state,
+        question,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+    )
+    .await;
+
+    assert_eq!(
+        asked,
+        Asked::Played,
+        "a stalled status must not cost the question"
+    );
+    assert_eq!(
+        *held.spoken.lock().unwrap(),
+        [
+            "Agent C reports.",
+            crate::test_support::STALLS,
+            "Ready to ship?"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_question_that_stalls_ends_on_its_own_budget() {
+    let held = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_millis(50),
+        std::sync::mpsc::channel().0,
+    );
+    let question = held
+        .state
+        .speech()
+        .speak_and_hold(crate::test_support::STALLS)
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let asked = question_played(
+        &held.state,
+        question,
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+
+    assert_eq!(
+        asked,
+        Asked::Stalled,
+        "a stalled backend must not hold the microphone"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    held.state.speech().stop();
+}
+
+#[tokio::test]
+async fn a_line_released_after_the_question_ends_the_wait() {
+    let held = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_millis(50),
+        std::sync::mpsc::channel().0,
+    );
+    let speech = held.state.speech();
+    let question = speech.speak_and_hold("Ready to ship?").unwrap();
+    speech
+        .speak(crate::test_support::STALLS, false, None)
+        .unwrap();
+    speech.release();
+
+    let started = std::time::Instant::now();
+    let asked = question_played(
+        &held.state,
+        question,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+
+    assert_eq!(asked, Asked::Played);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(
+        !held.cut_short.load(std::sync::atomic::Ordering::SeqCst),
+        "a line after the question is not the ask's to skip"
+    );
+    speech.stop();
+}
+
+#[tokio::test]
+async fn an_interrupt_that_drops_the_question_is_an_error_not_a_silent_listen() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_millis(300),
+        commands,
+    )
+    .state;
+    state
+        .speech()
+        .speak("Agent C reports.", false, None)
+        .unwrap();
+
+    let asking = spawn_ask(&state);
+    wait_for(&state, "the session arms", |state| {
+        state.recording_mode() == RecordingMode::Armed
+    })
+    .await;
+    state
+        .speech()
+        .speak("Agent B interrupts.", true, None)
+        .unwrap();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), asking)
+        .await
+        .expect("an ask with nobody to answer must not wait on a listen")
+        .unwrap();
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("a question nobody heard must not open the microphone");
+    };
+    assert_eq!(error.message, "The question was not spoken.");
+    assert!(command_receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_barge_in_before_the_question_still_takes_the_answer() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_millis(300),
+        commands,
+    )
+    .state;
+    state
+        .speech()
+        .speak("Agent C reports.", false, None)
+        .unwrap();
+
+    let listening = std::thread::spawn({
+        let state = Arc::clone(&state);
+        move || {
+            let Ok(ConsumerCommand::Ask(ask)) =
+                command_receiver.recv_timeout(std::time::Duration::from_secs(5))
+            else {
+                panic!("the answer must still be taken");
+            };
+            state.disarm(ask.session);
+            let _ = ask.reply.send(Ok("ship it".to_string()));
+        }
+    });
+    let asking = spawn_ask(&state);
+    wait_for(&state, "the session arms", |state| {
+        state.recording_mode() == RecordingMode::Armed
+    })
+    .await;
+    assert!(
+        state.record_start(TranscribeTarget::Dictate),
+        "the press holds to answer"
+    );
+
+    let response = asking.await.unwrap();
+    listening.join().unwrap();
+    assert!(
+        matches!(response, JsonRpcResponse::Success { .. }),
+        "{response:?}"
     );
 }
 
@@ -1380,21 +1607,13 @@ async fn ask_user_is_refused_while_the_pipeline_is_still_opening() {
 // armed before the first word, so nothing but the guard can give it back.
 #[tokio::test]
 async fn an_ask_dropped_while_it_speaks_closes_the_session_it_armed() {
-    let (state, _cut_short) = crate::test_support::daemon_state_holding_speech(
+    let state = crate::test_support::daemon_state_holding_speech(
         std::time::Duration::from_secs(30),
         std::sync::mpsc::channel().0,
-    );
+    )
+    .state;
 
-    let asking = tokio::spawn({
-        let state = Arc::clone(&state);
-        async move {
-            let asked = request(
-                BANSHEE_ASK_USER,
-                Some(serde_json::json!({"question": "Ready to ship?"})),
-            );
-            dispatch(asked, &state).await
-        }
-    });
+    let asking = spawn_ask(&state);
     wait_for(&state, "the session arms", |state| {
         state.recording_mode() == RecordingMode::Armed
     })
@@ -1409,20 +1628,45 @@ async fn an_ask_dropped_while_it_speaks_closes_the_session_it_armed() {
 }
 
 #[tokio::test]
+async fn an_ask_dropped_while_its_question_waits_never_speaks_it() {
+    let crate::test_support::HoldingSpeech { state, spoken, .. } =
+        crate::test_support::daemon_state_holding_speech(
+            std::time::Duration::from_millis(300),
+            std::sync::mpsc::channel().0,
+        );
+    state
+        .speech()
+        .speak("Agent C reports.", false, None)
+        .unwrap();
+    let asking = spawn_ask(&state);
+    wait_for(&state, "the session arms", |state| {
+        state.recording_mode() == RecordingMode::Armed
+    })
+    .await;
+
+    asking.abort();
+    wait_for(&state, "the session closes", |state| {
+        state.recording_mode() == RecordingMode::Idle
+    })
+    .await;
+    wait_for(&state, "the speech ends", |state| {
+        !state.speech().is_speaking()
+    })
+    .await;
+
+    assert_eq!(
+        *spoken.lock().unwrap(),
+        ["Agent C reports."],
+        "a question with nobody to answer it must not play"
+    );
+}
+
+#[tokio::test]
 async fn a_dropped_ask_closes_the_session_it_armed() {
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let state = test_state(commands);
 
-    let asking = tokio::spawn({
-        let state = Arc::clone(&state);
-        async move {
-            let asked = request(
-                BANSHEE_ASK_USER,
-                Some(serde_json::json!({"question": "Ready to ship?"})),
-            );
-            dispatch(asked, &state).await
-        }
-    });
+    let asking = spawn_ask(&state);
 
     // The session is armed once the consumer has the command
     let ask = tokio::task::spawn_blocking(move || command_receiver.recv())
@@ -1447,6 +1691,17 @@ async fn a_dropped_ask_closes_the_session_it_armed() {
         "the microphone belongs to nobody once the caller is gone"
     );
     drop(ask);
+}
+
+fn spawn_ask(state: &Arc<DaemonState>) -> tokio::task::JoinHandle<JsonRpcResponse> {
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let asked = request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "Ready to ship?"})),
+        );
+        dispatch(asked, &state).await
+    })
 }
 
 /// Polls the state until it holds, or the test fails. Generous next to the
