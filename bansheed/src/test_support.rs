@@ -123,14 +123,18 @@ impl TtsBackend for NullBackend {
     }
 }
 
+/// A line with this text never ends, which is what a stalled backend looks like.
+pub const STALLS: &str = "This line stalls.";
+
 struct Held {
-    until: std::time::Instant,
+    until: Option<std::time::Instant>,
     cut_short: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ActiveUtterance for Held {
     fn is_finished(&mut self) -> bool {
-        std::time::Instant::now() >= self.until
+        self.until
+            .is_some_and(|until| std::time::Instant::now() >= until)
     }
     fn stop(&mut self) {
         self.cut_short
@@ -141,33 +145,47 @@ impl ActiveUtterance for Held {
 struct HoldingBackend {
     hold: std::time::Duration,
     cut_short: Arc<std::sync::atomic::AtomicBool>,
+    spoken: SpokenLines,
 }
 
 impl TtsBackend for HoldingBackend {
     fn start(
         &self,
-        _text: &str,
+        text: &str,
         _voice: Option<&str>,
     ) -> Result<Box<dyn ActiveUtterance>, banshee_common::error::BansheeError> {
+        self.spoken.lock().unwrap().push(text.to_string());
         Ok(Box::new(Held {
-            until: std::time::Instant::now() + self.hold,
+            until: (text != STALLS).then(|| std::time::Instant::now() + self.hold),
             cut_short: Arc::clone(&self.cut_short),
         }))
     }
 }
 
-/// A daemon state whose speech plays for `hold`. The flag goes true if an
-/// utterance is stopped before it finishes.
+/// Speech held for `hold` per line, and what each line said. The flag goes
+/// true if an utterance is stopped before it finishes.
+pub struct HoldingSpeech {
+    pub state: Arc<DaemonState>,
+    pub cut_short: Arc<std::sync::atomic::AtomicBool>,
+    pub spoken: SpokenLines,
+}
+
 pub fn daemon_state_holding_speech(
     hold: std::time::Duration,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
-) -> (Arc<DaemonState>, Arc<std::sync::atomic::AtomicBool>) {
+) -> HoldingSpeech {
     let cut_short: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let spoken: SpokenLines = Arc::default();
     let speech = SpeechPlayer::new(Box::new(HoldingBackend {
         hold,
         cut_short: Arc::clone(&cut_short),
+        spoken: Arc::clone(&spoken),
     }));
-    (state(None, speech, commands), cut_short)
+    HoldingSpeech {
+        state: state(None, speech, commands),
+        cut_short,
+        spoken,
+    }
 }
 
 /// The voice and rate the last live `[tts]` write handed the backend.
