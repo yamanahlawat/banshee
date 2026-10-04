@@ -14,7 +14,9 @@ use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
 use crate::connect;
 use crate::permissions;
-use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingError, TranscribeTarget};
+use crate::state::{
+    AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, TranscribeTarget,
+};
 use crate::text_to_speech::sanitizer::sanitize;
 use crate::{readiness, settings};
 
@@ -494,21 +496,53 @@ fn record_toggle(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpc
     JsonRpcResponse::success(params.id(), serde_json::json!({"recording": recording}))
 }
 
-async fn silence_within(daemon_state: &DaemonState, budget: Duration) -> bool {
-    let mut speaking = daemon_state.speech().subscribe_speaking();
-    tokio::time::timeout(budget, speaking.wait_for(|s| !s))
-        .await
-        .is_ok()
+fn question_budget(question: &str) -> Duration {
+    let words = question.split_whitespace().count() as u64;
+    Duration::from_millis(
+        (PLAYBACK_BASE_MS + words * PLAYBACK_PER_WORD_MS).min(MAX_PLAYBACK_WAIT_MS),
+    )
 }
 
-// Echo avoidance by ordering: listen only after playback ends.
-// Bounded so a stalled backend cannot hold the mic armed forever
-async fn playback_ended(daemon_state: &DaemonState, question: &str) -> bool {
-    let words = question.split_whitespace().count() as u64;
-    let playback_budget = Duration::from_millis(
-        (PLAYBACK_BASE_MS + words * PLAYBACK_PER_WORD_MS).min(MAX_PLAYBACK_WAIT_MS),
-    );
-    silence_within(daemon_state, playback_budget).await
+#[derive(Debug, PartialEq)]
+enum Asked {
+    Played,
+    Unspoken,
+    Stalled,
+}
+
+// Echo avoidance by ordering: listen only after the question ends. A line that
+// plays past its bound with no change is a stalled backend, and must not hold
+// the microphone armed forever.
+async fn question_played(
+    daemon_state: &DaemonState,
+    question: u64,
+    budget: Duration,
+    stall: Duration,
+) -> Asked {
+    let speech = daemon_state.speech();
+    let mut playing = speech.subscribe_playing();
+    loop {
+        let utterance = match *playing.borrow_and_update() {
+            None if speech.has_started(question) => return Asked::Played,
+            None => return Asked::Unspoken,
+            Some(utterance) if utterance > question => return Asked::Played,
+            Some(utterance) => utterance,
+        };
+        let is_question = utterance == question;
+        let bound = if is_question { budget } else { stall };
+        match tokio::time::timeout(bound, playing.changed()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Asked::Stalled,
+            Err(_) if is_question => return Asked::Stalled,
+            Err(_) => {
+                log::warn!(
+                    "a line played {}s with no change, so the lines before the question are dropped",
+                    stall.as_secs()
+                );
+                speech.skip_to_question(utterance);
+            }
+        }
+    }
 }
 
 async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
@@ -546,30 +580,46 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         session,
     };
 
-    // A status outruns any budget short of the stalled-backend bound.
-    let settled = silence_within(daemon_state, Duration::from_millis(MAX_PLAYBACK_WAIT_MS)).await;
-
-    // Interrupts only what outran the wait, so a stalled backend costs one budget.
     let clean_question = sanitize(question);
-    // Released by the disarm that ends the session
-    if let Err(e) = daemon_state
-        .speech()
-        .speak_and_hold(&clean_question, !settled)
-    {
-        return JsonRpcResponse::error(
-            params.id(),
-            rpc_code::INTERNAL,
-            format!("Failed to speak question: {e}"),
-        );
-    }
+    // Queued behind what is already said. Every line after it waits for the
+    // disarm that ends the session.
+    let asked = match daemon_state.speech().speak_and_hold(&clean_question) {
+        Ok(utterance_id) => utterance_id,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                params.id(),
+                rpc_code::INTERNAL,
+                format!("Failed to speak question: {e}"),
+            );
+        }
+    };
 
-    if !playback_ended(daemon_state, &clean_question).await {
-        daemon_state.speech().stop();
-        return JsonRpcResponse::error(
-            params.id(),
-            rpc_code::INTERNAL,
-            "Question playback did not finish.",
-        );
+    let played = question_played(
+        daemon_state,
+        asked,
+        question_budget(&clean_question),
+        Duration::from_millis(MAX_PLAYBACK_WAIT_MS),
+    )
+    .await;
+    match played {
+        Asked::Played => {}
+        // A press during the wait answers before the question plays
+        Asked::Unspoken if daemon_state.armed_mode(session) == Some(RecordingMode::ArmedHold) => {}
+        Asked::Unspoken => {
+            return JsonRpcResponse::error(
+                params.id(),
+                rpc_code::INTERNAL,
+                "The question was not spoken.",
+            );
+        }
+        Asked::Stalled => {
+            daemon_state.speech().stop();
+            return JsonRpcResponse::error(
+                params.id(),
+                rpc_code::INTERNAL,
+                "Question playback did not finish.",
+            );
+        }
     }
 
     let (reply, answer) = tokio::sync::oneshot::channel();

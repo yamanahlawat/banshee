@@ -369,7 +369,7 @@ async fn push_level(writer: Arc<Mutex<OwnedWriteHalf>>, mut level: watch::Receiv
 /// Everything a state subscription waits on.
 struct StateWatches {
     recording: watch::Receiver<bool>,
-    speaking: watch::Receiver<bool>,
+    playing: watch::Receiver<Option<u64>>,
     transcribing: watch::Receiver<bool>,
     loading_model: watch::Receiver<bool>,
     telling: watch::Receiver<bool>,
@@ -393,7 +393,7 @@ async fn push_changes(
         // Every arm only wakes the task; the state is read fresh below
         let woken = tokio::select! {
             woken = watches.recording.changed() => woken,
-            woken = watches.speaking.changed() => woken,
+            woken = watches.playing.changed() => woken,
             woken = watches.transcribing.changed() => woken,
             woken = watches.loading_model.changed() => woken,
             woken = watches.telling.changed() => woken,
@@ -472,7 +472,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             (
                 StateWatches {
                     recording: state.subscribe_recording(),
-                    speaking: state.speech().subscribe_speaking(),
+                    playing: state.speech().subscribe_playing(),
                     transcribing: state.subscribe_transcribing(),
                     loading_model: state.subscribe_loading_model(),
                     telling: state.subscribe_telling(),
