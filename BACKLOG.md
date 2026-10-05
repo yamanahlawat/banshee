@@ -22,8 +22,6 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   so a daemon slow to load can be kickstarted more than once.
 - No protocol method cancels a download. A person on a metered connection can start 862 MB
   and has no way to stop it from the window.
-- Past eight queued utterances the oldest is dropped silently, and `speak` still answers with
-  an id for it.
 - A second `ask_user` is refused with `BUSY` while another agent's question holds the
   microphone. The agent then writes its question on screen, which an eyes-free user does not
   see. Seen on 2026-10-03: two `ask_user` calls in a row got "Microphone is busy". A fix: the

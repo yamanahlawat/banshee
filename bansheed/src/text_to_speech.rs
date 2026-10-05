@@ -19,9 +19,6 @@ use local::say::SayBackend;
 use output::Output;
 use remote::openai_compatible::RemoteSpeechBackend;
 
-/// Unmeasured. A bound against growth, not a latency target.
-const MAX_QUEUED_UTTERANCES: usize = 8;
-
 /// The end of speech is noticed this late at worst, which is under the cue that
 /// follows it.
 const PLAYBACK_POLL: Duration = Duration::from_millis(50);
@@ -438,15 +435,6 @@ impl SpeechPlayer {
                 text: text.to_string(),
                 voice: voice.map(str::to_string),
             });
-            // drop the oldest backlog rather than droning through stale updates
-            if playback.queue.len() > MAX_QUEUED_UTTERANCES {
-                let oldest = playback
-                    .queue
-                    .iter()
-                    .position(|line| !playback.hold.is_question(line.utterance_id))
-                    .expect("a full queue holds more than the question");
-                playback.queue.remove(oldest);
-            }
             // The interrupt above may have stopped what played
             self.publish(&playback);
             return Ok(utterance_id);
@@ -988,22 +976,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_cap_never_drops_a_waiting_question() {
+    async fn a_burst_plays_every_line_in_order() {
         let (player, started, ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
-        player.speak_and_hold("The question.").unwrap();
-        for _ in 0..MAX_QUEUED_UTTERANCES {
-            player.speak("Agent B reports.", false, None).unwrap();
+        let burst: Vec<String> = (1..=25).map(|id| format!("Status {id}.")).collect();
+        for line in &burst {
+            player.speak(line, false, None).unwrap();
         }
 
         ends.store(true, std::sync::atomic::Ordering::SeqCst);
         falls_silent(&player).await;
-        assert_eq!(
-            started_lines(&started),
-            ["Agent C was mid-sentence.", "The question."]
-        );
+        assert_eq!(started_lines(&started), burst);
     }
 
     #[test]
