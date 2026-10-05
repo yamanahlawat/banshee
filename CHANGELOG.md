@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still got an `ok` for it. A burst of fifteen statuses lost six from the
   middle. Now the queue has no limit, and every line plays in order. Press
   the key to stop a long backlog.
+- **A second question waits its turn.** When an agent asked while another
+  question was open, or while you dictated, it got "Microphone is busy" and
+  wrote its question on screen. Now it waits, in the order it asked, and plays
+  once the microphone is free. A question whose agent cancels it leaves the
+  line and is never spoken.
 
 ## [0.16.1] - 2026-10-01
 

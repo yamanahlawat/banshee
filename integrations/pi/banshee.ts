@@ -69,7 +69,7 @@ function callDaemon(
   });
 }
 
-// A thrown execute() lands here as content, e.g. daemon down or mic busy.
+// A thrown execute() lands here as content, e.g. daemon down or microphone unavailable.
 function errorText(result: any): string {
   const first = result?.content?.[0];
   return first?.type === "text" ? first.text : "failed";
@@ -95,13 +95,14 @@ export default function banshee(pi: ExtensionAPI) {
     name: "speak_status",
     label: "Banshee Speak",
     description:
-      "Speak a short message aloud to the user, who is working eyes-free and not reading the screen. This spoken message is your reply to them, so do not also repeat it as written text; reserve written output for what must be read on screen, such as code, file paths, commands, URLs, and lists. Use it for decisions you need input on, questions, and letting the user know you have finished. Talk like a colleague in the room: natural, warm, and varied, never scripted. When you finish, say what got done and flag anything still pending, then hand back to the user in your own words each time. When an implementation is done, mention it is ready for review. Do not narrate routine steps or tool activity in between.",
+      "Speak a short message aloud to the user, who is working eyes-free and not reading the screen. This spoken message is your reply to them, so do not also repeat it as written text; reserve written output for what must be read on screen, such as code, file paths, commands, URLs, and lists. Use it to say what you decided or finished; when you need an answer back, use ask_user instead, which speaks and listens in one step. Talk like a colleague in the room: natural, warm, and varied, never scripted. When you finish, say what got done and flag anything still pending, then hand back to the user in your own words each time. When an implementation is done, mention it is ready for review. Do not narrate routine steps or tool activity in between.",
     promptSnippet: "Speak a short spoken message aloud to the user.",
     promptGuidelines: [
       "The user is listening, not reading. Say it with speak_status instead of writing it out, and do not repeat spoken text as prose.",
       "Use ask_user, not speak_status, whenever you need an answer back.",
     ],
-    // Mic and speaker are one device; the daemon refuses overlapping sessions.
+    // One call at a time, so statuses and questions reach the daemon in the
+    // order the agent made them.
     executionMode: "sequential",
     parameters: Type.Object({
       text: Type.String({
@@ -134,7 +135,7 @@ export default function banshee(pi: ExtensionAPI) {
     name: "ask_user",
     label: "Banshee Ask",
     description:
-      "Ask the user a question aloud and wait for their spoken answer. Use it when you need a decision or clarification: the question is spoken, the microphone opens once it finishes playing, and the transcribed reply comes back scoped to you. Ask one focused question per call; when you have several, ask the most important first and wait for the answer before asking the next, so the user is never holding multiple questions in their head. Returns empty text if the user stayed silent.",
+      "Ask the user a question aloud and wait for their spoken answer. Use it when you need a decision or clarification: the question is spoken, the microphone opens once it finishes playing, and the transcribed reply comes back scoped to you. Ask one focused question per call; when you have several, ask the most important first and wait for the answer before asking the next, so the user is never holding multiple questions in their head. If another question is open or the user is dictating, yours waits its turn and plays once the microphone is free, which can take minutes. Returns empty text if the user stayed silent, and an error if the listening itself failed, so silence and a failed listen are never confused.",
     promptSnippet: "Ask the user a question aloud and wait for a spoken answer.",
     promptGuidelines: [
       "Ask one question per ask_user call and wait for the answer before asking the next.",
@@ -148,7 +149,7 @@ export default function banshee(pi: ExtensionAPI) {
       timeout_ms: Type.Optional(
         Type.Number({
           description:
-            "How long to wait for the user to start answering, in milliseconds. Defaults to 30000, capped at 120000.",
+            "How long to wait for the user to start answering, in milliseconds. It starts once your question has played, not while it waits its turn. Defaults to 30000, capped at 120000.",
         }),
       ),
     }),
