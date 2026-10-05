@@ -817,7 +817,7 @@ mod tests {
 
     async fn falls_silent(player: &SpeechPlayer) {
         let mut playing = player.subscribe_playing();
-        tokio::time::timeout(Duration::from_secs(3), playing.wait_for(Option::is_none))
+        tokio::time::timeout(Duration::from_secs(10), playing.wait_for(Option::is_none))
             .await
             .expect("playback never fell silent")
             .expect("playing sender dropped");

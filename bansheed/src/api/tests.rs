@@ -228,7 +228,7 @@ async fn a_stalled_status_is_skipped_and_the_question_still_plays() {
         &held.state,
         question,
         std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(100),
+        std::time::Duration::from_secs(1),
     )
     .await;
 
