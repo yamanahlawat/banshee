@@ -283,20 +283,20 @@ impl RemoteSpeechBackend {
                 if handover.stopped {
                     return;
                 }
-                let reason = match fallback
+                let fault = match fallback
                     .as_ref()
                     .map(|fallback| fallback.start(&text, None))
                 {
                     Some(Ok(utterance)) => {
                         handover.speaking = Some(utterance);
-                        reason
+                        Fault::SpokenByFallback(reason)
                     }
-                    Some(Err(error)) => {
-                        format!("{reason}, and the fallback voice did not start: {error}")
-                    }
-                    None => reason,
+                    Some(Err(error)) => Fault::Failed(format!(
+                        "{reason}, and the fallback voice did not start: {error}"
+                    )),
+                    None => Fault::Failed(reason),
                 };
-                report(&handover, Report::Fault(Fault::Failed(reason)));
+                report(&handover, Report::Fault(fault));
             };
             loop {
                 let source = match &mut reading {
@@ -673,17 +673,23 @@ mod tests {
     }
 
     fn failure(faults: &std::sync::mpsc::Receiver<Fault>) -> String {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match faults.recv_timeout(Duration::from_millis(100)) {
-                Ok(Fault::Failed(reason)) => return reason,
-                Ok(Fault::Played) => panic!("this utterance must not have played"),
-                Err(_) => assert!(
-                    std::time::Instant::now() < deadline,
-                    "no reason arrived within 5s"
-                ),
-            }
+        match next_fault(faults) {
+            Fault::Failed(reason) => reason,
+            other => panic!("this utterance must have failed unheard: {other:?}"),
         }
+    }
+
+    fn spoken_by_fallback(faults: &std::sync::mpsc::Receiver<Fault>) -> String {
+        match next_fault(faults) {
+            Fault::SpokenByFallback(reason) => reason,
+            other => panic!("the fallback must have spoken this utterance: {other:?}"),
+        }
+    }
+
+    fn next_fault(faults: &std::sync::mpsc::Receiver<Fault>) -> Fault {
+        faults
+            .recv_timeout(Duration::from_secs(5))
+            .expect("no fault arrived within 5s")
     }
 
     // The remote speaker plays through the same output as everything else, and
@@ -894,8 +900,8 @@ mod tests {
                 Ok(Fault::Played) => {
                     panic!("a stopped sentence must not report a played utterance")
                 }
-                Ok(Fault::Failed(reason)) => {
-                    panic!("a stopped sentence must not report a failure: {reason}")
+                Ok(fault @ (Fault::Failed(_) | Fault::SpokenByFallback(_))) => {
+                    panic!("a stopped sentence must not report a failure: {fault:?}")
                 }
                 Err(_) if utterance.spoken() => break,
                 Err(_) => assert!(
@@ -912,7 +918,10 @@ mod tests {
         let (base_url, served) = serve_speech("401 Unauthorized", vec![], false);
         let built = built(base_url, "", true);
         let mut utterance = built.backend.start("Say this anyway.", None).unwrap();
-        assert_eq!(failure(&built.faults), "the remote speaker refused the key");
+        assert_eq!(
+            spoken_by_fallback(&built.faults),
+            "the remote speaker refused the key"
+        );
         wait_until("the fallback is asked", || {
             !built.fallback_said.lock().unwrap().is_empty()
         });
@@ -952,7 +961,7 @@ mod tests {
         let (base_url, served) = serve_speech("200 OK", vec![], true);
         let built = built(base_url, "", true);
         let mut utterance = built.backend.start("Say this anyway.", None).unwrap();
-        let reason = failure(&built.faults);
+        let reason = spoken_by_fallback(&built.faults);
         assert!(reason.contains("stopped answering"), "{reason}");
         wait_until("the fallback is asked", || {
             !built.fallback_said.lock().unwrap().is_empty()
@@ -1012,7 +1021,10 @@ mod tests {
             .speak("Say this anyway.")
             .expect("a test device opens");
 
-        assert_eq!(failure(&faults), "the remote speaker refused the key");
+        assert_eq!(
+            spoken_by_fallback(&faults),
+            "the remote speaker refused the key"
+        );
         wait_until("the fallback takes the sentence", || {
             !lock(&fallback.said).is_empty()
         });
@@ -1261,7 +1273,7 @@ mod tests {
         remote.response_format = SpeechFormat::Wav;
         let built = build(remote, true);
         let mut utterance = built.backend.start("Say this anyway.", None).unwrap();
-        let reason = failure(&built.faults);
+        let reason = spoken_by_fallback(&built.faults);
         assert!(reason.contains("sent no audio"), "{reason}");
         wait_until("the fallback is asked", || {
             !built.fallback_said.lock().unwrap().is_empty()
@@ -1294,7 +1306,7 @@ mod tests {
         );
         let built = built(base_url, "", true);
         let _utterance = built.backend.start("Say this anyway.", None).unwrap();
-        let reason = failure(&built.faults);
+        let reason = spoken_by_fallback(&built.faults);
         assert!(reason.contains("Ogg"), "{reason}");
         wait_until("the fallback is asked", || {
             !built.fallback_said.lock().unwrap().is_empty()

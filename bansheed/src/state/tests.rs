@@ -691,6 +691,33 @@ fn the_drain_sounds_the_cue_for_a_failure_and_clears_the_reason_when_one_plays()
     );
 }
 
+// The fallback voice spoke, but the speaker the config names still failed.
+#[test]
+fn a_reply_the_fallback_spoke_still_records_why_the_speaker_failed() {
+    use crate::text_to_speech::{Fault, drain_faults};
+
+    let (cues, heard) = crate::audio::cues::Cues::recording();
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+    let (faults, receiver) = std::sync::mpsc::channel();
+    faults
+        .send(Fault::SpokenByFallback(
+            "the remote speaker did not answer in time".to_string(),
+        ))
+        .unwrap();
+    drop(faults);
+    drain_faults(std::sync::Arc::clone(&state), cues, receiver);
+
+    assert!(matches!(
+        heard.try_recv(),
+        Ok(crate::audio::cues::Cue::Error)
+    ));
+    assert_eq!(
+        state.last_speech_error().as_deref(),
+        Some("the remote speaker did not answer in time")
+    );
+}
+
 // The gate record_start shares with ask_user. A pipeline still being built has
 // no consumer thread, so a press must answer with the cue, not an open session.
 #[test]

@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it plays, the agent gets an error and the microphone stays closed, unless you
   already pressed the key to answer. A question whose agent gives up before it
   plays is never spoken.
+- **The log says when the fallback voice spoke a reply.** When the remote
+  speaker fails before its first sample, the system voice speaks the sentence.
+  The log said "the reply was not spoken". Now it says "the fallback voice
+  took over the reply", with the reason the remote speaker failed. The error
+  sound and the failed reply in `banshee status` stay: that speaker did fail.
 
 ## [0.16.1] - 2026-10-01
 

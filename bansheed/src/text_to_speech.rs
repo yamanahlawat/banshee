@@ -32,7 +32,32 @@ const PLAYBACK_POLL: Duration = Duration::from_millis(50);
 #[derive(Debug)]
 pub enum Fault {
     Failed(String),
+    /// The speaker `[tts]` names failed before its first sample, and the
+    /// fallback voice took the sentence. The reason is that speaker's.
+    SpokenByFallback(String),
     Played,
+}
+
+impl Fault {
+    fn log_line(&self) -> Option<(log::Level, String)> {
+        match self {
+            Fault::Failed(reason) => Some((
+                log::Level::Error,
+                format!("the reply was not spoken: {reason}"),
+            )),
+            Fault::SpokenByFallback(reason) => Some((
+                log::Level::Warn,
+                format!("the fallback voice took over the reply: {reason}"),
+            )),
+            Fault::Played => None,
+        }
+    }
+
+    pub fn log(&self) {
+        if let Some((level, line)) = self.log_line() {
+            log::log!(level, "{line}");
+        }
+    }
 }
 
 /// Drains the channel until every sender is gone. Runs on a thread of its own,
@@ -43,16 +68,16 @@ pub fn drain_faults(
     faults: std::sync::mpsc::Receiver<Fault>,
 ) {
     for fault in faults {
+        fault.log();
         match fault {
-            Fault::Failed(reason) => {
-                log::error!("the reply was not spoken: {reason}");
+            Fault::Played => state.set_last_speech_error(None),
+            Fault::Failed(reason) | Fault::SpokenByFallback(reason) => {
                 cues.emit(Signal::Error {
                     reason: Reason::new(ReasonCode::SpeechFailed, None),
                     target: None,
                 });
                 state.set_last_speech_error(Some(reason));
             }
-            Fault::Played => state.set_last_speech_error(None),
         }
     }
 }
@@ -553,6 +578,28 @@ mod tests {
             Err(error) => error.to_string(),
             Ok(_) => panic!("this speaker must refuse the utterance"),
         }
+    }
+
+    #[test]
+    fn a_reply_the_fallback_took_is_logged_as_taken_not_as_unspoken() {
+        let taken = Fault::SpokenByFallback("the remote speaker refused the key".into());
+        assert_eq!(
+            taken.log_line(),
+            Some((
+                log::Level::Warn,
+                "the fallback voice took over the reply: the remote speaker refused the key"
+                    .to_string()
+            ))
+        );
+        let failed = Fault::Failed("the remote speaker refused the key".into());
+        assert_eq!(
+            failed.log_line(),
+            Some((
+                log::Level::Error,
+                "the reply was not spoken: the remote speaker refused the key".to_string()
+            ))
+        );
+        assert_eq!(Fault::Played.log_line(), None);
     }
 
     #[test]
