@@ -558,10 +558,6 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         return *response;
     }
 
-    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
-        return *response;
-    }
-
     // Dropping this call is how a waiting question leaves the line. Armed
     // before the question plays, so a press while Banshee talks holds to
     // answer rather than dictates.

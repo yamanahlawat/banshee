@@ -342,6 +342,18 @@ mod tests {
         .expect("the shim stalled")
     }
 
+    fn cancel(id: u64) -> String {
+        request(
+            "notifications/cancelled",
+            serde_json::json!({"requestId": id}),
+            None,
+        )
+    }
+
+    fn ids_of(replies: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        replies.iter().map(|reply| reply["id"].clone()).collect()
+    }
+
     fn ask_call(id: u64) -> String {
         request(
             "tools/call",
@@ -355,11 +367,7 @@ mod tests {
         let replies = replies_to(
             &[
                 ask_call(7),
-                request(
-                    "notifications/cancelled",
-                    serde_json::json!({"requestId": 7}),
-                    None,
-                ),
+                cancel(7),
                 request("ping", serde_json::json!({}), Some(8)),
             ],
             1,
@@ -381,19 +389,14 @@ mod tests {
             &[
                 ask_call(7),
                 ask_call(8),
-                request(
-                    "notifications/cancelled",
-                    serde_json::json!({"requestId": 8}),
-                    None,
-                ),
+                cancel(8),
                 request("ping", serde_json::json!({}), Some(9)),
             ],
             2,
             counting,
         )
         .await;
-        let ids: Vec<_> = replies.iter().map(|reply| reply["id"].clone()).collect();
-        assert_eq!(ids, [7, 9]);
+        assert_eq!(ids_of(&replies), [7, 9]);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -402,19 +405,14 @@ mod tests {
         let replies = replies_to(
             &[
                 ask_call(7),
-                request(
-                    "notifications/cancelled",
-                    serde_json::json!({"requestId": 99}),
-                    None,
-                ),
+                cancel(99),
                 request("ping", serde_json::json!({}), Some(8)),
             ],
             2,
             answers_soon,
         )
         .await;
-        let ids: Vec<_> = replies.iter().map(|reply| reply["id"].clone()).collect();
-        assert_eq!(ids, [7, 8]);
+        assert_eq!(ids_of(&replies), [7, 8]);
     }
 
     /// One stdin line, as a client writes it.
@@ -446,17 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_notification_gets_no_reply() {
-        let reply = respond(
-            &request(
-                "notifications/cancelled",
-                serde_json::json!({"requestId": 3}),
-                None,
-            ),
-            &mut 0,
-            AGENT,
-            no_daemon,
-        )
-        .await;
+        let reply = respond(&cancel(3), &mut 0, AGENT, no_daemon).await;
 
         assert!(
             reply.is_none(),

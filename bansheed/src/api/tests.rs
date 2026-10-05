@@ -458,11 +458,7 @@ async fn a_second_ask_waits_for_the_first_answer_and_then_listens() {
     let (answers, answer_next) = std::sync::mpsc::channel::<&'static str>();
     let listener = answer_in_turn(&state, command_receiver, answer_next);
 
-    let first = spawn_ask(&state);
-    wait_for(&state, "the first ask arms", |state| {
-        state.recording_mode() == RecordingMode::Armed
-    })
-    .await;
+    let first = first_armed(&state, "Ready to ship?").await;
     let second = spawn_ask(&state);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
@@ -489,11 +485,7 @@ async fn waiting_asks_play_in_arrival_order_and_one_whose_caller_leaves_never_pl
     let (answers, answer_next) = std::sync::mpsc::channel::<&'static str>();
     let listener = answer_in_turn(&state, command_receiver, answer_next);
 
-    let first = spawn_question(&state, "First question");
-    wait_for(&state, "the first ask arms", |state| {
-        state.recording_mode() == RecordingMode::Armed
-    })
-    .await;
+    let first = first_armed(&state, "First question").await;
     let second = spawn_question(&state, "Second question");
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let gone = spawn_question(&state, "Gone question");
@@ -523,25 +515,11 @@ async fn a_waiting_ask_answers_a_broken_microphone_at_once() {
     let (answers, answer_next) = std::sync::mpsc::channel::<&'static str>();
     let listener = answer_in_turn(&state, command_receiver, answer_next);
 
-    let first = spawn_ask(&state);
-    wait_for(&state, "the first ask arms", |state| {
-        state.recording_mode() == RecordingMode::Armed
-    })
-    .await;
+    let first = first_armed(&state, "Ready to ship?").await;
     let waiting = spawn_ask(&state);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
-        "no device".to_string(),
-    )));
 
-    let response = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
-        .await
-        .expect("the waiting ask must not sleep until the first one ends")
-        .unwrap();
-    let JsonRpcResponse::Error { error, .. } = response else {
-        panic!("expected the microphone error, got {response:?}");
-    };
-    assert_eq!(error.code, rpc_code::MICROPHONE);
+    break_the_microphone_for(&state, waiting).await;
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
 
     answers.send("first answer").unwrap();
@@ -557,18 +535,8 @@ async fn an_ask_waiting_out_a_dictation_answers_a_broken_microphone_at_once() {
 
     let waiting = spawn_ask(&state);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
-        "no device".to_string(),
-    )));
 
-    let response = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
-        .await
-        .expect("the waiting ask must not sleep until the dictation ends")
-        .unwrap();
-    let JsonRpcResponse::Error { error, .. } = response else {
-        panic!("expected the microphone error, got {response:?}");
-    };
-    assert_eq!(error.code, rpc_code::MICROPHONE);
+    break_the_microphone_for(&state, waiting).await;
 }
 
 #[tokio::test]
@@ -1830,6 +1798,37 @@ fn spawn_question(
         );
         dispatch(asked, &state).await
     })
+}
+
+async fn first_armed(
+    state: &Arc<DaemonState>,
+    question: &'static str,
+) -> tokio::task::JoinHandle<JsonRpcResponse> {
+    let first = spawn_question(state, question);
+    wait_for(state, "the first ask arms", |state| {
+        state.recording_mode() == RecordingMode::Armed
+    })
+    .await;
+    first
+}
+
+/// Breaks the microphone, and expects the waiting ask to answer with that
+/// error at once rather than when the microphone would have come free.
+async fn break_the_microphone_for(
+    state: &DaemonState,
+    waiting: tokio::task::JoinHandle<JsonRpcResponse>,
+) {
+    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
+        "no device".to_string(),
+    )));
+    let response = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        .await
+        .expect("the waiting ask must answer as soon as the microphone breaks")
+        .unwrap();
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected the microphone error, got {response:?}");
+    };
+    assert_eq!(error.code, rpc_code::MICROPHONE);
 }
 
 /// Answers each ask with the next line sent on `answers`, and ends the session
