@@ -225,8 +225,8 @@ pub fn hotkey_listener(
         let mut pipeline = pipeline;
         while let Ok(command) = commands.recv() {
             match command {
-                ConsumerCommand::Transcribe(action) => {
-                    pipeline.transcribe_utterance(action, type_text)
+                ConsumerCommand::Transcribe(action, ring) => {
+                    pipeline.transcribe_utterance(action, ring, type_text)
                 }
                 // A session opened while this command sat in the queue owns
                 // the ring now: the discard skips, the cancelled lead-in stays.
@@ -340,12 +340,14 @@ impl Pipeline {
     fn transcribe_utterance(
         &mut self,
         action: TranscribeTarget,
+        ring: crate::state::RingClaim,
         type_words: impl FnOnce(&str) -> Result<(), banshee_common::error::BansheeError>,
     ) {
         let _transcribing = Raised::on(&self.state, DaemonState::set_transcribing);
         let device = self.state.audio_device();
         let mut audio_data = Vec::new();
         let (rate, _) = self.source.take(&mut audio_data);
+        drop(ring);
 
         log::debug!("Downsampling audio from {rate} Hz to {SAMPLE_RATE} Hz...");
 
@@ -1158,17 +1160,21 @@ mod utterance_tests {
     use ringbuf::traits::{Producer, Split};
     use std::sync::atomic::AtomicBool;
 
-    /// Answers one fixed result, and notes whether the flag was up when asked.
+    /// Answers one fixed result, and notes whether the flag was up and a
+    /// dictation still in the ring when asked.
     struct Scripted {
         state: Arc<DaemonState>,
         answer: Result<String, String>,
         saw_the_flag: Arc<AtomicBool>,
+        saw_a_dictation_in_ring: Arc<AtomicBool>,
     }
 
     impl Transcriber for Scripted {
         fn transcribe(&self, _audio: &[f32]) -> Result<String, BansheeError> {
             self.saw_the_flag
                 .store(self.state.is_transcribing(), Ordering::Relaxed);
+            self.saw_a_dictation_in_ring
+                .store(self.state.dictation_in_ring(), Ordering::Relaxed);
             self.answer.clone().map_err(BansheeError::Transcription)
         }
         fn set_vocabulary(&mut self, _words: &[String]) {}
@@ -1199,12 +1205,15 @@ mod utterance_tests {
             state: Arc::clone(&state),
             answer: answer.map(str::to_string).map_err(str::to_string),
             saw_the_flag: Arc::clone(&saw_the_flag),
+            saw_a_dictation_in_ring: Arc::default(),
         };
         let mut pipeline = holding(audio, &state, cues, scripted);
         let mut flag = state.subscribe_transcribing();
         flag.mark_unchanged();
         let typing = Arc::clone(&state);
-        pipeline.transcribe_utterance(action, move |words| type_words(&typing, words));
+        pipeline.transcribe_utterance(action, state.claim_ring(), move |words| {
+            type_words(&typing, words)
+        });
         let rose = flag.has_changed().unwrap();
         let mut signals = Vec::new();
         while let Ok(signal) = subscribed.try_recv() {
@@ -1216,6 +1225,34 @@ mod utterance_tests {
             up_while_transcribing: saw_the_flag.load(Ordering::Relaxed),
             state,
         }
+    }
+
+    #[test]
+    fn a_transcription_frees_the_ring_before_it_transcribes() {
+        let (commands, requests) = std::sync::mpsc::channel();
+        let state = crate::test_support::daemon_state(commands);
+        assert!(state.record_start(TranscribeTarget::Mailbox));
+        state.record_stop();
+        let Ok(ConsumerCommand::Transcribe(_, ring)) = requests.try_recv() else {
+            panic!("the stop sends the dictation to the consumer");
+        };
+        assert!(state.dictation_in_ring());
+        let saw_a_dictation_in_ring = Arc::new(AtomicBool::new(true));
+        let scripted = Scripted {
+            state: Arc::clone(&state),
+            answer: Ok("words".to_string()),
+            saw_the_flag: Arc::default(),
+            saw_a_dictation_in_ring: Arc::clone(&saw_a_dictation_in_ring),
+        };
+        let mut pipeline = holding(&spoken_then_quiet(), &state, Cues::recording().0, scripted);
+
+        pipeline.transcribe_utterance(TranscribeTarget::Mailbox, ring, |_| Ok(()));
+
+        assert!(
+            !saw_a_dictation_in_ring.load(Ordering::Relaxed),
+            "a waiting question must not sit through the transcription itself"
+        );
+        assert!(!state.dictation_in_ring());
     }
 
     /// A pipeline whose capture already holds `audio`, at the rate the detector reads.
@@ -1253,6 +1290,7 @@ mod utterance_tests {
             state: Arc::clone(&state),
             answer: Ok(String::new()),
             saw_the_flag: Arc::new(AtomicBool::new(false)),
+            saw_a_dictation_in_ring: Arc::default(),
         };
         let mut pipeline = holding(audio, &state, cues, scripted);
         let release = held.map(|after| {

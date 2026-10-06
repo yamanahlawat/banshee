@@ -22,12 +22,6 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   so a daemon slow to load can be kickstarted more than once.
 - No protocol method cancels a download. A person on a metered connection can start 862 MB
   and has no way to stop it from the window.
-- A question that waits out a dictation arms the moment push-to-talk stops, and the
-  consumer takes the ring for that dictation only when it reaches the `Transcribe` command.
-  If the consumer is still busy, for example with an earlier transcription, the ring can
-  hold the start of the question's echo, and it is typed with the dictation. Not measured.
-  Two fixes: take the ring when push-to-talk stops, or keep the question back until the
-  dictation is transcribed.
 - The remote speaker takes one shape only: an OpenAI-compatible `/audio/speech` endpoint.
   ElevenLabs and any other API shape need a backend of their own.
 - The remote speaker's voice is a plain field the person fills in. The endpoint has no call

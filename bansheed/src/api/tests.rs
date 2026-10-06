@@ -540,6 +540,45 @@ async fn an_ask_waiting_out_a_dictation_answers_a_broken_microphone_at_once() {
 }
 
 #[tokio::test]
+async fn an_ask_waits_until_the_dictation_leaves_the_ring() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let (take_the_ring, ring_wanted) = std::sync::mpsc::channel::<()>();
+    let consumer = std::thread::spawn({
+        let state = Arc::clone(&state);
+        move || {
+            let Ok(ConsumerCommand::Transcribe(_, ring)) =
+                command_receiver.recv_timeout(std::time::Duration::from_secs(5))
+            else {
+                panic!("the dictation never reached the consumer");
+            };
+            ring_wanted.recv().unwrap();
+            drop(ring);
+            let Ok(ConsumerCommand::Ask(ask)) =
+                command_receiver.recv_timeout(std::time::Duration::from_secs(5))
+            else {
+                panic!("the ask never reached the listener");
+            };
+            state.disarm(ask.session);
+            let _ = ask.reply.send(Ok("after the dictation".to_string()));
+        }
+    });
+    assert!(state.record_start(crate::state::TranscribeTarget::Mailbox));
+    let asking = spawn_ask(&state);
+    state.record_stop();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        state.recording_mode(),
+        RecordingMode::Idle,
+        "the question must not open the microphone while the dictation is still in the ring"
+    );
+
+    take_the_ring.send(()).unwrap();
+    assert_eq!(answer_of(asking).await, "after the dictation");
+    consumer.join().unwrap();
+}
+
+#[tokio::test]
 async fn an_ask_during_dictation_waits_until_the_dictation_ends() {
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let state = test_state(commands);
@@ -644,7 +683,7 @@ async fn record_start_and_stop_drive_push_to_talk() {
     };
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     // The dictate choice from start must reach the consumer command
-    let Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate)) = command_receiver.try_recv()
+    let Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate, _)) = command_receiver.try_recv()
     else {
         panic!("expected a dictate transcribe command");
     };
@@ -672,7 +711,7 @@ async fn record_toggle_starts_then_stops_and_says_which() {
     assert_eq!(result["recording"], serde_json::Value::Bool(false));
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     // The stop carries no flag, so the dictate choice comes from the first toggle
-    let Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate)) = command_receiver.try_recv()
+    let Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate, _)) = command_receiver.try_recv()
     else {
         panic!("expected a dictate transcribe command");
     };
