@@ -228,7 +228,7 @@ async fn a_stalled_status_is_skipped_and_the_question_still_plays() {
         &held.state,
         question,
         std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(100),
+        std::time::Duration::from_secs(1),
     )
     .await;
 
@@ -452,22 +452,111 @@ async fn ask_user_returns_the_scoped_answer() {
 }
 
 #[tokio::test]
-async fn concurrent_ask_user_is_refused_while_armed() {
-    let state = test_state(std::sync::mpsc::channel().0);
-    state.set_recording_mode(RecordingMode::Armed);
+async fn a_second_ask_waits_for_the_first_answer_and_then_listens() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let (answers, answer_next) = std::sync::mpsc::channel::<&'static str>();
+    let listener = answer_in_turn(&state, command_receiver, answer_next);
 
-    let request = request(
-        BANSHEE_ASK_USER,
-        Some(serde_json::json!({"question": "Also ready?"})),
+    let first = first_armed(&state, "Ready to ship?").await;
+    let second = spawn_ask(&state);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !second.is_finished(),
+        "the second ask must wait, not refuse"
     );
-    let response = dispatch(request, &state).await;
 
-    let JsonRpcResponse::Error { error, .. } = response else {
-        panic!("expected error response");
-    };
-    assert_eq!(error.code, rpc_code::BUSY);
-    // The refused call must not disturb the session that owns the mic
+    answers.send("first answer").unwrap();
+    assert_eq!(answer_of(first).await, "first answer");
+    answers.send("second answer").unwrap();
+    assert_eq!(answer_of(second).await, "second answer");
+    drop(answers);
+    listener.join().unwrap();
+}
+
+#[tokio::test]
+async fn waiting_asks_play_in_arrival_order_and_one_whose_caller_leaves_never_plays() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let crate::test_support::HoldingSpeech { state, spoken, .. } =
+        crate::test_support::daemon_state_holding_speech(
+            std::time::Duration::from_millis(10),
+            commands,
+        );
+    let (answers, answer_next) = std::sync::mpsc::channel::<&'static str>();
+    let listener = answer_in_turn(&state, command_receiver, answer_next);
+
+    let first = first_armed(&state, "First question").await;
+    let second = spawn_question(&state, "Second question");
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let gone = spawn_question(&state, "Gone question");
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let third = spawn_question(&state, "Third question");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    gone.abort();
+
+    answers.send("one").unwrap();
+    answer_of(first).await;
+    answers.send("two").unwrap();
+    assert_eq!(answer_of(second).await, "two");
+    answers.send("three").unwrap();
+    assert_eq!(answer_of(third).await, "three");
+    assert_eq!(
+        *spoken.lock().unwrap(),
+        ["First question", "Second question", "Third question"]
+    );
+    drop(answers);
+    listener.join().unwrap();
+}
+
+#[tokio::test]
+async fn a_waiting_ask_answers_a_broken_microphone_at_once() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let (answers, answer_next) = std::sync::mpsc::channel::<&'static str>();
+    let listener = answer_in_turn(&state, command_receiver, answer_next);
+
+    let first = first_armed(&state, "Ready to ship?").await;
+    let waiting = spawn_ask(&state);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    break_the_microphone_for(&state, waiting).await;
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
+
+    answers.send("first answer").unwrap();
+    answer_of(first).await;
+    drop(answers);
+    listener.join().unwrap();
+}
+
+#[tokio::test]
+async fn an_ask_waiting_out_a_dictation_answers_a_broken_microphone_at_once() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_recording_mode(RecordingMode::PushToTalk);
+
+    let waiting = spawn_ask(&state);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    break_the_microphone_for(&state, waiting).await;
+}
+
+#[tokio::test]
+async fn an_ask_during_dictation_waits_until_the_dictation_ends() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let (answers, answer_next) = std::sync::mpsc::channel::<&'static str>();
+    let listener = answer_in_turn(&state, command_receiver, answer_next);
+    state.set_recording_mode(RecordingMode::PushToTalk);
+
+    let asking = spawn_ask(&state);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!asking.is_finished(), "the ask must wait out the dictation");
+    assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+
+    state.set_recording_mode(RecordingMode::Idle);
+    answers.send("after dictation").unwrap();
+    assert_eq!(answer_of(asking).await, "after dictation");
+    drop(answers);
+    listener.join().unwrap();
 }
 
 #[tokio::test]
@@ -1601,7 +1690,7 @@ async fn ask_user_is_refused_while_the_pipeline_is_still_opening() {
 }
 
 // An agent that dies mid-question leaves the microphone armed for the rest of
-// the session, and every other ask is refused as busy until it ends. Dropping
+// the session, and every other ask waits behind it until it ends. Dropping
 // the call has to close the session the way a stop does.
 // The question is still being spoken when the agent dies. The microphone was
 // armed before the first word, so nothing but the guard can give it back.
@@ -1694,14 +1783,84 @@ async fn a_dropped_ask_closes_the_session_it_armed() {
 }
 
 fn spawn_ask(state: &Arc<DaemonState>) -> tokio::task::JoinHandle<JsonRpcResponse> {
+    spawn_question(state, "Ready to ship?")
+}
+
+fn spawn_question(
+    state: &Arc<DaemonState>,
+    question: &'static str,
+) -> tokio::task::JoinHandle<JsonRpcResponse> {
     let state = Arc::clone(state);
     tokio::spawn(async move {
         let asked = request(
             BANSHEE_ASK_USER,
-            Some(serde_json::json!({"question": "Ready to ship?"})),
+            Some(serde_json::json!({ "question": question })),
         );
         dispatch(asked, &state).await
     })
+}
+
+async fn first_armed(
+    state: &Arc<DaemonState>,
+    question: &'static str,
+) -> tokio::task::JoinHandle<JsonRpcResponse> {
+    let first = spawn_question(state, question);
+    wait_for(state, "the first ask arms", |state| {
+        state.recording_mode() == RecordingMode::Armed
+    })
+    .await;
+    first
+}
+
+/// Breaks the microphone, and expects the waiting ask to answer with that
+/// error at once rather than when the microphone would have come free.
+async fn break_the_microphone_for(
+    state: &DaemonState,
+    waiting: tokio::task::JoinHandle<JsonRpcResponse>,
+) {
+    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
+        "no device".to_string(),
+    )));
+    let response = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        .await
+        .expect("the waiting ask must answer as soon as the microphone breaks")
+        .unwrap();
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected the microphone error, got {response:?}");
+    };
+    assert_eq!(error.code, rpc_code::MICROPHONE);
+}
+
+/// Answers each ask with the next line sent on `answers`, and ends the session
+/// the way the consumer does.
+fn answer_in_turn(
+    state: &Arc<DaemonState>,
+    commands: std::sync::mpsc::Receiver<ConsumerCommand>,
+    answers: std::sync::mpsc::Receiver<&'static str>,
+) -> std::thread::JoinHandle<()> {
+    let state = Arc::clone(state);
+    std::thread::spawn(move || {
+        for answer in answers {
+            let Ok(ConsumerCommand::Ask(ask)) =
+                commands.recv_timeout(std::time::Duration::from_secs(5))
+            else {
+                panic!("the ask never reached the listener");
+            };
+            state.disarm(ask.session);
+            let _ = ask.reply.send(Ok(answer.to_string()));
+        }
+    })
+}
+
+async fn answer_of(asking: tokio::task::JoinHandle<JsonRpcResponse>) -> String {
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), asking)
+        .await
+        .expect("the ask never answered")
+        .unwrap();
+    let JsonRpcResponse::Success { result, .. } = response else {
+        panic!("expected an answer, got {response:?}");
+    };
+    result["text"].as_str().unwrap_or_default().to_string()
 }
 
 /// Polls the state until it holds, or the test fails. Generous next to the
@@ -1756,9 +1915,9 @@ async fn a_speech_from_an_agent_counts_for_that_agent_only() {
 }
 
 #[tokio::test]
-async fn a_question_refused_as_busy_still_counts() {
+async fn a_question_refused_for_a_closed_microphone_still_counts() {
     let state = test_state(std::sync::mpsc::channel().0);
-    state.set_recording_mode(RecordingMode::Armed);
+    state.set_pipeline(crate::state::Pipeline::Opening);
     let response = dispatch(
         request(
             BANSHEE_ASK_USER,
@@ -1768,9 +1927,9 @@ async fn a_question_refused_as_busy_still_counts() {
     )
     .await;
     let JsonRpcResponse::Error { error, .. } = response else {
-        panic!("expected the busy refusal");
+        panic!("expected the microphone refusal");
     };
-    assert_eq!(error.code, rpc_code::BUSY);
+    assert_eq!(error.code, rpc_code::MICROPHONE);
     assert_eq!(
         state.spoken().turn_ended(41),
         banshee_common::TurnVerdict::Pass

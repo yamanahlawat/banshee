@@ -342,6 +342,7 @@ pub struct DaemonState {
     // Start and stop can be separate RPC calls, so this cannot live on a stack
     push_to_talk: Mutex<PushToTalk>,
     armed_session: Mutex<u64>,
+    ask_turn: tokio::sync::Mutex<()>,
     // enigo posts to the same HID stream rdev listens at, so while this is
     // true the hotkey listener drops events: the paste's own modifier presses
     // would otherwise cancel or open sessions.
@@ -413,6 +414,7 @@ impl DaemonState {
                 target: TranscribeTarget::Mailbox,
             }),
             armed_session: Mutex::new(0),
+            ask_turn: tokio::sync::Mutex::new(()),
             typing: AtomicBool::new(false),
             capture_tick: AtomicU64::new(0),
             shutdown: tokio::sync::Notify::new(),
@@ -926,6 +928,34 @@ impl DaemonState {
         }
         *session += 1;
         Some(*session)
+    }
+
+    /// Waits for this question's turn and a free microphone, then arms. Tokio's
+    /// mutex is fair, so questions arm in the order they asked. Gives back the
+    /// pipeline instead once it is not open, whichever wait it breaks.
+    pub async fn arm_in_turn(&self) -> Result<(tokio::sync::MutexGuard<'_, ()>, u64), Pipeline> {
+        let mut modes = self.subscribe_recording();
+        let mut pipelines = self.subscribe_pipeline();
+        // Both senders live in `self`, so no wait below can end in an error.
+        let turn = tokio::select! {
+            turn = self.ask_turn.lock() => turn,
+            closed = pipelines.wait_for(|pipeline| !pipeline.is_open()) => {
+                return Err(closed.expect("the sender lives in self").clone());
+            }
+        };
+        loop {
+            let pipeline = self.pipeline();
+            if !pipeline.is_open() {
+                return Err(pipeline);
+            }
+            if let Some(session) = self.arm_for_ask() {
+                return Ok((turn, session));
+            }
+            tokio::select! {
+                _ = modes.changed() => {}
+                _ = pipelines.changed() => {}
+            }
+        }
     }
 
     pub fn armed_mode(&self, session: u64) -> Option<RecordingMode> {

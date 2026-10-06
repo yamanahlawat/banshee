@@ -505,8 +505,9 @@ impl Pipeline {
                 }
             }
             Err(error) => {
-                log::error!("Transcription failed: {error}");
-                self.state.set_last_error(Some(reason(&error)));
+                let why = reason(&error);
+                log::error!("Transcription failed: {why}");
+                self.state.set_last_error(Some(why));
                 self.cues.emit(Signal::Error {
                     reason: Reason::new(ReasonCode::TranscriptionFailed, None),
                     target: Some(action.into()),
@@ -675,8 +676,8 @@ fn settle_answer(
                     Ok(text)
                 }
                 Err(e) => {
-                    log::error!("Transcription failed: {e}");
                     let why = reason(&e);
+                    log::error!("Transcription failed: {why}");
                     state.set_last_error(Some(why.clone()));
                     cues.emit(Signal::Error {
                         reason: Reason::new(ReasonCode::TranscriptionFailed, None),
