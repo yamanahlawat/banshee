@@ -63,9 +63,8 @@ banshee start` rather than a stack trace.
 | `ask_user` | Ask a question aloud, then wait for and return your spoken answer |
 | `listen_for_prompt` | Pick up anything you've said since it last checked |
 
-All three run in `sequential` mode. The microphone and speaker are one device
-and the daemon rejects overlapping sessions, so letting Pi call them in
-parallel would produce `-32004` errors.
+All three run in `sequential` mode, so the agent's statuses and questions reach
+the daemon in the order the agent made them.
 
 The extension renders its own tool call and result rows, so you see the
 question Banshee asked and the answer it heard, not just a tool name.
