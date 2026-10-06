@@ -362,7 +362,7 @@ fn a_toggle_stops_the_session_a_toggle_started() {
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     assert!(matches!(
         requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate))
+        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate, _))
     ));
 
     // A manual override counts as in flight and ends as a stop
@@ -381,7 +381,7 @@ fn a_tell_session_stops_into_the_agent() {
     state.record_stop();
     assert!(matches!(
         requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Tell))
+        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Tell, _))
     ));
 }
 
@@ -451,7 +451,7 @@ fn watchdog_releases_a_push_to_talk_that_never_stopped() {
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     assert!(matches!(
         transcribe_requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Mailbox))
+        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Mailbox, _))
     ));
 
     // And a fresh start is accepted rather than refused as busy
@@ -691,6 +691,33 @@ fn the_drain_sounds_the_cue_for_a_failure_and_clears_the_reason_when_one_plays()
     );
 }
 
+// The fallback voice spoke, but the speaker the config names still failed.
+#[test]
+fn a_reply_the_fallback_spoke_still_records_why_the_speaker_failed() {
+    use crate::text_to_speech::{Fault, drain_faults};
+
+    let (cues, heard) = crate::audio::cues::Cues::recording();
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+    let (faults, receiver) = std::sync::mpsc::channel();
+    faults
+        .send(Fault::SpokenByFallback(
+            "the remote speaker did not answer in time".to_string(),
+        ))
+        .unwrap();
+    drop(faults);
+    drain_faults(std::sync::Arc::clone(&state), cues, receiver);
+
+    assert!(matches!(
+        heard.try_recv(),
+        Ok(crate::audio::cues::Cue::Error)
+    ));
+    assert_eq!(
+        state.last_speech_error().as_deref(),
+        Some("the remote speaker did not answer in time")
+    );
+}
+
 // The gate record_start shares with ask_user. A pipeline still being built has
 // no consumer thread, so a press must answer with the cue, not an open session.
 #[test]
@@ -896,5 +923,20 @@ fn an_answer_press_carries_the_answer_target() {
         crate::audio::cues::Signal::RecordStart {
             target: crate::audio::cues::Target::Answer
         }
+    );
+}
+
+#[test]
+fn a_dictation_the_consumer_never_reads_gives_the_ring_back() {
+    let (state, requests) = test_state_with_commands();
+    assert!(state.record_start(TranscribeTarget::Dictate));
+    state.record_stop();
+    assert!(state.dictation_in_ring());
+
+    drop(requests);
+
+    assert!(
+        !state.dictation_in_ring(),
+        "a consumer that is gone must not leave every later question waiting"
     );
 }

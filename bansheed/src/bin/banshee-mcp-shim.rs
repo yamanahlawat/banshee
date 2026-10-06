@@ -60,12 +60,12 @@ fn tools_list() -> serde_json::Value {
         },
         {
             "name": "ask_user",
-            "description": "Ask the user a question aloud and wait for their spoken answer. The user is working eyes-free and cannot see the screen, so every question goes through this tool: never write a question as text, and never put one in an on-screen prompt or menu. Use it when you need a decision or clarification: the question is spoken, the microphone opens once it finishes playing, and the transcribed reply comes back scoped to you. Ask one focused question per call; when you have several, ask the most important first and wait for the answer before asking the next, so the user is never holding multiple questions in their head. Returns empty text if the user stayed silent, and an error if the listening itself failed, so silence and a failed listen are never confused.",
+            "description": "Ask the user a question aloud and wait for their spoken answer. The user is working eyes-free and cannot see the screen, so every question goes through this tool: never write a question as text, and never put one in an on-screen prompt or menu. Use it when you need a decision or clarification: the question is spoken, the microphone opens once it finishes playing, and the transcribed reply comes back scoped to you. Ask one focused question per call; when you have several, ask the most important first and wait for the answer before asking the next, so the user is never holding multiple questions in their head. If another question is open or the user is dictating, yours waits its turn and plays once the microphone is free, which can take minutes. Returns empty text if the user stayed silent, and an error if the listening itself failed, so silence and a failed listen are never confused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "question": {"type": "string", "description": "One or two conversational sentences, as if asking a colleague. Refer to code, files, and identifiers by their spoken names rather than paths or signatures."},
-                    "timeout_ms": {"type": "number", "description": "How long to wait for the user to start answering, in milliseconds. Defaults to 30000, and is capped at 120000."}
+                    "timeout_ms": {"type": "number", "description": "How long to wait for the user to start answering, in milliseconds. It starts once your question has played, not while it waits its turn. Defaults to 30000, and is capped at 120000."}
                 },
                 "required": ["question"]
             }
@@ -197,16 +197,68 @@ async fn respond(
     })
 }
 
+/// Serves the client until stdin closes. The client is read while a call runs,
+/// so a cancel can drop the call, which closes its daemon socket, or take a
+/// waiting request out of the queue. A cancelled request gets no reply.
+async fn serve(
+    input: impl tokio::io::AsyncBufRead + Unpin,
+    mut output: impl tokio::io::AsyncWrite + Unpin,
+    agent_pid: u32,
+    mut last_seen_id: u64,
+    daemon: impl AsyncFn(&str, serde_json::Value) -> Result<serde_json::Value, BansheeError>,
+) {
+    let mut lines = input.lines();
+    let mut queued = std::collections::VecDeque::new();
+    loop {
+        let line = match queued.pop_front() {
+            Some(line) => line,
+            None => match lines.next_line().await {
+                Ok(Some(line)) => line,
+                _ => return,
+            },
+        };
+        let running = request_id(&line);
+        let mut call = std::pin::pin!(respond(&line, &mut last_seen_id, agent_pid, &daemon));
+        let response = loop {
+            tokio::select! {
+                response = &mut call => break response,
+                next = lines.next_line() => match next {
+                    Ok(Some(next)) => match cancelled_id(&next) {
+                        Some(id) if running.as_ref() == Some(&id) => break None,
+                        Some(id) => queued.retain(|line| request_id(line).as_ref() != Some(&id)),
+                        None => queued.push_back(next),
+                    },
+                    _ => return,
+                },
+            }
+        };
+        let Some(response) = response else { continue };
+        if let Ok(mut response_string) = serde_json::to_string(&response) {
+            response_string.push('\n');
+            let _ = output.write_all(response_string.as_bytes()).await;
+        }
+    }
+}
+
+fn request_id(line: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<JsonRpcRequest>(line).ok()?.id
+}
+
+fn cancelled_id(line: &str) -> Option<serde_json::Value> {
+    let request = serde_json::from_str::<JsonRpcRequest>(line).ok()?;
+    if request.method != "notifications/cancelled" {
+        return None;
+    }
+    request.params?.get("requestId").cloned()
+}
+
 #[tokio::main]
 async fn main() {
     banshee_common::logging::install();
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut reader = BufReader::new(stdin).lines();
 
     // Ring cursor, primed so the first poll skips pre-session speech.
     // On error the daemon is down and its ring will start empty, so 0 is right.
-    let mut last_seen_id: u64 = utils::call_daemon(
+    let last_seen_id: u64 = utils::call_daemon(
         BANSHEE_GET_TRANSCRIPTION,
         serde_json::json!({"since_id": 0, "wait_ms": 0}),
     )
@@ -219,16 +271,14 @@ async fn main() {
 
     log::info!("Banshee MCP shim started");
 
-    while let Ok(Some(line)) = reader.next_line().await {
-        let Some(response) = respond(&line, &mut last_seen_id, agent_pid, utils::call_daemon).await
-        else {
-            continue;
-        };
-        if let Ok(mut response_string) = serde_json::to_string(&response) {
-            response_string.push('\n');
-            let _ = stdout.write_all(response_string.as_bytes()).await;
-        }
-    }
+    serve(
+        BufReader::new(io::stdin()),
+        io::stdout(),
+        agent_pid,
+        last_seen_id,
+        utils::call_daemon,
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -242,6 +292,127 @@ mod tests {
         _params: serde_json::Value,
     ) -> Result<serde_json::Value, BansheeError> {
         unreachable!("these requests are answered without the daemon")
+    }
+
+    async fn never_answers(
+        _method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, BansheeError> {
+        std::future::pending().await
+    }
+
+    async fn answers_soon(
+        _method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, BansheeError> {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(serde_json::json!({"text": "yes"}))
+    }
+
+    /// Runs the shim over in-memory pipes: writes `lines` as a client would,
+    /// reads `expected` replies, then closes stdin.
+    async fn replies_to(
+        lines: &[String],
+        expected: usize,
+        daemon: impl AsyncFn(&str, serde_json::Value) -> Result<serde_json::Value, BansheeError>,
+    ) -> Vec<serde_json::Value> {
+        let (mut client, input) = tokio::io::duplex(64 * 1024);
+        let (output, replies) = tokio::io::duplex(64 * 1024);
+        let reading = async {
+            for line in lines {
+                client
+                    .write_all(format!("{line}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let mut replies = BufReader::new(replies).lines();
+            let mut got = Vec::new();
+            while got.len() < expected {
+                let line = replies.next_line().await.unwrap().expect("a reply");
+                got.push(serde_json::from_str(&line).unwrap());
+            }
+            drop(client);
+            got
+        };
+        let serving = serve(BufReader::new(input), output, AGENT, 0, daemon);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(serving, reading).1
+        })
+        .await
+        .expect("the shim stalled")
+    }
+
+    fn cancel(id: u64) -> String {
+        request(
+            "notifications/cancelled",
+            serde_json::json!({"requestId": id}),
+            None,
+        )
+    }
+
+    fn ids_of(replies: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        replies.iter().map(|reply| reply["id"].clone()).collect()
+    }
+
+    fn ask_call(id: u64) -> String {
+        request(
+            "tools/call",
+            serde_json::json!({"name": "ask_user", "arguments": {"question": "Ready?"}}),
+            Some(id),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_cancel_drops_the_call_in_flight_and_gets_no_reply() {
+        let replies = replies_to(
+            &[
+                ask_call(7),
+                cancel(7),
+                request("ping", serde_json::json!({}), Some(8)),
+            ],
+            1,
+            never_answers,
+        )
+        .await;
+        assert_eq!(replies[0]["id"], 8);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_for_a_queued_call_takes_it_out_of_the_queue() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let counting = async |_method: &str, _params: serde_json::Value| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(serde_json::json!({"text": "yes"}))
+        };
+        let replies = replies_to(
+            &[
+                ask_call(7),
+                ask_call(8),
+                cancel(8),
+                request("ping", serde_json::json!({}), Some(9)),
+            ],
+            2,
+            counting,
+        )
+        .await;
+        assert_eq!(ids_of(&replies), [7, 9]);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_for_another_request_leaves_the_call_running() {
+        let replies = replies_to(
+            &[
+                ask_call(7),
+                cancel(99),
+                request("ping", serde_json::json!({}), Some(8)),
+            ],
+            2,
+            answers_soon,
+        )
+        .await;
+        assert_eq!(ids_of(&replies), [7, 8]);
     }
 
     /// One stdin line, as a client writes it.
@@ -273,17 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_notification_gets_no_reply() {
-        let reply = respond(
-            &request(
-                "notifications/cancelled",
-                serde_json::json!({"requestId": 3}),
-                None,
-            ),
-            &mut 0,
-            AGENT,
-            no_daemon,
-        )
-        .await;
+        let reply = respond(&cancel(3), &mut 0, AGENT, no_daemon).await;
 
         assert!(
             reply.is_none(),

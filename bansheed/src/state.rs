@@ -49,6 +49,10 @@ struct PushToTalk {
     target: TranscribeTarget,
 }
 
+/// A stopped dictation's place in the ring. Dropped, it gives the place back,
+/// whether the consumer took the audio or the command was never read.
+pub type RingClaim = Counted;
+
 pub struct AskCommand {
     pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     pub timeout: Duration,
@@ -56,7 +60,7 @@ pub struct AskCommand {
 }
 
 pub enum ConsumerCommand {
-    Transcribe(TranscribeTarget),
+    Transcribe(TranscribeTarget, RingClaim),
     // The consumer empties the ring, so a cancelled session does not feed
     // the next transcription
     Discard,
@@ -224,14 +228,24 @@ impl Drop for DownloadSlot {
     }
 }
 
-/// One client that shows the level. Its drop is the client going away.
-pub struct LevelWatch(Arc<watch::Sender<usize>>);
+/// One holder of a count. Its drop gives the count back.
+pub struct Counted(Arc<watch::Sender<usize>>);
 
-impl Drop for LevelWatch {
-    fn drop(&mut self) {
-        self.0.send_modify(|watchers| *watchers -= 1);
+impl Counted {
+    fn take(count: &Arc<watch::Sender<usize>>) -> Self {
+        count.send_modify(|holders| *holders += 1);
+        Self(Arc::clone(count))
     }
 }
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.send_modify(|holders| *holders -= 1);
+    }
+}
+
+/// One client that shows the level. Its drop is the client going away.
+pub type LevelWatch = Counted;
 
 fn replace_if_new(field: &RwLock<Option<String>>, name: Option<String>) -> bool {
     let mut held = field.write().unwrap();
@@ -342,6 +356,8 @@ pub struct DaemonState {
     // Start and stop can be separate RPC calls, so this cannot live on a stack
     push_to_talk: Mutex<PushToTalk>,
     armed_session: Mutex<u64>,
+    ask_turn: tokio::sync::Mutex<()>,
+    dictations_in_ring: Arc<watch::Sender<usize>>,
     // enigo posts to the same HID stream rdev listens at, so while this is
     // true the hotkey listener drops events: the paste's own modifier presses
     // would otherwise cancel or open sessions.
@@ -413,6 +429,8 @@ impl DaemonState {
                 target: TranscribeTarget::Mailbox,
             }),
             armed_session: Mutex::new(0),
+            ask_turn: tokio::sync::Mutex::new(()),
+            dictations_in_ring: Arc::new(watch::channel(0).0),
             typing: AtomicBool::new(false),
             capture_tick: AtomicU64::new(0),
             shutdown: tokio::sync::Notify::new(),
@@ -496,6 +514,9 @@ impl DaemonState {
     }
 
     fn stop_push_to_talk(&self, session: std::sync::MutexGuard<'_, PushToTalk>) -> bool {
+        // Claimed under the push-to-talk lock and before the mode changes, so
+        // `arm_after_dictations` never sees the microphone free and the ring unclaimed.
+        let ring = self.claim_ring();
         if !self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             return false;
         }
@@ -505,8 +526,18 @@ impl DaemonState {
         self.cues.emit(Signal::RecordStop {
             target: target.into(),
         });
-        let _ = self.commands.send(ConsumerCommand::Transcribe(target));
+        let _ = self
+            .commands
+            .send(ConsumerCommand::Transcribe(target, ring));
         true
+    }
+
+    pub fn claim_ring(&self) -> RingClaim {
+        Counted::take(&self.dictations_in_ring)
+    }
+
+    pub fn dictation_in_ring(&self) -> bool {
+        *self.dictations_in_ring.borrow() > 0
     }
 
     // Resolved here, not in the tracker: a tracker-side read races a mode change. True when it
@@ -928,6 +959,46 @@ impl DaemonState {
         Some(*session)
     }
 
+    /// Waits for this question's turn, a free microphone and a ring with no
+    /// dictation left in it, then arms. Tokio's mutex is fair, so questions arm
+    /// in the order they asked. Gives back the pipeline instead once it is not
+    /// open, whichever wait it breaks.
+    pub async fn arm_in_turn(&self) -> Result<(tokio::sync::MutexGuard<'_, ()>, u64), Pipeline> {
+        let mut modes = self.subscribe_recording();
+        let mut pipelines = self.subscribe_pipeline();
+        let mut dictations = self.dictations_in_ring.subscribe();
+        // Every sender lives in `self`, so no wait below can end in an error.
+        let turn = tokio::select! {
+            turn = self.ask_turn.lock() => turn,
+            closed = pipelines.wait_for(|pipeline| !pipeline.is_open()) => {
+                return Err(closed.expect("the sender lives in self").clone());
+            }
+        };
+        loop {
+            let pipeline = self.pipeline();
+            if !pipeline.is_open() {
+                return Err(pipeline);
+            }
+            if let Some(session) = self.arm_after_dictations() {
+                return Ok((turn, session));
+            }
+            tokio::select! {
+                _ = modes.changed() => {}
+                _ = pipelines.changed() => {}
+                _ = dictations.changed() => {}
+            }
+        }
+    }
+
+    /// Under the push-to-talk lock, so no stop claims the ring between the count and the arm.
+    fn arm_after_dictations(&self) -> Option<u64> {
+        let _session = lock(&self.push_to_talk);
+        if self.dictation_in_ring() {
+            return None;
+        }
+        self.arm_for_ask()
+    }
+
     pub fn armed_mode(&self, session: u64) -> Option<RecordingMode> {
         let current = lock(&self.armed_session);
         let mode = self.recording_mode();
@@ -1170,8 +1241,7 @@ impl DaemonState {
     }
 
     pub fn watch_level(&self) -> LevelWatch {
-        self.level_watchers.send_modify(|watchers| *watchers += 1);
-        LevelWatch(Arc::clone(&self.level_watchers))
+        Counted::take(&self.level_watchers)
     }
 
     pub fn is_level_watched(&self) -> bool {

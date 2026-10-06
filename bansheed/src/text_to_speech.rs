@@ -19,9 +19,6 @@ use local::say::SayBackend;
 use output::Output;
 use remote::openai_compatible::RemoteSpeechBackend;
 
-/// Unmeasured. A bound against growth, not a latency target.
-const MAX_QUEUED_UTTERANCES: usize = 8;
-
 /// The end of speech is noticed this late at worst, which is under the cue that
 /// follows it.
 const PLAYBACK_POLL: Duration = Duration::from_millis(50);
@@ -32,7 +29,32 @@ const PLAYBACK_POLL: Duration = Duration::from_millis(50);
 #[derive(Debug)]
 pub enum Fault {
     Failed(String),
+    /// The speaker `[tts]` names failed before its first sample, and the
+    /// fallback voice took the sentence. The reason is that speaker's.
+    SpokenByFallback(String),
     Played,
+}
+
+impl Fault {
+    fn log_line(&self) -> Option<(log::Level, String)> {
+        match self {
+            Fault::Failed(reason) => Some((
+                log::Level::Error,
+                format!("the reply was not spoken: {reason}"),
+            )),
+            Fault::SpokenByFallback(reason) => Some((
+                log::Level::Warn,
+                format!("the fallback voice took over the reply: {reason}"),
+            )),
+            Fault::Played => None,
+        }
+    }
+
+    pub fn log(&self) {
+        if let Some((level, line)) = self.log_line() {
+            log::log!(level, "{line}");
+        }
+    }
 }
 
 /// Drains the channel until every sender is gone. Runs on a thread of its own,
@@ -43,16 +65,16 @@ pub fn drain_faults(
     faults: std::sync::mpsc::Receiver<Fault>,
 ) {
     for fault in faults {
+        fault.log();
         match fault {
-            Fault::Failed(reason) => {
-                log::error!("the reply was not spoken: {reason}");
+            Fault::Played => state.set_last_speech_error(None),
+            Fault::Failed(reason) | Fault::SpokenByFallback(reason) => {
                 cues.emit(Signal::Error {
                     reason: Reason::new(ReasonCode::SpeechFailed, None),
                     target: None,
                 });
                 state.set_last_speech_error(Some(reason));
             }
-            Fault::Played => state.set_last_speech_error(None),
         }
     }
 }
@@ -413,15 +435,6 @@ impl SpeechPlayer {
                 text: text.to_string(),
                 voice: voice.map(str::to_string),
             });
-            // drop the oldest backlog rather than droning through stale updates
-            if playback.queue.len() > MAX_QUEUED_UTTERANCES {
-                let oldest = playback
-                    .queue
-                    .iter()
-                    .position(|line| !playback.hold.is_question(line.utterance_id))
-                    .expect("a full queue holds more than the question");
-                playback.queue.remove(oldest);
-            }
             // The interrupt above may have stopped what played
             self.publish(&playback);
             return Ok(utterance_id);
@@ -553,6 +566,28 @@ mod tests {
             Err(error) => error.to_string(),
             Ok(_) => panic!("this speaker must refuse the utterance"),
         }
+    }
+
+    #[test]
+    fn a_reply_the_fallback_took_is_logged_as_taken_not_as_unspoken() {
+        let taken = Fault::SpokenByFallback("the remote speaker refused the key".into());
+        assert_eq!(
+            taken.log_line(),
+            Some((
+                log::Level::Warn,
+                "the fallback voice took over the reply: the remote speaker refused the key"
+                    .to_string()
+            ))
+        );
+        let failed = Fault::Failed("the remote speaker refused the key".into());
+        assert_eq!(
+            failed.log_line(),
+            Some((
+                log::Level::Error,
+                "the reply was not spoken: the remote speaker refused the key".to_string()
+            ))
+        );
+        assert_eq!(Fault::Played.log_line(), None);
     }
 
     #[test]
@@ -782,7 +817,7 @@ mod tests {
 
     async fn falls_silent(player: &SpeechPlayer) {
         let mut playing = player.subscribe_playing();
-        tokio::time::timeout(Duration::from_secs(3), playing.wait_for(Option::is_none))
+        tokio::time::timeout(Duration::from_secs(10), playing.wait_for(Option::is_none))
             .await
             .expect("playback never fell silent")
             .expect("playing sender dropped");
@@ -941,22 +976,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_cap_never_drops_a_waiting_question() {
+    async fn a_burst_plays_every_line_in_order() {
         let (player, started, ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
-        player.speak_and_hold("The question.").unwrap();
-        for _ in 0..MAX_QUEUED_UTTERANCES {
-            player.speak("Agent B reports.", false, None).unwrap();
+        let burst: Vec<String> = (1..=25).map(|id| format!("Status {id}.")).collect();
+        for line in &burst {
+            player.speak(line, false, None).unwrap();
         }
 
         ends.store(true, std::sync::atomic::Ordering::SeqCst);
         falls_silent(&player).await;
-        assert_eq!(
-            started_lines(&started),
-            ["Agent C was mid-sentence.", "The question."]
-        );
+        assert_eq!(started_lines(&started), burst);
     }
 
     #[test]

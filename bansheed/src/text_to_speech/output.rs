@@ -389,7 +389,6 @@ impl Playing {
     /// Ends a reply nothing can play. The player stops with it, so the next
     /// reply is not queued behind this one.
     fn give_up(&mut self, reason: String) {
-        log::error!("{reason}");
         let _ = self.faults.send(Fault::Failed(reason));
         *lock(&self.cancelled) = true;
         lock(&self.player).stop();

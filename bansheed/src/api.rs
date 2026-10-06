@@ -558,18 +558,15 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         return *response;
     }
 
-    if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
-        return *response;
-    }
-
-    // One armed session at a time; the mode is the lock. Armed before the wait
-    // below, so a press while Banshee talks holds to answer rather than dictates.
-    let Some(session) = daemon_state.arm_for_ask() else {
-        return JsonRpcResponse::error(
-            params.id(),
-            rpc_code::BUSY,
-            "Microphone is busy with another recording or listening session.",
-        );
+    // Dropping this call is how a waiting question leaves the line. Armed
+    // before the question plays, so a press while Banshee talks holds to
+    // answer rather than dictates.
+    let (_turn, session) = match daemon_state.arm_in_turn().await {
+        Ok(armed) => armed,
+        Err(pipeline) => {
+            return *not_recording(params.id(), &pipeline)
+                .expect("arm_in_turn gives back only a pipeline that is not open");
+        }
     };
 
     // From here the mode is held, and every way out of this call gives it back:
