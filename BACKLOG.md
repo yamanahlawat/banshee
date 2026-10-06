@@ -226,8 +226,8 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
 - The window's `connection_recovery` tests hold two hand-rolled fake daemons beside the shared
   one in `tests/common`, which accepts one connection and cannot drop the first unread.
 - The daemon has a `lib.rs` and a thin `main.rs`, but every module in it is private except
-  `bench`, so nothing in `tests/` can reach the daemon. The tray and shim are tested from
-  inside their own files.
+  `bench`, and the public `run()` reads the process arguments and the real config. So no test
+  in `tests/` can drive the daemon. The tray and shim are tested from inside their own files.
 - The Kokoro voice-swap rules are covered only by `#[ignore]`d tests that need the model.
 
 ## Build and dependencies
