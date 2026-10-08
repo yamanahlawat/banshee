@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once the microphone is free. A question that waits out your dictation plays
   only after that dictation's audio is taken, so it never ends up in your text.
   A question whose agent cancels it leaves the line and is never spoken.
+- **Raw `pcm` plays whatever its first bytes look like.** Banshee guessed the
+  format from an answer's opening bytes. A reply whose first sample was -1
+  read as the start of an MP3, so the fallback voice spoke it and the log said
+  "answered with MP3 audio". OmniVoice opened 4 of 30 replies that way. Now the
+  type the server declares names the format, and a type that names none
+  leaves the format Banshee asked for. An answer declared as MP3, Ogg or
+  another format Banshee cannot play is refused by its type. Under `pcm`, an
+  answer whose type names no format, such as `application/octet-stream`, plays
+  as samples whatever it holds.
 
 ### Changed
 

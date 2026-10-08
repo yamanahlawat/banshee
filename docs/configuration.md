@@ -258,12 +258,16 @@ The `preset` picks which Whisper model Banshee uses:
   and never under `wav`, where the header states the rate.
 - **The Voice panel sets both.** It shows the rate only under `pcm`, and an
   empty rate field goes back to 24000 Hz.
-- **Banshee identifies every answer from its own bytes.** It refuses one it
-  cannot play, and it names what arrived.
-- **A server that sends MP3, Ogg or an error page** in place of audio says so in
-  `banshee status`. Nothing plays as noise.
-- **Bare samples are the one answer no byte can prove,** so Banshee reads
-  unrecognised bytes as samples only under `response_format = "pcm"`.
+- **The type the server declares names the format.** A type that names none,
+  such as `application/octet-stream`, leaves the format Banshee asked for.
+  tts.ai and audio.cpp answer `pcm` with a WAV file and declare it, and Banshee
+  plays it.
+- **An answer declared as MP3, Ogg or another format Banshee cannot play,** or
+  as something that is not audio, is refused, and `banshee status` names the
+  type.
+- **Under `pcm`, the bytes play as samples whatever they look like.** A server
+  that sent another format under a type that names none would play as noise.
+  None of the servers tested so far does.
 - **With `fallback = "system"`,** an utterance the server refuses plays the
   error tone, and the system voice says it instead.
 - You still hear an agent's question.
