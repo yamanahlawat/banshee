@@ -761,18 +761,36 @@ fn reap(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+// `reap` kills an interactive shell before it gives back the terminal it took.
+// A new session has no terminal for the shell to take.
+fn start_own_session() -> std::io::Result<()> {
+    unsafe extern "C" {
+        fn setsid() -> i32;
+    }
+    // SAFETY: setsid takes no arguments and is async-signal-safe, so the forked child may call it.
+    if unsafe { setsid() } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn probe(shell: &OsStr, flags: &[&str], wait: std::time::Duration) -> Probe {
+    use std::os::unix::process::CommandExt;
+
     let deadline = std::time::Instant::now() + wait;
     let command = format!(r#"printf '{PATH_START}%s{PATH_END}' "$PATH""#);
-    let started = std::process::Command::new(shell)
+    let mut shell_command = std::process::Command::new(shell);
+    shell_command
         .args(flags)
         .arg("-c")
         .arg(&command)
         // An rc file that reads stdin holds `banshee connect` at the terminal.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+        .stderr(std::process::Stdio::piped());
+    // SAFETY: the hook only calls setsid, which is async-signal-safe.
+    unsafe { shell_command.pre_exec(start_own_session) };
+    let started = shell_command.spawn();
     let flags = flags.join(" ");
     let mut child = match started {
         Ok(child) => child,
