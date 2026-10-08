@@ -160,18 +160,22 @@ impl RemoteSpeechBackend {
         if let Some(instructions) = &self.instructions {
             body["instructions"] = instructions.clone().into();
         }
-        // Sent only when the user named one: a server that takes no such field
-        // may refuse the whole request over it. Never under WAV, whose header
-        // already states the rate
-        if let (SpeechFormat::Pcm, Some(rate)) = (self.response_format, self.sample_rate) {
-            body["sample_rate"] = rate.get().into();
+        // Neither field goes with WAV: its header states the rate, Groq refuses
+        // `stream_format`, and audio.cpp refuses a streamed WAV
+        if self.response_format == SpeechFormat::Pcm {
+            body["stream_format"] = "audio".into();
+            // Sent only when the user named one: a server that takes no such
+            // field may refuse the whole request over it
+            if let Some(rate) = self.sample_rate {
+                body["sample_rate"] = rate.get().into();
+            }
         }
         body
     }
 
-    /// Sends the request and hands back the body to read, or the reason it
+    /// Sends the request and hands back the answer to read, or the reason it
     /// failed before a single byte of audio.
-    fn open(&self, text: &str) -> Result<reqwest::blocking::Response, String> {
+    fn open(&self, text: &str) -> Result<Reading, String> {
         let response = self
             .client
             .post(format!("{}/audio/speech", self.base_url))
@@ -196,15 +200,17 @@ impl RemoteSpeechBackend {
                 &self.api_key,
             ));
         }
-        // A 200 that carries an error body says so here, before a byte of it
-        // is read as audio
-        declared(
+        let format = declared(
             response
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
+            self.response_format,
         )?;
-        Ok(response)
+        Ok(Reading {
+            body: response,
+            arrival: Arrival::new(format, self.sample_rate),
+        })
     }
 }
 
@@ -213,7 +219,7 @@ enum Report {
     Fault(Fault),
 }
 
-/// The response being read, and what its bytes have said so far.
+/// The response being read, and what turns its bytes into samples.
 struct Reading {
     body: reqwest::blocking::Response,
     arrival: Arrival,
@@ -302,10 +308,7 @@ impl RemoteSpeechBackend {
                 let source = match &mut reading {
                     Some(source) => source,
                     None => match opener.open(&text) {
-                        Ok(body) => reading.insert(Reading {
-                            body,
-                            arrival: Arrival::new(opener.response_format, opener.sample_rate),
-                        }),
+                        Ok(source) => reading.insert(source),
                         Err(reason) => {
                             unheard(reason);
                             return None;
@@ -315,8 +318,7 @@ impl RemoteSpeechBackend {
                 let read = match source.body.read(&mut buffer) {
                     Ok(0) => {
                         match source.arrival.ended() {
-                            // `ended` answers Ok for a body that said what it
-                            // was, which a header with no samples behind it did
+                            // A WAV header with no samples behind it still ends Ok
                             Ok(()) if !played => {
                                 unheard(format!("{} sent no audio", opener.host));
                             }
@@ -348,8 +350,8 @@ impl RemoteSpeechBackend {
                         return None;
                     }
                 };
-                // A refusal can only land before the first sample, because
-                // the answer is identified once and then only decoded
+                // A refusal can only land before the first sample: only a WAV
+                // header is ever refused
                 let chunk = match source.arrival.feed(&buffer[..read]) {
                     Ok(None) => continue,
                     Ok(Some(chunk)) => chunk,
@@ -741,6 +743,7 @@ mod tests {
         assert_eq!(sent["model"], "gpt-4o-mini-tts");
         assert_eq!(sent["voice"], "marin");
         assert_eq!(sent["response_format"], "pcm");
+        assert_eq!(sent["stream_format"], "audio");
         assert_eq!(sent["speed"].as_f64().map(|rate| rate as f32), Some(1.2));
         assert_eq!(sent["instructions"], "Calm and even");
     }
@@ -1175,9 +1178,9 @@ mod tests {
     }
 
     // Groq writes an asked rate into the WAV header without resampling, so the
-    // reply plays at the wrong speed.
+    // reply plays at the wrong speed, and refuses `stream_format` outright.
     #[test]
-    fn an_utterance_asks_for_wav_and_names_no_rate_even_when_one_is_set() {
+    fn a_wav_utterance_names_no_rate_or_stream_even_when_a_rate_is_set() {
         let (base_url, served) =
             serve_typed("200 OK", "audio/wav", vec![wav(24_000, &[16_384])], false);
         let mut remote = table(base_url, "");
@@ -1190,6 +1193,7 @@ mod tests {
         let sent = sent_body(&served.join().unwrap());
         assert_eq!(sent["response_format"], "wav");
         assert!(sent.get("sample_rate").is_none(), "{sent}");
+        assert!(sent.get("stream_format").is_none(), "{sent}");
     }
 
     #[test]
@@ -1237,6 +1241,37 @@ mod tests {
         assert_eq!(heard_wav, heard_pcm);
         assert_eq!(heard_wav[0].samples.len(), values.len());
         assert_eq!(heard_wav[0].rate.get(), 24_000);
+    }
+
+    // tts.ai answers a `pcm` request with a WAV file and declares it.
+    #[test]
+    fn a_wav_answer_to_a_pcm_request_plays_at_its_own_rate() {
+        let (base_url, served) = serve_typed(
+            "200 OK",
+            "audio/wav",
+            vec![wav(22_050, &[16_384, -16_384])],
+            false,
+        );
+        let heard = spoken_by(build(table(base_url, ""), false));
+        served.join().unwrap();
+        assert_eq!(heard[0].rate.get(), 22_050);
+        assert_eq!(heard[0].samples, vec![0.5, -0.5]);
+    }
+
+    // audio.cpp streams its samples as application/octet-stream, and -1025 is
+    // the bytes `ff fb`, which is also how an MP3 frame opens.
+    #[test]
+    fn samples_under_a_type_that_names_no_format_play_as_the_pcm_asked_for() {
+        let values = [-1_025, 4_096, -4_096, 0];
+        let (base_url, served) = serve_typed(
+            "200 OK",
+            "application/octet-stream",
+            vec![pcm(&values)],
+            false,
+        );
+        let heard = spoken_by(build(table(base_url, ""), false));
+        served.join().unwrap();
+        assert_eq!(heard[0].samples.len(), values.len());
     }
 
     fn spoken_by(built: Built) -> Vec<crate::text_to_speech::output::Chunk> {
@@ -1287,12 +1322,12 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_that_never_says_what_it_is_is_refused() {
+    fn an_empty_pcm_answer_is_refused() {
         let (base_url, served) = serve_speech("200 OK", vec![], false);
         let built = built(base_url, "", false);
         let _utterance = built.backend.start("Hello.", None).unwrap();
         let reason = failure(&built.faults);
-        assert!(reason.contains("ended"), "{reason}");
+        assert!(reason.contains("sent no audio"), "{reason}");
         let _ = served.join();
     }
 
@@ -1307,7 +1342,7 @@ mod tests {
         let built = built(base_url, "", true);
         let _utterance = built.backend.start("Say this anyway.", None).unwrap();
         let reason = spoken_by_fallback(&built.faults);
-        assert!(reason.contains("Ogg"), "{reason}");
+        assert!(reason.contains("audio/ogg"), "{reason}");
         wait_until("the fallback is asked", || {
             !built.fallback_said.lock().unwrap().is_empty()
         });
