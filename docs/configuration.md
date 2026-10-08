@@ -247,6 +247,10 @@ The `preset` picks which Whisper model Banshee uses:
   the rate the server chose.
 - **`pcm` omits the 44-byte header,** and OpenAI and Kokoro-FastAPI both answer
   it.
+- **Under `pcm`, Banshee also sends `stream_format = "audio"`.** That is OpenAI's
+  own field, and it makes a server such as audio.cpp stream its answer. A server
+  that refuses unknown fields refuses the request over it. Groq is one, but it
+  answers only `wav`, where the field is never sent.
 - **Bare samples describe nothing,** so Banshee reads them as 16-bit mono at
   24000 Hz.
 - **`sample_rate` changes that rate,** for a server that answers `pcm` at

@@ -160,11 +160,15 @@ impl RemoteSpeechBackend {
         if let Some(instructions) = &self.instructions {
             body["instructions"] = instructions.clone().into();
         }
-        // Sent only when the user named one: a server that takes no such field
-        // may refuse the whole request over it. Never under WAV, whose header
-        // already states the rate
-        if let (SpeechFormat::Pcm, Some(rate)) = (self.response_format, self.sample_rate) {
-            body["sample_rate"] = rate.get().into();
+        // Neither field goes with WAV: its header states the rate, Groq refuses
+        // `stream_format`, and audio.cpp refuses a streamed WAV
+        if self.response_format == SpeechFormat::Pcm {
+            body["stream_format"] = "audio".into();
+            // Sent only when the user named one: a server that takes no such
+            // field may refuse the whole request over it
+            if let Some(rate) = self.sample_rate {
+                body["sample_rate"] = rate.get().into();
+            }
         }
         body
     }
@@ -739,6 +743,7 @@ mod tests {
         // One request per utterance: a per-sentence split would break the voice
         assert_eq!(sent["input"], "One sentence. And a second.");
         assert_eq!(sent["model"], "gpt-4o-mini-tts");
+        assert_eq!(sent["stream_format"], "audio");
         assert_eq!(sent["voice"], "marin");
         assert_eq!(sent["response_format"], "pcm");
         assert_eq!(sent["speed"].as_f64().map(|rate| rate as f32), Some(1.2));
@@ -1175,9 +1180,9 @@ mod tests {
     }
 
     // Groq writes an asked rate into the WAV header without resampling, so the
-    // reply plays at the wrong speed.
+    // reply plays at the wrong speed, and refuses `stream_format` outright.
     #[test]
-    fn an_utterance_asks_for_wav_and_names_no_rate_even_when_one_is_set() {
+    fn a_wav_utterance_names_no_rate_or_stream_even_when_a_rate_is_set() {
         let (base_url, served) =
             serve_typed("200 OK", "audio/wav", vec![wav(24_000, &[16_384])], false);
         let mut remote = table(base_url, "");
@@ -1188,6 +1193,7 @@ mod tests {
         wait_until("the reply is read", || utterance.spoken());
 
         let sent = sent_body(&served.join().unwrap());
+        assert!(sent.get("stream_format").is_none(), "{sent}");
         assert_eq!(sent["response_format"], "wav");
         assert!(sent.get("sample_rate").is_none(), "{sent}");
     }

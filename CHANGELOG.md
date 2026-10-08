@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only after that dictation's audio is taken, so it never ends up in your text.
   A question whose agent cancels it leaves the line and is never spoken.
 
+### Changed
+
+- **A remote speaker set to `pcm` asks the server to stream.** Banshee now sends
+  `stream_format = "audio"`, so a server that streams only on request, such as
+  audio.cpp, starts playing before the whole reply is made.
+
 ## [0.16.1] - 2026-10-01
 
 ### Fixed
