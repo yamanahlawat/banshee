@@ -36,7 +36,7 @@
   $: tts = ($daemon.status?.config?.tts ?? {}) as Record<string, unknown>;
   // The rate the daemon assumes when the config names none. It is what the
   // word beside the readout is measured against.
-  const ASSUMED_SPEED = 1.2;
+  const ASSUMED_SPEED = 1.0;
   $: speed = shownFloat(Number(tts.speed ?? ASSUMED_SPEED));
   $: speedWord =
     Number(speed) === ASSUMED_SPEED ? 'usual' : Number(speed) < ASSUMED_SPEED ? 'slower' : 'faster';

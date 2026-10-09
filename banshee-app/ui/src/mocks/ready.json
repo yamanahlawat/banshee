@@ -74,7 +74,7 @@
         "sample_rate": null
       },
       "voice": "af_sky",
-      "speed": 1.2000000476837158,
+      "speed": 1.0,
       "fallback": "system"
     },
     "tell": {
