@@ -27,7 +27,7 @@ model = "whisper-1"                    # the model that server names
 [tts]
 provider = "local"     # local | remote; see "A remote voice" below
 voice = "af_sky"       # any voice from the Kokoro voices directory
-speed = 1.2            # 0.5 to 2.0; playback speed multiplier
+speed = 1.0            # 0.5 to 2.0; playback speed multiplier
 fallback = "system"    # system = use the OS voice (say, or espeak-ng on Linux) | none
 
 [tts.remote]                           # read when provider = "remote"
@@ -239,6 +239,9 @@ The `preset` picks which Whisper model Banshee uses:
 - **Leave `instructions` empty** unless the model you name reads it.
 - **`tts.speed` still applies, and it stays live.** A write reaches the server
   on the next reply.
+- **At 1.0, Banshee leaves `speed` out of the request.** 1.0 is the API's
+  default, and some servers refuse any request that names a speed their model
+  can't apply.
 - **`banshee config set tts.remote.api_key`** asks for the key by itself.
 - **`banshee config set tts.remote.voice marin`** names the voice.
 - **`response_format` is what the server is asked to send.** The default is
