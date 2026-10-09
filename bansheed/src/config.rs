@@ -383,7 +383,7 @@ impl Default for TTSConfig {
             provider: Provider::Local,
             remote: RemoteTtsConfig::default(),
             voice: "af_sky".to_string(),
-            speed: 1.2,
+            speed: 1.0,
             fallback: TTSFallback::System,
         }
     }
@@ -825,6 +825,12 @@ mod tests {
         assert_eq!(config.tts.remote.voice, "marin");
         assert_eq!(config.tts.remote.instructions, "Calm and even");
         assert_eq!(config.tts.remote.host(), "api.openai.com");
+    }
+
+    #[test]
+    fn a_tts_table_that_names_no_speed_speaks_at_the_api_default() {
+        let config: Config = toml::from_str("[tts]\nvoice = \"af_sky\"\n").unwrap();
+        assert_eq!(config.tts.speed, 1.0);
     }
 
     #[test]

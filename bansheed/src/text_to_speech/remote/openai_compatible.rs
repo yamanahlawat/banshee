@@ -155,8 +155,16 @@ impl RemoteSpeechBackend {
             "input": text,
             "voice": self.voice,
             "response_format": self.response_format,
-            "speed": *self.speed.read().unwrap_or_else(|poison| poison.into_inner()),
         });
+        // 1.0 is the API's default, and a server whose model cannot change pace
+        // refuses the request when the field is present at all
+        let speed = *self
+            .speed
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if speed != 1.0 {
+            body["speed"] = speed.into();
+        }
         if let Some(instructions) = &self.instructions {
             body["instructions"] = instructions.clone().into();
         }
@@ -1136,24 +1144,34 @@ mod tests {
         served.join().unwrap();
     }
 
-    #[test]
-    fn a_live_rate_write_reaches_the_next_utterance() {
+    /// The voice a rate write reports, and the body of the next request.
+    fn sent_after_a_rate_write(speed: f32) -> (Option<String>, serde_json::Value) {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[0, 1, 2, 3, 4, 5])], false);
         let built = built(base_url, "", false);
         let tts = crate::config::TTSConfig {
-            speed: 0.8,
+            speed,
             remote: table("http://unused.invalid/v1".to_string(), ""),
             ..Default::default()
         };
-        assert_eq!(built.backend.reconfigure(&tts).as_deref(), Some("marin"));
+        let voice = built.backend.reconfigure(&tts);
 
         let utterance = built.backend.speak("Hello.").expect("a test device opens");
         wait_until("the reply is read", || utterance.spoken());
-        let request = served.join().unwrap();
-        let body = request.split("\r\n\r\n").nth(1).expect("a JSON body");
-        let sent: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+        (voice, sent_body(&served.join().unwrap()))
+    }
+
+    #[test]
+    fn a_live_rate_write_reaches_the_next_utterance() {
+        let (voice, sent) = sent_after_a_rate_write(0.8);
+        assert_eq!(voice.as_deref(), Some("marin"));
         assert_eq!(sent["speed"].as_f64().map(|rate| rate as f32), Some(0.8));
         assert_eq!(sent["voice"], "marin");
+    }
+
+    #[test]
+    fn a_rate_of_one_is_left_out() {
+        let (_, sent) = sent_after_a_rate_write(1.0);
+        assert!(sent.get("speed").is_none(), "{sent}");
     }
 
     /// A minimal 16-bit mono WAV. The chunk sizes are the ones a server that

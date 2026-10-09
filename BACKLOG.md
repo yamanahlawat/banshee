@@ -38,8 +38,8 @@ nothing here is ordered. `ROADMAP.md` holds what lands next.
   costs the full 15 s.
 - A stop does not drop the in-flight request. The worker ends at the next byte or the bound,
   whichever comes first.
-- `speed` goes out on every speech request, since it is part of the original OpenAI schema. A
-  server that refuses the field refuses every utterance, not only the ones where speed changed.
+- `speed` goes out on every speech request where `tts.speed` is not 1.0. A server that refuses
+  the field refuses every utterance at those speeds.
 - Both remote keys live in `~/.banshee/credentials.toml`, which only the owner can read. The
   macOS Keychain holds neither, so a key stays a file on disk.
 - The status reply names the remote host from the config, not from what `select_backend`

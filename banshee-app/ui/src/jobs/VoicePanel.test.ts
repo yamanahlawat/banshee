@@ -455,3 +455,9 @@ it('sends one fetch however fast Get is pressed', async () => {
   await waitFor(() => expect(vi.mocked(downloadModels)).toHaveBeenCalledTimes(1));
   expect((get as HTMLButtonElement).disabled).toBe(true);
 });
+
+it('calls a rate of one the usual speed', () => {
+  daemon.set(reduceStatus(empty(), speaking({ speed: 1.0 })));
+  render(VoicePanel, { voices: VOICES });
+  expect(screen.getByText(/×\s*usual/)).toBeTruthy();
+});

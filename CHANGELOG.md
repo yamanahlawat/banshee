@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The default speech speed is 1.0, down from 1.2.** If you never set
+  `tts.speed`, replies now play a little slower. To keep the old pace, run
+  `banshee config set tts.speed 1.2`.
+
+### Fixed
+
+- **A remote speaker at speed 1.0 leaves `speed` out of the request.** 1.0 is
+  the API's default, so OpenAI hears the same thing. Some servers refuse any
+  request that names a speed their model can't apply, and used to refuse every
+  reply. At any other `tts.speed` they still do.
+
 ## [0.16.2] - 2026-10-08
 
 ### Fixed
