@@ -599,20 +599,28 @@ fn the_new_agents_plan_their_own_files_and_need_the_shim() {
     found(&mut env, "codex");
     found(&mut env, "copilot");
     found(&mut env, "agy");
-    for (agent, file) in [
-        (Agent::Cursor, ".cursor/mcp.json"),
-        (Agent::Antigravity, ".gemini/config/mcp_config.json"),
+    for (agent, files) in [
+        (Agent::Cursor, vec![".cursor/mcp.json"]),
+        (
+            Agent::Antigravity,
+            vec![
+                ".gemini/config/mcp_config.json",
+                ".gemini/config/hooks.json",
+            ],
+        ),
     ] {
-        match &plan(agent, &env).unwrap()[..] {
-            [
+        let actual: Vec<_> = plan(agent, &env)
+            .unwrap()
+            .into_iter()
+            .map(|change| match change {
                 Change::WriteFile {
                     path, before: None, ..
-                },
-            ] => {
-                assert_eq!(path, &home.join(file));
-            }
-            other => panic!("{agent:?}: {other:?}"),
-        }
+                } => path,
+                other => panic!("{agent:?}: {other:?}"),
+            })
+            .collect();
+        let expected: Vec<_> = files.into_iter().map(|file| home.join(file)).collect();
+        assert_eq!(actual, expected, "{agent:?}");
     }
     match &plan(Agent::Codex, &env).unwrap()[..] {
         [
