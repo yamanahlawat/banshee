@@ -51,7 +51,7 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
 
 ## Community sized
 
-- More agents for `banshee connect`: Windsurf, Zed, GitHub Copilot CLI, Kiro, Cline and
+- More agents for `banshee connect`: Windsurf, Zed, Kiro, Cline and
   Roo Code, Goose, Continue. Most take the same `mcpServers` JSON shape, so each is one
   `Agent` variant, one `plan` arm and two tests. One issue per agent (#55 to #58).
 - A JSONC-preserving editor for the JSON hosts, so comments and trailing commas survive
@@ -59,8 +59,8 @@ verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, 
 
 ## Not planned
 
-- ~~Spoken-status hooks for agents other than Claude Code.~~ Codex and Antigravity expose a
-  Stop hook that can hold a turn, and `banshee connect` now writes one for each. Cursor's stop
+- ~~Spoken-status hooks for agents other than Claude Code.~~ Codex, Antigravity and Copilot
+  expose a Stop hook that can hold a turn, and `banshee connect` now writes one for each. Cursor's stop
   hook can only send a follow-up message, and Windsurf, Zed and Amp have no turn-end hook.
 - `banshee narrate`. `banshee speak` is the primitive, and a shell line covers the use:
   `cargo build; banshee speak "build $([ $? = 0 ] && echo passed || echo failed)"`. Parsing

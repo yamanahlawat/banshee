@@ -25,6 +25,7 @@ const HIDDEN_TOOLS: &str = " If Banshee's tools are not in your tool list, they 
 pub enum GatedAgent {
     Claude,
     Codex,
+    Copilot,
     Antigravity,
 }
 
@@ -34,6 +35,7 @@ impl GatedAgent {
         match self {
             GatedAgent::Claude => "claude",
             GatedAgent::Codex => "codex",
+            GatedAgent::Copilot => "copilot",
             GatedAgent::Antigravity => "antigravity",
         }
     }
@@ -90,12 +92,20 @@ pub fn agent_pid(rows: &[ProcessRow], me: u32) -> Option<u32> {
 
 pub fn not_a_plain_end(agent: GatedAgent, payload: &serde_json::Value) -> bool {
     match agent {
-        GatedAgent::Claude | GatedAgent::Codex => payload["stop_hook_active"] == true,
+        GatedAgent::Claude | GatedAgent::Codex | GatedAgent::Copilot => {
+            payload["stop_hook_active"] == true
+        }
         // `terminationReason` is `NO_TOOL_CALL` on agy's plain end, whatever its docs say.
         GatedAgent::Antigravity => payload["error"]
             .as_str()
             .is_some_and(|error| !error.is_empty()),
     }
+}
+
+// Copilot fires agentStop for its subagents too, in the same process, and only
+// those payloads carry `parentAgentId`.
+fn ignored_stop(agent: GatedAgent, payload: &serde_json::Value) -> bool {
+    agent == GatedAgent::Copilot && payload.get("parentAgentId").is_some()
 }
 
 /// What the agent's hook prints for this verdict. `None` prints nothing.
@@ -104,7 +114,7 @@ pub fn answer(agent: GatedAgent, verdict: TurnVerdict) -> Option<String> {
         return None;
     }
     let (decision, reason) = match agent {
-        GatedAgent::Claude => ("block", REMINDER.to_string()),
+        GatedAgent::Claude | GatedAgent::Copilot => ("block", REMINDER.to_string()),
         GatedAgent::Codex => ("block", format!("{REMINDER}{HIDDEN_TOOLS}")),
         GatedAgent::Antigravity => ("continue", REMINDER.to_string()),
     };
@@ -127,7 +137,8 @@ pub fn read_payload(mut input: impl Read + Send + 'static, wait: Duration) -> se
 }
 
 /// The daemon's verdict for `agent_pid` on this stop. A stop that is not a plain
-/// end still goes to the daemon, as a repeat, and is `Pass`. Any failure is `Pass`.
+/// end still goes to the daemon, as a repeat, and is `Pass`. A Copilot subagent's
+/// stop never reaches the daemon and is `Pass`. Any failure is `Pass`.
 pub async fn verdict(
     agent: GatedAgent,
     payload: &serde_json::Value,
@@ -135,6 +146,9 @@ pub async fn verdict(
     ask: impl AsyncFn(u32, bool) -> Result<serde_json::Value, BansheeError>,
     wait: Duration,
 ) -> TurnVerdict {
+    if ignored_stop(agent, payload) {
+        return TurnVerdict::Pass;
+    }
     let Some(agent_pid) = agent_pid else {
         return TurnVerdict::Pass;
     };

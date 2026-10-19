@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`banshee connect copilot` connects GitHub Copilot CLI.** It writes the MCP server
+  to `~/.copilot/mcp-config.json` and an agent-stop hook to
+  `~/.copilot/hooks/banshee.json`. A turn that ends without a spoken status is sent
+  back once to speak, as with Claude Code and Codex. Restart Copilot after connecting.
+
 ### Changed
 
 - **The default speech speed is 1.0, down from 1.2.** If you never set

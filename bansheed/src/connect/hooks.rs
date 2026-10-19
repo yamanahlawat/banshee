@@ -143,3 +143,43 @@ pub(super) fn with_antigravity_turn_end(
     }
     Ok(Some(pretty_json(&root)?))
 }
+
+/// `before` with Copilot's agentStop hook holding `command`.
+/// `None` when it already does.
+pub(super) fn with_copilot_turn_end(
+    before: Option<&str>,
+    command: &str,
+) -> Result<Option<String>, BansheeError> {
+    const FILE: &str = "banshee.json";
+    let mut root: serde_json::Value = parse_settings(before, FILE)?;
+    let object = root
+        .as_object_mut()
+        .ok_or_else(|| malformed(FILE, "is not a JSON object"))?;
+    object
+        .entry("version")
+        .or_insert_with(|| serde_json::json!(1));
+    let agent_stop = object
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| malformed(FILE, "hooks is not an object"))?
+        .entry("agentStop")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| malformed(FILE, "hooks.agentStop is not a list"))?;
+    let existing = agent_stop.iter_mut().find(|handler| {
+        handler["bash"]
+            .as_str()
+            .is_some_and(|c| is_turn_end_command(c, GatedAgent::Copilot))
+    });
+    match existing {
+        Some(handler) if handler["bash"] == command => return Ok(None),
+        Some(handler) => handler["bash"] = serde_json::json!(command),
+        None => agent_stop.push(serde_json::json!({
+            "type": "command",
+            "bash": command,
+            "timeoutSec": 15,
+        })),
+    }
+    Ok(Some(pretty_json(&root)?))
+}
