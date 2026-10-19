@@ -15,6 +15,9 @@ ignore = [
     { id = "RUSTSEC-2025-0080", reason = "unic-common, under tauri-utils through urlpattern" },
     { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident, under tauri-utils through urlpattern" },
     { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version, under tauri-utils through urlpattern" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant, under zbus 5 through ksni and tauri-plugin-single-instance" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names, under zbus 5 through ksni and tauri-plugin-single-instance" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, under zbus 5 through ksni and tauri-plugin-single-instance" },
 ]
 
 [licenses]
