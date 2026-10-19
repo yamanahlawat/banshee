@@ -152,12 +152,13 @@ pub(super) fn with_copilot_turn_end(
 ) -> Result<Option<String>, BansheeError> {
     const FILE: &str = "banshee.json";
     let mut root: serde_json::Value = parse_settings(before, FILE)?;
-    let root = root
+    let object = root
         .as_object_mut()
         .ok_or_else(|| malformed(FILE, "is not a JSON object"))?;
-    root.entry("version")
+    object
+        .entry("version")
         .or_insert_with(|| serde_json::json!(1));
-    let agent_stop = root
+    let agent_stop = object
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
@@ -166,36 +167,19 @@ pub(super) fn with_copilot_turn_end(
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
         .ok_or_else(|| malformed(FILE, "hooks.agentStop is not a list"))?;
-    let existing = agent_stop
-        .iter_mut()
-        .filter_map(serde_json::Value::as_object_mut)
-        .find(|handler| {
-            handler
-                .get("bash")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| handler.get("command").and_then(serde_json::Value::as_str))
-                .is_some_and(|c| is_turn_end_command(c, GatedAgent::Copilot))
-        });
+    let existing = agent_stop.iter_mut().find(|handler| {
+        handler["bash"]
+            .as_str()
+            .is_some_and(|c| is_turn_end_command(c, GatedAgent::Copilot))
+    });
     match existing {
-        Some(handler)
-            if handler.get("type") == Some(&serde_json::json!("command"))
-                && handler.get("bash") == Some(&serde_json::json!(command)) =>
-        {
-            return Ok(None);
-        }
-        Some(handler) => {
-            handler.remove("command");
-            handler.insert("type".into(), serde_json::json!("command"));
-            handler.insert("bash".into(), serde_json::json!(command));
-            handler
-                .entry("timeoutSec")
-                .or_insert_with(|| serde_json::json!(15));
-        }
+        Some(handler) if handler["bash"] == command => return Ok(None),
+        Some(handler) => handler["bash"] = serde_json::json!(command),
         None => agent_stop.push(serde_json::json!({
             "type": "command",
             "bash": command,
             "timeoutSec": 15,
         })),
     }
-    Ok(Some(pretty_json(&serde_json::Value::Object(root.clone()))?))
+    Ok(Some(pretty_json(&root)?))
 }

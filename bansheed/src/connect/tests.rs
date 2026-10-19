@@ -369,7 +369,7 @@ fn cursor_is_installed_when_its_dir_exists_and_the_clis_when_on_path() {
 
 #[test]
 fn mcp_server_is_added_to_a_missing_file() {
-    let after = with_mcp_server(None, "mcp.json", Path::new(SHIM))
+    let after = with_mcp_server(None, "mcp.json", Path::new(SHIM), None)
         .unwrap()
         .expect("a change");
     let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -383,7 +383,7 @@ fn mcp_server_is_added_to_a_missing_file() {
 #[test]
 fn mcp_server_keeps_other_servers_and_key_order() {
     let before = "{\n  \"theme\": \"dark\",\n  \"mcpServers\": {\n    \"other\": { \"command\": \"x\" },\n  },\n}\n";
-    let after = with_mcp_server(Some(before), "settings.json", Path::new(SHIM))
+    let after = with_mcp_server(Some(before), "settings.json", Path::new(SHIM), None)
         .unwrap()
         .expect("a change");
     let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -398,12 +398,12 @@ fn mcp_server_keeps_other_servers_and_key_order() {
 fn mcp_server_that_reaches_the_shim_means_no_change() {
     let absolute = format!(r#"{{"mcpServers":{{"banshee":{{"command":"{SHIM}"}}}}}}"#);
     assert_eq!(
-        with_mcp_server(Some(&absolute), "mcp.json", Path::new(SHIM)).unwrap(),
+        with_mcp_server(Some(&absolute), "mcp.json", Path::new(SHIM), None).unwrap(),
         None
     );
     let bare = r#"{"mcpServers":{"banshee":{"command":"banshee-mcp-shim"}}}"#;
     assert!(
-        with_mcp_server(Some(bare), "mcp.json", Path::new(SHIM))
+        with_mcp_server(Some(bare), "mcp.json", Path::new(SHIM), None)
             .unwrap()
             .is_some(),
         "a bare name never reaches the shim"
@@ -413,13 +413,13 @@ fn mcp_server_that_reaches_the_shim_means_no_change() {
 #[test]
 fn mcp_server_errors_name_the_file() {
     let error =
-        with_mcp_server(Some("[1]"), "mcp.json", Path::new(SHIM)).expect_err("not an object");
+        with_mcp_server(Some("[1]"), "mcp.json", Path::new(SHIM), None).expect_err("not an object");
     assert!(error.to_string().starts_with("mcp.json "), "{error}");
 }
 
 #[test]
 fn copilot_server_is_added_with_local_type() {
-    let after = with_copilot_server(None, Path::new(SHIM))
+    let after = with_mcp_server(None, "mcp-config.json", Path::new(SHIM), Some("local"))
         .unwrap()
         .expect("a change");
     let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -432,9 +432,14 @@ fn copilot_server_is_added_with_local_type() {
 #[test]
 fn copilot_server_updates_an_entry_without_local_type() {
     let before = format!(r#"{{"mcpServers":{{"banshee":{{"command":"{SHIM}"}}}}}}"#);
-    let after = with_copilot_server(Some(&before), Path::new(SHIM))
-        .unwrap()
-        .expect("missing type must be fixed");
+    let after = with_mcp_server(
+        Some(&before),
+        "mcp-config.json",
+        Path::new(SHIM),
+        Some("local"),
+    )
+    .unwrap()
+    .expect("missing type must be fixed");
     let value: serde_json::Value = serde_json::from_str(&after).unwrap();
     assert_eq!(value["mcpServers"]["banshee"]["type"], "local");
     assert_eq!(value["mcpServers"]["banshee"]["command"], SHIM);
@@ -444,7 +449,13 @@ fn copilot_server_updates_an_entry_without_local_type() {
 fn copilot_server_with_local_type_and_shim_means_no_change() {
     let before = format!(r#"{{"mcpServers":{{"banshee":{{"type":"local","command":"{SHIM}"}}}}}}"#);
     assert_eq!(
-        with_copilot_server(Some(&before), Path::new(SHIM)).unwrap(),
+        with_mcp_server(
+            Some(&before),
+            "mcp-config.json",
+            Path::new(SHIM),
+            Some("local")
+        )
+        .unwrap(),
         None
     );
 }
@@ -579,8 +590,13 @@ fn codex_refuses_an_mcp_servers_that_is_not_a_table() {
 
 #[test]
 fn mcp_server_refuses_an_mcp_servers_that_is_not_an_object() {
-    let error = with_mcp_server(Some(r#"{"mcpServers":[1]}"#), "mcp.json", Path::new(SHIM))
-        .expect_err("a list is not a server map");
+    let error = with_mcp_server(
+        Some(r#"{"mcpServers":[1]}"#),
+        "mcp.json",
+        Path::new(SHIM),
+        None,
+    )
+    .expect_err("a list is not a server map");
     assert!(matches!(error, BansheeError::Rejected(_)), "{error}");
     assert_eq!(error.to_string(), "mcp.json mcpServers is not an object");
 }
@@ -997,7 +1013,7 @@ fn an_absolute_path_to_the_shim_still_reaches_it() {
 #[test]
 fn json_hosts_keep_the_entry_other_keys() {
     let before = r#"{"mcpServers":{"banshee":{"command":"/old/shim","env":{"KEEP":"me"}}}}"#;
-    let after = with_mcp_server(Some(before), "mcp.json", Path::new(SHIM))
+    let after = with_mcp_server(Some(before), "mcp.json", Path::new(SHIM), None)
         .unwrap()
         .expect("a change");
     let value: serde_json::Value = serde_json::from_str(&after).unwrap();

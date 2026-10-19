@@ -85,7 +85,7 @@ This is the step that closes the voice loop: the agent speaks, and you answer ou
 2. Press **Apply**.
 3. Restart the agent. It speaks its decisions and asks you questions out loud.
 
-- Antigravity, Claude Code, OpenCode and Pi are verified on a real install. Codex, Copilot and Cursor follow their published formats, and wait for a report.
+- Antigravity, Claude Code, Copilot, OpenCode and Pi are verified on a real install. Codex and Cursor follow their published formats, and wait for a report.
 - Pi has its own extension API, so it gets a [native extension](integrations/pi) instead.
 
 <p align="center"><img src="assets/agents.png" width="360" alt="The Agents panel: Claude Code and OpenCode are connected, and Codex and Cursor are installed with a Connect button beside each."></p>

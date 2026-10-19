@@ -361,7 +361,7 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
             let gate = crate::turn_end::GatedAgent::Copilot;
             let command = hooks::turn_end_command(gate, &env.banshee);
             let mut changes = rewrite(env.home.join(".copilot/mcp-config.json"), |before| {
-                with_copilot_server(before, shim)
+                with_mcp_server(before, "mcp-config.json", shim, Some("local"))
             })?;
             changes.extend(rewrite(
                 env.home.join(".copilot/hooks/banshee.json"),
@@ -372,7 +372,7 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
         Agent::Cursor => {
             let shim = require_shim(env)?;
             rewrite(env.home.join(".cursor/mcp.json"), |before| {
-                with_mcp_server(before, "mcp.json", shim)
+                with_mcp_server(before, "mcp.json", shim, None)
             })
         }
         // The IDE, the `agy` CLI and the SDK share this one file
@@ -381,7 +381,7 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
             let gate = crate::turn_end::GatedAgent::Antigravity;
             let command = hooks::turn_end_command(gate, &env.banshee);
             let mut changes = rewrite(env.home.join(".gemini/config/mcp_config.json"), |before| {
-                with_mcp_server(before, "mcp_config.json", shim)
+                with_mcp_server(before, "mcp_config.json", shim, None)
             })?;
             changes.extend(rewrite(
                 env.home.join(".gemini/config/hooks.json"),
@@ -490,21 +490,7 @@ fn with_mcp_server(
     config: Option<&str>,
     file: &str,
     shim: &Path,
-) -> Result<Option<String>, BansheeError> {
-    with_mcp_server_shape(config, file, shim, McpServerShape::Plain)
-}
-
-#[derive(Clone, Copy)]
-enum McpServerShape {
-    Plain,
-    CopilotLocal,
-}
-
-fn with_mcp_server_shape(
-    config: Option<&str>,
-    file: &str,
-    shim: &Path,
-    shape: McpServerShape,
+    server_type: Option<&str>,
 ) -> Result<Option<String>, BansheeError> {
     let mut root: serde_json::Value = match config {
         Some(text) => json5::from_str(text)
@@ -523,30 +509,19 @@ fn with_mcp_server_shape(
         .as_object_mut()
         .ok_or_else(|| malformed(file, "mcpServers.banshee is not an object"))?;
     let command = entry.get("command").and_then(serde_json::Value::as_str);
-    let type_ok = match shape {
-        McpServerShape::Plain => true,
-        McpServerShape::CopilotLocal => entry.get("type") == Some(&serde_json::json!("local")),
-    };
-    if type_ok && reaches_shim(command, shim) {
+    let typed = server_type
+        .is_none_or(|wanted| entry.get("type").and_then(serde_json::Value::as_str) == Some(wanted));
+    if typed && reaches_shim(command, shim) {
         return Ok(None);
     }
-    if matches!(shape, McpServerShape::CopilotLocal) {
-        entry.insert("type".into(), serde_json::json!("local"));
+    if let Some(wanted) = server_type {
+        entry.insert("type".into(), serde_json::json!(wanted));
     }
     entry.insert(
         "command".into(),
         serde_json::json!(shim.display().to_string()),
     );
     Ok(Some(pretty_json(&root)?))
-}
-
-fn with_copilot_server(config: Option<&str>, shim: &Path) -> Result<Option<String>, BansheeError> {
-    with_mcp_server_shape(
-        config,
-        "mcp-config.json",
-        shim,
-        McpServerShape::CopilotLocal,
-    )
 }
 
 // toml_edit keeps the user's comments

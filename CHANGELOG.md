@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`banshee connect copilot` now installs Copilot's MCP server and agent-stop hook.**
-  Copilot gets `~/.copilot/mcp-config.json` and `~/.copilot/hooks/banshee.json`,
-  so a silent turn can be sent back once to speak, like Claude Code and Codex.
+- **`banshee connect copilot` connects GitHub Copilot CLI.** It writes the MCP server
+  to `~/.copilot/mcp-config.json` and an agent-stop hook to
+  `~/.copilot/hooks/banshee.json`. A turn that ends without a spoken status is sent
+  back once to speak, as with Claude Code and Codex. Restart Copilot after connecting.
 
 ### Changed
 
@@ -821,7 +822,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`banshee connect` wires up your coding agent.** `banshee connect antigravity`,
-  `claude`, `codex`, `copilot`, `cursor`, `opencode` or `pi` detects the tool, shows the exact
+  `claude`, `codex`, `cursor`, `opencode` or `pi` detects the tool, shows the exact
   change to its config, and writes it only after you say yes. Claude Code gets the MCP
   server and a stop hook that makes each turn end with a spoken status; the others get
   the MCP server entry, and Pi its native extension. `banshee connect` alone lists what
