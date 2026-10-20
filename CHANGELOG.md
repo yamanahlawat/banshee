@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The default speech speed is 1.0, down from 1.2.** If you never set
   `tts.speed`, replies now play a little slower. To keep the old pace, run
   `banshee config set tts.speed 1.2`.
+- **Banshee is licensed under MIT.**
 
 ### Fixed
 

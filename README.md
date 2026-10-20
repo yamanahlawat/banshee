@@ -178,4 +178,4 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE).
+[MIT](LICENSE)
