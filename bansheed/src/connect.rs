@@ -11,16 +11,18 @@ pub enum Agent {
     Antigravity,
     ClaudeCode,
     Codex,
+    Copilot,
     Cursor,
     OpenCode,
     Pi,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 6] = [
+    pub const ALL: [Agent; 7] = [
         Agent::Antigravity,
         Agent::ClaudeCode,
         Agent::Codex,
+        Agent::Copilot,
         Agent::Cursor,
         Agent::OpenCode,
         Agent::Pi,
@@ -31,6 +33,7 @@ impl Agent {
             Agent::Antigravity => "antigravity",
             Agent::ClaudeCode => "claude",
             Agent::Codex => "codex",
+            Agent::Copilot => "copilot",
             Agent::Cursor => "cursor",
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
@@ -43,6 +46,7 @@ impl Agent {
             Agent::Antigravity => "Antigravity",
             Agent::ClaudeCode => "Claude Code",
             Agent::Codex => "Codex",
+            Agent::Copilot => "Copilot",
             Agent::Cursor => "Cursor",
             Agent::OpenCode => "OpenCode",
             Agent::Pi => "Pi",
@@ -64,6 +68,7 @@ impl Agent {
             Agent::Antigravity => Signal::OnPath("agy"),
             Agent::ClaudeCode => Signal::OnPath("claude"),
             Agent::Codex => Signal::OnPath("codex"),
+            Agent::Copilot => Signal::OnPath("copilot"),
             Agent::Cursor => Signal::HomeDir(".cursor"),
             Agent::OpenCode => Signal::HomeDir(".config/opencode"),
             Agent::Pi => Signal::HomeDir(".pi/agent"),
@@ -83,6 +88,7 @@ impl From<crate::args::AgentName> for Agent {
             crate::args::AgentName::Antigravity => Agent::Antigravity,
             crate::args::AgentName::Claude => Agent::ClaudeCode,
             crate::args::AgentName::Codex => Agent::Codex,
+            crate::args::AgentName::Copilot => Agent::Copilot,
             crate::args::AgentName::Cursor => Agent::Cursor,
             crate::args::AgentName::Opencode => Agent::OpenCode,
             crate::args::AgentName::Pi => Agent::Pi,
@@ -350,10 +356,23 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
             })?);
             Ok(changes)
         }
+        Agent::Copilot => {
+            let shim = require_shim(env)?;
+            let gate = crate::turn_end::GatedAgent::Copilot;
+            let command = hooks::turn_end_command(gate, &env.banshee);
+            let mut changes = rewrite(env.home.join(".copilot/mcp-config.json"), |before| {
+                with_mcp_server(before, "mcp-config.json", shim, Some("local"))
+            })?;
+            changes.extend(rewrite(
+                env.home.join(".copilot/hooks/banshee.json"),
+                |before| hooks::with_copilot_turn_end(before, &command),
+            )?);
+            Ok(changes)
+        }
         Agent::Cursor => {
             let shim = require_shim(env)?;
             rewrite(env.home.join(".cursor/mcp.json"), |before| {
-                with_mcp_server(before, "mcp.json", shim)
+                with_mcp_server(before, "mcp.json", shim, None)
             })
         }
         // The IDE, the `agy` CLI and the SDK share this one file
@@ -362,7 +381,7 @@ pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
             let gate = crate::turn_end::GatedAgent::Antigravity;
             let command = hooks::turn_end_command(gate, &env.banshee);
             let mut changes = rewrite(env.home.join(".gemini/config/mcp_config.json"), |before| {
-                with_mcp_server(before, "mcp_config.json", shim)
+                with_mcp_server(before, "mcp_config.json", shim, None)
             })?;
             changes.extend(rewrite(
                 env.home.join(".gemini/config/hooks.json"),
@@ -471,6 +490,7 @@ fn with_mcp_server(
     config: Option<&str>,
     file: &str,
     shim: &Path,
+    server_type: Option<&str>,
 ) -> Result<Option<String>, BansheeError> {
     let mut root: serde_json::Value = match config {
         Some(text) => json5::from_str(text)
@@ -489,8 +509,13 @@ fn with_mcp_server(
         .as_object_mut()
         .ok_or_else(|| malformed(file, "mcpServers.banshee is not an object"))?;
     let command = entry.get("command").and_then(serde_json::Value::as_str);
-    if reaches_shim(command, shim) {
+    let typed = server_type
+        .is_none_or(|wanted| entry.get("type").and_then(serde_json::Value::as_str) == Some(wanted));
+    if typed && reaches_shim(command, shim) {
         return Ok(None);
+    }
+    if let Some(wanted) = server_type {
+        entry.insert("type".into(), serde_json::json!(wanted));
     }
     entry.insert(
         "command".into(),

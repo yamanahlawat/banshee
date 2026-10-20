@@ -18,11 +18,11 @@
 
 On Omarchy, one spoken request sets the desktop up for a recording: no screen lock, no top bar, no window gaps. A second request puts the gaps back, and `show me` opens the diffs.
 
-<https://github.com/user-attachments/assets/912c94af-baac-4385-b135-07a4eeb11b0e>
+<https://github.com/user-attachments/assets/b60f2c32-19cc-4da2-a0e2-463ecb9d56c8>
 
-On macOS, Claude Code finds a first-run bug in Banshee's own code, says out loud what it would change, and asks how far to take the fix. The answer is spoken back. Nothing was typed.
+On macOS, Claude Code makes a weather CLI work offline. It plans out loud, takes a spoken correction, then asks about the review findings and the commit. Every answer is spoken. Nothing was typed.
 
-[More demos](docs/demos.md): a focus mode built by voice on Omarchy.
+[More demos](docs/demos.md): a focus mode built by voice on Omarchy, and a bug in Banshee fixed by voice on macOS.
 
 ## Quickstart on Linux
 
@@ -85,7 +85,7 @@ This is the step that closes the voice loop: the agent speaks, and you answer ou
 2. Press **Apply**.
 3. Restart the agent. It speaks its decisions and asks you questions out loud.
 
-- Antigravity, Claude Code, OpenCode and Pi are verified on a real install. Codex and Cursor follow their published formats, and wait for a report.
+- Antigravity, Claude Code, Copilot, OpenCode and Pi are verified on a real install. Codex and Cursor follow their published formats, and wait for a report.
 - Pi has its own extension API, so it gets a [native extension](integrations/pi) instead.
 
 <p align="center"><img src="assets/agents.png" width="360" alt="The Agents panel: Claude Code and OpenCode are connected, and Codex and Cursor are installed with a Connect button beside each."></p>
@@ -97,6 +97,7 @@ banshee connect            # which agents are installed, and which are connected
 banshee connect antigravity # Antigravity IDE, agy CLI and SDK: the MCP server in ~/.gemini/config/mcp_config.json and the stop hook in ~/.gemini/config/hooks.json
 banshee connect claude      # Claude Code: the MCP server and a stop hook that sends a silent turn back once to speak
 banshee connect codex       # Codex CLI: the MCP server in ~/.codex/config.toml and the same stop hook in ~/.codex/hooks.json; trust it once in /hooks
+banshee connect copilot     # GitHub Copilot CLI: the MCP server in ~/.copilot/mcp-config.json and the agentStop hook in ~/.copilot/hooks/banshee.json
 banshee connect cursor      # Cursor: the MCP server in ~/.cursor/mcp.json
 banshee connect opencode    # OpenCode: the MCP server
 banshee connect pi          # Pi: the native extension
@@ -177,4 +178,4 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE).
+[MIT](LICENSE)

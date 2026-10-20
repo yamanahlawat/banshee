@@ -345,6 +345,12 @@ fn cursor_is_installed_when_its_dir_exists_and_the_clis_when_on_path() {
         }
     );
     assert_eq!(
+        detect(Agent::Copilot, &env),
+        Presence::NotInstalled {
+            looked_for: "copilot on PATH".into()
+        }
+    );
+    assert_eq!(
         detect(Agent::Antigravity, &env),
         Presence::NotInstalled {
             looked_for: "agy on PATH".into()
@@ -352,16 +358,18 @@ fn cursor_is_installed_when_its_dir_exists_and_the_clis_when_on_path() {
     );
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     found(&mut env, "codex");
+    found(&mut env, "copilot");
     found(&mut env, "agy");
     assert_eq!(detect(Agent::Cursor, &env), Presence::Installed);
     assert_eq!(detect(Agent::Codex, &env), Presence::Installed);
+    assert_eq!(detect(Agent::Copilot, &env), Presence::Installed);
     assert_eq!(detect(Agent::Antigravity, &env), Presence::Installed);
     let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]
 fn mcp_server_is_added_to_a_missing_file() {
-    let after = with_mcp_server(None, "mcp.json", Path::new(SHIM))
+    let after = with_mcp_server(None, "mcp.json", Path::new(SHIM), None)
         .unwrap()
         .expect("a change");
     let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -375,7 +383,7 @@ fn mcp_server_is_added_to_a_missing_file() {
 #[test]
 fn mcp_server_keeps_other_servers_and_key_order() {
     let before = "{\n  \"theme\": \"dark\",\n  \"mcpServers\": {\n    \"other\": { \"command\": \"x\" },\n  },\n}\n";
-    let after = with_mcp_server(Some(before), "settings.json", Path::new(SHIM))
+    let after = with_mcp_server(Some(before), "settings.json", Path::new(SHIM), None)
         .unwrap()
         .expect("a change");
     let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -390,12 +398,12 @@ fn mcp_server_keeps_other_servers_and_key_order() {
 fn mcp_server_that_reaches_the_shim_means_no_change() {
     let absolute = format!(r#"{{"mcpServers":{{"banshee":{{"command":"{SHIM}"}}}}}}"#);
     assert_eq!(
-        with_mcp_server(Some(&absolute), "mcp.json", Path::new(SHIM)).unwrap(),
+        with_mcp_server(Some(&absolute), "mcp.json", Path::new(SHIM), None).unwrap(),
         None
     );
     let bare = r#"{"mcpServers":{"banshee":{"command":"banshee-mcp-shim"}}}"#;
     assert!(
-        with_mcp_server(Some(bare), "mcp.json", Path::new(SHIM))
+        with_mcp_server(Some(bare), "mcp.json", Path::new(SHIM), None)
             .unwrap()
             .is_some(),
         "a bare name never reaches the shim"
@@ -405,8 +413,109 @@ fn mcp_server_that_reaches_the_shim_means_no_change() {
 #[test]
 fn mcp_server_errors_name_the_file() {
     let error =
-        with_mcp_server(Some("[1]"), "mcp.json", Path::new(SHIM)).expect_err("not an object");
+        with_mcp_server(Some("[1]"), "mcp.json", Path::new(SHIM), None).expect_err("not an object");
     assert!(error.to_string().starts_with("mcp.json "), "{error}");
+}
+
+#[test]
+fn copilot_server_is_added_with_local_type() {
+    let after = with_mcp_server(None, "mcp-config.json", Path::new(SHIM), Some("local"))
+        .unwrap()
+        .expect("a change");
+    let value: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({ "mcpServers": { "banshee": { "type": "local", "command": SHIM } } })
+    );
+}
+
+#[test]
+fn copilot_server_updates_an_entry_without_local_type() {
+    let before = format!(r#"{{"mcpServers":{{"banshee":{{"command":"{SHIM}"}}}}}}"#);
+    let after = with_mcp_server(
+        Some(&before),
+        "mcp-config.json",
+        Path::new(SHIM),
+        Some("local"),
+    )
+    .unwrap()
+    .expect("missing type must be fixed");
+    let value: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(value["mcpServers"]["banshee"]["type"], "local");
+    assert_eq!(value["mcpServers"]["banshee"]["command"], SHIM);
+}
+
+#[test]
+fn copilot_server_with_local_type_and_shim_means_no_change() {
+    let before = format!(r#"{{"mcpServers":{{"banshee":{{"type":"local","command":"{SHIM}"}}}}}}"#);
+    assert_eq!(
+        with_mcp_server(
+            Some(&before),
+            "mcp-config.json",
+            Path::new(SHIM),
+            Some("local")
+        )
+        .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn copilot_agent_stop_hook_is_added_in_its_native_shape() {
+    let command = hooks::turn_end_command(GatedAgent::Copilot, Path::new(BANSHEE));
+    let before = r#"{"hooks":{"otherEvent":[{"type":"command","bash":"theirs"}]}}"#;
+    let after = hooks::with_copilot_turn_end(Some(before), &command)
+        .unwrap()
+        .expect("a change");
+    let root: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(root["version"], 1);
+    assert_eq!(root["hooks"]["otherEvent"][0]["bash"], "theirs");
+    assert_eq!(
+        root["hooks"]["agentStop"][0],
+        serde_json::json!({
+            "type": "command",
+            "bash": command,
+            "timeoutSec": 15,
+        })
+    );
+    assert_eq!(
+        hooks::with_copilot_turn_end(Some(&after), &command).unwrap(),
+        None,
+        "a second run changes nothing"
+    );
+}
+
+#[test]
+fn copilot_agent_stop_hook_replaces_an_old_turn_end_command() {
+    let old = hooks::turn_end_command(GatedAgent::Copilot, Path::new("/old/banshee"));
+    let command = hooks::turn_end_command(GatedAgent::Copilot, Path::new(BANSHEE));
+    let before = serde_json::json!({
+        "version": 1,
+        "hooks": {
+            "agentStop": [
+                {"type": "command", "bash": old, "timeoutSec": 30}
+            ]
+        }
+    })
+    .to_string();
+    let after = hooks::with_copilot_turn_end(Some(&before), &command)
+        .unwrap()
+        .expect("a moved banshee rewrites the hook");
+    let root: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(root["hooks"]["agentStop"].as_array().unwrap().len(), 1);
+    assert_eq!(root["hooks"]["agentStop"][0]["bash"], command);
+    assert_eq!(
+        root["hooks"]["agentStop"][0]["timeoutSec"], 30,
+        "the entry keeps the user's timeout"
+    );
+}
+
+#[test]
+fn copilot_agent_stop_errors_name_the_hook_file() {
+    let command = hooks::turn_end_command(GatedAgent::Copilot, Path::new(BANSHEE));
+    let error = hooks::with_copilot_turn_end(Some("{ not json"), &command)
+        .expect_err("bad copilot hooks json");
+    assert!(error.to_string().starts_with("banshee.json "), "{error}");
 }
 
 #[test]
@@ -481,8 +590,13 @@ fn codex_refuses_an_mcp_servers_that_is_not_a_table() {
 
 #[test]
 fn mcp_server_refuses_an_mcp_servers_that_is_not_an_object() {
-    let error = with_mcp_server(Some(r#"{"mcpServers":[1]}"#), "mcp.json", Path::new(SHIM))
-        .expect_err("a list is not a server map");
+    let error = with_mcp_server(
+        Some(r#"{"mcpServers":[1]}"#),
+        "mcp.json",
+        Path::new(SHIM),
+        None,
+    )
+    .expect_err("a list is not a server map");
     assert!(matches!(error, BansheeError::Rejected(_)), "{error}");
     assert_eq!(error.to_string(), "mcp.json mcpServers is not an object");
 }
@@ -499,21 +613,91 @@ fn the_new_agents_plan_their_own_files_and_need_the_shim() {
     let mut env = env_at(&home);
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     found(&mut env, "codex");
+    found(&mut env, "copilot");
     found(&mut env, "agy");
-    match &plan(Agent::Cursor, &env).unwrap()[..] {
+    for (agent, files) in [
+        (Agent::Cursor, vec![".cursor/mcp.json"]),
+        (
+            Agent::Antigravity,
+            vec![
+                ".gemini/config/mcp_config.json",
+                ".gemini/config/hooks.json",
+            ],
+        ),
+    ] {
+        let actual: Vec<_> = plan(agent, &env)
+            .unwrap()
+            .into_iter()
+            .map(|change| match change {
+                Change::WriteFile {
+                    path, before: None, ..
+                } => path,
+                other => panic!("{agent:?}: {other:?}"),
+            })
+            .collect();
+        let expected: Vec<_> = files.into_iter().map(|file| home.join(file)).collect();
+        assert_eq!(actual, expected, "{agent:?}");
+    }
+    match &plan(Agent::Codex, &env).unwrap()[..] {
         [
             Change::WriteFile {
-                path, before: None, ..
+                path: config,
+                before: None,
+                ..
+            },
+            Change::WriteFile {
+                path: hooks,
+                before: None,
+                ..
             },
         ] => {
-            assert_eq!(path, &home.join(".cursor/mcp.json"));
+            assert_eq!(config, &home.join(".codex/config.toml"));
+            assert_eq!(hooks, &home.join(".codex/hooks.json"));
         }
-        other => panic!("{other:?}"),
+        other => panic!("Codex: {other:?}"),
     }
     env.shim = None;
-    for agent in [Agent::Cursor, Agent::Codex, Agent::Antigravity] {
+    for agent in [
+        Agent::Cursor,
+        Agent::Codex,
+        Agent::Copilot,
+        Agent::Antigravity,
+    ] {
         assert!(plan(agent, &env).is_err(), "{agent:?} must need the shim");
     }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn copilot_plans_its_server_and_agent_stop_hook() {
+    let home = scratch("copilot-hook-plan");
+    let mut env = env_at(&home);
+    found(&mut env, "copilot");
+    let changes = plan(Agent::Copilot, &env).unwrap();
+    let paths: Vec<_> = changes
+        .iter()
+        .map(|change| match change {
+            Change::WriteFile { path, .. } => path.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            home.join(".copilot/mcp-config.json"),
+            home.join(".copilot/hooks/banshee.json")
+        ]
+    );
+    let shown = render(&changes[1]);
+    assert!(shown.contains("agentStop"), "{shown}");
+    assert!(shown.contains("turn-end copilot"), "{shown}");
+    for change in &changes {
+        apply_write(change).unwrap();
+    }
+    assert!(
+        plan(Agent::Copilot, &env).unwrap().is_empty(),
+        "a second run is empty"
+    );
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -644,7 +828,15 @@ fn every_agent_has_a_cli_name() {
     let names: Vec<&str> = Agent::ALL.iter().map(|a| a.name()).collect();
     assert_eq!(
         names,
-        ["antigravity", "claude", "codex", "cursor", "opencode", "pi"]
+        [
+            "antigravity",
+            "claude",
+            "codex",
+            "copilot",
+            "cursor",
+            "opencode",
+            "pi"
+        ]
     );
 }
 
@@ -821,7 +1013,7 @@ fn an_absolute_path_to_the_shim_still_reaches_it() {
 #[test]
 fn json_hosts_keep_the_entry_other_keys() {
     let before = r#"{"mcpServers":{"banshee":{"command":"/old/shim","env":{"KEEP":"me"}}}}"#;
-    let after = with_mcp_server(Some(before), "mcp.json", Path::new(SHIM))
+    let after = with_mcp_server(Some(before), "mcp.json", Path::new(SHIM), None)
         .unwrap()
         .expect("a change");
     let value: serde_json::Value = serde_json::from_str(&after).unwrap();
@@ -1214,6 +1406,7 @@ fn the_turn_end_command_is_recognised_for_its_own_agent_only() {
         for agent in [
             GatedAgent::Claude,
             GatedAgent::Codex,
+            GatedAgent::Copilot,
             GatedAgent::Antigravity,
         ] {
             let command = hooks::turn_end_command(agent, Path::new(banshee));

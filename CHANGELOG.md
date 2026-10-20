@@ -7,11 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-10-20
+
+### Added
+
+- **`banshee connect copilot` connects GitHub Copilot CLI.** It writes the MCP server
+  to `~/.copilot/mcp-config.json` and an agent-stop hook to
+  `~/.copilot/hooks/banshee.json`. A turn that ends without a spoken status is sent
+  back once to speak, as with Claude Code and Codex. Restart Copilot after connecting.
+
 ### Changed
 
 - **The default speech speed is 1.0, down from 1.2.** If you never set
   `tts.speed`, replies now play a little slower. To keep the old pace, run
   `banshee config set tts.speed 1.2`.
+- **Banshee is licensed under MIT.**
 
 ### Fixed
 
@@ -19,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the API's default, so OpenAI hears the same thing. Some servers refuse any
   request that names a speed their model can't apply, and used to refuse every
   reply. At any other `tts.speed` they still do.
+
+### Security
+
+- **rustls is 0.23.46, which fixes RUSTSEC-2026-0346.** Older versions let a
+  custom TLS session store write TLS secrets into its logs. Banshee has no
+  custom session store, so 0.16.2 never leaked anything.
 
 ## [0.16.2] - 2026-10-08
 
@@ -1357,7 +1373,8 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.16.2...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.16.3...HEAD
+[0.16.3]: https://github.com/yamanahlawat/banshee/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/yamanahlawat/banshee/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/yamanahlawat/banshee/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/yamanahlawat/banshee/compare/v0.15.1...v0.16.0
