@@ -18,11 +18,11 @@
 
 On Omarchy, one spoken request sets the desktop up for a recording: no screen lock, no top bar, no window gaps. A second request puts the gaps back, and `show me` opens the diffs.
 
-<https://github.com/user-attachments/assets/912c94af-baac-4385-b135-07a4eeb11b0e>
+<https://github.com/user-attachments/assets/b60f2c32-19cc-4da2-a0e2-463ecb9d56c8>
 
-On macOS, Claude Code finds a first-run bug in Banshee's own code, says out loud what it would change, and asks how far to take the fix. The answer is spoken back. Nothing was typed.
+On macOS, Claude Code makes a weather CLI work offline. It plans out loud, takes a spoken correction, then asks about the review findings and the commit. Every answer is spoken. Nothing was typed.
 
-[More demos](docs/demos.md): a focus mode built by voice on Omarchy.
+[More demos](docs/demos.md): a focus mode built by voice on Omarchy, and a bug in Banshee fixed by voice on macOS.
 
 ## Quickstart on Linux
 
@@ -178,4 +178,4 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE).
+[MIT](LICENSE)
