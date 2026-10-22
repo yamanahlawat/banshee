@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Banshee.app is signed with the hardened runtime.** Before, another program
+  running as you could inject a library into Banshee through
+  `DYLD_INSERT_LIBRARIES`. The library then got Banshee's microphone,
+  Accessibility and Input Monitoring grants without a prompt. Your existing
+  grants carry over.
+
 ## [0.16.3] - 2026-10-20
 
 ### Added
