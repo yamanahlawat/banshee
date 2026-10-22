@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Banshee.app is signed with the hardened runtime.** Before, another program
+  running as you could inject a library into Banshee through
+  `DYLD_INSERT_LIBRARIES`. The library then got Banshee's microphone,
+  Accessibility and Input Monitoring grants without a prompt. Your existing
+  grants carry over.
 - **The system voice speaks text that starts with a dash.** `say` and
   `espeak-ng` used to read such text as an option. An agent's `speak_status`
   of `-o<path>` made `say` overwrite that file with audio. This happened only

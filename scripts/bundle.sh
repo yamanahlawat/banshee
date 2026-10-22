@@ -26,7 +26,8 @@ mkdir -p "$macos" "$resources"
 
 # banshee-app is the bundle's executable. The other three run from inside it:
 # launchd starts the daemon and the tray, and ~/.cargo/bin links the CLI.
-binaries="banshee-app banshee banshee-tray banshee-mcp-shim"
+helpers="banshee-tray banshee-mcp-shim"
+binaries="banshee-app banshee $helpers"
 
 for binary in $binaries; do
     cp "$bindir/$binary" "$macos/$binary"
@@ -35,12 +36,19 @@ done
 cp "$root/assets/banshee.icns" "$resources/banshee.icns"
 sed "s/__VERSION__/$version/g" "$root/packaging/Info.plist" > "$staging/Contents/Info.plist"
 
-# Nested binaries first, then the bundle. --deep is unreliable and Apple
-# deprecated it.
-for binary in $binaries; do
-    codesign --force --identifier "com.banshee.app" --sign "$identity" "$macos/$binary"
+sign() {
+    codesign --force --options runtime --sign "$identity" "$@"
+}
+
+# The bundle signature covers banshee-app as its executable, so it comes last.
+# --deep is unreliable and Apple deprecated it. Only the daemon captures audio,
+# so only it gets the entitlement.
+sign --identifier "com.banshee.app" \
+    --entitlements "$root/packaging/banshee.entitlements" "$macos/banshee"
+for binary in $helpers; do
+    sign --identifier "com.banshee.app" "$macos/$binary"
 done
-codesign --force --sign "$identity" "$staging"
+sign "$staging"
 
 codesign --verify --strict --verbose=2 "$staging"
 
