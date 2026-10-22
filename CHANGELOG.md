@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The system voice speaks text that starts with a dash.** `say` and
+  `espeak-ng` used to read such text as an option. An agent's `speak_status`
+  of `-o<path>` made `say` overwrite that file with audio. This happened only
+  while the system voice was speaking, for example before Kokoro's models finished
+  downloading.
+- **`~/.banshee` is owner-only.** It holds the dictation history, and other
+  accounts on the machine could read it. The daemon sets the folder to 0700
+  each time it starts, and refuses to start if it can't.
+
 ## [0.16.3] - 2026-10-20
 
 ### Added

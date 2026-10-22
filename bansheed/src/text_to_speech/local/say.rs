@@ -39,15 +39,20 @@ fn program() -> &'static str {
     "espeak-ng"
 }
 
-#[cfg(target_os = "macos")]
 fn command_for(text: &str) -> io::Result<Command> {
-    let mut command = Command::new(program());
-    command.arg(text);
+    let mut command = voice_program()?;
+    // `--` stops a leading dash being read as a flag
+    command.arg("--").arg(text);
     Ok(command)
 }
 
+#[cfg(target_os = "macos")]
+fn voice_program() -> io::Result<Command> {
+    Ok(Command::new(program()))
+}
+
 #[cfg(not(target_os = "macos"))]
-fn command_for(text: &str) -> io::Result<Command> {
+fn voice_program() -> io::Result<Command> {
     let bin = resolve_espeak().ok_or_else(|| {
         io::Error::other(format!(
             "{} not installed; install: {}",
@@ -55,9 +60,7 @@ fn command_for(text: &str) -> io::Result<Command> {
             espeak_install_hint()
         ))
     })?;
-    let mut command = Command::new(bin);
-    command.arg(text);
-    Ok(command)
+    Ok(Command::new(bin))
 }
 
 struct SayUtterance {
@@ -91,6 +94,13 @@ mod tests {
             "the voice is the caller's to change, not a fault of this process: {error:?}"
         );
         assert!(error.to_string().contains("Kokoro"), "{error}");
+    }
+
+    #[test]
+    fn text_that_starts_with_a_dash_is_spoken_not_read_as_an_option() {
+        let command = command_for("-o/tmp/victim.txt").expect("the platform voice is installed");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["--", "-o/tmp/victim.txt"]);
     }
 
     #[test]
