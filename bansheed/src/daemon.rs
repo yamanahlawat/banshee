@@ -1,4 +1,4 @@
-use banshee_common::utils::socket_path;
+use banshee_common::utils::{banshee_dir, socket_path};
 use banshee_common::{
     BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED,
     BANSHEE_SUBSCRIBE, JsonRpcNotification, JsonRpcRequest, SileroVADConfig, error::BansheeError,
@@ -27,6 +27,9 @@ pub fn claim() -> Result<(std::path::PathBuf, UnixListener, fs::File), BansheeEr
         BansheeError::Other("could not find home directory for the socket path".to_string())
     })?;
 
+    if let Some(dir) = banshee_dir() {
+        make_owner_only(&dir).map_err(|e| BansheeError::file(&dir, e))?;
+    }
     if let Some(parent_dir) = socket_path.parent() {
         fs::create_dir_all(parent_dir).map_err(|e| BansheeError::file(parent_dir, e))?;
     }
@@ -563,6 +566,13 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
 // macOS reports success against a dead socket
 pub fn socket_answers(socket_path: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+}
+
+/// `banshee start`, the tray and a config write can create the directory
+/// first, at the default mode.
+fn make_owner_only(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 fn claim_socket(socket_path: &Path) -> io::Result<(UnixListener, fs::File)> {

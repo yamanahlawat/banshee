@@ -483,6 +483,29 @@ fn test_socket_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("banshee-{name}-{}.sock", std::process::id()))
 }
 
+fn mode_of(path: &Path) -> u32 {
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[test]
+fn a_missing_banshee_directory_is_created_owner_only() {
+    let dir = crate::test_support::scratch("owner-only-new").join(".banshee");
+
+    make_owner_only(&dir).unwrap();
+
+    assert_eq!(mode_of(&dir), 0o700);
+}
+
+#[test]
+fn a_banshee_directory_others_can_read_is_closed_to_them() {
+    let dir = crate::test_support::scratch("owner-only-open");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    make_owner_only(&dir).unwrap();
+
+    assert_eq!(mode_of(&dir), 0o700);
+}
+
 #[tokio::test]
 async fn stale_socket_is_reclaimed() {
     let path = test_socket_path("stale");
