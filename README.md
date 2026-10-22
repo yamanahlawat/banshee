@@ -159,11 +159,11 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 
 ## Other ways to install
 
-|                       | With the desktop window                                                                                           | Terminal only                                                           |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Linux (x86_64, arm64) | [from source](docs/linux.md#building-the-desktop-window)                                                          | the installer above, or [Homebrew](docs/install.md#linux-with-homebrew) |
-| macOS (Apple Silicon) | [a direct download](docs/install.md#macos-without-homebrew), or [the cask](docs/install.md#macos-with-the-window) | [the formula](docs/install.md#macos-terminal-only)                      |
-| Windows               | not yet                                                                                                           | not yet                                                                 |
+|                       | With the desktop window                                                                                           | Terminal only                                                               |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Linux (x86_64, arm64) | [from source](docs/linux.md#building-the-desktop-window)                                                          | the installer above, or [Homebrew](docs/install.md#linux-with-homebrew)     |
+| macOS (Apple Silicon) | [a direct download](docs/install.md#macos-without-homebrew), or [the cask](docs/install.md#macos-with-the-window) | [the app](docs/install.md#macos-without-homebrew), which includes `banshee` |
+| Windows               | not yet                                                                                                           | not yet                                                                     |
 
 - [Build from source](docs/install.md#from-source), [set up from the terminal](docs/install.md#set-up-from-the-terminal), or [remove any install](docs/install.md#uninstall)
 
