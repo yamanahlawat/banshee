@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The Homebrew formula and the shell installer no longer ship for macOS.**
+  Banshee.app is the only macOS install, through the cask or the direct
+  download, and it includes the `banshee` command. If you installed the
+  formula on a Mac, run `brew uninstall --formula banshee`, then
+  `brew install --cask yamanahlawat/banshee/banshee`. If you used the shell
+  installer on a Mac, `banshee-update` now fails: run `banshee uninstall`,
+  then install the app. Linux keeps both.
+
 ### Security
 
 - **Banshee.app is signed with the hardened runtime.** Before, another program

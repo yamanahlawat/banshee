@@ -1,6 +1,6 @@
-//! The `banshee` command on PATH. A cask writes its own wrapper there, and a
-//! shell installer places its own copy, so both routes arrive with the command
-//! already working. An app bundle unpacked by hand places neither.
+//! The `banshee` command on PATH. A cask writes its own wrapper there, so it
+//! arrives with the command already working. An app bundle unpacked by hand
+//! does not.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
