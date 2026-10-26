@@ -420,9 +420,14 @@ pub async fn watch(waybar: bool, events: Vec<String>) -> Result<(), BansheeError
 /// Ends when the reader of `out` closes it. A closed reader fails only the
 /// next write, and an idle daemon sends nothing to write. Output that cannot be
 /// polled, such as a file, has no reader to lose, so this never ends.
-async fn reader_gone(out: impl std::os::fd::AsRawFd) {
-    let Ok(out) = tokio::io::unix::AsyncFd::with_interest(out, tokio::io::Interest::WRITABLE)
-    else {
+async fn reader_gone(out: impl std::os::fd::AsFd) {
+    let Ok(out) = out.as_fd().try_clone_to_owned() else {
+        return std::future::pending().await;
+    };
+    // SAFETY: the AsyncFd owns this duplicate, so it stays open and unchanged while it lives.
+    let Ok(out) = (unsafe {
+        tokio::io::unix::AsyncFd::register_with_interest(out, tokio::io::Interest::WRITABLE)
+    }) else {
         return std::future::pending().await;
     };
     loop {
