@@ -54,16 +54,6 @@ sudo mkdir -p /usr/local/bin && sudo ln -s \
 - **Remove it** with `banshee uninstall`, which stops the daemon and takes the
   login entries and the link with it.
 
-## macOS, terminal only
-
-```bash
-brew install --formula yamanahlawat/banshee/banshee
-```
-
-- **You get** the daemon, the `banshee` command and the menu bar icon.
-- **To add the window,** remove the formula first ([Uninstall](#uninstall)),
-  then install the cask.
-
 ## Linux, with Homebrew
 
 ```bash

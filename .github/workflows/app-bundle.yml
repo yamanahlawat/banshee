@@ -1,7 +1,6 @@
 # `dist` builds and publishes the binaries; it does not build a Tauri bundle.
-# This job assembles the same `Banshee.app` that `make install` does, signs it
-# with the certificate the release job already uses, and attaches it to the
-# release. It runs after the release is published so the upload has somewhere
+# This job assembles the same `Banshee.app` that `make install` does, signs it,
+# and attaches it to the release. It runs after the release is published so the upload has somewhere
 # to go.
 name: App bundle
 
