@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-27
+
 ### Removed
 
 - **The Homebrew formula and the shell installer no longer ship for macOS.**
@@ -32,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`~/.banshee` is owner-only.** It holds the dictation history, and other
   accounts on the machine could read it. The daemon sets the folder to 0700
   each time it starts, and refuses to start if it can't.
+- **tokio is 1.54.1, which fixes RUSTSEC-2026-0386.** Older versions let safe code
+  register a file descriptor it didn't own, which could free memory still in use.
+  `banshee watch` now registers its own copy of stdout, so its descriptor stays
+  open while it waits.
 
 ## [0.16.3] - 2026-10-20
 
@@ -1399,7 +1405,8 @@ First public release. macOS only for now; Windows and Linux support is planned.
 - Configurable VAD threshold via `config.toml` and the `banshee.configure` RPC,
   reported back through `banshee status`.
 
-[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.16.3...HEAD
+[Unreleased]: https://github.com/yamanahlawat/banshee/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/yamanahlawat/banshee/compare/v0.16.3...v0.17.0
 [0.16.3]: https://github.com/yamanahlawat/banshee/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/yamanahlawat/banshee/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/yamanahlawat/banshee/compare/v0.16.0...v0.16.1
