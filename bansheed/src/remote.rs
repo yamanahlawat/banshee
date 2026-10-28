@@ -9,19 +9,45 @@ use crate::credentials::{self, RemoteKey};
 /// different things.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// reqwest's own default, which a custom redirect policy replaces.
+const REDIRECT_LIMIT: usize = 10;
+
 /// Built on a thread of its own, and joined, because reqwest's blocking builder
 /// makes and drops a temporary runtime, and tokio refuses that drop on a worker.
 /// Both backends are selected on one.
-pub fn build_client(read_timeout: Duration, what: &str) -> Result<Client, BansheeError> {
+pub fn build_client(
+    side: RemoteKey,
+    base_url: &str,
+    read_timeout: Duration,
+) -> Result<Client, BansheeError> {
+    crate::config::refuse_plain_http_to_the_internet(side, base_url)
+        .map_err(BansheeError::Other)?;
     let build = move || {
         Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(read_timeout)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= REDIRECT_LIMIT {
+                    return attempt.error(format!("redirected more than {REDIRECT_LIMIT} times"));
+                }
+                match crate::config::cleartext_internet_host(attempt.url()) {
+                    Some(host) => {
+                        let reason = format!("redirected to plain http at {host}");
+                        attempt.error(reason)
+                    }
+                    None => attempt.follow(),
+                }
+            }))
             .build()
     };
     std::thread::spawn(build)
         .join()
-        .map_err(|_| BansheeError::Other(format!("the client for the remote {what} panicked")))?
+        .map_err(|_| {
+            BansheeError::Other(format!(
+                "the client for the remote {} panicked",
+                side.side()
+            ))
+        })?
         .map_err(|error| BansheeError::Other(error.to_string()))
 }
 
@@ -71,6 +97,74 @@ mod tests {
 
     /// Shaped like a key and issued by nobody.
     const FAKE_KEY: &str = "sk-proj-7Qm4Xb2vR8tL1yWn3cZa";
+
+    /// Answers `times` requests with `head` and no body. Loopback only.
+    fn answering(head: String, times: usize) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            for _ in 0..times {
+                let (mut stream, _) = listener.accept().unwrap();
+                crate::test_support::read_request(&mut stream);
+                let response = format!("{head}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (base_url, handle)
+    }
+
+    fn redirect_to(location: &str) -> String {
+        format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}")
+    }
+
+    #[test]
+    fn a_redirect_that_stays_on_your_network_is_followed() {
+        let (target, served) = answering("HTTP/1.1 200 OK".to_string(), 1);
+        let (base_url, redirected) = answering(redirect_to(&format!("{target}/models")), 1);
+        let client = build_client(RemoteKey::Stt, &base_url, CONNECT_TIMEOUT).unwrap();
+        let response = client.get(format!("{base_url}/models")).send().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        redirected.join().unwrap();
+        served.join().unwrap();
+    }
+
+    /// The server answers exactly the limit, so a policy that never stops makes
+    /// one more request and meets a closed port instead.
+    #[test]
+    fn a_redirect_loop_stops_at_the_limit() {
+        let (base_url, redirected) = answering(redirect_to("/v1/models"), REDIRECT_LIMIT);
+        let client = build_client(RemoteKey::Stt, &base_url, CONNECT_TIMEOUT).unwrap();
+        let error = client
+            .get(format!("{base_url}/models"))
+            .send()
+            .expect_err("a loop must not be followed for ever");
+        redirected.join().unwrap();
+        let sentence = credentials::describe_send_error("127.0.0.1", &error);
+        assert!(
+            sentence.contains("redirected more than 10 times"),
+            "{sentence}"
+        );
+    }
+
+    /// 203.0.113.1 is a documentation address: should the policy break, the
+    /// client waits out the connect bound and sends nothing anywhere.
+    #[test]
+    fn a_redirect_to_plain_http_on_the_internet_is_not_followed() {
+        let (base_url, redirected) = answering(redirect_to("http://203.0.113.1/v1/models"), 1);
+        let client = build_client(RemoteKey::Stt, &base_url, CONNECT_TIMEOUT).unwrap();
+        let error = client
+            .get(format!("{base_url}/models"))
+            .send()
+            .expect_err("the redirect must not be followed");
+        redirected.join().unwrap();
+        let sentence = credentials::describe_send_error("127.0.0.1", &error);
+        assert!(
+            sentence.contains("redirected to plain http at 203.0.113.1"),
+            "{sentence}"
+        );
+    }
 
     #[test]
     fn each_side_names_itself_in_a_refusal() {

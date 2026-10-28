@@ -1,6 +1,4 @@
-use reqwest::blocking::Client;
-
-use crate::credentials;
+use crate::credentials::{self, RemoteKey};
 use crate::remote::CONNECT_TIMEOUT;
 
 /// What one remote server says when it is asked whether the key works.
@@ -15,22 +13,18 @@ pub enum Probe {
 
 /// GET `<base_url>/models` with the key. One request, the connect bound the
 /// transcriber uses, and the same bound for the answer.
-pub fn probe(base_url: &str, api_key: &str) -> Probe {
+pub fn probe(side: RemoteKey, base_url: &str, api_key: &str) -> Probe {
     // On a thread of its own, and joined, because reqwest's blocking client
     // makes and drops a temporary runtime, and a debug build of tokio refuses
     // that drop on a worker. The checklist runs on one.
-    std::thread::scope(|scope| scope.spawn(|| ask(base_url, api_key)).join().unwrap())
+    std::thread::scope(|scope| scope.spawn(|| ask(side, base_url, api_key)).join().unwrap())
 }
 
-fn ask(base_url: &str, api_key: &str) -> Probe {
+fn ask(side: RemoteKey, base_url: &str, api_key: &str) -> Probe {
     let host = crate::config::host_of(base_url);
-    let client = match Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(CONNECT_TIMEOUT)
-        .build()
-    {
+    let client = match crate::remote::build_client(side, base_url, CONNECT_TIMEOUT) {
         Ok(client) => client,
-        Err(error) => return Probe::Unreachable(credentials::describe_send_error(&host, &error)),
+        Err(error) => return Probe::Unreachable(error.to_string()),
     };
     let endpoint = format!("{}/models", base_url.trim_end_matches('/'));
     // The body is never read: a refusal is the likeliest place for a server to
@@ -50,6 +44,7 @@ fn ask(base_url: &str, api_key: &str) -> Probe {
 #[cfg(test)]
 mod tests {
     use super::{Probe, probe};
+    use crate::credentials::RemoteKey;
     use std::io::Write;
     use std::net::TcpListener;
 
@@ -80,28 +75,37 @@ mod tests {
     #[test]
     fn a_server_that_answers_passes() {
         let (base_url, served) = serve_once("200 OK", r#"{"data": []}"#);
-        assert_eq!(probe(&base_url, FAKE_KEY), Probe::Answers);
+        assert_eq!(probe(RemoteKey::Stt, &base_url, FAKE_KEY), Probe::Answers);
         served.join().unwrap();
     }
 
     #[test]
     fn a_refused_key_is_named_as_such() {
         let (base_url, served) = serve_once("401 Unauthorized", r#"{"error": "bad key"}"#);
-        assert_eq!(probe(&base_url, FAKE_KEY), Probe::KeyRefused);
+        assert_eq!(
+            probe(RemoteKey::Stt, &base_url, FAKE_KEY),
+            Probe::KeyRefused
+        );
         served.join().unwrap();
     }
 
     #[test]
     fn a_server_without_a_models_path_is_a_note() {
         let (base_url, served) = serve_once("404 Not Found", "");
-        assert_eq!(probe(&base_url, FAKE_KEY), Probe::NoModelsPath);
+        assert_eq!(
+            probe(RemoteKey::Stt, &base_url, FAKE_KEY),
+            Probe::NoModelsPath
+        );
         served.join().unwrap();
     }
 
     #[test]
     fn a_server_error_is_a_failure_and_names_the_code() {
         let (base_url, served) = serve_once("500 Internal Server Error", "");
-        assert_eq!(probe(&base_url, FAKE_KEY), Probe::Failed(500));
+        assert_eq!(
+            probe(RemoteKey::Stt, &base_url, FAKE_KEY),
+            Probe::Failed(500)
+        );
         served.join().unwrap();
     }
 
@@ -110,18 +114,35 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         drop(listener);
-        let Probe::Unreachable(reason) = probe(&base_url, FAKE_KEY) else {
+        let Probe::Unreachable(reason) = probe(RemoteKey::Stt, &base_url, FAKE_KEY) else {
             panic!("a closed port is unreachable");
         };
         assert!(reason.contains("127.0.0.1"), "{reason}");
         assert!(!reason.contains(FAKE_KEY), "the key is in the reason");
     }
 
+    /// 203.0.113.1 is a documentation address: should the refusal break, the
+    /// probe waits out the connect bound and sends nothing anywhere.
+    #[test]
+    fn plain_http_to_the_internet_is_never_asked() {
+        let Probe::Unreachable(reason) = probe(RemoteKey::Tts, "http://203.0.113.1/v1", FAKE_KEY)
+        else {
+            panic!("plain http to the internet must not be probed");
+        };
+        assert!(
+            reason.contains("tts.remote.base_url needs https for 203.0.113.1"),
+            "{reason}"
+        );
+    }
+
     #[test]
     fn the_request_carries_the_key_as_a_bearer_header_and_asks_for_models() {
         let (base_url, served) = serve_once("200 OK", r#"{"data": []}"#);
         // A trailing slash on the base URL leaves the same path
-        assert_eq!(probe(&format!("{base_url}/"), FAKE_KEY), Probe::Answers);
+        assert_eq!(
+            probe(RemoteKey::Stt, &format!("{base_url}/"), FAKE_KEY),
+            Probe::Answers
+        );
         let request = served.join().unwrap();
         assert!(request.starts_with("GET /v1/models HTTP/1.1"), "{request}");
         assert!(

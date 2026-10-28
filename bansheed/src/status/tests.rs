@@ -1,4 +1,5 @@
-use super::{BansheeError, microphone_line, report_probe};
+use super::{BansheeError, check_remote_side, microphone_line, report_probe};
+use crate::credentials::{Credentials, RemoteKey};
 
 const DAEMON_HOLDS: &str = "daemon has the microphone";
 
@@ -378,4 +379,15 @@ fn one_device_at_full_rate_is_not_worth_a_line() {
 #[test]
 fn nothing_is_said_when_no_speaker_answers() {
     assert_eq!(super::shared_device("Buds", None), None);
+}
+
+#[test]
+fn plain_http_to_the_internet_fails_its_side() {
+    let credentials = Credentials {
+        stt_api_key: Some("sk-test".to_string()),
+        ..Credentials::default()
+    };
+    let side = |base_url| check_remote_side(RemoteKey::Stt, base_url, Ok(&credentials), None);
+    assert!(!side("http://api.example.com/v1"));
+    assert!(side("https://api.example.com/v1"));
 }

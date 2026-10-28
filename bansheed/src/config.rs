@@ -1,7 +1,10 @@
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use banshee_common::{error::BansheeError, utils::config_path};
 use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::credentials::RemoteKey;
 
 // Every section denies unknown fields: TOML binds a key to whatever table
 // precedes it, so a misplaced setting parses fine and silently does nothing.
@@ -178,6 +181,59 @@ fn remote_url<'de, D: Deserializer<'de>>(deserializer: D, key: &str) -> Result<S
         )));
     }
     Ok(value)
+}
+
+// Not refused at load: a daemon that exits on an old config is one launchd
+// restarts for ever.
+pub fn refuse_plain_http_to_the_internet(side: RemoteKey, base_url: &str) -> Result<(), String> {
+    // A URL that does not parse is `remote_url`'s to refuse.
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return Ok(());
+    };
+    match cleartext_internet_host(&url) {
+        Some(host) => Err(format!(
+            "{} needs https for {host}. Plain http may reach only this machine or your own network",
+            side.base_url_setting()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The host a plain http request to `url` would reach across the internet.
+pub fn cleartext_internet_host(url: &reqwest::Url) -> Option<&str> {
+    url.host_str()
+        .filter(|host| url.scheme() == "http" && !stays_on_your_network(host))
+}
+
+// Reads the URL alone and resolves no name, so a public name that points at a
+// home address is refused.
+fn stays_on_your_network(host: &str) -> bool {
+    // An IPv6 host comes bracketed, as in `[::1]`.
+    match host.trim_start_matches('[').trim_end_matches(']').parse() {
+        Ok(IpAddr::V4(ip)) => {
+            // 100.64.0.0/10, where Tailscale hands out its addresses.
+            let [first, second, ..] = ip.octets();
+            let tailscale = first == 100 && (64..128).contains(&second);
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_private()
+                || ip.is_link_local()
+                || tailscale
+        }
+        Ok(IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+        Err(_) => {
+            let name = host.trim_end_matches('.');
+            !name.contains('.')
+                || [".ts.net", ".local", ".lan", ".home.arpa", ".internal"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+        }
+    }
 }
 
 fn remote_base_url<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
@@ -792,6 +848,82 @@ mod tests {
                 .contains("stt.remote.base_url needs an http or https URL with a host"),
             "{error}"
         );
+    }
+
+    fn http_stays_on_your_network(url: &str) -> bool {
+        stays_on_your_network(reqwest::Url::parse(url).unwrap().host_str().unwrap())
+    }
+
+    #[test]
+    fn plain_http_may_reach_this_machine_and_your_own_network() {
+        for url in [
+            "http://localhost:8000/v1",
+            "http://127.0.0.1/v1",
+            "http://[::1]/v1",
+            "http://192.168.1.5/v1",
+            "http://10.0.0.2/v1",
+            "http://172.16.0.1/v1",
+            "http://172.31.255.1/v1",
+            "http://100.64.0.1/v1",
+            "http://100.127.255.254/v1",
+            "http://[fd7a:115c:a1e0::1]/v1",
+            "http://0.0.0.0:8000/v1",
+            "http://[::]:8000/v1",
+            "http://169.254.10.2/v1",
+            "http://[fe80::1]/v1",
+            "http://gpu-box:8000/v1",
+            "http://gpu-box.tail1234.ts.net/v1",
+            "http://studio.local/v1",
+            "http://nas.lan/v1",
+            "http://pi.home.arpa/v1",
+            "http://gpu.internal/v1",
+            "http://nas.lan./v1",
+            "http://localhost./v1",
+        ] {
+            assert!(http_stays_on_your_network(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn plain_http_may_not_reach_the_internet() {
+        for url in [
+            "http://api.example.com/v1",
+            "http://8.8.8.8/v1",
+            "http://172.32.0.1/v1",
+            "http://100.63.255.255/v1",
+            "http://100.128.0.1/v1",
+            "http://[2001:db8::1]/v1",
+            "http://evilts.net/v1",
+            "http://local.example.com/v1",
+        ] {
+            assert!(!http_stays_on_your_network(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_the_setting_and_the_host() {
+        let refusal =
+            refuse_plain_http_to_the_internet(RemoteKey::Stt, "http://api.example.com/v1")
+                .expect_err("plain http to the internet must be refused");
+        assert!(
+            refusal.contains("stt.remote.base_url needs https for api.example.com"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn https_to_the_internet_is_not_refused() {
+        assert_eq!(
+            refuse_plain_http_to_the_internet(RemoteKey::Stt, "https://api.example.com/v1"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn an_old_config_with_plain_http_to_the_internet_still_loads() {
+        let config = Config::parse("[stt.remote]\nbase_url = \"http://api.example.com/v1\"\n")
+            .expect("an old config must load");
+        assert_eq!(config.stt.remote.base_url, "http://api.example.com/v1");
     }
 
     #[test]

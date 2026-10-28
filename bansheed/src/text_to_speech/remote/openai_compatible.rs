@@ -133,7 +133,7 @@ impl RemoteSpeechBackend {
         }
         let base_url = remote.base_url.trim_end_matches('/').to_string();
         Ok(Self {
-            client: crate::remote::build_client(READ_TIMEOUT, "speaker")?,
+            client: crate::remote::build_client(RemoteKey::Tts, &remote.base_url, READ_TIMEOUT)?,
             host: crate::config::host_of(&base_url),
             base_url,
             model: remote.model.clone(),
@@ -654,6 +654,19 @@ mod tests {
         fallback: Option<Arc<dyn TtsBackend>>,
         output: Output,
     ) -> (RemoteSpeechBackend, std::sync::mpsc::Receiver<Fault>) {
+        let (backend, faults) = speaker(remote, api_key, fallback, output);
+        (backend.unwrap(), faults)
+    }
+
+    fn speaker(
+        remote: &RemoteTtsConfig,
+        api_key: &str,
+        fallback: Option<Arc<dyn TtsBackend>>,
+        output: Output,
+    ) -> (
+        Result<RemoteSpeechBackend, BansheeError>,
+        std::sync::mpsc::Receiver<Fault>,
+    ) {
         let (sender, faults) = std::sync::mpsc::channel();
         let backend = RemoteSpeechBackend::new(
             remote,
@@ -662,9 +675,23 @@ mod tests {
             fallback,
             Arc::new(output),
             sender,
-        )
-        .unwrap();
+        );
         (backend, faults)
+    }
+
+    #[test]
+    fn plain_http_to_the_internet_builds_no_speaker() {
+        let (output, _opened) = Output::counting();
+        let remote = table("http://api.example.com/v1".to_string(), "");
+        let (Err(error), _faults) = speaker(&remote, "sk-test", None, output) else {
+            panic!("plain http to the internet must build no speaker");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("tts.remote.base_url needs https for api.example.com"),
+            "{error}"
+        );
     }
 
     fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
@@ -771,7 +798,7 @@ mod tests {
 
     #[test]
     fn a_voice_this_backend_cannot_apply_is_refused() {
-        let built = built("http://unused.invalid/v1".to_string(), "", false);
+        let built = built("https://unused.invalid/v1".to_string(), "", false);
         let Err(error) = built.backend.start("Hello.", Some("cedar")) else {
             panic!("the remote speaker cannot honour a per-request voice, so it must refuse");
         };

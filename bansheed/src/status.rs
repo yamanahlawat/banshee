@@ -306,10 +306,22 @@ fn probe_remote_sides(
     );
     std::thread::scope(|scope| {
         let stt = stt_key.map(|key| {
-            scope.spawn(|| crate::remote_probe::probe(&config.stt.remote.base_url, key))
+            scope.spawn(|| {
+                crate::remote_probe::probe(
+                    crate::credentials::RemoteKey::Stt,
+                    &config.stt.remote.base_url,
+                    key,
+                )
+            })
         });
         let tts = tts_key.map(|key| {
-            scope.spawn(|| crate::remote_probe::probe(&config.tts.remote.base_url, key))
+            scope.spawn(|| {
+                crate::remote_probe::probe(
+                    crate::credentials::RemoteKey::Tts,
+                    &config.tts.remote.base_url,
+                    key,
+                )
+            })
         });
         let joined = |handle: Option<std::thread::ScopedJoinHandle<'_, _>>| {
             handle.map(|handle| handle.join().unwrap())
@@ -326,7 +338,15 @@ fn check_remote_side(
     answer: Option<crate::remote_probe::Probe>,
 ) -> bool {
     let mut healthy = check_remote_key(side, credentials);
-    if let Some(answer) = answer {
+    if let Err(refusal) = crate::config::refuse_plain_http_to_the_internet(side, base_url) {
+        healthy &= fail(
+            &refusal,
+            &format!(
+                "banshee config set {} <an https URL>",
+                side.base_url_setting()
+            ),
+        );
+    } else if let Some(answer) = answer {
         healthy &= check_remote_answer(side, base_url, answer);
     }
     healthy

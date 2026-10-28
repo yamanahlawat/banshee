@@ -226,6 +226,31 @@ fn refuse_unknown_language(assignments: &Assignments) -> Result<(), BansheeError
     }
 }
 
+/// Only a write that sets a side's server, or turns the side on, is refused:
+/// any other write beside an old URL still goes through.
+fn refuse_plain_http(config: &Config, assignments: &Assignments) -> Result<(), BansheeError> {
+    let sides = [
+        (
+            RemoteKey::Stt,
+            config.stt.provider,
+            &config.stt.remote.base_url,
+        ),
+        (
+            RemoteKey::Tts,
+            config.tts.provider,
+            &config.tts.remote.base_url,
+        ),
+    ];
+    for (side, provider, base_url) in sides {
+        let turned_on = provider.is_remote() && assignments.contains_key(side.provider_setting());
+        if turned_on || assignments.contains_key(side.base_url_setting()) {
+            crate::config::refuse_plain_http_to_the_internet(side, base_url)
+                .map_err(BansheeError::Rejected)?;
+        }
+    }
+    Ok(())
+}
+
 /// The keys go to the credentials file and never into the TOML, so they leave
 /// the map before `edit` sees it. Ordered by side, so a caller writes them in a
 /// fixed order.
@@ -391,6 +416,7 @@ fn write_locked(
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
     let (rendered, config) = edit(existing, &assignments)?;
+    refuse_plain_http(&config, &assignments)?;
 
     // Last of the checks, first of the writes: a key stored before `edit`
     // refused a value beside it would be on disk under an error the caller

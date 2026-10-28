@@ -17,6 +17,13 @@ fn configure_in_scratch(
     super::configure_at(&dir.join("config.toml"), state, assignments, persist)
 }
 
+/// The same write, over a config.toml that already holds `existing`.
+fn configure_over(existing: &str, assignments: Assignments) -> Result<Outcome, BansheeError> {
+    let path = crate::test_support::unique_scratch("settings").join("config.toml");
+    std::fs::write(&path, existing).unwrap();
+    super::configure_at(&path, None, assignments, true)
+}
+
 fn assignments(pairs: &[(&str, serde_json::Value)]) -> Assignments {
     pairs
         .iter()
@@ -64,7 +71,7 @@ fn a_write_keeps_the_comment_above_the_key_it_changes() {
 fn a_setting_two_sections_deep_is_reachable() {
     let (rendered, config) = edit(
         "",
-        &assignments(&[("stt.remote.base_url", "http://listener.example/v1".into())]),
+        &assignments(&[("stt.remote.base_url", "https://listener.example/v1".into())]),
     )
     .unwrap();
     assert!(
@@ -75,7 +82,7 @@ fn a_setting_two_sections_deep_is_reachable() {
         !rendered.contains("[stt]"),
         "a parent invented only to hold the subtable needs no header: {rendered}"
     );
-    assert_eq!(config.stt.remote.base_url, "http://listener.example/v1");
+    assert_eq!(config.stt.remote.base_url, "https://listener.example/v1");
 }
 
 // An [stt] that holds keys of its own keeps its header either way, so the
@@ -85,7 +92,7 @@ fn a_nested_write_keeps_a_section_that_was_already_written() {
     let existing = "# listener settings, see docs\n[stt]\n\n[tts]\nvoice = \"af_sky\"\n";
     let (rendered, _) = edit(
         existing,
-        &assignments(&[("stt.remote.base_url", "http://listener.example/v1".into())]),
+        &assignments(&[("stt.remote.base_url", "https://listener.example/v1".into())]),
     )
     .unwrap();
     assert!(
@@ -126,6 +133,48 @@ fn a_language_the_engine_does_not_know_is_refused_at_the_boundary() {
     .expect_err("an unknown code must not be written");
     assert!(error.to_string().contains("klingon"), "{error}");
     assert!(error.to_string().contains("auto"), "{error}");
+}
+
+#[test]
+fn plain_http_to_the_internet_is_not_written() {
+    let error = configure_in_scratch(
+        None,
+        assignments(&[("tts.remote.base_url", "http://api.example.com/v1".into())]),
+        true,
+    )
+    .expect_err("plain http to the internet must not be written");
+    assert!(error.to_string().contains("needs https"), "{error}");
+}
+
+const OLD_PLAIN_HTTP_LISTENER: &str =
+    "[stt]\nprovider = \"remote\"\n\n[stt.remote]\nbase_url = \"http://api.example.com/v1\"\n";
+
+#[test]
+fn switching_to_a_remote_side_with_plain_http_to_the_internet_is_not_written() {
+    let error = configure_over(
+        OLD_PLAIN_HTTP_LISTENER,
+        assignments(&[("stt.provider", "remote".into())]),
+    )
+    .expect_err("a side switched on over plain http to the internet must not be written");
+    assert!(error.to_string().contains("needs https"), "{error}");
+}
+
+#[test]
+fn switching_a_side_to_local_over_an_old_plain_http_url_is_written() {
+    configure_over(
+        OLD_PLAIN_HTTP_LISTENER,
+        assignments(&[("stt.provider", "local".into())]),
+    )
+    .expect("turning the side off is not refused");
+}
+
+#[test]
+fn an_unrelated_write_beside_an_old_plain_http_url_is_written() {
+    configure_over(
+        OLD_PLAIN_HTTP_LISTENER,
+        assignments(&[("stt.language", "de".into())]),
+    )
+    .expect("a write that touches no remote side is not refused");
 }
 
 #[test]

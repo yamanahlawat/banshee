@@ -47,6 +47,13 @@ impl RemoteKey {
             .find(|side| side.setting() == key)
     }
 
+    pub fn provider_setting(self) -> &'static str {
+        match self {
+            RemoteKey::Stt => "stt.provider",
+            RemoteKey::Tts => "tts.provider",
+        }
+    }
+
     pub fn base_url_setting(self) -> &'static str {
         match self {
             RemoteKey::Stt => "stt.remote.base_url",
@@ -300,6 +307,10 @@ pub fn describe_send_error(host: &str, error: &reqwest::Error) -> String {
         format!("{host} did not answer in time")
     } else if error.is_connect() {
         format!("{host} could not be reached")
+    } else if error.is_redirect()
+        && let Some(reason) = std::error::Error::source(error)
+    {
+        format!("{host} {reason}")
     } else {
         format!("the request to {host} failed: {error}")
     }
