@@ -26,8 +26,6 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 
 ## Remote listener and speaker
 
-- A remote URL can be plain `http://` to any host, so audio and text can cross a network
-  unencrypted.
 - Both remote keys live in a file in `~/.banshee`, not in the Keychain.
 - A server that refuses the `speed` field refuses every reply at that speed.
 - The speaker takes the OpenAI `/audio/speech` shape only.
