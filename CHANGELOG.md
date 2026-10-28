@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A remote server out on the internet needs `https`.** Plain `http` used to
+  send audio, text and the key in the clear to any host. It now works only for
+  this machine and your own network, including Tailscale. `banshee config set`
+  refuses plain `http` to a public host. A config that already holds one still
+  loads, but that side refuses to send, and `banshee status` names the setting.
+  Change the URL to `https`. A server's redirect to plain `http` on the
+  internet is refused the same way.
+
 ## [0.17.0] - 2026-10-27
 
 ### Removed

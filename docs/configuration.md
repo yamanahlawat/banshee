@@ -21,7 +21,7 @@ translate = false        # true answers in English whatever you spoke
 endpoint_silence_ms = 2500  # trailing silence that ends a spoken answer
 
 [stt.remote]                           # read when provider = "remote"
-base_url = "https://api.openai.com/v1" # an OpenAI-compatible /v1 root; an http or https URL with a host
+base_url = "https://api.openai.com/v1" # an OpenAI-compatible /v1 root; https, or http on your own network
 model = "whisper-1"                    # the model that server names
 
 [tts]
@@ -31,7 +31,7 @@ speed = 1.0            # 0.5 to 2.0; playback speed multiplier
 fallback = "system"    # system = use the OS voice (say, or espeak-ng on Linux) | none
 
 [tts.remote]                           # read when provider = "remote"
-base_url = "https://api.openai.com/v1" # an OpenAI-compatible /v1 root; an http or https URL with a host
+base_url = "https://api.openai.com/v1" # an OpenAI-compatible /v1 root; https, or http on your own network
 model = "tts-1"                        # the model that server names
 voice = ""                             # a voice that server names; required
 instructions = ""                      # tone and delivery, for a model that reads it
@@ -198,6 +198,18 @@ The `preset` picks which Whisper model Banshee uses:
   reply.
 - **The daemon reads the providers and both remote tables when it starts,** so
   the command ends with a restart.
+- **A server out on the internet needs `https`.** Banshee accepts plain `http`
+  to this machine and to your own network:
+  - a private or link-local address, such as `192.168.1.5`
+  - a Tailscale address, or a name ending in `.ts.net`
+  - a name with no dot, such as `gpu-box`
+  - a name ending in `.local`, `.lan`, `.home.arpa` or `.internal`
+- **Banshee reads only the URL and resolves no name.** It refuses a public name
+  that points at a home address. Use the address or the Tailscale name instead.
+- **A config that already holds plain `http` to a public host still loads.**
+  That side refuses to send, and `banshee status` names the setting to change.
+- **A redirect follows the same rule.** Banshee refuses a server's redirect to
+  plain `http` on the internet, and names the host it was sent to.
 
 ### A remote listener
 

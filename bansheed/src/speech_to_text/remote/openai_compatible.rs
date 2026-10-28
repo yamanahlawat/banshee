@@ -40,7 +40,7 @@ impl RemoteTranscriber {
         speech: Speech,
     ) -> Result<Self, BansheeError> {
         Ok(Self {
-            client: crate::remote::build_client(REQUEST_TIMEOUT, "listener")?,
+            client: crate::remote::build_client(RemoteKey::Stt, &remote.base_url, REQUEST_TIMEOUT)?,
             base_url: remote.base_url.trim_end_matches('/').to_string(),
             model: remote.model.clone(),
             api_key,
@@ -145,6 +145,7 @@ mod tests {
     use super::RemoteTranscriber;
     use crate::config::RemoteSttConfig;
     use crate::speech_to_text::{Speech, Transcriber};
+    use banshee_common::error::BansheeError;
     use std::io::Write;
     use std::net::TcpListener;
 
@@ -174,6 +175,13 @@ mod tests {
     }
 
     fn transcriber(base_url: String, translate: bool) -> RemoteTranscriber {
+        built_transcriber(base_url, translate).unwrap()
+    }
+
+    fn built_transcriber(
+        base_url: String,
+        translate: bool,
+    ) -> Result<RemoteTranscriber, BansheeError> {
         let remote = RemoteSttConfig {
             base_url,
             model: "whisper-1".to_string(),
@@ -187,7 +195,6 @@ mod tests {
                 translate,
             },
         )
-        .unwrap()
     }
 
     #[test]
@@ -297,6 +304,19 @@ mod tests {
             },
         )
         .expect("the client must build where the daemon builds it");
+    }
+
+    #[test]
+    fn plain_http_to_the_internet_builds_no_listener() {
+        let Err(error) = built_transcriber("http://api.example.com/v1".to_string(), false) else {
+            panic!("plain http to the internet must build no listener");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("stt.remote.base_url needs https for api.example.com"),
+            "{error}"
+        );
     }
 
     #[test]
