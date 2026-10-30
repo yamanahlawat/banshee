@@ -22,17 +22,21 @@ resources="$staging/Contents/Resources"
 trap 'rm -rf "$staging"' EXIT
 
 rm -rf "$staging"
-mkdir -p "$macos" "$resources"
+agents="$staging/Contents/Library/LaunchAgents"
+mkdir -p "$macos" "$resources" "$agents"
 
 # banshee-app is the bundle's executable. The other three run from inside it:
 # launchd starts the daemon and the tray, and ~/.cargo/bin links the CLI.
-helpers="banshee-tray banshee-mcp-shim"
-binaries="banshee-app banshee $helpers"
+# Each executable signs with its own identifier, the name of its launchd job.
+# The bundle signature covers banshee-app as its executable, so it signs last.
+executables="banshee:com.banshee.app.daemon banshee-tray:com.banshee.app.tray
+banshee-mcp-shim:com.banshee.app.mcp-shim banshee-app:com.banshee.app"
 
-for binary in $binaries; do
-    cp "$bindir/$binary" "$macos/$binary"
+for pair in $executables; do
+    cp "$bindir/${pair%%:*}" "$macos/${pair%%:*}"
 done
 
+cp "$root/packaging/LaunchAgents/"*.plist "$agents/"
 cp "$root/assets/banshee.icns" "$resources/banshee.icns"
 sed "s/__VERSION__/$version/g" "$root/packaging/Info.plist" > "$staging/Contents/Info.plist"
 
@@ -40,17 +44,37 @@ sign() {
     codesign --force --options runtime --sign "$identity" "$@"
 }
 
-# The bundle signature covers banshee-app as its executable, so it comes last.
 # --deep is unreliable and Apple deprecated it. Only the daemon captures audio,
 # so only it gets the entitlement.
-sign --identifier "com.banshee.app" \
-    --entitlements "$root/packaging/banshee.entitlements" "$macos/banshee"
-for binary in $helpers; do
-    sign --identifier "com.banshee.app" "$macos/$binary"
+for pair in $executables; do
+    name="${pair%%:*}"
+    entitlements=()
+    if [ "$name" = banshee ]; then
+        entitlements=(--entitlements "$root/packaging/banshee.entitlements")
+    fi
+    sign --identifier "${pair#*:}" ${entitlements[@]+"${entitlements[@]}"} "$macos/$name"
 done
 sign "$staging"
 
 codesign --verify --strict --verbose=2 "$staging"
+
+expect_identifier() {
+    local id
+    id="$(codesign -dv "$macos/$1" 2>&1 | sed -n 's/^Identifier=//p')"
+    [ "$id" = "$2" ] || {
+        echo "$1 is not signed as $2 (codesign printed '$id')" >&2
+        exit 1
+    }
+}
+for pair in $executables; do
+    expect_identifier "${pair%%:*}" "${pair#*:}"
+done
+for agent in daemon tray; do
+    test -f "$agents/com.banshee.app.$agent.plist" || {
+        echo "missing launch agent plist com.banshee.app.$agent.plist" >&2
+        exit 1
+    }
+done
 
 trap - EXIT
 rm -rf "$app"

@@ -25,6 +25,10 @@ pub const MAX_PUSH_TO_TALK: Duration = Duration::from_secs(crate::audio::RING_SE
 // healthy gaps are 11 ms to 18 ms, so this keeps 55 to 90 times headroom.
 pub const CAPTURE_SILENCE_LIMIT: Duration = Duration::from_secs(1);
 
+// EX_TEMPFAIL in sysexits.h. Any nonzero status restarts the daemon under
+// launchd's `SuccessfulExit=false` and systemd's `Restart=on-failure`.
+const RESTART_EXIT: u8 = 75;
+
 /// What the daemon reads from the machine it runs on: its files, and whether
 /// VoiceOver is on. Handed in, so a test decides.
 pub struct Machine {
@@ -660,14 +664,24 @@ impl DaemonState {
         self.downloading.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub fn request_restart(&self) {
+    /// Shuts the daemon down to exit with the status that has its supervisor
+    /// start it again.
+    pub fn leave_to_restart(&self) {
         self.restart_wanted
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.shutdown.notify_one();
     }
 
-    pub fn restart_wanted(&self) -> bool {
-        self.restart_wanted
+    /// The status the daemon exits with once it shuts down.
+    pub fn exit_code(&self) -> u8 {
+        if self
+            .restart_wanted
             .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            RESTART_EXIT
+        } else {
+            0
+        }
     }
 
     /// Takes the download slot, or `None` when one is already running. The

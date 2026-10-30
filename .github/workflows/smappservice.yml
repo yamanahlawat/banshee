@@ -1,0 +1,116 @@
+# A registered login item needs a signed app in /Applications and a launchd
+# session, so this job runs on a runner nobody keeps: it installs the app,
+# registers the agents, restarts, stops and removes them.
+name: Login items
+
+on:
+  pull_request:
+    paths:
+      - bansheed/src/**
+      - banshee-app/**
+      - banshee-common/src/**
+      - Cargo.toml
+      - Cargo.lock
+      - scripts/bundle.sh
+      - scripts/ci-smappservice.sh
+      - packaging/**
+      - .github/workflows/smappservice.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smappservice-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  login-items:
+    runs-on: macos-latest
+    # The app-bundle job's cold builds take about 18 minutes; 40 leaves room for the script.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: banshee-app/ui/package-lock.json
+
+      # A self-signed identity that lives for this run. `bundle.sh` asks
+      # `security find-identity -v`, which lists only a trusted certificate.
+      - name: make a throwaway signing identity
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          cat > cert.cnf <<'EOF'
+          [req]
+          distinguished_name = dn
+          x509_extensions = ext
+          prompt = no
+          [dn]
+          CN = banshee-ci
+          [ext]
+          keyUsage = critical, digitalSignature
+          extendedKeyUsage = critical, codeSigning
+          basicConstraints = critical, CA:false
+          EOF
+          # The system LibreSSL writes a PKCS#12 that `security import` reads.
+          /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout key.pem -out cert.pem -config cert.cnf
+          /usr/bin/openssl pkcs12 -export -inkey key.pem -in cert.pem \
+            -out id.p12 -passout pass:banshee-ci
+          keychain="$RUNNER_TEMP/banshee-ci.keychain-db"
+          password="$(uuidgen)"
+          security create-keychain -p "$password" "$keychain"
+          # No auto-lock: a locked keychain makes codesign wait for a prompt forever.
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import id.p12 -k "$keychain" -P banshee-ci -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$password" "$keychain" > /dev/null
+          security list-keychain -d user -s "$keychain" \
+            $(security list-keychains -d user | tr -d '"')
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain cert.pem
+          rm -f key.pem id.p12
+          security find-identity -v -p codesigning
+
+      - run: npm ci
+        working-directory: banshee-app/ui
+      - run: cargo build --release --workspace --exclude banshee-app
+      - run: cargo install tauri-cli --version "^2" --locked
+      # Last, and never followed by a plain `cargo build`: see the Makefile.
+      - run: cargo tauri build --no-bundle
+        working-directory: banshee-app
+
+      - name: assemble and sign the bundle into /Applications
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          ./scripts/bundle.sh target/release /Applications/Banshee.app banshee-ci "$version"
+
+      - run: ./scripts/ci-smappservice.sh /Applications/Banshee.app
+
+      - name: logs
+        if: failure()
+        run: |
+          for log in "$HOME"/Library/Logs/com.banshee.app/*.log "$HOME"/.banshee/*.log; do
+            [ -f "$log" ] || continue
+            echo "=== $log"
+            tail -n 80 "$log"
+          done
+          for label in com.banshee.app.daemon com.banshee.app.tray com.banshee.daemon com.banshee.tray; do
+            echo "=== launchctl print gui/$(id -u)/$label"
+            launchctl print "gui/$(id -u)/$label" 2>&1 | head -40 || true
+          done
+          log show --last 15m --style compact \
+            --predicate 'subsystem == "com.apple.backgroundtaskmanagement" OR process == "smd"' \
+            2>/dev/null | tail -80 || true

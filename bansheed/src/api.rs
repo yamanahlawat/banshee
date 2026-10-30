@@ -7,8 +7,8 @@ use banshee_common::{
     BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY,
     BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_LANGUAGES, BANSHEE_LIST_VOICES,
     BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_RECORD_TOGGLE,
-    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
-    BANSHEE_TURN_ENDED,
+    BANSHEE_RESTART, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
+    BANSHEE_SUBSCRIBE, BANSHEE_TURN_ENDED,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
@@ -435,6 +435,12 @@ fn turn_ended(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRes
 
 fn stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     daemon_state.shutdown().notify_one();
+    JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
+}
+
+fn restart(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+    log::info!("restarting on request");
+    daemon_state.leave_to_restart();
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
 }
 
@@ -865,6 +871,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_SPEAK => speak(params, daemon_state),
         BANSHEE_STOP_SPEAKING => stop_speaking(params, daemon_state),
         BANSHEE_STOP => stop(params, daemon_state),
+        BANSHEE_RESTART => restart(params, daemon_state),
         BANSHEE_RECORD_START => record_start(params, daemon_state),
         BANSHEE_RECORD_STOP => record_stop(params, daemon_state),
         BANSHEE_RECORD_TOGGLE => record_toggle(params, daemon_state),

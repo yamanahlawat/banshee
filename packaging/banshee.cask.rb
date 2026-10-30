@@ -81,12 +81,17 @@ cask "banshee" do
   end
 
   uninstall launchctl: [
+              "com.banshee.app.daemon",
+              "com.banshee.app.tray",
               "com.banshee.daemon",
               "com.banshee.tray",
             ],
             quit:      "com.banshee.app"
 
-  zap trash: "~/.banshee"
+  zap trash: [
+    "~/.banshee",
+    "~/Library/Logs/com.banshee.app",
+  ]
 
   caveats do
     <<~EOS

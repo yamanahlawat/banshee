@@ -24,16 +24,57 @@ pub fn sibling(exe: &Path, name: &str) -> Result<PathBuf, BansheeError> {
 }
 
 /// The sibling above, ready to run. Both binaries in the bundle reach the
-/// others this way.
+/// others this way. The child logs to the terminal even when the parent logs
+/// to a file.
 pub fn sibling_command(name: &str) -> Result<std::process::Command, BansheeError> {
     let exe = std::env::current_exe()?;
-    Ok(std::process::Command::new(sibling(&exe, name)?))
+    let mut command = std::process::Command::new(sibling(&exe, name)?);
+    command.env_remove("BANSHEE_LOG_TO");
+    Ok(command)
 }
 
-/// launchd's names for the two login jobs. The daemon binary installs them and
-/// the window starts them, so the spelling is shared.
-pub const DAEMON_AGENT: &str = "com.banshee.daemon";
-pub const TRAY_AGENT: &str = "com.banshee.tray";
+/// launchd's names for the two login jobs. `banshee-app` registers both, and
+/// the CLI and the window ask it to, so the spelling is shared.
+pub const DAEMON_AGENT: &str = "com.banshee.app.daemon";
+pub const TRAY_AGENT: &str = "com.banshee.app.tray";
+
+/// The labels earlier releases registered, kept so an upgrade can remove them.
+pub const LEGACY_AGENTS: [&str; 2] = ["com.banshee.daemon", "com.banshee.tray"];
+
+/// Where macOS stands on one login job the app registers. `banshee-app
+/// --login-items` prints each job as `<label> <word>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registration {
+    Enabled,
+    RequiresApproval,
+    NotRegistered,
+    NotFound,
+}
+
+impl Registration {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::RequiresApproval => "requires-approval",
+            Self::NotRegistered => "not-registered",
+            Self::NotFound => "not-found",
+        }
+    }
+
+    pub fn is_registered(self) -> bool {
+        !matches!(self, Self::NotRegistered | Self::NotFound)
+    }
+
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "enabled" => Some(Self::Enabled),
+            "requires-approval" => Some(Self::RequiresApproval),
+            "not-registered" => Some(Self::NotRegistered),
+            "not-found" => Some(Self::NotFound),
+            _ => None,
+        }
+    }
+}
 
 /// Writes `bytes` to `path` through a staged file and a rename, so a partial
 /// write never truncates a file the user hand-edits, and the bytes reach the
@@ -119,8 +160,24 @@ pub fn banshee_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".banshee"))
 }
 
+/// Where a program launchd starts on macOS writes its log, under the bundle's
+/// identifier.
+pub fn logs_dir() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join("Library/Logs/com.banshee.app"))
+}
+
+/// The log file of one program, `daemon` or `tray`.
+pub fn log_path(program: &str) -> Option<PathBuf> {
+    Some(logs_dir()?.join(format!("{program}.log")))
+}
+
 pub fn socket_path() -> Option<PathBuf> {
     Some(banshee_dir()?.join("banshee.sock"))
+}
+
+/// The menu bar icon holds an exclusive `flock` on this file while it runs.
+pub fn tray_lock_path() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("tray.lock"))
 }
 
 pub fn models_path() -> Option<PathBuf> {
@@ -268,6 +325,30 @@ mod tests {
             refused,
             Err(BansheeError::Rpc { code: -32004, .. })
         ));
+    }
+
+    #[test]
+    fn a_registration_word_round_trips() {
+        let all = [
+            Registration::Enabled,
+            Registration::RequiresApproval,
+            Registration::NotRegistered,
+            Registration::NotFound,
+        ];
+        let words: Vec<&str> = all.iter().map(|state| state.word()).collect();
+        assert_eq!(
+            words,
+            [
+                "enabled",
+                "requires-approval",
+                "not-registered",
+                "not-found"
+            ]
+        );
+        for state in all {
+            assert_eq!(Registration::from_word(state.word()), Some(state));
+        }
+        assert_eq!(Registration::from_word("Enabled"), None);
     }
 
     #[test]

@@ -131,15 +131,35 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        use banshee_common::utils::Registration;
+
+        use crate::service::Agent;
+
+        match crate::service::registration(Agent::Daemon) {
+            Ok(Registration::Enabled) => note("the daemon starts at login"),
+            Ok(Registration::RequiresApproval) => {
+                note(&crate::service::awaits_approval(Agent::Daemon))
+            }
+            Ok(Registration::NotRegistered | Registration::NotFound) => {
+                note("the daemon does not start at login (start it with: banshee start)")
+            }
+            Err(error) => note(&format!("could not read the login items: {error}")),
+        }
+        if let Ok(follow) = crate::service::follow_the_log(Agent::Daemon) {
+            note(&format!("daemon log: {follow}"));
+        }
+        if let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) {
+            note(&format!("running from {}", install_shape(&exe)));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(service) = crate::service::service_file_path() {
         if service.exists() {
             note("start-at-login service installed");
         } else {
             note("no start-at-login service (install with: banshee start)");
-        }
-        #[cfg(target_os = "macos")]
-        if let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) {
-            note(&format!("running from {}", install_shape(&exe)));
         }
     }
 

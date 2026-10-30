@@ -35,22 +35,25 @@ mod uninstall;
 use std::process::ExitCode;
 
 use args::{Cli, CommandType};
+use banshee_common::error::BansheeError;
 use clap::Parser;
 
 use crate::config::Config;
 
 pub async fn run() -> ExitCode {
-    banshee_common::logging::install();
+    banshee_common::logging::install("daemon");
     let cli = Cli::parse();
     // Unwrapped only by the arms that read it: RPC works without a parseable
     // config, and the checklist diagnoses a broken one
     let config_result = Config::load();
 
     let outcome = match cli.command {
-        CommandType::Serve => match config_result {
-            Ok(config) => daemon::start(config).await,
-            Err(error) => Err(error),
-        },
+        CommandType::Serve => {
+            return exit_code(match config_result {
+                Ok(config) => daemon::start(config).await,
+                Err(error) => Err(error),
+            });
+        }
         CommandType::Stop => cli::stop().await,
         CommandType::Devices => cli::devices().await,
         CommandType::Voices => cli::voices().await,
@@ -77,10 +80,14 @@ pub async fn run() -> ExitCode {
             Ok(())
         }
     };
+    exit_code(outcome.map(|()| 0))
+}
+
+fn exit_code(outcome: Result<u8, BansheeError>) -> ExitCode {
     match outcome {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("{}", cli::failure_line(&error));
+            banshee_common::logging::failure(&cli::failure_line(&error));
             ExitCode::FAILURE
         }
     }

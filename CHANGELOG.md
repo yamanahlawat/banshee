@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **On macOS, the daemon and the tray start at login through Login Items.**
+  They show in System Settings > General > Login Items under "Allow in the
+  Background", where you can switch them off. macOS shows "Background Items
+  Added" when they register, and may show it again after a later
+  `banshee start`. If you switch Banshee off there, `banshee start` and
+  `banshee status` say so and name the setting.
+- **macOS asks for microphone and accessibility permission once more.** Each
+  program has its own signing identifier now. Grant both again when asked.
+- **`banshee start` removes the old launchd plists on macOS.** It deletes
+  `~/Library/LaunchAgents/com.banshee.daemon.plist` and `com.banshee.tray.plist`.
+  The tray stays off until you run `banshee tray` or open the window.
+- **On macOS the logs move to `~/Library/Logs/com.banshee.app/`.** `daemon.log`
+  and `tray.log` rotate at 1000 KB and keep 5 files. Console.app shows them
+  under Log Reports, and `banshee status` prints the path. You can delete
+  `~/.banshee/daemon.log` and `~/.banshee/tray.log`. Linux keeps the systemd journal.
+- **`BANSHEE_LOG` no longer reaches the background daemon on macOS.** For a
+  debug log, stop Banshee and run `BANSHEE_LOG=debug banshee serve` in a
+  terminal. Raw output from native libraries such as whisper and ggml no
+  longer lands in a file on macOS.
+
 ### Removed
 
 - **`banshee tell` and the `[tell]` section are gone.** Delete `[tell]` from
@@ -19,8 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`banshee service uninstall` and `banshee tray --uninstall` are gone.**
   `banshee uninstall` replaces `service uninstall`. No switch stops only the
   tray yet. To stop the tray starting at login and keep the rest of Banshee,
-  on macOS run `launchctl bootout gui/$UID/com.banshee.tray`, then delete
-  `~/Library/LaunchAgents/com.banshee.tray.plist`. On Linux, run
+  on macOS switch off the tray under "Allow in the Background" in System
+  Settings > General > Login Items. On Linux, run
   `systemctl --user disable --now banshee-tray.service`. `banshee tray` puts
   it back.
 

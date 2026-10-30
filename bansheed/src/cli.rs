@@ -783,7 +783,7 @@ fn link_the_command() {
 }
 
 pub async fn start(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
-    let log = service::install(service::Agent::Daemon)?;
+    let follow_the_log = service::start(service::Agent::Daemon)?;
     println!("Banshee is running, and starts again at login.");
     link_the_command();
 
@@ -826,15 +826,15 @@ pub async fn start(config_result: Result<Config, BansheeError>) -> Result<(), Ba
             println!();
             println!("{}", hotkey::usage_hint(hotkey, mode));
         }
-        _ => println!("Logs: {log}"),
+        _ => println!("Follow the log: {follow_the_log}"),
     }
     Ok(())
 }
 
 pub fn tray() -> Result<(), BansheeError> {
-    let log = service::install(service::Agent::Tray)?;
+    let follow_the_log = service::start(service::Agent::Tray)?;
     println!("The menu bar icon is running, and comes back at login.");
-    println!("Logs: {log}");
+    println!("Follow the log: {follow_the_log}");
     Ok(())
 }
 
@@ -923,10 +923,13 @@ pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
     // A receipt names what its installer meant to place, and the updater beside
     // them that it never recorded. Only what is on disk is offered for removal.
     software.retain(|path| path.exists());
+    let logs = utils::logs_dir().filter(|path| path.exists());
+    let logs_stay = logs.is_some();
     let unowned = data
-        .then(utils::banshee_dir)
-        .flatten()
+        .then(|| [utils::banshee_dir(), logs])
         .into_iter()
+        .flatten()
+        .flatten()
         .chain(crate::on_path::placed(running.as_deref()))
         .collect();
     let plan = crate::uninstall::plan(&owner, software, unowned, running.as_deref());
@@ -947,6 +950,9 @@ pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
     }
     if !data {
         println!("  ~/.banshee stays: the models, the history and the keys. --data takes it.");
+        if logs_stay {
+            println!("  ~/Library/Logs/com.banshee.app stays: the logs. --data takes it.");
+        }
     }
 
     if !yes && !confirmed()? {

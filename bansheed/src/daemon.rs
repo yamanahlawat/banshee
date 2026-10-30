@@ -118,7 +118,8 @@ fn start_recording(
     })
 }
 
-pub async fn start(config: Config) -> Result<(), BansheeError> {
+/// Returns the status the process exits with.
+pub async fn start(config: Config) -> Result<u8, BansheeError> {
     let config = Arc::new(config);
     let (socket_path, listener, _lock) = claim()?;
     permissions::ask_for_accessibility();
@@ -163,10 +164,7 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         },
         {
             let state = Arc::clone(&daemon_state);
-            move || {
-                state.request_restart();
-                state.shutdown().notify_one();
-            }
+            move || state.leave_to_restart()
         },
     );
 
@@ -236,12 +234,7 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         let _ = consumer_thread.join();
     }
     result?;
-    if daemon_state.restart_wanted() {
-        return Err(BansheeError::Other(
-            "the Accessibility grant landed; starting again to pick it up".to_string(),
-        ));
-    }
-    Ok(())
+    Ok(daemon_state.exit_code())
 }
 
 pub async fn run(

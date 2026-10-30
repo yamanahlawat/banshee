@@ -123,6 +123,15 @@ pub async fn preview_voice(client: &mut Client, id: &str) -> Result<(), CommandE
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub async fn restart(client: &mut Client) -> Result<(), CommandError> {
+    client
+        .call(banshee_common::BANSHEE_RESTART, json!({}))
+        .await
+        .map_err(CommandError::from)?;
+    Ok(())
+}
+
 pub async fn download_models(client: &mut Client) -> Result<(), CommandError> {
     client
         .call(BANSHEE_DOWNLOAD_MODELS, json!({}))

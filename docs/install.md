@@ -19,7 +19,7 @@ xattr -dr com.apple.quarantine /Applications/Banshee.app
   terminal. It asks first, and only ever asks a person.
 - **Update it** with `brew upgrade --cask banshee`.
 - **Remove it** with `brew uninstall --cask banshee`, and add `--zap` to take
-  `~/.banshee` as well.
+  `~/.banshee` and `~/Library/Logs/com.banshee.app` as well.
 - **The `banshee` command** is on your `PATH` as well as in the app.
 
 ## macOS, without Homebrew
@@ -77,6 +77,9 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/yamanahlawat/banshee/re
 - **Clone the repo** and run `make install`. See
   [CONTRIBUTING.md](../CONTRIBUTING.md).
 - **It works** on macOS and Linux.
+- **On macOS** it registers the daemon and the tray as Login Items. They show
+  in System Settings > General > Login Items under "Allow in the Background",
+  where you can switch them off.
 - **On Linux** it also registers and starts the `systemd --user` service, where
   systemd answers.
 - **Without systemd** the install still finishes, and `banshee serve` starts the
@@ -135,7 +138,8 @@ banshee uninstall
 - **A source build stays:** `make install` records nothing, so the command
   names the binary it runs from and leaves every file the install placed.
 - **`--data`** also deletes `~/.banshee`: the models, the history and the keys.
+  On macOS it deletes the logs in `~/Library/Logs/com.banshee.app` too.
   Without it, they stay.
 - **`--yes`** removes without asking, for a script.
 - **The cask alone:** `brew uninstall --zap --cask banshee` does the same in one
-  step, and `--zap` takes `~/.banshee` with it.
+  step, and `--zap` takes `~/.banshee` and the logs with it.

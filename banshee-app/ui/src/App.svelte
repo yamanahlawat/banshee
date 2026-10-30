@@ -318,19 +318,21 @@
 
   // The window restarts the daemon itself rather than naming a terminal command.
   let restarting = false;
-  const COMING_BACK = 12;
+  // launchd.plist(5): ThrottleInterval, the least time between two launches of a
+  // job, defaults to 10 seconds.
+  const LAUNCHD_THROTTLE_MS = 10_000;
+  const POLL_MS = 250;
   async function restart() {
     restarting = true;
     try {
       await restartDaemon();
-      // `launchctl kickstart -k` answers when launchd accepts the request, not
-      // when the new process listens. Reading straight away finds a dead socket
-      // and tells the user Banshee has stopped, which is the opposite of what
-      // just happened. Nothing measured this count; it trades how slow a
-      // machine may be against how long the window waits before believing it.
-      for (let left = COMING_BACK; left > 0; left--) {
+      // The restart answers once the daemon has the request, not when the new
+      // process listens, and launchd may hold the relaunch for its throttle.
+      // Reading straight away finds a dead socket and tells the user Banshee
+      // has stopped, which is the opposite of what just happened.
+      for (let left = LAUNCHD_THROTTLE_MS / POLL_MS; left > 0; left--) {
         if (await readStatus(false)) break;
-        await new Promise((wake) => setTimeout(wake, 250));
+        await new Promise((wake) => setTimeout(wake, POLL_MS));
       }
       await readLatest();
     } catch {

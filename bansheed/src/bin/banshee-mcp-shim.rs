@@ -194,7 +194,7 @@ fn cancelled_id(line: &str) -> Option<serde_json::Value> {
 
 #[tokio::main]
 async fn main() {
-    banshee_common::logging::install();
+    banshee_common::logging::install("mcp-shim");
 
     let agent_pid = std::os::unix::process::parent_id();
 

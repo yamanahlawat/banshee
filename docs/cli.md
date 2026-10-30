@@ -10,7 +10,7 @@
 
 | Command                         | What it does                                               |
 | ------------------------------- | ---------------------------------------------------------- |
-| `banshee start`                 | Start the daemon, now and at every login; it names any model that is missing |
+| `banshee start`                 | Start the daemon, now and at every login (on macOS as a Login Item); it registers again if already on and names any model that is missing |
 | `banshee stop`                  | Stop the running daemon                                    |
 | `banshee setup`                 | Download the required models; a re-run fetches only what is missing         |
 | `banshee status`                | What Banshee is doing, and what stops it working           |
@@ -25,12 +25,12 @@
 | `banshee connect [agent]`       | Connect a coding agent, after showing the change           |
 | `banshee bind [hyprland]`       | Bind the record keys in your compositor's config, after showing the change. It asks for the key and offers `audio.hotkey`, or `F9` when that is a lone modifier; alone, print the snippet and name the file it would write |
 | `banshee serve`                 | Run the daemon in the foreground                           |
-| `banshee tray`                  | Show the tray icon, now and at every login                 |
+| `banshee tray`                  | Show the tray icon, now and at every login; registers again if already on                 |
 | `banshee record start` / `stop` / `toggle` | Push-to-talk without the hotkey; `toggle` is one key that starts, then stops |
 | `banshee speak "<text>"`        | Speak some text aloud                                      |
 | `banshee history`               | List all saved transcriptions                              |
 | `banshee clear-history`         | Clear the saved transcriptions                             |
-| `banshee uninstall [--data] [--yes]` | Stop Banshee and remove its login services. It lists the files it would delete and asks first; for a Homebrew install it names the `brew` command that removes the rest. `--data` also deletes `~/.banshee`, and `--yes` skips the question |
+| `banshee uninstall [--data] [--yes]` | Stop Banshee and remove its login services (on macOS, its Login Items). It lists the files it would delete and asks first; for a Homebrew install it names the `brew` command that removes the rest. `--data` also deletes `~/.banshee` and, on macOS, `~/Library/Logs/com.banshee.app`, and `--yes` skips the question |
 
 ## Following what the daemon is doing
 

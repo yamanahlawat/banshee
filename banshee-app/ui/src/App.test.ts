@@ -689,8 +689,8 @@ it('offers a restart, not a download, when the files are already there', async (
   expect(screen.queryByText(/file is missing|files are missing/)).toBeNull();
   expect(screen.queryByRole('radiogroup', { name: 'Speech model' })).toBeNull();
 
-  // `startDaemon` runs `launchctl kickstart`, which leaves a running job alone.
-  // This blocker is offered while the daemon runs, so only a restart clears it.
+  // `startDaemon` is for a daemon that is down. This blocker is offered while
+  // the daemon runs, so only a restart clears it.
   vi.mocked(status).mockResolvedValue({ ...ready, blockers: [] });
   await fireEvent.click(screen.getByRole('button', { name: 'Restart Banshee' }));
   expect(vi.mocked(restartDaemon)).toHaveBeenCalled();

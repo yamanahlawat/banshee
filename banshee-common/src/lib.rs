@@ -122,6 +122,8 @@ pub enum TurnVerdict {
 }
 
 pub const BANSHEE_STOP: &str = "banshee.stop";
+/// Replies `{"ok": true}`, then the daemon exits with status 75 so its supervisor starts it again.
+pub const BANSHEE_RESTART: &str = "banshee.restart";
 pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
 pub const BANSHEE_RECORD_TOGGLE: &str = "banshee.record_toggle";

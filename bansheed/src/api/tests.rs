@@ -615,6 +615,27 @@ async fn stop_replies_ok_and_signals_shutdown() {
     tokio::time::timeout(Duration::from_millis(100), state.shutdown().notified())
         .await
         .expect("shutdown was not signaled");
+    assert_eq!(state.exit_code(), 0, "a stop must not be started again");
+}
+
+#[tokio::test]
+async fn a_restart_replies_then_asks_to_exit_with_failure() {
+    let state = test_state(std::sync::mpsc::channel().0);
+
+    let response = dispatch(request(BANSHEE_RESTART, None), &state).await;
+
+    let JsonRpcResponse::Success { result, .. } = response else {
+        panic!("expected success response, got {response:?}");
+    };
+    assert_eq!(result["ok"], true);
+    tokio::time::timeout(Duration::from_millis(100), state.shutdown().notified())
+        .await
+        .expect("shutdown was not signaled");
+    assert_eq!(
+        state.exit_code(),
+        75,
+        "EX_TEMPFAIL, so the supervisor starts the daemon again"
+    );
 }
 
 // "No microphone" and "busy" send the caller to different fixes, so the
