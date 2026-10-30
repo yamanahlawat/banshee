@@ -7,12 +7,9 @@ today, and `CHANGELOG.md` holds what has shipped.
 
 ## Next
 
-1. **Cut what the loop doesn't need, and define each setting once.** `banshee tell`,
-   `listen_for_prompt` with the keep key and `banshee listen`, and `service uninstall` and
-   `tray --uninstall`, which `banshee uninstall` already covers. Each remaining setting is
-   defined once in `banshee-common`, and both `banshee config set` and the window read that
-   list, so the two always offer the same settings. It comes before the items below because
-   they add settings.
+1. **Cut what the loop doesn't need.** `banshee tell`, `banshee listen`, `listen_for_prompt`,
+   Shift plus the hotkey, `service uninstall` and `tray --uninstall` go, so a recording always
+   dictates. It comes first because the items below build on a smaller daemon.
 2. **`SMAppService` for the daemon and the tray.** Banshee stops writing launchd plists and
    calling `launchctl`. It works with a self-signed app, even one whose certificate the Mac
    doesn't trust: tested on macOS 14 and 26 in
@@ -47,18 +44,22 @@ today, and `CHANGELOG.md` holds what has shipped.
 6. **Banshee checks for a text field before typing.** When nothing can take the text, it goes
    on the clipboard and the capsule says "Copied". Text typed into the wrong place is among the
    most common complaints too.
-7. **History keeps questions and their audio.** The window gets a sidebar, and History shows a
+7. **Every setting applies at once, and each is defined once.** The hotkey, a switch to or
+   from a server, and the answer's quiet length stop needing a restart. Each setting is then
+   defined once in `banshee-common`, and both `banshee config set` and the window read that list.
+   It comes after the items that change settings, and before the window is rebuilt on it.
+8. **History keeps questions and their audio.** The window gets a sidebar, and History shows a
    list with the selected row beside it. An agent's question and your spoken answer are kept
    as a pair. Audio stays for 7 days by default, and a failed transcription can be retried
    from it.
-8. **The tray switches the listening model and the voice,** with no restart.
-9. **A capsule on Linux, then the answer countdown on both platforms.** Linux has no capsule
-   today, and the countdown needs it.
-10. **End-of-turn detection with Smart Turn,** so a thinking pause doesn't end an answer. On 500
+9. **The tray switches the listening model and the voice,** with no restart.
+10. **A capsule on Linux, then the answer countdown on both platforms.** Linux has no capsule
+    today, and the countdown needs it.
+11. **End-of-turn detection with Smart Turn,** so a thinking pause doesn't end an answer. On 500
     held-out clips at threshold 0.2, it waited out 92.4% of unfinished pauses and held 3.2% of
     finished answers past 2.5 s. Each check took 13 ms on the Mac and 40 ms on the Ryzen. How
     long to wait after an unfinished pause isn't set yet.
-11. **Every microphone use names its client.** When the microphone opens, Banshee names the
+12. **Every microphone use names its client.** When the microphone opens, Banshee names the
     program that asked for it, and the log records it. The daemon reads the name of the
     connected process from the operating system. A process can still rename itself or run a
     renamed copy of a program, so the name is a lead to check. For the MCP shim and the
@@ -66,11 +67,11 @@ today, and `CHANGELOG.md` holds what has shipped.
     measured yet. The capsule shows it on macOS. Where Linux shows it is still open. Any
     process running as you can still reach the socket and read `banshee.db`. This item makes
     each use visible. It comes after the cut, so fewer commands open the microphone.
-12. **Linux packaging:** an AppImage and an AUR package, so the window and the tray install
+13. **Linux packaging:** an AppImage and an AUR package, so the window and the tray install
     without a source clone. transcribe.cpp builds for the host CPU on Linux unless told not
     to, so a release build sets `GGML_NATIVE=OFF`. A GPU build (Vulkan, CUDA or ROCm) is tried
     here; none is measured yet. It comes before notarization because it can start today.
-13. **Notarization,** once a Developer ID is affordable. SentinelOne doesn't flag Handy,
+14. **Notarization,** once a Developer ID is affordable. SentinelOne doesn't flag Handy,
     which is notarized and starts at login through `SMAppService`. Which of the two stops the
     flag isn't measured. Check the flag once item 2 ships, before paying for a Developer ID.
 

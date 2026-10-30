@@ -20,6 +20,9 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   read every transcript in `banshee.db`. Nothing shows which client opened the microphone.
 - Transcription runs on whisper.cpp only, after the speaker stops. No streaming model is wired
   in, so text arrives only after the silence and a full pass.
+- Banshee downloads the Silero VAD model from the `master` branch with no pinned commit and no
+  hash check (`banshee-common/src/lib.rs:437`), while the Kokoro files are pinned. The file
+  matched the pinned hash on 2026-10-30, but it can change under every install.
 - Dictation types the words exactly as heard. Nothing drops fillers such as "um" or applies a
   spoken edit such as "make that a list". An idea to test: a small local model as a cleanup
   step after transcription. It could also change what the person meant.
@@ -39,6 +42,10 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 
 ## The window
 
+- Sensitivity runs backwards. "High" writes `stt.vad_threshold` 0.85, and the daemon counts
+  audio as speech only above the threshold (`bansheed/src/hotkey.rs:390`), so High hears the
+  least. `docs/configuration.md` says higher is stricter, which matches the daemon. The window's
+  labels are the wrong side (`banshee-app/ui/src/jobs/MicrophonePanel.svelte:40-44`).
 - The download shows no rate or time left, so a stalled download looks like a slow one.
 - A vocabulary word removed by mistake has to be typed again.
 - The same model is called `Speech model` in one place and `Model` in another.
@@ -48,6 +55,10 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 
 ## Build and tests
 
+- `remote_probe`'s `a_closed_port_names_the_host` binds a port, frees it, then probes it. A
+  test running in parallel can bind that freed port first, so the probe reaches the other
+  test's server: both tests then fail (`remote_probe.rs:78` and `:118`). Seen once in a full
+  Linux run on 2026-10-31; five isolated and two full reruns passed.
 - Nothing tests the window and the daemon together.
 - No `rust-version` is declared.
 - `rdev` pulls crates the compiler reports as future-incompatible, and has no newer release.
