@@ -10,9 +10,8 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - Dictating replaces a copied image for good. Banshee saves only clipboard text to put back: with
   a 2x2 image copied, the clipboard held no image and only the dictated words 1.5 s later. Files
   and rich text are likely the same; not tested. The Linux path is separate and not tested.
-- Banshee writes its own launchd plists and calls `launchctl`, which is how persistence malware
-  looks to an EDR. Apple's `SMAppService` is the sanctioned route, and it accepts a self-signed
-  app.
+- Nothing has tested a logout and login with the login items. CI registers, restarts, stops
+  and removes them on a runner, but cannot log in again.
 
 ## Listening and speaking
 
