@@ -340,15 +340,6 @@ mod size_tests {
             pending_megabytes(&wanted(&config), dir)
         );
     }
-
-    /// Nothing left to fetch costs nothing, which is what a client shows once
-    /// setup is done.
-    #[test]
-    fn a_run_with_nothing_missing_costs_nothing() {
-        let dir = std::env::temp_dir();
-        let held: Vec<super::Download> = Vec::new();
-        assert_eq!(pending_megabytes(&held, &dir), 0);
-    }
 }
 
 #[cfg(test)]

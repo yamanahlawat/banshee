@@ -1155,7 +1155,6 @@ mod utterance_tests {
     use super::*;
     use crate::config::STTPreset;
     use crate::speech_to_text::Speech;
-    use banshee_common::SileroVADConfig;
     use banshee_common::error::BansheeError;
     use ringbuf::traits::{Producer, Split};
     use std::sync::atomic::AtomicBool;
@@ -1270,7 +1269,7 @@ mod utterance_tests {
                 sample_rate: SAMPLE_RATE,
             })),
             speech_to_text: Box::new(speech_to_text),
-            vad: VADEngine::new(SileroVADConfig::new(crate::models::VAD_MODEL)).unwrap(),
+            vad: VADEngine::open(&crate::test_support::silero()).unwrap(),
             state: Arc::clone(state),
             cues,
             endpoint_silence_ms: 800,

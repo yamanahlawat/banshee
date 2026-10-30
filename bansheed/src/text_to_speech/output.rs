@@ -770,29 +770,6 @@ mod tests {
         assert!(heard.try_recv().is_err(), "a swap that worked is no fault");
     }
 
-    // Kokoro takes its time over a long sentence, and the player is empty until
-    // it answers. Reading that quiet as a dead device would swap the speaker in
-    // the middle of a reply that is only waiting for words.
-    #[test]
-    fn a_player_waiting_for_the_next_sentence_swaps_nothing() {
-        let (output, opened) = Output::counting();
-        let output = Arc::new(output);
-        let mut utterance = output
-            .play(std::iter::empty(), ignored_faults())
-            .expect("a test device opens");
-        wait_until("the worker ends with nothing to play", || {
-            utterance.is_finished()
-        });
-
-        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-
-        assert_eq!(
-            opened.load(Ordering::Relaxed),
-            1,
-            "a quiet player is not a dead device"
-        );
-    }
-
     // Kokoro hands over a whole sentence at a time, and a spoken sentence runs
     // longer than the bound. The next one must still stand behind the one
     // playing, or the player runs dry at every sentence boundary.

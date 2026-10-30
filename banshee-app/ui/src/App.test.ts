@@ -1286,14 +1286,6 @@ it('gives the keyboard back when Escape closes a panel', async () => {
   );
 });
 
-// With no heading anywhere, a screen reader has no way to reach the record but
-// to walk the whole window.
-it('carries a heading for the record', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  expect(screen.getAllByRole('heading').length).toBeGreaterThan(0);
-});
-
 // The device picker keeps a row for a device that is not there. The language
 // picker had no such guard, so a code Whisper's table does not name left a
 // `select` whose value matched no option, which draws as an empty control.

@@ -53,10 +53,9 @@ cargo build --release --workspace --exclude banshee-app
 - It carries on when no systemd user bus answers. See "Install on Linux"
   below.
 
-- The VAD tests read `silero_vad.onnx` from `~/.banshee/models/`; run
-  `banshee setup` once before the suite.
-- CI downloads the same file in its own step, and installs `espeak-ng` for the
-  out-of-vocabulary test.
+- The VAD tests read the committed `bansheed/tests/data/silero_vad.onnx`, so
+  plain `cargo test` needs no setup.
+- CI installs `espeak-ng` for the out-of-vocabulary test.
 - The Kokoro tests need the model and two voices, which are too large for CI, so
   they are `#[ignore]`d. Run them on a machine that has them:
 
