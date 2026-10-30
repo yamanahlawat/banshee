@@ -4,23 +4,20 @@ use std::time::Duration;
 use banshee_common::error::BansheeError;
 use banshee_common::{
     BANSHEE_AGENTS, BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE,
-    BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS,
-    BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_LANGUAGES,
-    BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP,
-    BANSHEE_RECORD_TOGGLE, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
-    BANSHEE_SUBSCRIBE, BANSHEE_TURN_ENDED,
+    BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY,
+    BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_LANGUAGES, BANSHEE_LIST_VOICES,
+    BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_RECORD_TOGGLE,
+    BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE,
+    BANSHEE_TURN_ENDED,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
 use crate::connect;
 use crate::permissions;
-use crate::state::{
-    AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, TranscribeTarget,
-};
+use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode};
 use crate::text_to_speech::sanitizer::sanitize;
 use crate::{readiness, settings};
 
-const MAX_WAIT_MS: u64 = 30_000;
 const DEFAULT_ASK_WAIT_MS: u64 = 30_000;
 const MAX_ASK_WAIT_MS: u64 = 120_000;
 // Budget scales with question length; the per-word figure is a speech-rate
@@ -370,7 +367,6 @@ fn live_state_at(
         "armed": daemon_state.is_armed(),
         "transcribing": daemon_state.is_transcribing(),
         "loading_model": daemon_state.is_loading_model(),
-        "telling": daemon_state.is_telling(),
         "speaking": daemon_state.speech().is_speaking(),
         "audio_device": daemon_state.audio_device(),
         "missing_device": daemon_state.missing_device(),
@@ -442,33 +438,12 @@ fn stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse 
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
 }
 
-fn dictate_target(params: &Params<'_>) -> Result<TranscribeTarget, Box<JsonRpcResponse>> {
-    let dictate = params.flag("dictate")?;
-    let tell = params.flag("tell")?;
-    Ok(match (dictate, tell) {
-        (true, true) => {
-            return Err(Box::new(JsonRpcResponse::error(
-                params.id(),
-                rpc_code::INVALID_PARAMS,
-                "dictate and tell are two destinations. Pass one.",
-            )));
-        }
-        (true, false) => TranscribeTarget::Dictate,
-        (false, true) => TranscribeTarget::Tell,
-        (false, false) => TranscribeTarget::Mailbox,
-    })
-}
-
 fn record_start(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let action = match dictate_target(&params) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
     // Checked before the transition, so -32004 keeps meaning "busy"
     if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
         return *response;
     }
-    if daemon_state.record_start(action) {
+    if daemon_state.record_start() {
         JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
     } else {
         JsonRpcResponse::error(
@@ -485,14 +460,10 @@ fn record_stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRe
 }
 
 fn record_toggle(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let action = match dictate_target(&params) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
     if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
         return *response;
     }
-    let recording = daemon_state.record_toggle(action);
+    let recording = daemon_state.record_toggle();
     JsonRpcResponse::success(params.id(), serde_json::json!({"recording": recording}))
 }
 
@@ -647,42 +618,6 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
             "Listening session ended unexpectedly.",
         ),
     }
-}
-
-async fn get_transcription(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let mut since_id = match params.u64("since_id", 0) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let wait_ms = match params.u64("wait_ms", 0) {
-        Ok(value) => value.min(MAX_WAIT_MS),
-        Err(response) => return *response,
-    };
-
-    // Subscribe before the first read so a push landing in between
-    // is still seen by wait_for
-    let mut latest_id = daemon_state.subscribe_transcriptions();
-
-    // since_id ahead of the newest id = stale cursor from an older daemon run
-    if since_id > *latest_id.borrow() {
-        since_id = 0;
-    }
-
-    let mut transcriptions = daemon_state.transcriptions_since(since_id);
-
-    if transcriptions.is_empty() && wait_ms > 0 {
-        let _ = tokio::time::timeout(
-            Duration::from_millis(wait_ms),
-            latest_id.wait_for(|id| *id > since_id),
-        )
-        .await;
-        transcriptions = daemon_state.transcriptions_since(since_id);
-    }
-
-    JsonRpcResponse::success(
-        params.id(),
-        serde_json::json!({ "transcriptions": transcriptions }),
-    )
 }
 
 fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
@@ -935,7 +870,6 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_RECORD_TOGGLE => record_toggle(params, daemon_state),
         BANSHEE_ASK_USER => ask_user(params, daemon_state).await,
         BANSHEE_TURN_ENDED => turn_ended(params, daemon_state),
-        BANSHEE_GET_TRANSCRIPTION => get_transcription(params, daemon_state).await,
         BANSHEE_CONFIGURE => configure(params, daemon_state),
         BANSHEE_DOWNLOAD_MODELS => download_models(params, daemon_state),
         BANSHEE_LIST_VOICES => list_voices(params, daemon_state),

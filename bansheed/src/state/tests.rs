@@ -16,7 +16,7 @@ fn the_peak_keeps_the_loudest_sample_until_it_is_read() {
 fn a_new_press_starts_from_silence() {
     let state = test_state();
     state.note_peak(0.9);
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert!(state.record_start());
     assert_eq!(
         state.take_peak(),
         0.0,
@@ -95,14 +95,6 @@ fn the_model_reported_is_the_one_the_listener_loaded() {
     state.set_stt_model(Some("ggml-large-v3-q5_0.bin"));
 
     assert_eq!(state.stt_model(), Some("ggml-large-v3-q5_0.bin"));
-}
-
-#[test]
-fn a_remote_listener_reports_no_loaded_model() {
-    let mut config = Config::default();
-    config.stt.provider = crate::config::Provider::Remote;
-    let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
-    assert_eq!(state.stt_model(), None);
 }
 
 // The off direction alone would pass a `set_history` that always stores
@@ -195,42 +187,51 @@ fn test_state() -> DaemonState {
 }
 
 // A deaf daemon must refuse the press rather than open a session that no
-// consumer thread exists to drain.
+// consumer thread exists to drain. A pipeline still being built has no
+// consumer thread either, so a press must answer with the cue, not an open
+// session. ask_user shares the gate, so it cannot arm a deaf mic.
 #[test]
-fn record_start_is_refused_without_a_pipeline() {
-    let (state, transcribe_requests) = test_state_with_commands();
-    state.set_pipeline(Pipeline::Broken(RecordingError::Microphone(
-        "no device".to_string(),
-    )));
+fn record_start_and_arming_are_refused_until_the_pipeline_is_open() {
+    let cases = [
+        (
+            "the microphone is gone",
+            Pipeline::Broken(RecordingError::Microphone("no device".to_string())),
+            Some(RecordingError::Microphone(String::new())),
+        ),
+        (
+            "the model is missing",
+            Pipeline::Broken(RecordingError::Model("missing file".to_string())),
+            Some(RecordingError::Model(String::new())),
+        ),
+        ("the pipeline is still opening", Pipeline::Opening, None),
+    ];
 
-    assert!(!state.record_start(TranscribeTarget::Mailbox));
-    assert_eq!(state.recording_mode(), RecordingMode::Idle);
-    // Nothing may reach the consumer: there is nothing on the other end
-    assert!(transcribe_requests.try_recv().is_err());
+    for (name, pipeline, fault) in cases {
+        let (state, transcribe_requests) = test_state_with_commands();
+        assert!(state.pipeline().fault().is_none(), "{name}");
+        assert!(state.arm_for_ask().is_some(), "{name}");
+        state.set_recording_mode(RecordingMode::Idle);
 
-    // record_stop stays a no-op, so a release keybind cannot wedge the mode
-    state.record_stop();
-    assert_eq!(state.recording_mode(), RecordingMode::Idle);
-}
+        state.set_pipeline(pipeline);
+        assert_eq!(
+            state.pipeline().fault().map(std::mem::discriminant),
+            fault.as_ref().map(std::mem::discriminant),
+            "{name}"
+        );
 
-#[test]
-fn recording_error_keeps_the_cause_it_was_given() {
-    let state = test_state();
-    assert!(state.pipeline().fault().is_none());
-    // An armed session is available while nothing is wrong
-    assert!(state.arm_for_ask().is_some());
-    state.set_recording_mode(RecordingMode::Idle);
+        assert!(!state.record_start(), "{name}");
+        assert!(state.arm_for_ask().is_none(), "{name}");
+        assert_eq!(state.recording_mode(), RecordingMode::Idle, "{name}");
+        // Nothing may reach the consumer: there is nothing on the other end
+        assert!(transcribe_requests.try_recv().is_err(), "{name}");
 
-    state.set_pipeline(Pipeline::Broken(RecordingError::Model(
-        "missing file".to_string(),
-    )));
-    assert!(matches!(
-        state.pipeline().fault(),
-        Some(RecordingError::Model(_))
-    ));
-    // The same gate record_start uses, so ask_user cannot arm a deaf mic
-    assert!(state.arm_for_ask().is_none());
-    assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        // record_stop stays a no-op, so a release keybind cannot wedge the mode
+        state.record_stop();
+        assert_eq!(state.recording_mode(), RecordingMode::Idle, "{name}");
+
+        state.set_pipeline(Pipeline::Open);
+        assert!(state.record_start(), "{name}");
+    }
 }
 
 #[test]
@@ -262,7 +263,7 @@ fn missing_device_names_what_the_config_waits_for() {
 
     // A substitute does not block recording, so no blocker appears with it
     assert!(state.pipeline().fault().is_none());
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert!(state.record_start());
     state.record_stop();
 
     // The named device returns, so nothing is missing any more
@@ -349,40 +350,20 @@ fn recording_error_clears_when_capture_recovers() {
 fn a_toggle_stops_the_session_a_toggle_started() {
     let (state, requests) = test_state_with_commands();
 
-    assert!(
-        state.record_toggle(TranscribeTarget::Dictate),
-        "idle: starts"
-    );
+    assert!(state.record_toggle(), "idle: starts");
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
-    assert!(
-        !state.record_toggle(TranscribeTarget::Dictate),
-        "in flight: stops"
-    );
+    assert!(!state.record_toggle(), "in flight: stops");
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     assert!(matches!(
         requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate, _))
+        Ok(ConsumerCommand::Transcribe(_))
     ));
 
     // A manual override counts as in flight and ends as a stop
     state.set_recording_mode(RecordingMode::ArmedHold);
-    assert!(!state.record_toggle(TranscribeTarget::Dictate));
+    assert!(!state.record_toggle());
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
-}
-
-// A wrong byte here hands an utterance to the agent silently, or drops it
-// into the mailbox instead of running one
-#[test]
-fn a_tell_session_stops_into_the_agent() {
-    let (state, requests) = test_state_with_commands();
-
-    assert!(state.record_start(TranscribeTarget::Tell));
-    state.record_stop();
-    assert!(matches!(
-        requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Tell, _))
-    ));
 }
 
 // A wrong routing here turns typed-with-the-modifier noise into dictation
@@ -390,7 +371,7 @@ fn a_tell_session_stops_into_the_agent() {
 fn cancel_discards_the_session_instead_of_routing_it() {
     let (state, requests) = test_state_with_commands();
 
-    assert!(state.record_start(TranscribeTarget::Dictate));
+    assert!(state.record_start());
     state.record_cancel();
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     assert!(matches!(requests.try_recv(), Ok(ConsumerCommand::Discard)));
@@ -417,7 +398,7 @@ fn a_cancelled_push_to_talk_emits_a_silent_signal() {
     let mut signals = cues.subscribe_signals();
     let state = crate::test_support::daemon_state_with_cues(cues);
 
-    assert!(state.record_start(TranscribeTarget::Dictate));
+    assert!(state.record_start());
     heard.try_recv().expect("the start cue plays");
     signals.try_recv().expect("the start signal broadcasts");
 
@@ -436,7 +417,7 @@ fn a_cancelled_push_to_talk_emits_a_silent_signal() {
 fn watchdog_releases_a_push_to_talk_that_never_stopped() {
     let (state, transcribe_requests) = test_state_with_commands();
 
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert!(state.record_start());
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
     // Nowhere near the ceiling yet: the mic stays open
@@ -444,18 +425,18 @@ fn watchdog_releases_a_push_to_talk_that_never_stopped() {
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
     // Bring the deadline forward instead of waiting out MAX_PUSH_TO_TALK
-    lock(&state.push_to_talk).deadline = Instant::now();
+    *lock(&state.push_to_talk) = Instant::now();
 
     // Past it, the mic comes back and the utterance is still transcribed
     assert!(state.expire_stuck_recording());
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     assert!(matches!(
         transcribe_requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Mailbox, _))
+        Ok(ConsumerCommand::Transcribe(_))
     ));
 
     // And a fresh start is accepted rather than refused as busy
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert!(state.record_start());
 }
 
 #[test]
@@ -464,7 +445,7 @@ fn watchdog_leaves_armed_listening_alone() {
     // ask_user sessions run their own timeouts; the watchdog must not
     // yank the microphone out from under one
     state.set_recording_mode(RecordingMode::Armed);
-    lock(&state.push_to_talk).deadline = Instant::now();
+    *lock(&state.push_to_talk) = Instant::now();
     assert!(!state.expire_stuck_recording());
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
 }
@@ -477,7 +458,7 @@ fn every_path_that_moves_the_mic_publishes_it() {
     let mut recording = state.subscribe_recording();
     assert!(!*recording.borrow_and_update());
 
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert!(state.record_start());
     assert!(
         recording.has_changed().unwrap(),
         "record_start went unheard"
@@ -525,26 +506,6 @@ fn recording_mode_roundtrips_and_derives_is_recording() {
 }
 
 #[test]
-fn ring_evicts_oldest_and_filters_by_cursor() {
-    let state = test_state();
-    for i in 1..=20 {
-        state.push_transcription(format!("utterance {i}"));
-    }
-
-    let all = state.transcriptions_since(0);
-    assert_eq!(all.len(), TRANSCRIPTION_RING_CAPACITY);
-    assert_eq!(all.first().unwrap().id, 5);
-    assert_eq!(all.last().unwrap().id, 20);
-
-    let newer = state.transcriptions_since(18);
-    assert_eq!(newer.len(), 2);
-    assert_eq!(newer[0].text, "utterance 19");
-
-    assert!(state.transcriptions_since(20).is_empty());
-    assert_eq!(*state.subscribe_transcriptions().borrow(), 20);
-}
-
-#[test]
 fn capture_is_stalled_until_the_callback_stamps_it() {
     let (state, _requests) = test_state_with_commands();
     // Nothing has captured yet, so a watchdog must not call this healthy
@@ -582,31 +543,6 @@ fn clearing_an_error_that_is_already_clear_wakes_nobody() {
         watcher.has_changed().unwrap(),
         "a new failure must wake one"
     );
-}
-
-// The two paths share one field, so each clears only what it wrote.
-#[test]
-fn a_success_on_one_path_leaves_the_other_path_s_failure_standing() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-
-    state.set_tell_error(Some("opencode exited exit status: 1".to_string()));
-    state.set_last_error(None);
-    assert_eq!(
-        state.last_error().as_deref(),
-        Some("opencode exited exit status: 1"),
-        "a dictation that works says nothing about an agent run that failed"
-    );
-
-    state.set_last_error(Some("the microphone would not open".to_string()));
-    state.set_tell_error(None);
-    assert_eq!(
-        state.last_error().as_deref(),
-        Some("the microphone would not open"),
-        "an agent run that works says nothing about a microphone that would not open"
-    );
-
-    state.set_last_error(None);
-    assert_eq!(state.last_error(), None, "each path still clears its own");
 }
 
 // One field per side, so a failed listen and a failed reply never overwrite
@@ -647,91 +583,60 @@ async fn an_unchanged_speech_error_wakes_nobody() {
 }
 
 // The backend cannot reach the cue player or the state, so a channel carries
-// both what failed and the first chunk that played.
+// both what failed and the first chunk that played. A reply the fallback spoke
+// still records why the speaker the config names failed.
 #[test]
 fn the_drain_sounds_the_cue_for_a_failure_and_clears_the_reason_when_one_plays() {
     use crate::text_to_speech::{Fault, drain_faults};
 
-    let (cues, heard) = crate::audio::cues::Cues::recording();
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let cases = [
+        (
+            "a failed utterance",
+            Fault::Failed("the remote speaker refused the key".to_string()),
+            "the remote speaker refused the key",
+        ),
+        (
+            "a reply the fallback spoke",
+            Fault::SpokenByFallback("the remote speaker did not answer in time".to_string()),
+            "the remote speaker did not answer in time",
+        ),
+    ];
 
-    let (faults, receiver) = std::sync::mpsc::channel();
-    faults
-        .send(Fault::Failed(
-            "the remote speaker refused the key".to_string(),
-        ))
-        .unwrap();
-    drop(faults);
-    drain_faults(std::sync::Arc::clone(&state), cues.clone(), receiver);
+    for (name, fault, reason) in cases {
+        let (cues, heard) = crate::audio::cues::Cues::recording();
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
 
-    assert!(
-        matches!(heard.try_recv(), Ok(crate::audio::cues::Cue::Error)),
-        "a failed utterance sounds its cue"
-    );
-    assert_eq!(
-        state.last_speech_error().as_deref(),
-        Some("the remote speaker refused the key"),
-        "the reason the backend gave is the record"
-    );
+        let (faults, receiver) = std::sync::mpsc::channel();
+        faults.send(fault).unwrap();
+        drop(faults);
+        drain_faults(std::sync::Arc::clone(&state), cues.clone(), receiver);
 
-    let (faults, receiver) = std::sync::mpsc::channel();
-    faults.send(Fault::Played).unwrap();
-    drop(faults);
-    drain_faults(std::sync::Arc::clone(&state), cues, receiver);
+        assert!(
+            matches!(heard.try_recv(), Ok(crate::audio::cues::Cue::Error)),
+            "{name} sounds its cue"
+        );
+        assert_eq!(
+            state.last_speech_error().as_deref(),
+            Some(reason),
+            "{name}: the reason the backend gave is the record"
+        );
 
-    assert_eq!(
-        state.last_speech_error(),
-        None,
-        "the utterance that played cleared the reason before it"
-    );
-    let sounded = heard.try_recv();
-    assert!(
-        sounded.is_err(),
-        "an utterance that played sounds no cue: {sounded:?}"
-    );
-}
+        let (faults, receiver) = std::sync::mpsc::channel();
+        faults.send(Fault::Played).unwrap();
+        drop(faults);
+        drain_faults(std::sync::Arc::clone(&state), cues, receiver);
 
-// The fallback voice spoke, but the speaker the config names still failed.
-#[test]
-fn a_reply_the_fallback_spoke_still_records_why_the_speaker_failed() {
-    use crate::text_to_speech::{Fault, drain_faults};
-
-    let (cues, heard) = crate::audio::cues::Cues::recording();
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-
-    let (faults, receiver) = std::sync::mpsc::channel();
-    faults
-        .send(Fault::SpokenByFallback(
-            "the remote speaker did not answer in time".to_string(),
-        ))
-        .unwrap();
-    drop(faults);
-    drain_faults(std::sync::Arc::clone(&state), cues, receiver);
-
-    assert!(matches!(
-        heard.try_recv(),
-        Ok(crate::audio::cues::Cue::Error)
-    ));
-    assert_eq!(
-        state.last_speech_error().as_deref(),
-        Some("the remote speaker did not answer in time")
-    );
-}
-
-// The gate record_start shares with ask_user. A pipeline still being built has
-// no consumer thread, so a press must answer with the cue, not an open session.
-#[test]
-fn record_start_is_refused_while_the_pipeline_is_still_opening() {
-    let (state, transcribe_requests) = test_state_with_commands();
-    state.set_pipeline(Pipeline::Opening);
-
-    assert!(!state.record_start(TranscribeTarget::Mailbox));
-    assert!(state.arm_for_ask().is_none());
-    assert_eq!(state.recording_mode(), RecordingMode::Idle);
-    assert!(transcribe_requests.try_recv().is_err());
-
-    state.set_pipeline(Pipeline::Open);
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+        assert_eq!(
+            state.last_speech_error(),
+            None,
+            "{name}: the utterance that played cleared the reason before it"
+        );
+        let sounded = heard.try_recv();
+        assert!(
+            sounded.is_err(),
+            "{name}: an utterance that played sounds no cue: {sounded:?}"
+        );
+    }
 }
 
 struct StopWaits {
@@ -791,7 +696,7 @@ fn the_watchdog_does_not_expire_a_press_whose_start_is_still_running() {
         .unwrap();
 
     let starting = std::sync::Arc::clone(&state);
-    let pressed = std::thread::spawn(move || starting.record_start(TranscribeTarget::Mailbox));
+    let pressed = std::thread::spawn(move || starting.record_start());
     stop_started
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("record_start reaches speech.stop");
@@ -839,16 +744,15 @@ fn the_answer_flag_opens_only_for_the_session_still_armed() {
 }
 
 #[test]
-fn the_target_and_the_arming_decide_the_press_cue() {
+fn the_arming_and_the_pipeline_decide_the_press_cue() {
     use crate::audio::cues::Cue;
 
     let cases = [
-        (TranscribeTarget::Dictate, true, true, Cue::RecordStart),
-        (TranscribeTarget::Tell, false, true, Cue::RecordStart),
-        (TranscribeTarget::Dictate, false, true, Cue::RecordStart),
-        (TranscribeTarget::Dictate, true, false, Cue::Error),
+        (true, true, Cue::RecordStart),
+        (false, true, Cue::RecordStart),
+        (true, false, Cue::Error),
     ];
-    for (target, armed, pipeline_open, expected) in cases {
+    for (armed, pipeline_open, expected) in cases {
         let (cues, heard) = crate::audio::cues::Cues::recording();
         let state = crate::test_support::daemon_state_with_cues(cues);
         if armed {
@@ -859,41 +763,22 @@ fn the_target_and_the_arming_decide_the_press_cue() {
         }
 
         assert_eq!(
-            state.record_start(target),
+            state.record_start(),
             pipeline_open,
-            "{target:?} armed {armed} open {pipeline_open}"
+            "armed {armed} open {pipeline_open}"
         );
         assert_eq!(
             heard.try_recv().ok(),
             Some(expected),
-            "{target:?} armed {armed} open {pipeline_open}"
+            "armed {armed} open {pipeline_open}"
         );
-    }
-}
-
-#[test]
-fn a_press_while_the_pipeline_opens_says_banshee_is_starting() {
-    let (cues, _heard) = crate::audio::cues::Cues::recording();
-    let mut signals = cues.subscribe_signals();
-    let state = crate::test_support::daemon_state_before_the_pipeline_with_cues(cues);
-    assert!(!state.record_start(TranscribeTarget::Dictate));
-    match signals.try_recv() {
-        Ok(crate::audio::cues::Signal::Error { reason, .. }) => {
-            assert_eq!(reason.code, crate::audio::cues::ReasonCode::Starting);
-        }
-        other => panic!("expected a starting error, got {other:?}"),
     }
 }
 
 #[test]
 fn a_refused_press_names_the_press_or_the_answer_when_armed() {
     use crate::audio::cues::{Signal, Target};
-    for (press, armed, named) in [
-        (TranscribeTarget::Dictate, false, Target::Dictate),
-        (TranscribeTarget::Mailbox, false, Target::Mailbox),
-        (TranscribeTarget::Tell, false, Target::Tell),
-        (TranscribeTarget::Mailbox, true, Target::Answer),
-    ] {
+    for (armed, named) in [(false, Target::Dictate), (true, Target::Answer)] {
         let (cues, _heard) = crate::audio::cues::Cues::recording();
         let mut signals = cues.subscribe_signals();
         let state = crate::test_support::daemon_state_with_cues(cues);
@@ -901,10 +786,15 @@ fn a_refused_press_names_the_press_or_the_answer_when_armed() {
             state.arm_for_ask().expect("an idle daemon arms");
         }
         state.set_pipeline(Pipeline::Opening);
-        assert!(!state.record_start(press));
+        assert!(!state.record_start());
         match signals.try_recv() {
-            Ok(Signal::Error { target, .. }) => {
-                assert_eq!(target, Some(named), "{press:?} armed {armed}")
+            Ok(Signal::Error { target, reason }) => {
+                assert_eq!(target, Some(named), "armed {armed}");
+                assert_eq!(
+                    reason.code,
+                    crate::audio::cues::ReasonCode::Starting,
+                    "armed {armed}"
+                );
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -917,7 +807,7 @@ fn an_answer_press_carries_the_answer_target() {
     let mut signals = cues.subscribe_signals();
     let state = crate::test_support::daemon_state_with_cues(cues);
     state.arm_for_ask().expect("an idle daemon arms");
-    assert!(state.record_start(TranscribeTarget::Dictate));
+    assert!(state.record_start());
     assert_eq!(
         signals.try_recv().unwrap(),
         crate::audio::cues::Signal::RecordStart {
@@ -929,7 +819,7 @@ fn an_answer_press_carries_the_answer_target() {
 #[test]
 fn a_dictation_the_consumer_never_reads_gives_the_ring_back() {
     let (state, requests) = test_state_with_commands();
-    assert!(state.record_start(TranscribeTarget::Dictate));
+    assert!(state.record_start());
     state.record_stop();
     assert!(state.dictation_in_ring());
 

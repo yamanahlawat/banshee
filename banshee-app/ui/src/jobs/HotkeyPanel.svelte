@@ -152,7 +152,7 @@
     Wayland grants no global hotkey, so Banshee binds none. Bind these two commands to one key in
     your compositor. Put the first on the press and the second on the release.
   </p>
-  <pre class="commands">banshee record start --dictate
+  <pre class="commands">banshee record start
 banshee record stop</pre>
   <p class="compositor">docs/linux.md gives the Hyprland and Omarchy syntax.</p>
 {/if}

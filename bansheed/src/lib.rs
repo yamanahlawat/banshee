@@ -25,7 +25,6 @@ mod settings;
 mod speech_to_text;
 mod state;
 mod status;
-mod tell;
 #[cfg(test)]
 mod test_support;
 mod text_to_speech;
@@ -64,17 +63,14 @@ pub async fn run() -> ExitCode {
         } => cli::config_remote().await,
         CommandType::Setup => cli::setup(config_result).await,
         CommandType::Status { json } => cli::status(json, config_result).await,
-        CommandType::Listen => cli::listen().await,
         CommandType::Speak { text } => cli::speak(text).await,
-        CommandType::Tell { text, undo } => cli::tell(text, undo, config_result),
         CommandType::History => cli::history().await,
         CommandType::ClearHistory => cli::clear_history().await,
         CommandType::Record { action } => cli::record(action).await,
         CommandType::Start => cli::start(config_result).await,
-        CommandType::Tray { uninstall } => cli::tray(uninstall),
+        CommandType::Tray => cli::tray(),
         CommandType::Connect { agent, yes } => cli::connect(agent, yes),
         CommandType::Bind { compositor, yes } => cli::bind(compositor, yes, config_result).await,
-        CommandType::Service { action } => cli::service(action),
         CommandType::Uninstall { data, yes } => cli::uninstall(data, yes).await,
         CommandType::TurnEnd { agent } => {
             turn_end::run(agent).await;

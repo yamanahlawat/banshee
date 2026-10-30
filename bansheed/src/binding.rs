@@ -5,7 +5,6 @@
 use rdev::{EventType, Key};
 
 use crate::config::HotkeyMode;
-use crate::state::TranscribeTarget;
 
 /// A parsed `audio.hotkey`. The parser constructs it, so a binding the
 /// listener cannot match fails the config load instead of sitting silent.
@@ -93,8 +92,7 @@ const TYPED_KEYS: [(char, Key); 36] = [
     ('9', Key::Num9),
 ];
 
-const SHIFT_RESERVED: &str = "Shift is the mailbox modifier: Shift + the hotkey \
-     sends speech to `banshee listen` instead of typing it";
+const SHIFT_IGNORED: &str = "Banshee ignores Shift, so it can never be part of the hotkey";
 
 struct Modifier {
     name: &'static str,
@@ -159,17 +157,17 @@ const MODIFIERS: [Modifier; 11] = [
     Modifier {
         name: "Shift",
         key: Key::ShiftLeft,
-        refused: Some(SHIFT_RESERVED),
+        refused: Some(SHIFT_IGNORED),
     },
     Modifier {
         name: "LeftShift",
         key: Key::ShiftLeft,
-        refused: Some(SHIFT_RESERVED),
+        refused: Some(SHIFT_IGNORED),
     },
     Modifier {
         name: "RightShift",
         key: Key::ShiftRight,
-        refused: Some(SHIFT_RESERVED),
+        refused: Some(SHIFT_IGNORED),
     },
     Modifier {
         name: "CapsLock",
@@ -248,7 +246,7 @@ fn parse_hotkey(value: &str) -> Result<Hotkey, String> {
         } else if is("Cmd") || is("Command") {
             cmd = true;
         } else if is("Shift") {
-            return Err(SHIFT_RESERVED.to_string());
+            return Err(SHIFT_IGNORED.to_string());
         } else {
             return Err(format!(
                 "\"{part}\" is not a chord modifier; use Ctrl, Alt or Cmd"
@@ -332,8 +330,8 @@ impl std::fmt::Display for Hotkey {
 /// deciding start-versus-stop itself would race a mode change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyAction {
-    Start(TranscribeTarget),
-    Toggle(TranscribeTarget),
+    Start,
+    Toggle,
     Stop,
     Cancel,
 }
@@ -342,7 +340,6 @@ pub enum HotkeyAction {
 pub struct HotkeyTracker {
     hotkey: Hotkey,
     mode: HotkeyMode,
-    shift: bool,
     // Left and right copies of each chord modifier, tracked apart: one bool
     // per pair would read a released twin as the whole pair released
     ctrl: (bool, bool),
@@ -361,7 +358,6 @@ impl HotkeyTracker {
         Self {
             hotkey,
             mode,
-            shift: false,
             ctrl: (false, false),
             alt: (false, false),
             cmd: (false, false),
@@ -385,13 +381,8 @@ impl HotkeyTracker {
             _ => return None,
         };
         match key {
-            // Shift is sampled at the action instant, so dictation takes the
-            // unmodified key: a near simultaneous press cannot misroute it.
-            // It routes to the mailbox, so it never counts as a combo.
-            Key::ShiftLeft | Key::ShiftRight => {
-                self.shift = pressed;
-                return None;
-            }
+            // Never a combo: a Shift press during a lone-modifier hold must not cancel it
+            Key::ShiftLeft | Key::ShiftRight => return None,
             Key::ControlLeft => self.ctrl.0 = pressed,
             Key::ControlRight => self.ctrl.1 = pressed,
             Key::Alt => self.alt.0 = pressed,
@@ -429,9 +420,9 @@ impl HotkeyTracker {
         match self.mode {
             HotkeyMode::Hold => {
                 self.started = true;
-                Some(HotkeyAction::Start(self.target()))
+                Some(HotkeyAction::Start)
             }
-            HotkeyMode::Toggle => Some(HotkeyAction::Toggle(self.target())),
+            HotkeyMode::Toggle => Some(HotkeyAction::Toggle),
         }
     }
 
@@ -451,7 +442,7 @@ impl HotkeyTracker {
             // Toggle waits for the release: the press may yet become a chord
             if matches!(self.mode, HotkeyMode::Hold) {
                 self.started = true;
-                return Some(HotkeyAction::Start(self.target()));
+                return Some(HotkeyAction::Start);
             }
             return None;
         }
@@ -467,7 +458,7 @@ impl HotkeyTracker {
             (HotkeyMode::Hold, true) => Some(HotkeyAction::Cancel),
             (HotkeyMode::Hold, false) => Some(HotkeyAction::Stop),
             (HotkeyMode::Toggle, true) => None,
-            (HotkeyMode::Toggle, false) => Some(HotkeyAction::Toggle(self.target())),
+            (HotkeyMode::Toggle, false) => Some(HotkeyAction::Toggle),
         }
     }
 
@@ -477,14 +468,6 @@ impl HotkeyTracker {
         };
         let down = |pair: (bool, bool)| pair.0 || pair.1;
         (!ctrl || down(self.ctrl)) && (!alt || down(self.alt)) && (!cmd || down(self.cmd))
-    }
-
-    fn target(&self) -> TranscribeTarget {
-        if self.shift {
-            TranscribeTarget::Mailbox
-        } else {
-            TranscribeTarget::Dictate
-        }
     }
 }
 

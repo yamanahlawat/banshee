@@ -29,7 +29,6 @@ pub enum Show {
 pub enum Done {
     Typed,
     Sent,
-    Finished,
 }
 
 impl Done {
@@ -37,7 +36,6 @@ impl Done {
         match self {
             Done::Typed => "Typed",
             Done::Sent => "Sent to the agent",
-            Done::Finished => "Done",
         }
     }
 }
@@ -54,7 +52,6 @@ pub struct Live {
     pub recording: bool,
     pub armed: bool,
     pub transcribing: bool,
-    pub telling: bool,
     pub loading_model: bool,
 }
 
@@ -64,13 +61,12 @@ impl Live {
             recording: flag(state, "recording"),
             armed: flag(state, "armed"),
             transcribing: flag(state, "transcribing"),
-            telling: flag(state, "telling"),
             loading_model: flag(state, "loading_model"),
         }
     }
 
     fn busy(self) -> bool {
-        self.recording || self.armed || self.transcribing || self.telling || self.loading_model
+        self.recording || self.armed || self.transcribing || self.loading_model
     }
 }
 
@@ -84,11 +80,8 @@ pub enum Input {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Press {
-    Recording(Target),
-    Working(Target),
-    /// Working on a job the seed cannot name, so a failure of any press
-    /// target ends it.
-    Seeded,
+    Recording,
+    Working,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,7 +96,6 @@ enum Question {
 pub struct Chip {
     press: Option<Press>,
     question: Option<Question>,
-    tells: usize,
     held: Option<(Show, Instant)>,
     waiting: VecDeque<Show>,
     done: Option<(Done, Instant)>,
@@ -162,10 +154,9 @@ impl Chip {
         if self.done.is_some_and(|(_, at)| now >= at + FLOAT) {
             self.done = None;
         }
-        if self.running() && self.quiet_since.is_some_and(|since| now >= since + QUIET) {
+        if self.foreground() && self.quiet_since.is_some_and(|since| now >= since + QUIET) {
             self.press = None;
             self.question = None;
-            self.tells = 0;
             self.quiet_since = None;
         }
         if !self.foreground()
@@ -184,7 +175,7 @@ impl Chip {
             self.held.as_ref().map(|(_, at)| *at + FAULT_HOLD),
             self.done.map(|(_, at)| at + FLOAT),
             self.quiet_since
-                .filter(|_| self.running())
+                .filter(|_| self.foreground())
                 .map(|since| since + QUIET),
         ]
         .into_iter()
@@ -204,11 +195,10 @@ impl Chip {
         if live.armed {
             self.question = Some(Question::Asking);
         } else if live.recording {
-            self.press = Some(Press::Recording(Target::Dictate));
+            self.press = Some(Press::Recording);
         } else if live.transcribing {
-            self.press = Some(Press::Seeded);
+            self.press = Some(Press::Working);
         }
-        self.tells = usize::from(live.telling);
     }
 
     fn signal(&mut self, signal: Signal, now: Instant) {
@@ -219,9 +209,10 @@ impl Chip {
                 self.question = Some(Question::Holding);
                 self.begin();
             }
-            Signal::RecordStart { target } => {
-                self.hand_the_tell_off();
-                self.press = Some(Press::Recording(target));
+            Signal::RecordStart {
+                target: Target::Dictate,
+            } => {
+                self.press = Some(Press::Recording);
                 self.begin();
             }
             Signal::RecordStop {
@@ -232,10 +223,11 @@ impl Chip {
                     self.question = Some(Question::Working);
                 }
             }
-            Signal::RecordStop { target } => self.press = Some(Press::Working(target)),
+            Signal::RecordStop {
+                target: Target::Dictate,
+            } => self.press = Some(Press::Working),
             Signal::Cancelled { .. } => self.press = None,
             Signal::Arm => {
-                self.hand_the_tell_off();
                 if !matches!(self.question, Some(Question::Holding)) {
                     self.question = Some(Question::Asking);
                 }
@@ -251,20 +243,11 @@ impl Chip {
                 let words = Reason::new(ReasonCode::EmptyTranscript, None).text;
                 self.surface(Show::NothingHeard(words), false, now);
             }
-            Signal::Told => {
-                self.end_a_tell();
-                self.finish(Done::Finished, now);
-            }
-            Signal::Ready { target } => {
-                if self.working_on(target) {
+            Signal::Ready { .. } => {
+                if self.working() {
                     self.press = None;
                 }
-                let done = match target {
-                    Target::Dictate => Done::Typed,
-                    Target::Mailbox => Done::Sent,
-                    Target::Tell | Target::Answer => Done::Finished,
-                };
-                self.finish(done, now);
+                self.finish(Done::Typed, now);
             }
             Signal::Error { reason, target } => self.error(reason, target, now),
             Signal::Onset => {
@@ -277,10 +260,7 @@ impl Chip {
 
     fn error(&mut self, reason: Reason, target: Option<Target>, now: Instant) {
         self.end_what_failed(reason.code, target);
-        let waits_behind_others = matches!(
-            reason.code,
-            ReasonCode::TellFailed | ReasonCode::TellWarned | ReasonCode::SpeechFailed
-        );
+        let waits_behind_others = reason.code == ReasonCode::SpeechFailed;
         let fault = match reason.code {
             ReasonCode::NoSpeech
             | ReasonCode::EmptyTranscript
@@ -291,9 +271,7 @@ impl Chip {
             | ReasonCode::TranscriptionFailed
             | ReasonCode::Starting
             | ReasonCode::PipelineBroken
-            | ReasonCode::SpeechFailed
-            | ReasonCode::TellFailed
-            | ReasonCode::TellWarned => Show::Broken(reason.text),
+            | ReasonCode::SpeechFailed => Show::Broken(reason.text),
         };
         self.surface(fault, waits_behind_others, now);
     }
@@ -308,18 +286,12 @@ impl Chip {
         }
         match target {
             Some(Target::Answer) => self.question = None,
-            Some(Target::Tell) => match code {
-                ReasonCode::TellFailed | ReasonCode::TellWarned => self.end_a_tell(),
-                _ if self.working_on(Target::Tell) => self.press = None,
-                _ => self.end_a_tell(),
-            },
-            Some(target) => {
-                if self.working_on(target) {
+            Some(Target::Dictate) => {
+                if self.working() {
                     self.press = None;
                 }
             }
             None => match code {
-                ReasonCode::TellFailed | ReasonCode::TellWarned => self.end_a_tell(),
                 ReasonCode::Silence | ReasonCode::Closed | ReasonCode::ListenFailed => {
                     self.question = None;
                 }
@@ -328,7 +300,7 @@ impl Chip {
                 | ReasonCode::EmptyTranscript
                 | ReasonCode::TypeFailed
                 | ReasonCode::TranscriptionFailed => {
-                    if matches!(self.press, Some(Press::Working(_) | Press::Seeded)) {
+                    if self.working() {
                         self.press = None;
                     } else if self.question == Some(Question::Working) {
                         self.question = None;
@@ -353,31 +325,8 @@ impl Chip {
         }
     }
 
-    fn working_on(&self, target: Target) -> bool {
-        match self.press {
-            Some(Press::Working(working)) => working == target,
-            Some(Press::Seeded) => true,
-            Some(Press::Recording(_)) | None => false,
-        }
-    }
-
-    fn telling_in_front(&self) -> bool {
-        self.press == Some(Press::Working(Target::Tell))
-    }
-
-    fn hand_the_tell_off(&mut self) {
-        if self.telling_in_front() {
-            self.press = None;
-            self.tells += 1;
-        }
-    }
-
-    fn end_a_tell(&mut self) {
-        if self.tells > 0 {
-            self.tells -= 1;
-        } else if self.telling_in_front() {
-            self.press = None;
-        }
+    fn working(&self) -> bool {
+        self.press == Some(Press::Working)
     }
 
     /// A new state cancels a pending hide and an exit in progress.
@@ -400,15 +349,11 @@ impl Chip {
         self.press.is_some() || self.question.is_some()
     }
 
-    fn running(&self) -> bool {
-        self.foreground() || self.tells > 0
-    }
-
     fn resolve(&self) -> Option<Show> {
         if let Some(press) = self.press {
             return Some(match press {
-                Press::Recording(_) => Show::Recording,
-                Press::Working(_) | Press::Seeded => Show::Working,
+                Press::Recording => Show::Recording,
+                Press::Working => Show::Working,
             });
         }
         if let Some(question) = self.question {
@@ -425,7 +370,7 @@ impl Chip {
         if let Some((done, _)) = self.done {
             return Some(Show::Done(done));
         }
-        (self.tells > 0).then_some(Show::Working)
+        None
     }
 
     fn settle(&mut self) {
@@ -499,7 +444,6 @@ mod tests {
         recording: false,
         armed: false,
         transcribing: false,
-        telling: false,
         loading_model: false,
     };
 
@@ -630,56 +574,6 @@ mod tests {
     }
 
     #[test]
-    fn a_press_shows_over_a_question_and_a_question_over_a_tell() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        fed(
-            &mut chip,
-            clock.at(0),
-            [
-                Signal::RecordStart {
-                    target: Target::Tell,
-                },
-                Signal::RecordStop {
-                    target: Target::Tell,
-                },
-                Signal::Arm,
-            ],
-        );
-        assert_eq!(
-            shown(&chip),
-            Some(Show::YourTurn),
-            "the tell went to the background"
-        );
-        fed(
-            &mut chip,
-            clock.at(100),
-            [Signal::RecordStart {
-                target: Target::Dictate,
-            }],
-        );
-        assert_eq!(shown(&chip), Some(Show::Recording));
-        fed(
-            &mut chip,
-            clock.at(200),
-            [Signal::Cancelled {
-                target: Target::Dictate,
-            }],
-        );
-        assert_eq!(shown(&chip), Some(Show::YourTurn));
-        fed(
-            &mut chip,
-            clock.at(300),
-            [Signal::Disarm, Signal::Answered { heard: true }],
-        );
-        assert_eq!(shown(&chip), Some(Show::Done(Done::Sent)));
-        chip.tick(clock.at(300) + FLOAT);
-        assert_eq!(shown(&chip), Some(Show::Working), "the tell still runs");
-        fed(&mut chip, clock.at(5000), [Signal::Told]);
-        assert_eq!(shown(&chip), Some(Show::Done(Done::Finished)));
-    }
-
-    #[test]
     fn a_background_failure_waits_for_the_press_to_end() {
         let clock = Clock::new();
         let mut chip = Chip::default();
@@ -715,88 +609,56 @@ mod tests {
     }
 
     #[test]
-    fn a_new_press_cancels_a_held_failure() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        fed(
-            &mut chip,
-            clock.at(0),
-            [
-                Signal::RecordStart {
-                    target: Target::Dictate,
-                },
-                Signal::RecordStop {
-                    target: Target::Dictate,
-                },
-                error(ReasonCode::NoSpeech),
-            ],
-        );
-        assert_eq!(
-            shown(&chip),
-            Some(Show::NothingHeard("Nothing heard on AirPods".to_string()))
-        );
-        fed(
-            &mut chip,
-            clock.at(400),
-            [Signal::RecordStart {
-                target: Target::Dictate,
-            }],
-        );
-        assert_eq!(shown(&chip), Some(Show::Recording));
-        fed(
-            &mut chip,
-            clock.at(500),
-            [Signal::Cancelled {
-                target: Target::Dictate,
-            }],
-        );
-        assert_eq!(
-            shown(&chip),
-            None,
-            "the held failure was cancelled, not merely covered"
-        );
-    }
+    fn a_new_press_cancels_a_held_failure_and_a_done_float() {
+        let press = Signal::RecordStart {
+            target: Target::Dictate,
+        };
+        let release = Signal::RecordStop {
+            target: Target::Dictate,
+        };
+        let cases = [
+            (
+                "a held failure",
+                vec![press.clone(), release.clone(), error(ReasonCode::NoSpeech)],
+                Show::NothingHeard("Nothing heard on AirPods".to_string()),
+                400,
+                500,
+            ),
+            (
+                "a done float in progress",
+                vec![
+                    press.clone(),
+                    release,
+                    Signal::Ready {
+                        target: Target::Dictate,
+                    },
+                ],
+                Show::Done(Done::Typed),
+                100,
+                200,
+            ),
+        ];
 
-    #[test]
-    fn a_new_press_cancels_a_done_float_in_progress() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        fed(
-            &mut chip,
-            clock.at(0),
-            [
-                Signal::RecordStart {
+        for (name, signals, shown_first, pressed_at, cancelled_at) in cases {
+            let clock = Clock::new();
+            let mut chip = Chip::default();
+            fed(&mut chip, clock.at(0), signals);
+            assert_eq!(shown(&chip), Some(shown_first), "{name}");
+            fed(&mut chip, clock.at(pressed_at), [press.clone()]);
+            assert_eq!(shown(&chip), Some(Show::Recording), "{name}");
+            fed(
+                &mut chip,
+                clock.at(cancelled_at),
+                [Signal::Cancelled {
                     target: Target::Dictate,
-                },
-                Signal::RecordStop {
-                    target: Target::Dictate,
-                },
-                Signal::Ready {
-                    target: Target::Dictate,
-                },
-            ],
-        );
-        assert_eq!(shown(&chip), Some(Show::Done(Done::Typed)));
-        fed(
-            &mut chip,
-            clock.at(100),
-            [Signal::RecordStart {
-                target: Target::Dictate,
-            }],
-        );
-        assert_eq!(shown(&chip), Some(Show::Recording));
-        fed(
-            &mut chip,
-            clock.at(200),
-            [Signal::Cancelled {
-                target: Target::Dictate,
-            }],
-        );
-        assert_eq!(
-            shown(&chip),
-            None,
-            "the float was cancelled, not merely covered"
-        );
+                }],
+            );
+            assert_eq!(
+                shown(&chip),
+                None,
+                "{name} was cancelled, not merely covered"
+            );
+        }
     }
 
     #[test]
@@ -824,28 +686,35 @@ mod tests {
     }
 
     #[test]
-    fn an_arm_during_an_armed_hold_keeps_recording() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        fed(
-            &mut chip,
-            clock.at(0),
-            [
-                Signal::RecordStart {
+    fn a_hold_while_a_question_is_asked_records_whichever_signal_came_first() {
+        let hold = Signal::RecordStart {
+            target: Target::Answer,
+        };
+        let cases = [
+            (
+                "an arm during an armed hold",
+                vec![hold.clone(), Signal::Arm],
+            ),
+            (
+                "a hold during the answer",
+                vec![Signal::Arm, Signal::Onset, hold],
+            ),
+        ];
+
+        for (name, signals) in cases {
+            let clock = Clock::new();
+            let mut chip = Chip::default();
+            fed(&mut chip, clock.at(0), signals);
+            assert_eq!(shown(&chip), Some(Show::Recording), "{name}");
+            fed(
+                &mut chip,
+                clock.at(900),
+                [Signal::RecordStop {
                     target: Target::Answer,
-                },
-                Signal::Arm,
-            ],
-        );
-        assert_eq!(shown(&chip), Some(Show::Recording));
-        fed(
-            &mut chip,
-            clock.at(900),
-            [Signal::RecordStop {
-                target: Target::Answer,
-            }],
-        );
-        assert_eq!(shown(&chip), Some(Show::Working));
+                }],
+            );
+            assert_eq!(shown(&chip), Some(Show::Working), "{name}");
+        }
     }
 
     #[test]
@@ -869,38 +738,6 @@ mod tests {
             chip.scene().is_some(),
             "the hold starts again from the repeat"
         );
-    }
-
-    #[test]
-    fn a_refused_press_does_not_end_a_tell_shown_in_front() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        fed(
-            &mut chip,
-            clock.at(0),
-            [
-                Signal::RecordStart {
-                    target: Target::Tell,
-                },
-                Signal::RecordStop {
-                    target: Target::Tell,
-                },
-            ],
-        );
-        assert_eq!(shown(&chip), Some(Show::Working));
-        for refused in [
-            error(ReasonCode::Starting),
-            error_of(ReasonCode::Starting, Target::Tell),
-        ] {
-            fed(&mut chip, clock.at(100), [refused]);
-            assert_eq!(
-                shown(&chip),
-                Some(Show::Working),
-                "the tell keeps running; the refusal ends nothing"
-            );
-        }
-        fed(&mut chip, clock.at(200), [Signal::Told]);
-        assert_eq!(shown(&chip), Some(Show::Done(Done::Finished)));
     }
 
     #[test]
@@ -946,59 +783,6 @@ mod tests {
     }
 
     #[test]
-    fn a_background_tells_failure_waits_behind_the_foreground_tell() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        fed(
-            &mut chip,
-            clock.at(0),
-            [
-                Signal::RecordStart {
-                    target: Target::Tell,
-                },
-                Signal::RecordStop {
-                    target: Target::Tell,
-                },
-                Signal::RecordStart {
-                    target: Target::Tell,
-                },
-                Signal::RecordStop {
-                    target: Target::Tell,
-                },
-            ],
-        );
-        assert_eq!(
-            shown(&chip),
-            Some(Show::Working),
-            "B runs in front, A backgrounded"
-        );
-        fed(
-            &mut chip,
-            clock.at(100),
-            [error_of(ReasonCode::TellFailed, Target::Tell)],
-        );
-        assert_eq!(
-            shown(&chip),
-            Some(Show::Working),
-            "A's failure waits behind B, not held and ticking unseen"
-        );
-        // A failure held at t=100, not queued, would expire unseen before this.
-        let ends = clock.at(100) + FAULT_HOLD + Duration::from_millis(500);
-        fed(
-            &mut chip,
-            ends,
-            [Signal::Cancelled {
-                target: Target::Tell,
-            }],
-        );
-        assert_eq!(
-            shown(&chip),
-            Some(Show::Broken("The agent run failed".to_string())),
-            "A's failure surfaces once B ends"
-        );
-    }
-
-    #[test]
     fn a_repeated_refusal_under_a_question_does_not_stack_in_waiting() {
         let clock = Clock::new();
         let mut chip = Chip::default();
@@ -1030,47 +814,6 @@ mod tests {
             shown(&chip),
             None,
             "one hold's worth of time clears it: it was not queued three deep"
-        );
-    }
-
-    #[test]
-    fn ending_one_background_tell_leaves_the_foreground_tell_running() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        fed(
-            &mut chip,
-            clock.at(0),
-            [
-                Signal::RecordStart {
-                    target: Target::Tell,
-                },
-                Signal::RecordStop {
-                    target: Target::Tell,
-                },
-                Signal::RecordStart {
-                    target: Target::Tell,
-                },
-                Signal::RecordStop {
-                    target: Target::Tell,
-                },
-            ],
-        );
-        assert_eq!(
-            shown(&chip),
-            Some(Show::Working),
-            "B runs in front, A backgrounded"
-        );
-        fed(&mut chip, clock.at(100), [Signal::Told]);
-        assert_eq!(
-            shown(&chip),
-            Some(Show::Working),
-            "A ends; B's Working stays"
-        );
-        fed(&mut chip, clock.at(200), [error(ReasonCode::NoSpeech)]);
-        assert_eq!(
-            shown(&chip),
-            Some(Show::NothingHeard("Nothing heard on AirPods".to_string())),
-            "B ends on its own failure"
         );
     }
 
@@ -1110,22 +853,22 @@ mod tests {
             clock.at(0),
             [
                 Signal::RecordStart {
-                    target: Target::Tell,
+                    target: Target::Dictate,
                 },
                 Signal::RecordStop {
-                    target: Target::Tell,
+                    target: Target::Dictate,
                 },
-                error(ReasonCode::TellFailed),
+                error(ReasonCode::TranscriptionFailed),
             ],
         );
         assert_eq!(
             shown(&chip),
-            Some(Show::Broken("The agent run failed".to_string()))
+            Some(Show::Broken("Could not transcribe".to_string()))
         );
         fed(&mut chip, clock.at(500), [error(ReasonCode::SpeechFailed)]);
         assert_eq!(
             shown(&chip),
-            Some(Show::Broken("The agent run failed".to_string())),
+            Some(Show::Broken("Could not transcribe".to_string())),
             "the held failure stays until its own hold ends"
         );
         chip.tick(clock.at(0) + FAULT_HOLD);
@@ -1212,45 +955,6 @@ mod tests {
     }
 
     #[test]
-    fn a_signal_after_a_seeded_press_goes_idle_restarts_the_fallback() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        chip.feed(
-            Input::Seed(Live {
-                transcribing: true,
-                ..IDLE
-            }),
-            clock.at(0),
-        );
-        assert_eq!(shown(&chip), Some(Show::Working));
-        chip.feed(Input::Live(IDLE), clock.at(50));
-        fed(&mut chip, clock.at(700), [Signal::Answered { heard: true }]);
-        assert_eq!(
-            shown(&chip),
-            Some(Show::Working),
-            "the fallback restarted rather than being cancelled"
-        );
-        chip.tick(clock.at(700) + QUIET);
-        assert_eq!(shown(&chip), None);
-    }
-
-    #[test]
-    fn told_ends_a_tell_while_telling_is_still_true() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        chip.feed(
-            Input::Seed(Live {
-                telling: true,
-                ..IDLE
-            }),
-            clock.at(0),
-        );
-        assert_eq!(shown(&chip), Some(Show::Working));
-        fed(&mut chip, clock.at(100), [Signal::Told]);
-        assert_eq!(shown(&chip), Some(Show::Done(Done::Finished)));
-    }
-
-    #[test]
     fn a_tray_that_starts_mid_question_shows_your_turn() {
         let mut chip = Chip::default();
         chip.feed(
@@ -1276,25 +980,6 @@ mod tests {
         chip.feed(Input::Gone, clock.at(10));
         assert_eq!(shown(&chip), None);
         assert_eq!(chip.deadline(), None);
-    }
-
-    #[test]
-    fn an_answer_heard_as_nothing_fails_rather_than_floats() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        fed(
-            &mut chip,
-            clock.at(0),
-            [
-                Signal::Arm,
-                Signal::Disarm,
-                Signal::Answered { heard: false },
-            ],
-        );
-        assert_eq!(
-            shown(&chip),
-            Some(Show::NothingHeard("Nothing heard".to_string()))
-        );
     }
 
     #[test]
@@ -1475,73 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mailbox_failure_leaves_a_dictation_working_in_front() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        fed(
-            &mut chip,
-            clock.at(0),
-            [
-                Signal::RecordStart {
-                    target: Target::Mailbox,
-                },
-                Signal::RecordStop {
-                    target: Target::Mailbox,
-                },
-                Signal::RecordStart {
-                    target: Target::Dictate,
-                },
-                Signal::RecordStop {
-                    target: Target::Dictate,
-                },
-            ],
-        );
-        fed(
-            &mut chip,
-            clock.at(100),
-            [error_of(ReasonCode::TranscriptionFailed, Target::Mailbox)],
-        );
-        assert_eq!(
-            shown(&chip),
-            Some(Show::Working),
-            "the dictation still works"
-        );
-    }
-
-    #[test]
-    fn a_tell_press_that_hears_nothing_ends_itself_not_the_tell_behind_it() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        let tell_press = [
-            Signal::RecordStart {
-                target: Target::Tell,
-            },
-            Signal::RecordStop {
-                target: Target::Tell,
-            },
-        ];
-        fed(&mut chip, clock.at(0), tell_press.clone());
-        fed(&mut chip, clock.at(50), tell_press);
-        fed(
-            &mut chip,
-            clock.at(100),
-            [error_of(ReasonCode::NoSpeech, Target::Tell)],
-        );
-        assert_eq!(
-            shown(&chip),
-            Some(Show::NothingHeard("Nothing heard on AirPods".to_string())),
-            "the second press ends on its own failure"
-        );
-        chip.tick(clock.at(100) + FAULT_HOLD);
-        assert_eq!(
-            shown(&chip),
-            Some(Show::Working),
-            "the first tell still runs"
-        );
-    }
-
-    #[test]
-    fn a_seeded_press_ends_on_a_failure_of_any_press_target() {
+    fn a_seeded_press_ends_on_a_dictation_failure() {
         let clock = Clock::new();
         let mut chip = Chip::default();
         chip.feed(
@@ -1554,12 +1173,35 @@ mod tests {
         fed(
             &mut chip,
             clock.at(100),
-            [error_of(ReasonCode::TranscriptionFailed, Target::Mailbox)],
+            [error_of(ReasonCode::TranscriptionFailed, Target::Dictate)],
         );
         assert_eq!(
             shown(&chip),
             Some(Show::Broken("Could not transcribe".to_string()))
         );
+    }
+
+    #[test]
+    fn a_seeded_press_shows_working_and_survives_a_signal_that_is_not_a_press() {
+        let clock = Clock::new();
+        let mut chip = Chip::default();
+        chip.feed(
+            Input::Seed(Live {
+                transcribing: true,
+                ..IDLE
+            }),
+            clock.at(0),
+        );
+        assert_eq!(shown(&chip), Some(Show::Working));
+        chip.feed(Input::Live(IDLE), clock.at(50));
+        fed(&mut chip, clock.at(700), [Signal::Answered { heard: true }]);
+        assert_eq!(
+            shown(&chip),
+            Some(Show::Working),
+            "the fallback restarted rather than being cancelled"
+        );
+        chip.tick(clock.at(700) + QUIET);
+        assert_eq!(shown(&chip), None);
     }
 
     #[test]
@@ -1616,24 +1258,6 @@ mod tests {
         assert_eq!(shown(&chip), Some(Show::Recording));
         fed(&mut chip, clock.at(200), [Signal::Disarm, Signal::Onset]);
         assert_eq!(shown(&chip), Some(Show::Working));
-    }
-
-    #[test]
-    fn a_hold_during_the_answer_records() {
-        let clock = Clock::new();
-        let mut chip = Chip::default();
-        fed(
-            &mut chip,
-            clock.at(0),
-            [
-                Signal::Arm,
-                Signal::Onset,
-                Signal::RecordStart {
-                    target: Target::Answer,
-                },
-            ],
-        );
-        assert_eq!(shown(&chip), Some(Show::Recording));
     }
 
     #[test]

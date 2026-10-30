@@ -1276,7 +1276,7 @@ mod tests {
 
     #[test]
     fn done_leaves_by_its_float_and_everything_else_sinks() {
-        assert_eq!(leaving(&Show::Done(Done::Finished), false), None);
+        assert_eq!(leaving(&Show::Done(Done::Typed), false), None);
         for show in [
             Show::Recording,
             Show::Working,

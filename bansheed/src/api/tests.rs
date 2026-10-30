@@ -37,11 +37,6 @@ async fn a_flag_that_is_not_a_boolean_is_refused() {
             serde_json::json!({"text": "hi", "interrupt": "true"}),
         ),
         (
-            BANSHEE_RECORD_START,
-            "dictate",
-            serde_json::json!({"dictate": "true"}),
-        ),
-        (
             BANSHEE_CONFIGURE,
             "persist",
             serde_json::json!({"settings": {}, "persist": "true"}),
@@ -55,6 +50,11 @@ async fn a_flag_that_is_not_a_boolean_is_refused() {
             BANSHEE_CONNECT_APPLY,
             "disconnect",
             serde_json::json!({"agent": "cursor", "disconnect": "true"}),
+        ),
+        (
+            BANSHEE_TURN_ENDED,
+            "repeat",
+            serde_json::json!({"agent_pid": 7, "repeat": "yes"}),
         ),
     ] {
         let JsonRpcResponse::Error { error, .. } =
@@ -372,10 +372,7 @@ async fn a_barge_in_before_the_question_still_takes_the_answer() {
         state.recording_mode() == RecordingMode::Armed
     })
     .await;
-    assert!(
-        state.record_start(TranscribeTarget::Dictate),
-        "the press holds to answer"
-    );
+    assert!(state.record_start(), "the press holds to answer");
 
     let response = asking.await.unwrap();
     listening.join().unwrap();
@@ -547,7 +544,7 @@ async fn an_ask_waits_until_the_dictation_leaves_the_ring() {
     let consumer = std::thread::spawn({
         let state = Arc::clone(&state);
         move || {
-            let Ok(ConsumerCommand::Transcribe(_, ring)) =
+            let Ok(ConsumerCommand::Transcribe(ring)) =
                 command_receiver.recv_timeout(std::time::Duration::from_secs(5))
             else {
                 panic!("the dictation never reached the consumer");
@@ -563,7 +560,7 @@ async fn an_ask_waits_until_the_dictation_leaves_the_ring() {
             let _ = ask.reply.send(Ok("after the dictation".to_string()));
         }
     });
-    assert!(state.record_start(crate::state::TranscribeTarget::Mailbox));
+    assert!(state.record_start());
     let asking = spawn_ask(&state);
     state.record_stop();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -624,34 +621,70 @@ async fn stop_replies_ok_and_signals_shutdown() {
 // codes must not collapse into one another.
 #[tokio::test]
 async fn recording_rpcs_report_the_cause_not_a_busy_mic() {
-    for (cause, expected) in [
-        (RecordingError::Microphone("no device".to_string()), -32000),
-        (RecordingError::Model("missing file".to_string()), -32002),
+    use crate::state::Pipeline;
+
+    let causes = [
         (
-            RecordingError::KeyFile("it does not parse".to_string()),
-            -32008,
+            Pipeline::Broken(RecordingError::Microphone("no device".to_string())),
+            -32000,
+            None,
         ),
-    ] {
-        let state = test_state(std::sync::mpsc::channel().0);
-        state.set_pipeline(crate::state::Pipeline::Broken(cause));
-
-        let start = request(BANSHEE_RECORD_START, None);
-        let JsonRpcResponse::Error { error, .. } = dispatch(start, &state).await else {
-            panic!("expected error response");
-        };
-        assert_eq!(error.code, expected);
-        assert_eq!(state.recording_mode(), RecordingMode::Idle);
-
-        let ask = request(
+        (
+            Pipeline::Broken(RecordingError::Model("missing file".to_string())),
+            -32002,
+            None,
+        ),
+        (
+            Pipeline::Broken(RecordingError::KeyFile("it does not parse".to_string())),
+            -32008,
+            None,
+        ),
+        (
+            Pipeline::Broken(RecordingError::Provider(
+                "the remote listener refused the key".to_string(),
+            )),
+            rpc_code::PROVIDER,
+            Some(("remote listener", "the message names the failing side")),
+        ),
+        (
+            Pipeline::Opening,
+            rpc_code::MICROPHONE,
+            Some((
+                "still opening",
+                "the reason must say it is not broken, only late",
+            )),
+        ),
+    ];
+    let methods = [
+        (BANSHEE_RECORD_START, None),
+        (BANSHEE_RECORD_TOGGLE, None),
+        (
             BANSHEE_ASK_USER,
             Some(serde_json::json!({"question": "ready?"})),
-        );
-        let JsonRpcResponse::Error { error, .. } = dispatch(ask, &state).await else {
-            panic!("expected error response");
-        };
-        assert_eq!(error.code, expected);
-        // The armed lock must not be taken by a refused question
-        assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        ),
+    ];
+
+    for (pipeline, expected, says) in causes {
+        for (method, params) in &methods {
+            let state = test_state(std::sync::mpsc::channel().0);
+            state.set_pipeline(pipeline.clone());
+
+            let JsonRpcResponse::Error { error, .. } =
+                dispatch(request(method, params.clone()), &state).await
+            else {
+                panic!("{method} on {pipeline:?} must be refused");
+            };
+            assert_eq!(error.code, expected, "{method} on {pipeline:?}");
+            if let Some((says, why)) = says {
+                assert!(
+                    error.message.contains(says),
+                    "{method} on {pipeline:?}: {why}: {}",
+                    error.message
+                );
+            }
+            // The armed lock must not be taken by a refused question
+            assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        }
     }
 }
 
@@ -682,11 +715,59 @@ async fn record_start_and_stop_drive_push_to_talk() {
         panic!("expected success response");
     };
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
-    // The dictate choice from start must reach the consumer command
-    let Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate, _)) = command_receiver.try_recv()
-    else {
-        panic!("expected a dictate transcribe command");
+    let Ok(ConsumerCommand::Transcribe(_)) = command_receiver.try_recv() else {
+        panic!("expected a transcribe command");
     };
+}
+
+/// Starts a recording over the socket with `params`, stops it, and gives back
+/// every signal the pair sent.
+async fn recorded_with(params: Option<serde_json::Value>) -> Vec<crate::audio::cues::Signal> {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let mut signals = state.cues().subscribe_signals();
+
+    let start = request(BANSHEE_RECORD_START, params);
+    let JsonRpcResponse::Success { .. } = dispatch(start, &state).await else {
+        panic!("the start must be accepted");
+    };
+    let stop = request(BANSHEE_RECORD_STOP, None);
+    let JsonRpcResponse::Success { .. } = dispatch(stop, &state).await else {
+        panic!("the stop must be accepted");
+    };
+    let Ok(ConsumerCommand::Transcribe(..)) = command_receiver.try_recv() else {
+        panic!("the stop must send the audio to be transcribed");
+    };
+    let mut sent = Vec::new();
+    while let Ok(signal) = signals.try_recv() {
+        sent.push(signal);
+    }
+    sent
+}
+
+fn a_dictation() -> [crate::audio::cues::Signal; 2] {
+    use crate::audio::cues::{Signal, Target};
+    [
+        Signal::RecordStart {
+            target: Target::Dictate,
+        },
+        Signal::RecordStop {
+            target: Target::Dictate,
+        },
+    ]
+}
+
+#[tokio::test]
+async fn a_record_start_with_no_flag_dictates() {
+    assert_eq!(recorded_with(None).await, a_dictation());
+}
+
+#[tokio::test]
+async fn the_dictate_flag_still_dictates() {
+    assert_eq!(
+        recorded_with(Some(serde_json::json!({"dictate": true}))).await,
+        a_dictation()
+    );
 }
 
 #[tokio::test]
@@ -694,10 +775,7 @@ async fn record_toggle_starts_then_stops_and_says_which() {
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let state = test_state(commands);
 
-    let first = request(
-        BANSHEE_RECORD_TOGGLE,
-        Some(serde_json::json!({"dictate": true})),
-    );
+    let first = request(BANSHEE_RECORD_TOGGLE, None);
     let JsonRpcResponse::Success { result, .. } = dispatch(first, &state).await else {
         panic!("expected success response");
     };
@@ -710,26 +788,9 @@ async fn record_toggle_starts_then_stops_and_says_which() {
     };
     assert_eq!(result["recording"], serde_json::Value::Bool(false));
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
-    // The stop carries no flag, so the dictate choice comes from the first toggle
-    let Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate, _)) = command_receiver.try_recv()
-    else {
-        panic!("expected a dictate transcribe command");
+    let Ok(ConsumerCommand::Transcribe(_)) = command_receiver.try_recv() else {
+        panic!("expected a transcribe command");
     };
-}
-
-#[tokio::test]
-async fn record_toggle_is_refused_while_recording_is_unavailable() {
-    let state = test_state(std::sync::mpsc::channel().0);
-    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
-        "no device".to_string(),
-    )));
-
-    let toggle = request(BANSHEE_RECORD_TOGGLE, None);
-    let JsonRpcResponse::Error { error, .. } = dispatch(toggle, &state).await else {
-        panic!("expected error response");
-    };
-    assert_eq!(error.code, rpc_code::MICROPHONE);
-    assert_eq!(state.recording_mode(), RecordingMode::Idle);
 }
 
 #[tokio::test]
@@ -831,7 +892,7 @@ fn status_reports_the_modifiers_the_parser_binds() {
     for refused in ["Shift", "LeftShift", "RightShift", "CapsLock"] {
         assert!(
             !reported.as_array().unwrap().iter().any(|n| n == refused),
-            "{refused} is reserved, so the window must never offer it"
+            "the parser refuses {refused}, so the window must never offer it"
         );
     }
 }
@@ -933,8 +994,16 @@ fn the_reply_says_which_speaker_started_and_not_which_voice_is_held() {
 // The window marks the voice the backend loaded, so a remote speaker's voice
 // has to be the one reported. Kokoro's catalogue is still the list.
 #[tokio::test]
-async fn the_voice_reported_under_a_remote_speaker_is_the_one_the_server_names() {
+async fn list_voices_names_no_current_voice_until_one_is_set_and_then_the_one_held() {
     let state = test_state(std::sync::mpsc::channel().0);
+    let JsonRpcResponse::Success { result, .. } =
+        dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
+    else {
+        panic!("expected success response");
+    };
+    assert!(result["current"].is_null());
+    assert!(result["voices"].is_array(), "{result}");
+
     state.set_tts_voice("marin".to_string());
 
     let JsonRpcResponse::Success { result, .. } =
@@ -965,50 +1034,20 @@ fn status_names_the_host_a_remote_listener_sends_audio_to() {
 }
 
 #[test]
-fn the_pushed_state_carries_the_device_and_what_it_waits_for() {
-    let state = test_state(std::sync::mpsc::channel().0);
-    state.set_audio_device(Some("OnePlus Buds 3".to_string()));
-    let bound = live_state(&state);
-    assert_eq!(bound["audio_device"], "OnePlus Buds 3");
-    assert!(bound["missing_device"].is_null());
-
-    // A substitution must reach a subscriber, or the tray shows the dead device
-    state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
-    state.set_missing_device(Some("OnePlus Buds 3".to_string()));
-    let substituted = live_state(&state);
-    assert_eq!(substituted["audio_device"], "MacBook Pro Microphone");
-    assert_eq!(substituted["missing_device"], "OnePlus Buds 3");
-    assert_ne!(
-        bound, substituted,
-        "push_changes suppresses an unchanged state"
-    );
-}
-
-#[test]
 fn live_state_reports_armed_while_a_question_waits() {
     let state = test_state(std::sync::mpsc::channel().0);
-    assert_eq!(live_state(&state)["armed"], serde_json::json!(false));
 
-    assert!(
-        state.arm_for_ask().is_some(),
-        "the fixture must discriminate"
-    );
-    let live = live_state(&state);
-    assert_eq!(live["armed"], serde_json::json!(true));
-    // The microphone is open while armed
-    assert_eq!(live["recording"], serde_json::json!(true));
-
-    state.set_recording_mode(RecordingMode::Idle);
-    assert_eq!(live_state(&state)["armed"], serde_json::json!(false));
-}
-
-#[test]
-fn push_to_talk_records_without_arming() {
-    let state = test_state(std::sync::mpsc::channel().0);
-    state.set_recording_mode(RecordingMode::PushToTalk);
-    let live = live_state(&state);
-    assert_eq!(live["recording"], serde_json::json!(true));
-    assert_eq!(live["armed"], serde_json::json!(false));
+    for (name, mode, armed, recording) in [
+        ("idle at the start", RecordingMode::Idle, false, false),
+        ("armed", RecordingMode::Armed, true, true),
+        ("push to talk", RecordingMode::PushToTalk, false, true),
+        ("idle again", RecordingMode::Idle, false, false),
+    ] {
+        state.set_recording_mode(mode);
+        let live = live_state(&state);
+        assert_eq!(live["armed"], serde_json::json!(armed), "{name}");
+        assert_eq!(live["recording"], serde_json::json!(recording), "{name}");
+    }
 }
 
 #[test]
@@ -1022,52 +1061,12 @@ fn live_state_reports_transcribing() {
 }
 
 #[test]
-fn live_state_reports_telling() {
-    let state = test_state(std::sync::mpsc::channel().0);
-    assert_eq!(live_state(&state)["telling"], serde_json::json!(false));
-    state.telling_started();
-    assert_eq!(live_state(&state)["telling"], serde_json::json!(true));
-    state.telling_ended();
-    assert_eq!(live_state(&state)["telling"], serde_json::json!(false));
-}
-
-#[test]
-fn setting_telling_wakes_a_subscriber() {
-    let state = test_state(std::sync::mpsc::channel().0);
-    let mut changes = state.subscribe_telling();
-    state.telling_started();
-    assert!(changes.has_changed().expect("the sender outlives this"));
-    assert!(*changes.borrow_and_update());
-}
-
-#[test]
 fn setting_transcribing_wakes_a_subscriber() {
     let state = test_state(std::sync::mpsc::channel().0);
     let mut changes = state.subscribe_transcribing();
     state.set_transcribing(true);
     assert!(changes.has_changed().expect("the sender outlives this"));
     assert!(*changes.borrow_and_update());
-}
-
-#[tokio::test]
-async fn a_fallback_backend_reports_no_current_voice() {
-    let state = test_state(std::sync::mpsc::channel().0);
-
-    let JsonRpcResponse::Success { result, .. } =
-        dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
-    else {
-        panic!("expected success response");
-    };
-    assert!(result["current"].is_null());
-    assert!(result["voices"].is_array(), "{result}");
-
-    state.set_tts_voice("af_sky".to_string());
-    let JsonRpcResponse::Success { result, .. } =
-        dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
-    else {
-        panic!("expected success response");
-    };
-    assert_eq!(result["current"], "af_sky");
 }
 
 #[tokio::test]
@@ -1171,42 +1170,6 @@ async fn downloading_nothing_reports_an_empty_list() {
         state.start_downloading().is_some(),
         "a call that fetched nothing must not hold the slot"
     );
-}
-
-#[tokio::test]
-async fn stale_cursor_is_clamped_to_zero() {
-    let state = test_state(std::sync::mpsc::channel().0);
-    state.push_transcription("hello".to_string());
-
-    let request = request(
-        BANSHEE_GET_TRANSCRIPTION,
-        Some(serde_json::json!({"since_id": 999})),
-    );
-    let response = dispatch(request, &state).await;
-
-    let JsonRpcResponse::Success { result, .. } = response else {
-        panic!("expected success response");
-    };
-    let transcriptions = result["transcriptions"].as_array().unwrap();
-    assert_eq!(transcriptions.len(), 1);
-    assert_eq!(transcriptions[0]["text"], "hello");
-}
-
-#[tokio::test]
-async fn caught_up_cursor_returns_empty() {
-    let state = test_state(std::sync::mpsc::channel().0);
-    state.push_transcription("hello".to_string());
-
-    let request = request(
-        BANSHEE_GET_TRANSCRIPTION,
-        Some(serde_json::json!({"since_id": 1})),
-    );
-    let response = dispatch(request, &state).await;
-
-    let JsonRpcResponse::Success { result, .. } = response else {
-        panic!("expected success response");
-    };
-    assert!(result["transcriptions"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1348,30 +1311,6 @@ async fn speak_passes_the_voice_parameter_to_the_backend() {
 
     assert!(matches!(response, JsonRpcResponse::Success { .. }));
     assert_eq!(*captured.lock().unwrap(), vec![Some("am_adam".to_string())]);
-}
-
-#[tokio::test]
-async fn ask_user_names_the_provider_fault_with_its_own_code() {
-    let state = test_state(std::sync::mpsc::channel().0);
-    state.set_pipeline(crate::state::Pipeline::Broken(
-        crate::state::RecordingError::Provider("the remote listener refused the key".to_string()),
-    ));
-
-    let request = request(
-        BANSHEE_ASK_USER,
-        Some(serde_json::json!({"question": "Ready?"})),
-    );
-    let response = dispatch(request, &state).await;
-
-    let JsonRpcResponse::Error { error, .. } = response else {
-        panic!("expected error response");
-    };
-    assert_eq!(error.code, rpc_code::PROVIDER);
-    assert!(
-        error.message.contains("remote listener"),
-        "{}",
-        error.message
-    );
 }
 
 /// Silence answers `{"text": ""}`; a listener that failed answers an error, so
@@ -1624,41 +1563,6 @@ fn one_mock_carries_every_config_key(name: &str, body: &str) {
     );
 }
 
-#[test]
-fn the_tell_flag_picks_the_tell_target() {
-    let built = request(
-        BANSHEE_RECORD_START,
-        Some(serde_json::json!({"tell": true})),
-    );
-    let params = Params::new(&built);
-    assert!(matches!(
-        dictate_target(&params).unwrap(),
-        TranscribeTarget::Tell
-    ));
-}
-
-#[test]
-fn no_flag_still_means_the_mailbox() {
-    let built = request(BANSHEE_RECORD_START, None);
-    let params = Params::new(&built);
-    assert!(matches!(
-        dictate_target(&params).unwrap(),
-        TranscribeTarget::Mailbox
-    ));
-}
-
-#[test]
-fn dictate_and_tell_together_are_refused_rather_than_guessed() {
-    // The words typed into a window and the words handed to an agent are two
-    // destinations. A silent choice would put a desktop command in a text field.
-    let built = request(
-        BANSHEE_RECORD_START,
-        Some(serde_json::json!({"dictate": true, "tell": true})),
-    );
-    let params = Params::new(&built);
-    assert!(dictate_target(&params).is_err());
-}
-
 // The daemon answers its socket from `claim()`, long before the microphone is
 // open. Saying nothing of that gap leaves a client reporting a healthy daemon
 // that cannot record.
@@ -1683,19 +1587,9 @@ async fn status_says_the_pipeline_is_opening_until_it_stands() {
 // The window draws its word from this. A daemon that answers "ready" while it
 // cannot record sends a person to a hotkey that plays the error cue.
 #[test]
-fn a_daemon_still_opening_its_microphone_is_not_ready() {
-    assert!(super::ready(&[], &crate::state::Pipeline::Open));
-    assert!(!super::ready(&[], &crate::state::Pipeline::Opening));
-    assert!(!super::ready(
-        &[],
-        &crate::state::Pipeline::Broken(crate::state::RecordingError::Microphone(
-            "no device".to_string()
-        ))
-    ));
-}
-
-#[test]
 fn anything_that_stops_banshee_working_is_not_ready() {
+    use crate::state::Pipeline;
+
     let blocker = banshee_common::Blocker {
         kind: banshee_common::BlockerKind::Permission,
         role: None,
@@ -1706,53 +1600,21 @@ fn anything_that_stops_banshee_working_is_not_ready() {
         fix: "grant it".to_string(),
         command: None,
     };
-    assert!(!super::ready(&[blocker], &crate::state::Pipeline::Open));
-}
+    let broken = Pipeline::Broken(RecordingError::Microphone("no device".to_string()));
 
-#[tokio::test]
-async fn ask_user_is_refused_while_the_pipeline_is_still_opening() {
-    let state = crate::test_support::daemon_state_before_the_pipeline();
-
-    let asked = request(
-        BANSHEE_ASK_USER,
-        Some(serde_json::json!({ "question": "ready?" })),
-    );
-    let JsonRpcResponse::Error { error, .. } = dispatch(asked, &state).await else {
-        panic!("a microphone that is not open yet cannot answer a question");
-    };
-    assert_eq!(error.code, rpc_code::MICROPHONE);
-    assert!(
-        error.message.contains("still opening"),
-        "the reason must say it is not broken, only late: {}",
-        error.message
-    );
-}
-
-// An agent that dies mid-question leaves the microphone armed for the rest of
-// the session, and every other ask waits behind it until it ends. Dropping
-// the call has to close the session the way a stop does.
-// The question is still being spoken when the agent dies. The microphone was
-// armed before the first word, so nothing but the guard can give it back.
-#[tokio::test]
-async fn an_ask_dropped_while_it_speaks_closes_the_session_it_armed() {
-    let state = crate::test_support::daemon_state_holding_speech(
-        std::time::Duration::from_secs(30),
-        std::sync::mpsc::channel().0,
-    )
-    .state;
-
-    let asking = spawn_ask(&state);
-    wait_for(&state, "the session arms", |state| {
-        state.recording_mode() == RecordingMode::Armed
-    })
-    .await;
-
-    asking.abort();
-
-    wait_for(&state, "the session closes", |state| {
-        state.recording_mode() == RecordingMode::Idle
-    })
-    .await;
+    for (name, blockers, pipeline, ready) in [
+        (
+            "an open pipeline with nothing blocking",
+            vec![],
+            Pipeline::Open,
+            true,
+        ),
+        ("a pipeline still opening", vec![], Pipeline::Opening, false),
+        ("a broken pipeline", vec![], broken, false),
+        ("a blocker", vec![blocker], Pipeline::Open, false),
+    ] {
+        assert_eq!(super::ready(&blockers, &pipeline), ready, "{name}");
+    }
 }
 
 #[tokio::test]
@@ -1789,6 +1651,9 @@ async fn an_ask_dropped_while_its_question_waits_never_speaks_it() {
     );
 }
 
+// An agent that dies mid-question leaves the microphone armed for the rest of
+// the session, and every other ask waits behind it until it ends. Dropping
+// the call has to close the session the way a stop does.
 #[tokio::test]
 async fn a_dropped_ask_closes_the_session_it_armed() {
     let (commands, command_receiver) = std::sync::mpsc::channel();
@@ -2054,21 +1919,4 @@ async fn turn_ended_with_repeat_true_answers_pass() {
         panic!("expected success response");
     };
     assert_eq!(result["verdict"], "pass", "even on a silent turn");
-}
-
-#[tokio::test]
-async fn a_repeat_that_is_not_a_boolean_is_refused() {
-    let state = test_state(std::sync::mpsc::channel().0);
-    let response = dispatch(
-        request(
-            BANSHEE_TURN_ENDED,
-            Some(serde_json::json!({"agent_pid": 7, "repeat": "yes"})),
-        ),
-        &state,
-    )
-    .await;
-    let JsonRpcResponse::Error { error, .. } = response else {
-        panic!("expected an error response");
-    };
-    assert_eq!(error.code, rpc_code::INVALID_PARAMS);
 }

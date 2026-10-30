@@ -129,19 +129,19 @@ async fn a_cue_subscriber_that_lags_still_hears_what_comes_next() {
     for _ in 0..300 {
         state.cues().emit(crate::audio::cues::Signal::Disarm);
     }
-    state.cues().emit(crate::audio::cues::Signal::Told);
+    state.cues().emit(crate::audio::cues::Signal::Onset);
 
-    let told = tokio::time::timeout(ARRIVES * 5, async {
+    let after = tokio::time::timeout(ARRIVES * 5, async {
         loop {
             let pushed = next_message(&mut lines).await;
-            if pushed["params"]["cue"] == "told" {
+            if pushed["params"]["cue"] == "onset" {
                 return pushed;
             }
         }
     })
     .await
     .expect("the signal after the lag never arrived");
-    assert_eq!(told["method"], banshee_common::BANSHEE_CUE);
+    assert_eq!(after["method"], banshee_common::BANSHEE_CUE);
 }
 
 #[tokio::test]
@@ -600,21 +600,27 @@ async fn a_requested_shutdown_takes_the_socket_file_with_it() {
 // the connection while it does. A client that leaves must not be waited for.
 #[tokio::test]
 async fn a_client_that_leaves_ends_the_call_it_parked() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (commands, never_answered) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
     let (client, server) = UnixStream::pair().expect("no socket pair");
     let serving = tokio::spawn(serve(server, Arc::clone(&state)));
 
     let (reader, mut writer) = client.into_split();
     send(
         &mut writer,
-        banshee_common::BANSHEE_GET_TRANSCRIPTION,
-        serde_json::json!({ "wait_ms": 5000 }),
+        BANSHEE_ASK_USER,
+        serde_json::json!({"question": "ready?"}),
     )
     .await;
+    // Held unanswered to the end, so only the client leaving can end the call
+    let _parked = tokio::task::spawn_blocking(move || never_answered.recv_timeout(ARRIVES))
+        .await
+        .expect("no panic")
+        .expect("the question never reached the pipeline");
     drop(writer);
     drop(reader);
 
-    // Well inside the five seconds the call would otherwise hold: a bound for
+    // Well inside the two minutes the call would otherwise hold: a bound for
     // the test, not a limit the daemon promises.
     tokio::time::timeout(std::time::Duration::from_secs(1), serving)
         .await
@@ -626,7 +632,8 @@ async fn a_client_that_leaves_ends_the_call_it_parked() {
 // before the first one answered must be held and served, never swallowed.
 #[tokio::test]
 async fn a_request_sent_during_a_call_is_still_answered() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (commands, answerer) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
     let (client, server) = UnixStream::pair().expect("no socket pair");
     tokio::spawn(serve(server, Arc::clone(&state)));
     let (reader, mut writer) = client.into_split();
@@ -635,14 +642,25 @@ async fn a_request_sent_during_a_call_is_still_answered() {
     // The first parks; the second arrives while it does
     send(
         &mut writer,
-        banshee_common::BANSHEE_GET_TRANSCRIPTION,
-        serde_json::json!({ "wait_ms": 300 }),
+        BANSHEE_ASK_USER,
+        serde_json::json!({"question": "ready?"}),
     )
     .await;
     send(&mut writer, BANSHEE_STATUS, serde_json::json!({})).await;
 
+    let parked = tokio::task::spawn_blocking(move || answerer.recv_timeout(ARRIVES))
+        .await
+        .expect("no panic")
+        .expect("the question never reached the pipeline");
+    let ConsumerCommand::Ask(ask) = parked else {
+        panic!("a question is the only thing sent");
+    };
+    ask.reply
+        .send(Ok("yes".to_string()))
+        .expect("the call is parked");
+
     let first = next_message(&mut lines).await;
-    assert!(first["result"]["transcriptions"].is_array(), "{first}");
+    assert_eq!(first["result"]["text"], "yes", "{first}");
     let second = next_message(&mut lines).await;
     assert_eq!(second["result"]["running"], true, "{second}");
 }

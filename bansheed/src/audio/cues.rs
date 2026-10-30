@@ -64,16 +64,6 @@ pub fn sounds(mode: FeedbackMode, drawn: bool) -> bool {
     }
 }
 
-impl From<crate::state::TranscribeTarget> for Target {
-    fn from(target: crate::state::TranscribeTarget) -> Self {
-        match target {
-            crate::state::TranscribeTarget::Dictate => Target::Dictate,
-            crate::state::TranscribeTarget::Mailbox => Target::Mailbox,
-            crate::state::TranscribeTarget::Tell => Target::Tell,
-        }
-    }
-}
-
 pub fn broken(fault: &crate::state::RecordingError) -> Reason {
     Reason {
         code: ReasonCode::PipelineBroken,
@@ -89,7 +79,7 @@ pub fn cue_of(signal: &Signal) -> Option<Cue> {
         Signal::Error { .. } => Some(Cue::Error),
         Signal::Arm => Some(Cue::Arm),
         Signal::Disarm => Some(Cue::Disarm),
-        Signal::Answered { .. } | Signal::Told | Signal::Cancelled { .. } | Signal::Onset => None,
+        Signal::Answered { .. } | Signal::Cancelled { .. } | Signal::Onset => None,
     }
 }
 
@@ -273,7 +263,6 @@ mod tests {
     #[test]
     fn only_the_silent_signals_have_no_cue() {
         assert_eq!(cue_of(&Signal::Answered { heard: true }), None);
-        assert_eq!(cue_of(&Signal::Told), None);
         assert_eq!(cue_of(&Signal::Onset), None);
         assert_eq!(
             cue_of(&Signal::Cancelled {
@@ -341,7 +330,7 @@ mod tests {
     }
 
     // The gate reads only the mode and the drawn count, so a dictation, an
-    // agent's question, a tell failure and a speech failure share one answer.
+    // agent's question, a typing failure and a speech failure share one answer.
     #[test]
     fn a_chip_in_visual_silences_every_job_and_no_chip_sounds_them_all() {
         let jobs = [
@@ -353,8 +342,8 @@ mod tests {
                 target: Some(Target::Answer),
             },
             Signal::Error {
-                reason: Reason::new(ReasonCode::TellFailed, None),
-                target: Some(Target::Tell),
+                reason: Reason::new(ReasonCode::TypeFailed, None),
+                target: Some(Target::Dictate),
             },
             Signal::Error {
                 reason: Reason::new(ReasonCode::SpeechFailed, None),

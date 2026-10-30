@@ -726,44 +726,12 @@ pub async fn status(
     Ok(())
 }
 
-pub async fn listen() -> Result<(), BansheeError> {
-    show(
-        banshee_common::BANSHEE_GET_TRANSCRIPTION,
-        serde_json::json!({}),
-    )
-    .await
-}
-
 pub async fn speak(text: String) -> Result<(), BansheeError> {
     show(
         banshee_common::BANSHEE_SPEAK,
         serde_json::json!({ "text": text }),
     )
     .await
-}
-
-/// Prints what the agent wrote. A refused `speak_status` leaves this print as
-/// the only thing the user gets.
-pub fn tell(
-    text: Option<String>,
-    undo: bool,
-    config: Result<Config, BansheeError>,
-) -> Result<(), BansheeError> {
-    let config = config?;
-    if undo {
-        println!("{}", crate::tell::undo(&config.tell)?);
-        return Ok(());
-    }
-    let text =
-        text.ok_or_else(|| BansheeError::Rejected("say what to tell it, or pass --undo".into()))?;
-    let told = crate::tell::run(&text, &config.tell, &|line| println!("{line}"))?;
-    for warning in &told.warnings {
-        eprintln!("{}", warning.text());
-    }
-    if let Some(reply) = told.reply {
-        println!("{reply}");
-    }
-    Ok(())
 }
 
 pub async fn history() -> Result<(), BansheeError> {
@@ -775,18 +743,12 @@ pub async fn clear_history() -> Result<(), BansheeError> {
 }
 
 pub async fn record(action: args::RecordAction) -> Result<(), BansheeError> {
-    let (method, params) = match action {
-        args::RecordAction::Start { dictate, tell } => (
-            banshee_common::BANSHEE_RECORD_START,
-            serde_json::json!({ "dictate": dictate, "tell": tell }),
-        ),
-        args::RecordAction::Stop => (banshee_common::BANSHEE_RECORD_STOP, serde_json::json!({})),
-        args::RecordAction::Toggle { dictate, tell } => (
-            banshee_common::BANSHEE_RECORD_TOGGLE,
-            serde_json::json!({ "dictate": dictate, "tell": tell }),
-        ),
+    let method = match action {
+        args::RecordAction::Start { .. } => banshee_common::BANSHEE_RECORD_START,
+        args::RecordAction::Stop => banshee_common::BANSHEE_RECORD_STOP,
+        args::RecordAction::Toggle { .. } => banshee_common::BANSHEE_RECORD_TOGGLE,
     };
-    utils::call_daemon(method, params).await?;
+    utils::call_daemon(method, serde_json::json!({})).await?;
     Ok(())
 }
 
@@ -869,18 +831,10 @@ pub async fn start(config_result: Result<Config, BansheeError>) -> Result<(), Ba
     Ok(())
 }
 
-pub fn tray(uninstall: bool) -> Result<(), BansheeError> {
-    if uninstall {
-        if service::uninstall(service::Agent::Tray)? {
-            println!("The menu bar icon no longer starts at login.");
-        } else {
-            println!("The menu bar icon was not set to start at login.");
-        }
-    } else {
-        let log = service::install(service::Agent::Tray)?;
-        println!("The menu bar icon is running, and comes back at login.");
-        println!("Logs: {log}");
-    }
+pub fn tray() -> Result<(), BansheeError> {
+    let log = service::install(service::Agent::Tray)?;
+    println!("The menu bar icon is running, and comes back at login.");
+    println!("Logs: {log}");
     Ok(())
 }
 
@@ -1036,25 +990,6 @@ fn confirmed() -> Result<bool, BansheeError> {
         return Ok(false);
     }
     crate::connect::confirm("Remove it? [y/N] ")
-}
-
-pub fn service(action: args::ServiceAction) -> Result<(), BansheeError> {
-    match action {
-        // Every entry, so none is left behind to fail at the next login
-        args::ServiceAction::Uninstall => {
-            let mut removed = false;
-            for agent in service::Agent::ALL {
-                if service::uninstall(agent)? {
-                    println!("The {} no longer starts at login.", agent.name());
-                    removed = true;
-                }
-            }
-            if !removed {
-                println!("Nothing was set to start at login.");
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

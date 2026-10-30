@@ -79,7 +79,7 @@ mod tests {
     #[tokio::test]
     async fn a_new_watcher_sees_no_peak_from_before_it_watched() {
         let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-        assert!(state.record_start(crate::state::TranscribeTarget::Mailbox));
+        assert!(state.record_start());
         state.note_peak(0.5);
         let mut level = state.subscribe_level();
         tokio::spawn(super::sample(std::sync::Arc::clone(&state)));
@@ -107,7 +107,7 @@ mod tests {
     #[tokio::test]
     async fn every_sample_is_published_the_same_value_too() {
         let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-        assert!(state.record_start(crate::state::TranscribeTarget::Mailbox));
+        assert!(state.record_start());
         let _watch = state.watch_level();
         let mut level = state.subscribe_level();
         tokio::spawn(super::sample(std::sync::Arc::clone(&state)));
@@ -124,7 +124,7 @@ mod tests {
     #[tokio::test]
     async fn sampling_stops_on_one_silence_and_an_idle_sampler_publishes_nothing() {
         let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-        assert!(state.record_start(crate::state::TranscribeTarget::Mailbox));
+        assert!(state.record_start());
         let watch = state.watch_level();
         let mut level = state.subscribe_level();
         tokio::spawn(super::sample(std::sync::Arc::clone(&state)));

@@ -30,58 +30,36 @@
 - **`hyprctl reload`** runs after the write.
 - **`banshee bind` alone** prints the block for you to paste, and names the
   file it would write.
-- **It binds a tell key too.** Hold it and speak, and your coding agent changes
-  the config. See
-  [cli.md](cli.md#telling-your-agent-to-change-the-desktop).
-- **The tell chord is the dictate chord plus one modifier,** the first free one
-  of `Super`, `Ctrl` and `Alt`.
-- **`Shift` is not among them.** The record bind holds it.
-- **A dictate key that already holds all three** gets no tell bind, and `bind`
-  says so.
 
 ```lua
 -- BEGIN BANSHEE MANAGED BLOCK
-o.bind("F9", "Banshee: hold to dictate", "banshee record start --dictate")
+o.bind("F9", "Banshee: hold to dictate", "banshee record start")
 o.bind("F9", nil, "banshee record stop", { release = true })
-o.bind("SHIFT + F9", "Banshee: hold to record", "banshee record start")
-o.bind("SHIFT + F9", nil, "banshee record stop", { release = true })
-o.bind("SUPER + F9", "Banshee: hold to tell the agent", "banshee record start --tell")
-o.bind("SUPER + F9", nil, "banshee record stop", { release = true })
 -- END BANSHEE MANAGED BLOCK
 ```
 
 ```conf
 # BEGIN BANSHEE MANAGED BLOCK
-bind  = , F9, exec, banshee record start --dictate
+bind  = , F9, exec, banshee record start
 bindr = , F9, exec, banshee record stop
-bind  = SHIFT, F9, exec, banshee record start
-bindr = SHIFT, F9, exec, banshee record stop
-bind  = SUPER, F9, exec, banshee record start --tell
-bindr = SUPER, F9, exec, banshee record stop
 # END BANSHEE MANAGED BLOCK
 ```
 
-- **Tap** binds one toggle for each key, with no release bind:
+- **Tap** binds one toggle, with no release bind:
 
 ```lua
 -- BEGIN BANSHEE MANAGED BLOCK
-o.bind("F9", "Banshee: tap to dictate", "banshee record toggle --dictate")
-o.bind("SHIFT + F9", "Banshee: tap to record", "banshee record toggle")
-o.bind("SUPER + F9", "Banshee: tap to tell the agent", "banshee record toggle --tell")
+o.bind("F9", "Banshee: tap to dictate", "banshee record toggle")
 -- END BANSHEE MANAGED BLOCK
 ```
 
 ```conf
 # BEGIN BANSHEE MANAGED BLOCK
-bind = , F9, exec, banshee record toggle --dictate
-bind = SHIFT, F9, exec, banshee record toggle
-bind = SUPER, F9, exec, banshee record toggle --tell
+bind = , F9, exec, banshee record toggle
 # END BANSHEE MANAGED BLOCK
 ```
 
-- **Both release binds** in the hold block are there on purpose, in either config style.
-- **Hyprland** matches modifiers exactly, and `Shift` may be released before
-  `F9`.
+- **The release bind** in the hold block is there on purpose, in either config style.
 - **Bind an ordinary key,** not a modifier.
 - **A bare modifier's press action** waits, because the press might still become
   the start of a different chord.
@@ -91,7 +69,7 @@ bind = SUPER, F9, exec, banshee record toggle --tell
   audio.
 - **`F9` is not a modifier,** so it has no such ambiguity, and it dispatches its
   press bind at once.
-- **`banshee record toggle --dictate`** is one key that starts and stops, for a
+- **`banshee record toggle`** is one key that starts and stops, for a
   compositor with no release bind.
 
 ## Typing into the focused app

@@ -231,10 +231,6 @@ impl TtsBackend for SpeakingBackend {
 /// A daemon state that keeps every line it was asked to speak. A queued line
 /// reaches the backend from the watcher thread, so a test waits for it rather
 /// than reading the list at once.
-pub fn daemon_state_recording_speech() -> (Arc<DaemonState>, SpokenLines) {
-    daemon_state_recording_speech_for(std::sync::mpsc::channel().0)
-}
-
 pub fn daemon_state_recording_speech_for(
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
 ) -> (Arc<DaemonState>, SpokenLines) {

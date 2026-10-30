@@ -107,7 +107,6 @@ pub const BANSHEE_SPEAK: &str = "banshee.speak";
 pub const BANSHEE_STOP_SPEAKING: &str = "banshee.stop_speaking";
 pub const BANSHEE_STATUS: &str = "banshee.status";
 pub const BANSHEE_CONFIGURE: &str = "banshee.configure";
-pub const BANSHEE_GET_TRANSCRIPTION: &str = "banshee.get_transcription";
 pub const BANSHEE_HISTORY: &str = "banshee.history";
 pub const BANSHEE_CLEAR_HISTORY: &str = "banshee.clear_history";
 pub const BANSHEE_ASK_USER: &str = "banshee.ask_user";
@@ -232,7 +231,7 @@ pub fn flag(state: &Value, name: &str) -> bool {
 }
 
 /// What the daemon is doing, read from the `armed`, `recording`, `speaking`,
-/// `transcribing` and `telling` flags. Both a `banshee.status` reply and a
+/// `transcribing` and `loading_model` flags. Both a `banshee.status` reply and a
 /// `state_changed` push carry them. The ranking is defined here; `stateWord`
 /// in banshee-app/ui/src/lib/daemon.ts mirrors it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,7 +240,7 @@ pub enum Activity {
     Recording,
     Speaking,
     Listening,
-    /// Banshee transcribes, or the agent a `tell` started still runs.
+    /// Banshee transcribes, or reads a model off disk.
     Busy,
 }
 
@@ -263,10 +262,7 @@ impl Activity {
             Activity::Recording
         } else if flag(state, "speaking") {
             Activity::Speaking
-        } else if flag(state, "transcribing")
-            || flag(state, "telling")
-            || flag(state, "loading_model")
-        {
+        } else if flag(state, "transcribing") || flag(state, "loading_model") {
             Activity::Busy
         } else {
             Activity::Idle
@@ -642,18 +638,9 @@ mod wire_tests {
     }
 
     #[test]
-    fn a_running_agent_is_busy() {
-        let telling = serde_json::json!({
-            "recording": false, "armed": false, "speaking": false, "telling": true
-        });
-        assert_eq!(Activity::of(&telling), Activity::Busy);
-    }
-
-    // The agent speaks its answer through Banshee while its run is still open,
-    // so these two are true together for the length of a spoken reply.
-    #[test]
     fn the_speaker_outranks_work_the_user_is_no_part_of() {
-        let both = serde_json::json!({"speaking": true, "telling": true, "transcribing": true});
+        let both =
+            serde_json::json!({"speaking": true, "loading_model": true, "transcribing": true});
         assert_eq!(
             Activity::of(&both),
             Activity::Speaking,
@@ -663,13 +650,13 @@ mod wire_tests {
         let recording = serde_json::json!({"recording": true, "transcribing": true});
         assert_eq!(Activity::of(&recording), Activity::Recording);
 
-        let armed = serde_json::json!({"armed": true, "telling": true});
+        let armed = serde_json::json!({"armed": true, "transcribing": true});
         assert_eq!(Activity::of(&armed), Activity::Listening);
     }
 
     #[test]
     fn neither_flag_is_idle() {
-        let quiet = serde_json::json!({"transcribing": false, "telling": false});
+        let quiet = serde_json::json!({"transcribing": false, "loading_model": false});
         assert_eq!(Activity::of(&quiet), Activity::Idle);
     }
 

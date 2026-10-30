@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`banshee tell` and the `[tell]` section are gone.** Delete `[tell]` from
+  `config.toml`, or the daemon won't start. `banshee status` names the key.
+  You can delete `~/.banshee/tell/`.
+- **`banshee listen`, `listen_for_prompt` and Shift plus the hotkey are gone.**
+  A recording always dictates. On Hyprland, run `banshee bind hyprland` again;
+  it rewrites the managed block. With Pi, run `banshee connect pi` again. Old
+  binds that pass `--dictate` still work.
+- **`banshee service uninstall` and `banshee tray --uninstall` are gone.**
+  `banshee uninstall` replaces `service uninstall`. No switch stops only the
+  tray yet. To stop the tray starting at login and keep the rest of Banshee,
+  on macOS run `launchctl bootout gui/$UID/com.banshee.tray`, then delete
+  `~/Library/LaunchAgents/com.banshee.tray.plist`. On Linux, run
+  `systemctl --user disable --now banshee-tray.service`. `banshee tray` puts
+  it back.
+
 ### Security
 
 - **A remote server out on the internet needs `https`.** Plain `http` used to

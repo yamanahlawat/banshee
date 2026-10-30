@@ -2025,7 +2025,7 @@ it('offers the compositor commands instead of a capture that writes nothing', as
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
 
-  expect(await screen.findByText(/banshee record start --dictate/)).toBeTruthy();
+  expect(await screen.findByText(/^banshee record start banshee record stop$/)).toBeTruthy();
   // The capture writes `audio.hotkey`, and no listener reads it in this session.
   expect(screen.queryByRole('button', { name: /change the hotkey/ })).toBeNull();
 });

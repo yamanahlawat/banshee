@@ -1,5 +1,4 @@
 use super::*;
-use crate::state::TranscribeTarget;
 
 struct Tick {
     name: &'static str,
@@ -371,7 +370,7 @@ fn a_tick_that_cannot_move_keeps_the_microphone_it_has() {
         "the microphone works, so recording is possible"
     );
     assert!(
-        state.record_start(TranscribeTarget::Mailbox),
+        state.record_start(),
         "a press must open a session, not answer with the error cue"
     );
     assert_eq!(

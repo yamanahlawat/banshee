@@ -90,7 +90,7 @@ it('binds an F-key on the press, without waiting for a release', async () => {
   await waitFor(() => expect(setSetting).toHaveBeenCalledWith('audio.hotkey', 'F6'));
 });
 
-it('refuses every Shift form, which the daemon reserves', async () => {
+it('refuses every Shift form, which the daemon ignores', async () => {
   const panel = await capture('KeyR', { shiftKey: true });
   await waitFor(() => expect(panel.getByText('Banshee cannot bind that key.')).toBeTruthy());
   expect(setSetting).not.toHaveBeenCalled();
@@ -104,7 +104,7 @@ it('offers the compositor commands instead of a capture on Wayland', () => {
   const panel = render(HotkeyPanel);
 
   expect(panel.queryByRole('button', { name: /change the hotkey/ })).toBeNull();
-  expect(panel.getByText(/banshee record start --dictate/)).toBeTruthy();
+  expect(panel.getByText(/^banshee record start banshee record stop$/)).toBeTruthy();
 });
 
 // With no daemon the window is told no modifier binds, which is not the same

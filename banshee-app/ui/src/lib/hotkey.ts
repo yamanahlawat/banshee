@@ -39,7 +39,7 @@ export function hotkeyFrom(
   },
   bindable: readonly string[],
 ): string | null {
-  // The daemon reserves every Shift form, and a chord that silently drops it
+  // The daemon ignores every Shift form, and a chord that silently drops it
   // would bind a key the user never pressed.
   if (event.shiftKey === true) return null;
   const modifier = named(event.code, bindable);
