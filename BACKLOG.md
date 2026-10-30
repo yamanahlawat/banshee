@@ -7,6 +7,9 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - SentinelOne flags every new Banshee build on a managed Mac as `persistence_deception`: the
   daemon, the window, and even `tar` unpacking the app. Each install or upgrade raises it again.
   The app is self-signed and not notarized.
+- Dictating replaces a copied image for good. Banshee saves only clipboard text to put back: with
+  a 2x2 image copied, the clipboard held no image and only the dictated words 1.5 s later. Files
+  and rich text are likely the same; not tested. The Linux path is separate and not tested.
 - Banshee writes its own launchd plists and calls `launchctl`, which is how persistence malware
   looks to an EDR. Apple's `SMAppService` is the sanctioned route, and it accepts a self-signed
   app.
@@ -17,6 +20,9 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   read every transcript in `banshee.db`. Nothing shows which client opened the microphone.
 - Transcription runs on whisper.cpp only, after the speaker stops. No streaming model is wired
   in, so text arrives only after the silence and a full pass.
+- Dictation types the words exactly as heard. Nothing drops fillers such as "um" or applies a
+  spoken edit such as "make that a list". An idea to test: a small local model as a cleanup
+  step after transcription. It could also change what the person meant.
 - In a crowded room, other people's voices end up in an answer. Nothing separates the user's
   voice from the room.
 - The hotkey still fires a dictation while the window is capturing a new hotkey.
