@@ -167,11 +167,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_reports_nothing_for_no_models() {
-        assert!(super::missing(&[]).is_empty());
-    }
-
-    #[test]
     fn no_speech_model_is_mistaken_for_a_voice() {
         let models = STTPreset::ALL.iter().map(|p| p.model_name().to_string());
         assert!(

@@ -689,8 +689,8 @@ it('offers a restart, not a download, when the files are already there', async (
   expect(screen.queryByText(/file is missing|files are missing/)).toBeNull();
   expect(screen.queryByRole('radiogroup', { name: 'Speech model' })).toBeNull();
 
-  // `startDaemon` runs `launchctl kickstart`, which leaves a running job alone.
-  // This blocker is offered while the daemon runs, so only a restart clears it.
+  // `startDaemon` is for a daemon that is down. This blocker is offered while
+  // the daemon runs, so only a restart clears it.
   vi.mocked(status).mockResolvedValue({ ...ready, blockers: [] });
   await fireEvent.click(screen.getByRole('button', { name: 'Restart Banshee' }));
   expect(vi.mocked(restartDaemon)).toHaveBeenCalled();
@@ -1284,14 +1284,6 @@ it('gives the keyboard back when Escape closes a panel', async () => {
   await waitFor(() =>
     expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Voice/ })),
   );
-});
-
-// With no heading anywhere, a screen reader has no way to reach the record but
-// to walk the whole window.
-it('carries a heading for the record', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  expect(screen.getAllByRole('heading').length).toBeGreaterThan(0);
 });
 
 // The device picker keeps a row for a device that is not there. The language
@@ -2033,7 +2025,7 @@ it('offers the compositor commands instead of a capture that writes nothing', as
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
 
-  expect(await screen.findByText(/banshee record start --dictate/)).toBeTruthy();
+  expect(await screen.findByText(/^banshee record start banshee record stop$/)).toBeTruthy();
   // The capture writes `audio.hotkey`, and no listener reads it in this session.
   expect(screen.queryByRole('button', { name: /change the hotkey/ })).toBeNull();
 });

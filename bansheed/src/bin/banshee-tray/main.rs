@@ -5,8 +5,9 @@
 //! does, so it needs no TCC grants of its own.
 
 fn main() {
+    banshee_common::logging::install("tray");
     if let Err(error) = tray::run() {
-        eprintln!("banshee-tray: {error}");
+        banshee_common::logging::failure(&format!("banshee-tray: {error}"));
         std::process::exit(1);
     }
 }
@@ -183,7 +184,7 @@ mod tray {
     #[cfg(target_os = "macos")]
     fn build_panel(postbox: impl Postbox) -> Option<Box<dyn Surface>> {
         let Some(mtm) = objc2::MainThreadMarker::new() else {
-            eprintln!("banshee-tray: the chip must be built on the main thread");
+            log::error!("the chip must be built on the main thread");
             return None;
         };
         let open = Box::new(move || {
@@ -420,7 +421,7 @@ mod tray {
                         self.ui = Some(ui);
                         self.show();
                     }
-                    Err(error) => eprintln!("banshee-tray: {error}"),
+                    Err(error) => log::error!("{error}"),
                 }
             }
             if !std::mem::replace(&mut self.begun, true) {
@@ -464,8 +465,8 @@ mod tray {
                 // the only way to let go of the microphone and the hotkey
                 // without a terminal.
                 Message::Quit => {
-                    close_the_window().unwrap_or_else(|e| eprintln!("banshee-tray: {e}"));
-                    stop_the_daemon().unwrap_or_else(|e| eprintln!("banshee-tray: {e}"));
+                    close_the_window().unwrap_or_else(|e| log::error!("{e}"));
+                    stop_the_daemon().unwrap_or_else(|e| log::error!("{e}"));
                     return Flow::Exit;
                 }
                 Message::State(indicator) => {
@@ -499,7 +500,7 @@ mod tray {
                     return Flow::Stay;
                 }
                 Message::Open => {
-                    open_the_window().unwrap_or_else(|error| eprintln!("banshee-tray: {error}"));
+                    open_the_window().unwrap_or_else(|error| log::error!("{error}"));
                     return Flow::Stay;
                 }
                 Message::CopyLast => {
@@ -507,8 +508,7 @@ mod tray {
                     return Flow::Stay;
                 }
                 Message::Copied(text) => {
-                    copy_to_clipboard(&text)
-                        .unwrap_or_else(|error| eprintln!("banshee-tray: {error}"));
+                    copy_to_clipboard(&text).unwrap_or_else(|error| log::error!("{error}"));
                     return Flow::Stay;
                 }
             };
@@ -528,7 +528,7 @@ mod tray {
             ui.copy_item
                 .set_enabled(copy_last_enabled(self.indicator, self.history_enabled));
             if let Err(error) = draw(&ui.tray, self.indicator) {
-                eprintln!("banshee-tray: could not draw the icon: {error}");
+                log::error!("could not draw the icon: {error}");
             }
         }
     }
@@ -702,7 +702,7 @@ mod tray {
                 .build()
             {
                 Ok(runtime) => runtime,
-                Err(error) => return eprintln!("banshee-tray: {error}"),
+                Err(error) => return log::error!("{error}"),
             };
             let reply = runtime.block_on(async {
                 tokio::time::timeout(
@@ -712,13 +712,13 @@ mod tray {
                 .await
             });
             let Ok(reply) = reply else {
-                return eprintln!("banshee-tray: the daemon did not answer in time");
+                return log::error!("the daemon did not answer in time");
             };
             match reply.as_ref().ok().and_then(last_history_entry) {
                 Some(text) => {
                     postbox.post(Message::Copied(text.to_string()));
                 }
-                None => eprintln!("banshee-tray: no dictation to copy"),
+                None => log::warn!("no dictation to copy"),
             }
         });
     }
@@ -755,12 +755,12 @@ mod tray {
         std::thread::spawn(move || {
             let mut clipboard = match arboard::Clipboard::new() {
                 Ok(clipboard) => clipboard,
-                Err(error) => return eprintln!("banshee-tray: no clipboard: {error}"),
+                Err(error) => return log::error!("no clipboard: {error}"),
             };
             // A dictation paste is excluded from clipboard history. This copy
             // is deliberate, so it belongs there.
             if let Err(error) = clipboard.set().wait_until(Instant::now() + HOLD).text(text) {
-                eprintln!("banshee-tray: the copy did not reach the clipboard: {error}");
+                log::error!("the copy did not reach the clipboard: {error}");
             }
         });
         Ok(())
@@ -800,24 +800,18 @@ mod tray {
     // and a second process means a second icon. The lock lives as long as the
     // process does and the kernel drops it however the process dies.
     fn claim_the_menu_bar() -> Result<std::fs::File, Box<dyn std::error::Error>> {
-        use std::os::fd::AsRawFd;
-
-        let dir = dirs::home_dir()
-            .ok_or("home dir not found")?
-            .join(".banshee");
-        std::fs::create_dir_all(&dir)?;
-        let file = std::fs::File::create(dir.join("tray.lock"))?;
-
-        unsafe extern "C" {
-            fn flock(fd: i32, operation: i32) -> i32;
+        let lock = utils::tray_lock_path().ok_or("home dir not found")?;
+        if let Some(dir) = lock.parent() {
+            std::fs::create_dir_all(dir)?;
         }
-        const EXCLUSIVE_WITHOUT_WAITING: i32 = 2 | 4;
-        // SAFETY: `file` is open for the whole call, so the descriptor is valid, and
-        // flock reads nothing else.
-        if unsafe { flock(file.as_raw_fd(), EXCLUSIVE_WITHOUT_WAITING) } != 0 {
-            return Err("the menu bar icon is already running".into());
+        let file = std::fs::File::create(lock)?;
+        match file.try_lock() {
+            Ok(()) => Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                Err("the menu bar icon is already running".into())
+            }
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
         }
-        Ok(file)
     }
 
     fn menu_message(id: &str) -> Option<Message> {
@@ -851,7 +845,7 @@ mod tray {
                 .build()
             {
                 Ok(runtime) => runtime.block_on(watch(postbox, to_draw)),
-                Err(error) => eprintln!("banshee-tray: {error}"),
+                Err(error) => log::error!("{error}"),
             }
         });
     }

@@ -598,7 +598,7 @@ pub fn render(change: &Change) -> String {
 }
 
 // POSIX single quotes, which a shell and `command_words` both read back as the one word
-fn shell_word(word: &str) -> String {
+pub(crate) fn shell_word(word: &str) -> String {
     let plain = word
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || "-_./=:".contains(c));
@@ -907,8 +907,8 @@ fn answered(shell_path: Option<OsString>) -> Option<OsString> {
 }
 
 fn searchable(path: OsString) -> OsString {
-    // `tell show`, dictation, the status report and the readiness check all
-    // search this PATH. None of them builds an `Env`, so the call belongs here.
+    // Dictation, the status report and the readiness check all search this
+    // PATH. None of them builds an `Env`, so the call belongs here.
     let path = match crate::service::home_dir() {
         Ok(home) => with_local_bin(path, &home),
         Err(_) => path,
@@ -936,8 +936,8 @@ fn refreshed(
     match probe() {
         Some(path) => cache.replace(path),
         // The fallback holds almost nothing under a service manager. Writing
-        // it over a working PATH would take detection, dictation and `tell`
-        // down until a later probe happened to answer.
+        // it over a working PATH would take detection and dictation down until
+        // a later probe happened to answer.
         None => cache.get(fallback),
     }
 }

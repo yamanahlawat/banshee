@@ -53,10 +53,9 @@ cargo build --release --workspace --exclude banshee-app
 - It carries on when no systemd user bus answers. See "Install on Linux"
   below.
 
-- The VAD tests read `silero_vad.onnx` from `~/.banshee/models/`; run
-  `banshee setup` once before the suite.
-- CI downloads the same file in its own step, and installs `espeak-ng` for the
-  out-of-vocabulary test.
+- The VAD tests read the committed `bansheed/tests/data/silero_vad.onnx`, so
+  plain `cargo test` needs no setup.
+- CI installs `espeak-ng` for the out-of-vocabulary test.
 - The Kokoro tests need the model and two voices, which are too large for CI, so
   they are `#[ignore]`d. Run them on a machine that has them:
 
@@ -147,9 +146,12 @@ make install
 - It builds the release binaries and signs `/Applications/Banshee.app` with
   `banshee-dev`.
 - It symlinks `banshee` and `banshee-mcp-shim` from `~/.cargo/bin` into the
-  bundle, then starts the daemon and the tray launch agents.
-- The bundled binaries sign under `com.banshee.app`, a different identifier
-  from the binary's own, so macOS asks for Accessibility once more.
+  bundle, then registers the daemon and the tray as Login Items through
+  `SMAppService`. Nothing is written to `~/Library/LaunchAgents`.
+- Run `banshee-app --login-items status` to see the registration state.
+- Each bundled program signs under its own identifier: `com.banshee.app` for
+  the window, `com.banshee.app.daemon`, `com.banshee.app.tray` and
+  `com.banshee.app.mcp-shim`. macOS asks for Accessibility once more.
 - A grant only applies to a freshly started process: approve the prompt,
   run `banshee start` again, and repeat until the hotkey earcon plays.
 - After that, the signature never changes and the grant sticks.

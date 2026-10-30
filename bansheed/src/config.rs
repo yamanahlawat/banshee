@@ -445,74 +445,6 @@ impl Default for TTSConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct TellConfig {
-    /// Empty asks Omarchy, then the connected agents.
-    pub agent: String,
-    /// Minutes a saved thread stays resumable.
-    pub thread_timeout_min: u64,
-    /// Minutes before a run is killed rather than waited on. 5 is a stated
-    /// default, not a measurement: no run has yet been timed to a limit.
-    pub run_timeout_min: u64,
-    /// How many snapshots to keep.
-    pub snapshots: usize,
-    /// The folders Banshee copies before a command. An agent that takes a
-    /// folder list gets this one.
-    pub paths: Vec<String>,
-}
-
-const DEFAULT_THREAD_TIMEOUT_MIN: u64 = 10;
-const DEFAULT_RUN_TIMEOUT_MIN: u64 = 5;
-
-impl Default for TellConfig {
-    fn default() -> Self {
-        TellConfig {
-            agent: String::new(),
-            thread_timeout_min: DEFAULT_THREAD_TIMEOUT_MIN,
-            run_timeout_min: DEFAULT_RUN_TIMEOUT_MIN,
-            snapshots: 10,
-            // The list the Omarchy skill names for itself.
-            paths: [
-                "~/.config/hypr",
-                "~/.config/omarchy",
-                "~/.config/alacritty",
-                "~/.config/foot",
-                "~/.config/kitty",
-                "~/.config/ghostty",
-            ]
-            .map(String::from)
-            .to_vec(),
-        }
-    }
-}
-
-impl TellConfig {
-    /// Never zero: a zero would delete the copy the run just took, and
-    /// `banshee tell --undo` would never have one.
-    pub fn keep(&self) -> usize {
-        self.snapshots.max(1)
-    }
-
-    /// A zero deadline kills every run on its first poll, where a user who
-    /// writes one means no limit.
-    pub fn run_minutes(&self) -> u64 {
-        match self.run_timeout_min {
-            0 => DEFAULT_RUN_TIMEOUT_MIN,
-            minutes => minutes,
-        }
-    }
-
-    /// A zero window refuses every thread a second older than the one that
-    /// saved it.
-    pub fn thread_minutes(&self) -> u64 {
-        match self.thread_timeout_min {
-            0 => DEFAULT_THREAD_TIMEOUT_MIN,
-            minutes => minutes,
-        }
-    }
-}
-
 #[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -521,7 +453,6 @@ pub struct Config {
     pub feedback: FeedbackConfig,
     pub stt: STTConfig,
     pub tts: TTSConfig,
-    pub tell: TellConfig,
 }
 
 impl Config {
@@ -570,15 +501,24 @@ impl Config {
         Config::load_from(&Config::path()?)
     }
 
-    /// `path` is the config.toml to read. Names the file in its refusal: toml
-    /// points at the offending line but not at the file it is in, and this
-    /// machine holds two.
-    fn load_from(path: &Path) -> Result<Self, BansheeError> {
+    /// `path` is the config.toml to read. The refusal is one line that names
+    /// the file, the line in it, and toml's message, because this machine holds
+    /// two config files and `banshee status` prints one line.
+    pub(crate) fn load_from(path: &Path) -> Result<Self, BansheeError> {
         let contents = Config::read(path)?;
         Config::parse(&contents).map_err(|error| match error {
-            // Already names the setting and what to do about it
-            BansheeError::Rejected(_) => error,
-            other => BansheeError::Rejected(format!("{} does not parse: {other}", path.display())),
+            BansheeError::Toml(toml) => {
+                let at = toml.span().map_or(String::new(), |span| {
+                    let line = contents[..span.start].matches('\n').count() + 1;
+                    format!(" at line {line}")
+                });
+                BansheeError::Rejected(format!(
+                    "{} does not parse{at}: {}",
+                    path.display(),
+                    toml.message()
+                ))
+            }
+            other => other,
         })
     }
 }
@@ -719,6 +659,16 @@ mod tests {
         assert!(
             error.to_string().contains("logging"),
             "the error must name the offending key: {error}"
+        );
+    }
+
+    #[test]
+    fn an_old_tell_section_is_refused_by_name() {
+        let error = Config::parse("[tell]\nagent = \"claude\"\n")
+            .expect_err("a removed section must not parse");
+        assert!(
+            error.to_string().contains("`tell`"),
+            "the error must name the offending section: {error}"
         );
     }
 
@@ -1065,17 +1015,18 @@ mod tests {
     }
 
     #[test]
-    fn a_config_that_does_not_parse_names_the_file_it_is_in() {
+    fn a_config_that_does_not_parse_names_the_file_and_the_line() {
         let dir = crate::test_support::unique_scratch("config-load");
         let path = dir.join("config.toml");
-        std::fs::write(&path, "[stt]\nlanguage =\n").unwrap();
+        std::fs::write(&path, "# a\n\n[stt]\nlanguage = 5\n").unwrap();
 
-        let error = super::Config::load_from(&path).expect_err("an unfinished value must not load");
-        assert!(
-            error.to_string().contains(&path.display().to_string()),
-            "{error}"
-        );
+        let error =
+            super::Config::load_from(&path).expect_err("a number must not load as a language");
         let _ = std::fs::remove_dir_all(&dir);
+        let error = error.to_string();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains("at line 4:"), "{error}");
+        assert!(!error.contains('\n'), "{error}");
     }
 
     #[test]

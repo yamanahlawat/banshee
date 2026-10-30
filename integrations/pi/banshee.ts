@@ -9,7 +9,6 @@ import path from "node:path";
 const SOCKET_PATH = path.join(os.homedir(), ".banshee", "banshee.sock");
 const BANSHEE_SPEAK = "banshee.speak";
 const BANSHEE_ASK_USER = "banshee.ask_user";
-const BANSHEE_GET_TRANSCRIPTION = "banshee.get_transcription";
 
 const DAEMON_DOWN = "Banshee is not running. Start it with: banshee start";
 // Guards the connect only. Once connected, ask_user legitimately sits idle for
@@ -75,22 +74,7 @@ function errorText(result: any): string {
   return first?.type === "text" ? first.text : "failed";
 }
 
-// Highest transcription id in a get_transcription result, if any.
-function latestId(result: any): number | undefined {
-  const items = result?.transcriptions;
-  if (!Array.isArray(items)) return undefined;
-  let max: number | undefined;
-  for (const item of items) {
-    const id = typeof item?.id === "number" ? item.id : undefined;
-    if (id !== undefined && (max === undefined || id > max)) max = id;
-  }
-  return max;
-}
-
 export default function banshee(pi: ExtensionAPI) {
-  // Ring cursor, primed on session start so listen skips pre-session speech.
-  let lastSeenId = 0;
-
   pi.registerTool({
     name: "speak_status",
     label: "Banshee Speak",
@@ -188,78 +172,5 @@ export default function banshee(pi: ExtensionAPI) {
         0,
       );
     },
-  });
-
-  pi.registerTool({
-    name: "listen_for_prompt",
-    label: "Banshee Listen",
-    description:
-      "Read what the user has said since your last call. Use it to pick up speech you did not explicitly ask for; when you have a question, prefer ask_user, which speaks it and waits in one step. Returns empty text if the user said nothing.",
-    promptSnippet: "Read the user's speech since the last call.",
-    executionMode: "sequential",
-    parameters: Type.Object({
-      timeout_ms: Type.Optional(
-        Type.Number({
-          description:
-            "Wait up to this many milliseconds for new speech before returning, capped at 30000. Defaults to no waiting.",
-        }),
-      ),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const result = await callDaemon(
-        BANSHEE_GET_TRANSCRIPTION,
-        { since_id: lastSeenId, wait_ms: params.timeout_ms ?? 0 },
-        signal,
-      );
-      const id = latestId(result);
-      if (id !== undefined) lastSeenId = Math.max(lastSeenId, id);
-      const items = Array.isArray(result?.transcriptions)
-        ? result.transcriptions
-        : [];
-      const heard = items
-        .filter((item: any) => typeof item?.text === "string")
-        .map((item: any) => item.text)
-        .join("\n")
-        .trim();
-      return {
-        content: [{ type: "text", text: heard || "(nothing new heard)" }],
-        details: { heard },
-      };
-    },
-    renderCall(_args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("listen")), 0, 0);
-    },
-    renderResult(result, _options, theme, context) {
-      if (context.isError) {
-        return new Text(theme.fg("error", errorText(result)), 0, 0);
-      }
-      if (context.isPartial) {
-        return new Text(theme.fg("muted", "listening..."), 0, 0);
-      }
-      const heard = (result.details as { heard?: string })?.heard;
-      if (!heard) {
-        return new Text(theme.fg("warning", "nothing heard"), 0, 0);
-      }
-      return new Text(
-        theme.fg("success", "> ") + theme.fg("accent", heard),
-        0,
-        0,
-      );
-    },
-  });
-
-  pi.on("session_start", async () => {
-    // Skip to the newest transcription so the first listen_for_prompt ignores
-    // anything said before this session.
-    try {
-      const result = await callDaemon(BANSHEE_GET_TRANSCRIPTION, {
-        since_id: 0,
-        wait_ms: 0,
-      });
-      const id = latestId(result);
-      if (id !== undefined) lastSeenId = id;
-    } catch {
-      // Daemon unavailable; cursor stays at 0.
-    }
   });
 }

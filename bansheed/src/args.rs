@@ -14,11 +14,7 @@ pub enum CommandType {
     /// Stops the running daemon
     Stop,
     /// Shows the tray icon now and at every login
-    Tray {
-        /// Stop the icon and remove its start-at-login service
-        #[clap(long)]
-        uninstall: bool,
-    },
+    Tray,
     /// Download required models locally
     Setup,
     /// Reports what Banshee is doing and what stops it working
@@ -45,8 +41,6 @@ pub enum CommandType {
         #[clap(subcommand)]
         action: ConfigAction,
     },
-    /// Gets latest transcription
-    Listen,
     /// Start, stop or toggle push-to-talk recording (for compositor keybinds and scripts)
     Record {
         #[clap(subcommand)]
@@ -54,25 +48,12 @@ pub enum CommandType {
     },
     /// Speaks a message via text-to-speech
     Speak { text: String },
-    /// Sends a command to your coding agent, which changes your desktop
-    Tell {
-        /// What to tell it. Leave it out with --undo.
-        text: Option<String>,
-        /// Put the config folders back as they were before the last command
-        #[clap(long, conflicts_with = "text")]
-        undo: bool,
-    },
     /// List all transcriptions in the database
     History,
     /// Clears all transcriptions in the database
     ClearHistory,
     /// Runs the daemon in the foreground (what the start-at-login service executes)
     Serve,
-    /// Manage the start-at-login service: launchd on macOS, systemd on Linux
-    Service {
-        #[clap(subcommand)]
-        action: ServiceAction,
-    },
     /// Remove Banshee: stops it, takes it out of login, and names what owns the rest
     Uninstall {
         /// Also delete ~/.banshee: the models, the history and the keys
@@ -136,32 +117,20 @@ pub enum ConfigAction {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ServiceAction {
-    /// Stop and remove the launch agent
-    Uninstall,
-}
-
-#[derive(Debug, Subcommand)]
 pub enum RecordAction {
     /// Begin recording (like pressing the hotkey)
     Start {
-        /// Type the transcription into the focused app instead of saving it
-        #[clap(long)]
+        // Binds written by older releases pass it; a recording dictates either way
+        #[clap(long, hide = true)]
         dictate: bool,
-        /// Send the transcription to your coding agent instead of typing it
-        #[clap(long, conflicts_with = "dictate")]
-        tell: bool,
     },
     /// Stop recording and transcribe (like releasing the hotkey)
     Stop,
     /// Start when idle, stop when recording (one key for compositors with no release bind)
     Toggle {
-        /// Type the transcription into the focused app instead of saving it
-        #[clap(long)]
+        // Binds written by older releases pass it; a recording dictates either way
+        #[clap(long, hide = true)]
         dictate: bool,
-        /// Send the transcription to your coding agent instead of typing it
-        #[clap(long, conflicts_with = "dictate")]
-        tell: bool,
     },
 }
 
@@ -177,5 +146,13 @@ mod tests {
             .expect("events alone must parse");
         Cli::try_parse_from(["banshee", "watch", "--waybar", "--events", "cues"])
             .expect_err("waybar and events together must be refused");
+    }
+
+    #[test]
+    fn a_record_bind_that_passes_dictate_still_parses() {
+        for action in ["start", "toggle"] {
+            Cli::try_parse_from(["banshee", "record", action, "--dictate"])
+                .unwrap_or_else(|error| panic!("record {action} --dictate: {error}"));
+        }
     }
 }

@@ -28,7 +28,6 @@ describe('plan', () => {
     const w = plan(10, at(Array(10).fill(60)), 64, 10000, 200, 2);
     expect(w.end).toBe(10);
     expect(w.bottom).toBe(0);
-    expect(w.top + [w.start, w.end].length).toBeGreaterThan(0);
   });
 
   it('reads unknown rows as the estimate', () => {

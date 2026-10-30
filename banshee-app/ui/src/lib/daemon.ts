@@ -59,7 +59,6 @@ export type Live = {
   /// A Whisper file being read off disk. The listener answers on the model it
   /// still holds while this runs, so it is work and not a stop.
   loading_model: boolean;
-  telling: boolean;
   audio_device: string | null;
   missing_device: string | null;
   last_error: string | null;
@@ -102,7 +101,6 @@ export function empty(): Daemon {
       armed: false,
       transcribing: false,
       loading_model: false,
-      telling: false,
       audio_device: null,
       missing_device: null,
       last_error: null,

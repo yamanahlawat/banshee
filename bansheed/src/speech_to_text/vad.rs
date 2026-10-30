@@ -20,9 +20,11 @@ pub struct VADEngine {
 
 impl VADEngine {
     pub fn new(vad_config: SileroVADConfig) -> Result<Self, BansheeError> {
-        let vad_model_path = crate::models::model_path(&vad_config.model_name)?;
-        let session =
-            crate::models::onnx_session(&vad_model_path, crate::models::VAD_THREADS, &[])?;
+        Self::open(&crate::models::model_path(&vad_config.model_name)?)
+    }
+
+    pub fn open(model: &std::path::Path) -> Result<Self, BansheeError> {
+        let session = crate::models::onnx_session(model, crate::models::VAD_THREADS, &[])?;
 
         let state = ndarray::Array3::<f32>::zeros(STATE_SHAPE);
         let context = vec![0.0f32; CONTEXT_SIZE];
@@ -116,7 +118,7 @@ mod tests {
     #[test]
     fn detects_speech_in_tts_audio() {
         let samples = test_speech();
-        let mut vad = VADEngine::new(SileroVADConfig::new("silero_vad.onnx")).unwrap();
+        let mut vad = VADEngine::open(&crate::test_support::silero()).unwrap();
 
         let mut speech = 0;
         let mut total = 0;
@@ -142,7 +144,7 @@ mod tests {
 
     #[test]
     fn a_chunk_that_is_not_the_model_size_is_refused() {
-        let mut vad = VADEngine::new(SileroVADConfig::new("silero_vad.onnx")).unwrap();
+        let mut vad = VADEngine::open(&crate::test_support::silero()).unwrap();
         let error = vad.check_speech(&[0.0f32; 256], 16000).unwrap_err();
         assert!(
             error.to_string().contains(&VAD_CHUNK.to_string()),
@@ -153,7 +155,7 @@ mod tests {
     #[test]
     fn rejects_silence() {
         let silence = vec![0.0f32; VAD_CHUNK * 20];
-        let mut vad = VADEngine::new(SileroVADConfig::new("silero_vad.onnx")).unwrap();
+        let mut vad = VADEngine::open(&crate::test_support::silero()).unwrap();
 
         for chunk in silence.chunks(VAD_CHUNK) {
             let p = vad.check_speech(chunk, 16000).unwrap();

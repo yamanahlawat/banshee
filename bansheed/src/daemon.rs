@@ -118,7 +118,8 @@ fn start_recording(
     })
 }
 
-pub async fn start(config: Config) -> Result<(), BansheeError> {
+/// Returns the status the process exits with.
+pub async fn start(config: Config) -> Result<u8, BansheeError> {
     let config = Arc::new(config);
     let (socket_path, listener, _lock) = claim()?;
     permissions::ask_for_accessibility();
@@ -163,10 +164,7 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         },
         {
             let state = Arc::clone(&daemon_state);
-            move || {
-                state.request_restart();
-                state.shutdown().notify_one();
-            }
+            move || state.leave_to_restart()
         },
     );
 
@@ -236,12 +234,7 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
         let _ = consumer_thread.join();
     }
     result?;
-    if daemon_state.restart_wanted() {
-        return Err(BansheeError::Other(
-            "the Accessibility grant landed; starting again to pick it up".to_string(),
-        ));
-    }
-    Ok(())
+    Ok(daemon_state.exit_code())
 }
 
 pub async fn run(
@@ -375,10 +368,9 @@ struct StateWatches {
     playing: watch::Receiver<Option<u64>>,
     transcribing: watch::Receiver<bool>,
     loading_model: watch::Receiver<bool>,
-    telling: watch::Receiver<bool>,
     devices: watch::Receiver<u64>,
     pipeline: watch::Receiver<crate::state::Pipeline>,
-    last_error: watch::Receiver<Option<crate::state::Failed>>,
+    last_error: watch::Receiver<Option<String>>,
     last_speech_error: watch::Receiver<Option<String>>,
     feedback: watch::Receiver<crate::config::FeedbackMode>,
 }
@@ -399,7 +391,6 @@ async fn push_changes(
             woken = watches.playing.changed() => woken,
             woken = watches.transcribing.changed() => woken,
             woken = watches.loading_model.changed() => woken,
-            woken = watches.telling.changed() => woken,
             woken = watches.devices.changed() => woken,
             woken = watches.pipeline.changed() => woken,
             woken = watches.last_error.changed() => woken,
@@ -478,7 +469,6 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
                     playing: state.speech().subscribe_playing(),
                     transcribing: state.subscribe_transcribing(),
                     loading_model: state.subscribe_loading_model(),
-                    telling: state.subscribe_telling(),
                     devices: state.device_changes(),
                     pipeline: state.subscribe_pipeline(),
                     last_error: state.subscribe_last_error(),

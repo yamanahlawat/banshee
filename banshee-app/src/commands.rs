@@ -46,6 +46,17 @@ impl Daemon {
         let mut client = self.client.lock().await;
         retrying(path, &mut client, body).await
     }
+
+    /// Asks the daemon to restart, then drops the connection. The daemon keeps
+    /// answering on it until it exits, so the next call has to reach the new one.
+    #[cfg(target_os = "macos")]
+    async fn restart(&self) -> Result<(), CommandError> {
+        let path = self.path_or_error()?;
+        let mut client = self.client.lock().await;
+        retrying(path, &mut client, |client| Box::pin(calls::restart(client))).await?;
+        *client = None;
+        Ok(())
+    }
 }
 
 impl Default for Daemon {
@@ -54,10 +65,11 @@ impl Default for Daemon {
     }
 }
 
-/// True only for a connection that died before the request left the client.
-/// A request the daemon received may already have run, so a replay could
-/// speak a preview twice or rewrite an agent's config twice.
-fn is_safe_to_retry(error: &CommandError) -> bool {
+/// True only for a connection that died before the request left the client,
+/// which is the only failure safe to retry. A request the daemon received may
+/// already have run, so a replay could speak a preview twice or rewrite an
+/// agent's config twice.
+fn never_reached_the_daemon(error: &CommandError) -> bool {
     error.transport && !error.sent
 }
 
@@ -105,7 +117,7 @@ pub async fn retrying<T>(
     match body(client).await {
         Err(error) if error.transport => {
             *slot = None;
-            if !is_safe_to_retry(&error) {
+            if !never_reached_the_daemon(&error) {
                 return Err(error);
             }
             body(force_reconnect(slot, path).await?).await
@@ -116,7 +128,7 @@ pub async fn retrying<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Daemon, is_safe_to_retry};
+    use super::{Daemon, never_reached_the_daemon};
     use crate::calls::CommandError;
     use crate::socket::{RpcError, SOCKET_CLOSED};
     use banshee_common::rpc_code;
@@ -128,6 +140,42 @@ mod tests {
             path: path.map(PathBuf::from),
             client: Mutex::new(None),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_restart_lets_go_of_the_daemon_that_is_leaving() {
+        use banshee_common::{BANSHEE_RESTART, JsonRpcRequest, JsonRpcResponse};
+        use std::io::{BufRead, BufReader, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("banshee.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // Returns the stream unclosed: a daemon on its way out still answers on it.
+        let leaving = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: JsonRpcRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(request.method, BANSHEE_RESTART);
+            let reply = JsonRpcResponse::success(request.id, serde_json::json!({"ok": true}));
+            writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+            stream
+        });
+        let daemon = Daemon {
+            path: Some(path),
+            client: Mutex::new(None),
+        };
+
+        daemon.restart().await.unwrap();
+
+        assert!(
+            daemon.client.lock().await.is_none(),
+            "the next call must reach the daemon launchd starts, not this one"
+        );
+        drop(leaving.join().unwrap());
     }
 
     #[test]
@@ -164,7 +212,7 @@ mod tests {
     fn a_request_that_never_left_the_client_is_safe_to_send_again() {
         // The write side fails first on a restart, and the operating system
         // names that one itself.
-        assert!(is_safe_to_retry(&from_socket(
+        assert!(never_reached_the_daemon(&from_socket(
             -32000,
             "Broken pipe (os error 32)",
             true,
@@ -176,7 +224,7 @@ mod tests {
     fn a_request_the_daemon_may_have_run_is_never_replayed() {
         // An EOF while waiting for the reply: the daemon held the request and
         // may have acted on it before it died.
-        assert!(!is_safe_to_retry(&from_socket(
+        assert!(!never_reached_the_daemon(&from_socket(
             -32000,
             SOCKET_CLOSED,
             true,
@@ -186,7 +234,7 @@ mod tests {
 
     #[test]
     fn a_refusal_the_daemon_wrote_is_never_a_dead_connection() {
-        assert!(!is_safe_to_retry(&from_socket(
+        assert!(!never_reached_the_daemon(&from_socket(
             rpc_code::INVALID_PARAMS,
             "Disconnect is not available yet.",
             false,
@@ -194,7 +242,7 @@ mod tests {
         )));
         // The daemon writes `-32000` for its own refusals too, so the code
         // alone must not decide this.
-        assert!(!is_safe_to_retry(&from_socket(
+        assert!(!never_reached_the_daemon(&from_socket(
             -32000,
             "Microphone unavailable.",
             false,
@@ -400,35 +448,10 @@ pub fn run_cli(subcommand: &str) -> Result<(), CommandError> {
     Err(failed(format!("banshee {subcommand} did not finish")))
 }
 
-/// Starts one login job. Without `replace`, kickstart leaves a job that already
-/// runs alone, so a daemon part-way through loading its models survives it;
-/// with it, the running job is torn down and started again, which is the only
-/// thing that clears a pipeline that died at startup.
-///
-/// It fails when the job was never bootstrapped, and the subcommand that
-/// installs it runs only then, because installing tears a running job down.
-#[cfg(target_os = "macos")]
-fn kickstart(label: &str, install: &str, replace: bool) -> Result<(), CommandError> {
-    let target = utils::launchd_target(label);
-    let mut args = vec!["kickstart"];
-    if replace {
-        args.push("-k");
-    }
-    args.push(&target);
-    let started = std::process::Command::new("launchctl")
-        .args(&args)
-        .status()
-        .map_err(|error| failed(error.to_string()))?;
-    if started.success() {
-        return Ok(());
-    }
-    run_cli(install)
-}
-
-/// The systemd arm. `start` leaves a running unit alone and `restart` tears it
-/// down, which is what `replace` means on launchd. Any failure falls through to
-/// the CLI: the label may name a unit nobody wrote yet, such as a fresh
-/// install where `banshee start` has not run.
+/// Starts one systemd unit. Without `replace`, `start` leaves a running unit
+/// alone; with it, `restart` tears the unit down first. Any failure falls
+/// through to the CLI: the label may name a unit nobody wrote yet, such as a
+/// fresh install where `banshee start` has not run.
 #[cfg(not(target_os = "macos"))]
 fn kickstart(label: &str, install: &str, replace: bool) -> Result<(), CommandError> {
     if let Some(args) = systemctl_args(label, replace) {
@@ -453,21 +476,54 @@ fn systemctl_args(label: &str, replace: bool) -> Option<Vec<String>> {
 }
 
 /// Puts the menu bar icon up. Not a second copy of the binary, which the
-/// icon's own lock refuses while launchd keeps retrying it.
+/// icon's own lock refuses while its supervisor keeps retrying it.
+#[cfg(target_os = "macos")]
+pub fn open_the_tray() -> Result<(), CommandError> {
+    crate::login_items::keep_the_tray_running().map_err(failed)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn open_the_tray() -> Result<(), CommandError> {
     kickstart(utils::TRAY_AGENT, "tray", false)
 }
 
-// `banshee start` waits on launchd, so running it on a worker thread would
-// hold that thread and stall every other command the window sends.
+#[cfg(target_os = "macos")]
+fn start_the_daemon() -> Result<(), CommandError> {
+    run_cli("start")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_the_daemon() -> Result<(), CommandError> {
+    kickstart(utils::DAEMON_AGENT, "start", false)
+}
+
+// `banshee start` waits on the service manager, so running it on a worker
+// thread would hold that thread and stall every other command the window sends.
 #[tauri::command]
 pub async fn start_daemon() -> Result<(), CommandError> {
-    tauri::async_runtime::spawn_blocking(|| kickstart(utils::DAEMON_AGENT, "start", false))
+    tauri::async_runtime::spawn_blocking(start_the_daemon)
         .await
         .map_err(|error| failed(error.to_string()))?
 }
 
+/// A setting the daemon reads once, and a pipeline dead at startup, both need
+/// the process renewed. The daemon answers, then exits for launchd to start it
+/// again; with no daemon to answer, `banshee start` brings one up.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn restart_daemon(daemon: State<'_, Daemon>) -> Result<(), CommandError> {
+    match daemon.restart().await {
+        Err(error) if never_reached_the_daemon(&error) => {
+            tauri::async_runtime::spawn_blocking(start_the_daemon)
+                .await
+                .map_err(|error| failed(error.to_string()))?
+        }
+        other => other,
+    }
+}
+
 /// A setting the daemon reads once, and a pipeline dead at startup, both need the process renewed.
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 pub async fn restart_daemon() -> Result<(), CommandError> {
     tauri::async_runtime::spawn_blocking(|| kickstart(utils::DAEMON_AGENT, "start", true))

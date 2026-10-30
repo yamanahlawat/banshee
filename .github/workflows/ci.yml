@@ -26,14 +26,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
-      # The VAD tests exercise the real Silero model (2 MB), same source as banshee
-      # setup. Pinned to a commit and checked: `master` can change the test input
-      # without a change in this repository.
-      - run: |
-          mkdir -p ~/.banshee/models
-          curl -fsSL -o ~/.banshee/models/silero_vad.onnx \
-            https://github.com/snakers4/silero-vad/raw/bfdc0193023f121ea5b3cc7b176dbed570a68a59/src/silero_vad/data/silero_vad.onnx
-          echo "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3  $HOME/.banshee/models/silero_vad.onnx" | shasum -a 256 -c -
       - run: cargo test
 
   # The release publishes the cask only after `brew style` passes on it, so the
@@ -100,12 +92,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # rustfmt reads no platform, so one job gates the whole workspace.
       - run: cargo fmt --all --check
-      # The same pinned model the macos job checks; see the reason there.
-      - run: |
-          mkdir -p ~/.banshee/models
-          curl -fsSL -o ~/.banshee/models/silero_vad.onnx \
-            https://github.com/snakers4/silero-vad/raw/bfdc0193023f121ea5b3cc7b176dbed570a68a59/src/silero_vad/data/silero_vad.onnx
-          echo "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3  $HOME/.banshee/models/silero_vad.onnx" | sha256sum -c -
       # The window builds in `linux-window`, which carries the WebKitGTK stack.
       # This job runs the daemon's own suite, which no job ran on Linux before.
       - run: cargo clippy --workspace --all-targets --exclude banshee-app -- -D warnings

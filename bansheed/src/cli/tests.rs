@@ -135,37 +135,38 @@ fn device(name: &str, default: bool) -> InputDevice {
 }
 
 #[test]
-fn the_recording_device_carries_both_labels_when_it_is_also_the_preference() {
-    assert_eq!(
-        super::device_labels(&device("Blue Yeti", true), Some("Blue Yeti")),
-        "system default, in use"
-    );
-}
+fn a_device_carries_a_label_for_each_thing_that_points_at_it() {
+    let cases = [
+        (
+            "both",
+            device("Blue Yeti", true),
+            Some("Blue Yeti"),
+            "system default, in use",
+        ),
+        (
+            "the daemon passed it over",
+            device("Built-in", true),
+            Some("Blue Yeti"),
+            "system default",
+        ),
+        (
+            "only in use",
+            device("Blue Yeti", false),
+            Some("Blue Yeti"),
+            "in use",
+        ),
+        ("nothing points at it", device("BlackHole", false), None, ""),
+        (
+            "no daemon: a device nobody opened must not read as recording",
+            device("Built-in", true),
+            None,
+            "system default",
+        ),
+    ];
 
-#[test]
-fn a_device_the_daemon_passed_over_keeps_its_preference_label() {
-    assert_eq!(
-        super::device_labels(&device("Built-in", true), Some("Blue Yeti")),
-        "system default"
-    );
-    assert_eq!(
-        super::device_labels(&device("Blue Yeti", false), Some("Blue Yeti")),
-        "in use"
-    );
-}
-
-#[test]
-fn a_device_nothing_points_at_carries_no_label() {
-    assert_eq!(super::device_labels(&device("BlackHole", false), None), "");
-}
-
-#[test]
-fn no_daemon_means_no_in_use_label_even_for_the_preference() {
-    assert_eq!(
-        super::device_labels(&device("Built-in", true), None),
-        "system default",
-        "a device nobody opened must not read as recording"
-    );
+    for (name, device, current, labels) in cases {
+        assert_eq!(super::device_labels(&device, current), labels, "{name}");
+    }
 }
 
 // The prompt cannot say "remove it", so an empty answer must not be read as one
@@ -265,10 +266,10 @@ fn a_failed_download_ends_the_wait_and_is_named_in_the_error() {
 
 #[test]
 fn a_rejection_reads_as_the_daemon_wrote_it() {
-    let error = BansheeError::Rejected("say what to tell it, or pass --undo".into());
+    let error = BansheeError::Rejected("'stt.preset' needs a value".into());
     assert_eq!(
         failure_line(&error),
-        "say what to tell it, or pass --undo",
+        "'stt.preset' needs a value",
         "the caller's own mistake needs no wrapper and no Debug form"
     );
 }
@@ -315,11 +316,11 @@ fn a_missing_model_is_named_beside_the_command_that_fetches_it() {
         note.contains("banshee setup"),
         "the line must name the command that downloads: {note}"
     );
-}
-
-#[test]
-fn nothing_is_said_when_every_model_is_on_disk() {
-    assert_eq!(super::missing_models_note(&[]), None);
+    assert_eq!(
+        super::missing_models_note(&[]),
+        None,
+        "nothing is said when every model is on disk"
+    );
 }
 
 #[test]
@@ -329,11 +330,11 @@ fn a_file_that_arrived_through_a_running_daemon_names_the_restart() {
         note.contains("banshee start"),
         "the line must name the command that reloads: {note}"
     );
-}
-
-#[test]
-fn a_run_that_fetched_nothing_asks_for_no_restart() {
-    assert_eq!(super::restart_note(0), None);
+    assert_eq!(
+        super::restart_note(0),
+        None,
+        "a run that fetched nothing asks for no restart"
+    );
 }
 
 // Both halves of what an orphaned socket answers with: nothing at all, and a

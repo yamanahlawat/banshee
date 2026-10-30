@@ -1154,6 +1154,14 @@ fn a_command_renders_as_one_quoted_line() {
 }
 
 #[test]
+fn a_word_holding_a_quote_stays_one_word() {
+    assert_eq!(
+        shell_word("/home/ada's box/bin/banshee"),
+        "'/home/ada'\\''s box/bin/banshee'"
+    );
+}
+
+#[test]
 fn a_new_file_renders_every_line_as_added() {
     let change = Change::WriteFile {
         path: PathBuf::from("/h/.codex/hooks.json"),

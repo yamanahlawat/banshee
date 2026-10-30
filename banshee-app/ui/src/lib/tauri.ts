@@ -93,9 +93,8 @@ export function copyText(text: string): Promise<void> {
 export function startDaemon(): Promise<void> {
   return call('start_daemon');
 }
-/// Replaces the running daemon. `startDaemon` leaves one that is already up,
-/// which is right for a daemon that has stopped and useless for one whose
-/// pipeline died at startup.
+/// Replaces the running daemon, which a pipeline that died at startup needs.
+/// `startDaemon` is for a daemon that is down.
 export function restartDaemon(): Promise<void> {
   return call('restart_daemon');
 }

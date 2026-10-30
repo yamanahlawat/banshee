@@ -6,6 +6,10 @@ use crate::history::TranscriptionHistory;
 use crate::state::{ConsumerCommand, DaemonState};
 use crate::text_to_speech::{ActiveUtterance, Speaker, SpeechPlayer, TtsBackend};
 
+pub fn silero() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/silero_vad.onnx")
+}
+
 /// Reads one HTTP request off a loopback stream: the head, then as many body
 /// bytes as its Content-Length names, and none when it names no length.
 pub fn read_request(stream: &mut std::net::TcpStream) -> String {
@@ -227,10 +231,6 @@ impl TtsBackend for SpeakingBackend {
 /// A daemon state that keeps every line it was asked to speak. A queued line
 /// reaches the backend from the watcher thread, so a test waits for it rather
 /// than reading the list at once.
-pub fn daemon_state_recording_speech() -> (Arc<DaemonState>, SpokenLines) {
-    daemon_state_recording_speech_for(std::sync::mpsc::channel().0)
-}
-
 pub fn daemon_state_recording_speech_for(
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
 ) -> (Arc<DaemonState>, SpokenLines) {

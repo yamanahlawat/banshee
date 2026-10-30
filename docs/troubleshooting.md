@@ -4,10 +4,15 @@ This page lists what breaks, and the fix.
 
 - Start with `banshee status`; it catches most setup problems and names the
   fix.
-- The daemon logs to `~/.banshee/daemon.log`. Every line carries a clock and a
+- On macOS the daemon logs to `~/Library/Logs/com.banshee.app/daemon.log`, and
+  the tray to `tray.log` in the same folder. Console.app shows both under Log
+  Reports. `banshee status` prints the path. On
+  Linux, run `journalctl --user -u banshee`. Every line carries a clock and a
   level.
-- `BANSHEE_LOG=debug banshee start` adds what Banshee heard and typed. Plain
-  `banshee start` goes back to the default.
+- `BANSHEE_LOG=debug banshee serve` adds what Banshee heard and typed. Stop
+  Banshee first; on macOS the background daemon ignores `BANSHEE_LOG`.
+- On macOS, if `banshee status` says Banshee is switched off, turn it on in
+  System Settings > General > Login Items.
 - Run `banshee serve` in the foreground to watch it work.
 
 - **The microphone looks dead: you record, and nothing ever comes back.**
@@ -43,7 +48,7 @@ This page lists what breaks, and the fix.
   - Banshee asks an interactive login shell first, so a directory that only
     `.zshrc` or `.bashrc` adds still counts. An npm or nvm install is the
     common case.
-  - `~/.banshee/daemon.log` names the PATH the search used, and names every
+  - The daemon log names the PATH the search used, and names every
     probe that failed with what the shell printed.
   - If the log shows a probe that timed out, your profile is slow. Move the
     PATH line to `.zshenv` on zsh, or `.profile` on bash, where a plain login

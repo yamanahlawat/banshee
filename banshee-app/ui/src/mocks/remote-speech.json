@@ -80,20 +80,6 @@
       "voice": "af_sky",
       "speed": 1.0,
       "fallback": "system"
-    },
-    "tell": {
-      "agent": "",
-      "thread_timeout_min": 10,
-      "run_timeout_min": 5,
-      "snapshots": 10,
-      "paths": [
-        "~/.config/hypr",
-        "~/.config/omarchy",
-        "~/.config/alacritty",
-        "~/.config/foot",
-        "~/.config/kitty",
-        "~/.config/ghostty"
-      ]
     }
   },
   "pending": [],
@@ -113,7 +99,6 @@
     }
   },
   "key_press_access": "granted",
-  "telling": false,
   "activity": "idle",
   "hotkey_listens": true
 }

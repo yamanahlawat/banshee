@@ -79,11 +79,6 @@ describe('the state word', () => {
     expect(stateWord(state)).toBe('Working');
     expect(lampForm('Working')).toBe('busy');
   });
-  it('is Working while an agent a tell started still runs', () => {
-    const state = reduceLive(reduceStatus(empty(), ready), { telling: true, activity: 'busy' });
-    expect(stateWord(state)).toBe('Working');
-    expect(lampForm('Working')).toBe('busy');
-  });
   // Which flag outranks which is `Activity::of`, tested in banshee-common.
   it.each([
     ['listening', 'Listening'],
@@ -95,7 +90,7 @@ describe('the state word', () => {
       activity: said,
       recording: true,
       armed: true,
-      telling: true,
+      loading_model: true,
       transcribing: true,
       speaking: true,
     });

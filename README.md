@@ -10,19 +10,14 @@
 - Whisper, Kokoro and Silero run inside Banshee. Nothing to host, no account.
 - Words leave your laptop only with a remote listener or voice you set. The tray and `banshee status` say so.
 - Also a dictation tool: hold a hotkey, speak. The text lands in the app you are focused on.
-- Tell it to change your desktop: `banshee tell "make the window gaps bigger"` hands your words to your coding agent.
 
 ## Demo
-
-<https://github.com/user-attachments/assets/7ec3eaa1-33d6-4cdd-8e5b-10ae11871918>
-
-On Omarchy, one spoken request sets the desktop up for a recording: no screen lock, no top bar, no window gaps. A second request puts the gaps back, and `show me` opens the diffs.
 
 <https://github.com/user-attachments/assets/b60f2c32-19cc-4da2-a0e2-463ecb9d56c8>
 
 On macOS, Claude Code makes a weather CLI work offline. It plans out loud, takes a spoken correction, then asks about the review findings and the commit. Every answer is spoken. Nothing was typed.
 
-[More demos](docs/demos.md): a focus mode built by voice on Omarchy, and a bug in Banshee fixed by voice on macOS.
+[More demos](docs/demos.md): a bug in Banshee fixed by voice on macOS.
 
 ## Quickstart on Linux
 
@@ -117,13 +112,12 @@ banshee connect pi          # Pi: the native extension
 }
 ```
 
-It exposes three tools:
+It exposes two tools:
 
 | Tool                | What the agent does with it                                       |
 | ------------------- | ----------------------------------------------------------------- |
 | `speak_status`      | Say something aloud, for decisions made and work finished         |
 | `ask_user`          | Ask a question aloud, then wait for and return your spoken answer |
-| `listen_for_prompt` | Pick up anything you've said since it last checked                |
 
 ## The keys
 
@@ -132,12 +126,9 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 |                       | Linux, on Hyprland | macOS                    | What happens                                            |
 | --------------------- | ------------------ | ------------------------ | ------------------------------------------------------- |
 | **Dictate**           | `F9`               | `Right Option`           | The text is typed into the app you are focused on.      |
-| **Tell your agent**   | `Super` + `F9`     | `banshee tell "..."`     | Your agent changes your desktop, and speaks the result. |
-| **Keep, do not type** | `Shift` + `F9`     | `Shift` + `Right Option` | `banshee listen` prints it.                             |
 
-- **The key is yours.** On Linux, `banshee bind hyprland` asks for it. On macOS, run `banshee config set audio.hotkey LeftOption`, then `banshee start`. The [Linux demo videos](docs/demos.md) use `F5`.
+- **The key is yours.** On Linux, `banshee bind hyprland` asks for it. On macOS, run `banshee config set audio.hotkey LeftOption`, then `banshee start`.
 - **Hold the key** while you speak, or [tap it instead](docs/configuration.md#the-hotkey).
-- **Tell takes the first free modifier,** so a key that already holds `Super` gets `Ctrl` instead. [What tell does](docs/cli.md#telling-your-agent-to-change-the-desktop)
 
 ## Use it
 
@@ -153,7 +144,7 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 |:----:|:---------:|:----:|:--------:|:---------------:|:-----------:|
 | <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/busy.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/listening.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
 
-- Busy means Banshee transcribes what you said, or the agent a `banshee tell` started still runs.
+- Busy means Banshee transcribes what you said.
 - Waiting for you means an agent asked a question and holds for your answer.
 - The states differ by shape, never by colour alone, and macOS tints the template image.
 

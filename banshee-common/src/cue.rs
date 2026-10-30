@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Target {
     Dictate,
-    Mailbox,
-    Tell,
     Answer,
 }
 
@@ -27,8 +25,6 @@ pub enum ReasonCode {
     Starting,
     PipelineBroken,
     SpeechFailed,
-    TellFailed,
-    TellWarned,
 }
 
 /// `text` is what every client shows.
@@ -53,8 +49,6 @@ impl Reason {
             ReasonCode::Starting => "Banshee is still starting".to_string(),
             ReasonCode::PipelineBroken => "Banshee cannot record".to_string(),
             ReasonCode::SpeechFailed => "The reply did not play".to_string(),
-            ReasonCode::TellFailed => "The agent run failed".to_string(),
-            ReasonCode::TellWarned => "The agent did not answer".to_string(),
         };
         Reason { code, text }
     }
@@ -83,7 +77,6 @@ pub enum Signal {
     Answered {
         heard: bool,
     },
-    Told,
     Cancelled {
         target: Target,
     },
@@ -104,9 +97,9 @@ mod tests {
                 },
             ),
             (
-                r#"{"cue":"ready","target":"mailbox"}"#,
+                r#"{"cue":"ready","target":"dictate"}"#,
                 Signal::Ready {
-                    target: Target::Mailbox,
+                    target: Target::Dictate,
                 },
             ),
             (
@@ -135,7 +128,6 @@ mod tests {
             ),
             (r#"{"cue":"arm"}"#, Signal::Arm),
             (r#"{"cue":"disarm"}"#, Signal::Disarm),
-            (r#"{"cue":"told"}"#, Signal::Told),
             (r#"{"cue":"onset"}"#, Signal::Onset),
             (
                 r#"{"cue":"cancelled","target":"dictate"}"#,
@@ -155,13 +147,13 @@ mod tests {
 
     #[test]
     fn every_signal_survives_the_wire() {
-        let reason = Reason::new(ReasonCode::TellWarned, None);
+        let reason = Reason::new(ReasonCode::TypeFailed, None);
         for signal in [
             Signal::RecordStart {
                 target: Target::Answer,
             },
             Signal::RecordStop {
-                target: Target::Tell,
+                target: Target::Dictate,
             },
             Signal::Ready {
                 target: Target::Dictate,
@@ -172,14 +164,13 @@ mod tests {
             },
             Signal::Error {
                 reason,
-                target: Some(Target::Tell),
+                target: Some(Target::Dictate),
             },
             Signal::Arm,
             Signal::Disarm,
             Signal::Answered { heard: false },
-            Signal::Told,
             Signal::Cancelled {
-                target: Target::Mailbox,
+                target: Target::Dictate,
             },
             Signal::Onset,
         ] {

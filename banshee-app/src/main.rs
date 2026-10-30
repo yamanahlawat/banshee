@@ -12,7 +12,22 @@ fn start_the_icon() {
     });
 }
 
+#[cfg(target_os = "macos")]
+fn login_items(request: &[String]) -> i32 {
+    banshee_app::login_items::run(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn login_items(_request: &[String]) -> i32 {
+    eprintln!("banshee-app: --login-items is macOS only");
+    2
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|flag| flag == "--login-items") {
+        std::process::exit(login_items(&args[1..]));
+    }
     tauri::Builder::default()
         // The tray opens the window by running this binary, so a second press
         // starts a second process. That one hands the window over and exits.

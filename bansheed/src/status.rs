@@ -26,12 +26,8 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             let path = utils::config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "config.toml".to_string());
-            // First line only: toml's diagnostic runs five lines with a caret,
-            // and `main` has already printed it in full
-            let reason = e.to_string();
-            let reason = reason.lines().next().unwrap_or("could not be read");
             healthy &= fail(
-                &format!("config.toml invalid: {reason}"),
+                &invalid_config_line(&e),
                 &format!("edit {path}, or delete it to use defaults"),
             );
             Config::default()
@@ -135,17 +131,35 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         }
     }
 
-    report_tell(&config);
+    #[cfg(target_os = "macos")]
+    {
+        use banshee_common::utils::Registration;
 
+        use crate::service::Agent;
+
+        match crate::service::registration(Agent::Daemon) {
+            Ok(Registration::Enabled) => note("the daemon starts at login"),
+            Ok(Registration::RequiresApproval) => {
+                note(&crate::service::awaits_approval(Agent::Daemon))
+            }
+            Ok(Registration::NotRegistered | Registration::NotFound) => {
+                note("the daemon does not start at login (start it with: banshee start)")
+            }
+            Err(error) => note(&format!("could not read the login items: {error}")),
+        }
+        if let Ok(follow) = crate::service::follow_the_log(Agent::Daemon) {
+            note(&format!("daemon log: {follow}"));
+        }
+        if let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) {
+            note(&format!("running from {}", install_shape(&exe)));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(service) = crate::service::service_file_path() {
         if service.exists() {
             note("start-at-login service installed");
         } else {
             note("no start-at-login service (install with: banshee start)");
-        }
-        #[cfg(target_os = "macos")]
-        if let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) {
-            note(&format!("running from {}", install_shape(&exe)));
         }
     }
 
@@ -170,54 +184,6 @@ fn check_credentials_mode() -> bool {
             &format!("run: chmod 600 {}", path.display()),
         ),
         None => true,
-    }
-}
-
-/// What `banshee tell` would run. A note and never a failure: a machine with
-/// no headless agent still records, types and speaks.
-fn report_tell(config: &Config) {
-    // The same call `tell` makes, so the checklist cannot name one agent while
-    // a command runs another.
-    let agent = crate::connect::Env::from_machine()
-        .and_then(|env| crate::tell::resolved_agent(&config.tell, &env, &env.home));
-    let found = agent.is_ok();
-    note(&tell_line(agent));
-    if let Some(line) = silent_tell_line(found, config.feedback_mode()) {
-        note(line);
-    }
-}
-
-/// The note for a mode where a failed tell makes no sound: `none`, and `visual`
-/// on macOS, where the figure shows the failure.
-fn silent_tell_line(agent_found: bool, mode: crate::config::FeedbackMode) -> Option<&'static str> {
-    if !agent_found {
-        return None;
-    }
-    match mode {
-        crate::config::FeedbackMode::Off => Some(
-            "feedback is none, so a failed tell makes no sound; \
-             run banshee config set feedback.mode sound to hear it",
-        ),
-        crate::config::FeedbackMode::Visual if cfg!(target_os = "macos") => Some(
-            "feedback is visual, so a failed tell makes no sound while the menu bar icon \
-             draws the figure; the figure shows the failure instead",
-        ),
-        _ => None,
-    }
-}
-
-/// The failure carries its own fix, so this adds none.
-fn tell_line(agent: Result<crate::tell::Headless, BansheeError>) -> String {
-    match agent {
-        Ok(agent) if agent.scoped() => format!(
-            "tell runs {}, and it gets the folders in tell.paths, and its own run directory",
-            agent.name()
-        ),
-        Ok(agent) => format!(
-            "tell runs {}, which takes no folder list, so it can edit any file",
-            agent.name()
-        ),
-        Err(reason) => format!("tell has no agent: {reason}"),
     }
 }
 
@@ -781,8 +747,8 @@ fn settings_voice(config: &Config, tts_remote: bool) -> &str {
     }
 }
 
-/// Names no producer: four paths write `last_error`, and naming one lies about
-/// the other three.
+/// Names no producer: several paths write `last_error`, and naming one lies
+/// about the others.
 fn last_error_line(error: &str) -> String {
     format!("the last attempt failed: {error}")
 }
@@ -817,6 +783,10 @@ fn install_shape(exe: &std::path::Path) -> &'static str {
     } else {
         "a loose binary"
     }
+}
+
+fn invalid_config_line(error: &BansheeError) -> String {
+    format!("config.toml invalid: {error}")
 }
 
 fn pass(msg: &str) -> bool {

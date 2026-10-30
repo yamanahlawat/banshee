@@ -156,7 +156,7 @@ fn archivo() -> Option<CFRetained<CTFont>> {
 
 fn words_font() -> Option<CFRetained<CTFont>> {
     archivo().or_else(|| {
-        eprintln!("banshee-tray: Archivo did not load; the chip's words use the system font");
+        log::warn!("Archivo did not load; the chip's words use the system font");
         // SAFETY: no language means the user's own.
         unsafe {
             CTFont::new_ui_font_for_language(CTFontUIFontType::EmphasizedSystem, WORDS_SIZE, None)
@@ -1276,7 +1276,7 @@ mod tests {
 
     #[test]
     fn done_leaves_by_its_float_and_everything_else_sinks() {
-        assert_eq!(leaving(&Show::Done(Done::Finished), false), None);
+        assert_eq!(leaving(&Show::Done(Done::Typed), false), None);
         for show in [
             Show::Recording,
             Show::Working,

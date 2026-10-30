@@ -1,8 +1,7 @@
 # Pi coding agent
 
 An extension that gives the [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)
-the same three voice tools the MCP shim exposes: `speak_status`, `ask_user`,
-and `listen_for_prompt`.
+the same two voice tools the MCP shim exposes: `speak_status` and `ask_user`.
 
 Pi has its own extension API, so it talks to the Banshee daemon directly over
 `~/.banshee/banshee.sock` rather than going through `banshee-mcp-shim`. Nothing
@@ -61,9 +60,8 @@ banshee start` rather than a stack trace.
 | --- | --- |
 | `speak_status` | Say something aloud, for decisions made and work finished |
 | `ask_user` | Ask a question aloud, then wait for and return your spoken answer |
-| `listen_for_prompt` | Pick up anything you've said since it last checked |
 
-All three run in `sequential` mode, so the agent's statuses and questions reach
+Both run in `sequential` mode, so the agent's statuses and questions reach
 the daemon in the order the agent made them.
 
 The extension renders its own tool call and result rows, so you see the

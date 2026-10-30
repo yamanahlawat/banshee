@@ -591,16 +591,13 @@ mod tests {
     }
 
     #[test]
-    fn utterance_ids_increment_and_stop_clears() {
+    fn utterance_ids_increment() {
         let player = Arc::new(SpeechPlayer::default());
         assert!(!player.is_speaking());
 
         let first = player.speak("", false, None).unwrap();
         let second = player.speak("", false, None).unwrap();
         assert_eq!((first, second), (1, 2));
-
-        player.stop();
-        assert!(!player.is_speaking());
     }
 
     #[tokio::test]

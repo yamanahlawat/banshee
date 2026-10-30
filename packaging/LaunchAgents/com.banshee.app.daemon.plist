@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.banshee.app.daemon</string>
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/banshee</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>banshee</string>
+        <string>serve</string>
+    </array>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.banshee.app</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BANSHEE_LOG_TO</key>
+        <string>file</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+</dict>
+</plist>

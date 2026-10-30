@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn the_peak_reads_the_frames_a_full_ring_refuses() {
         let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-        assert!(state.record_start(crate::state::TranscribeTarget::Mailbox));
+        assert!(state.record_start());
         let (producer, _consumer) = HeapRb::<f32>::new(1).split();
         let mut sink = CaptureSink {
             state: Arc::clone(&state),

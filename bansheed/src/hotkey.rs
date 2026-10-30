@@ -14,7 +14,7 @@ use crate::config::HotkeyMode;
 use crate::dictation::type_text;
 use crate::speech_to_text::vad::{VAD_CHUNK, VADEngine};
 use crate::speech_to_text::{SAMPLE_RATE, Transcriber};
-use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode, TranscribeTarget};
+use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode};
 use crate::text_to_speech::lock;
 
 // Lowers the flag however the job leaves, including an unwind: a panic would
@@ -225,9 +225,7 @@ pub fn hotkey_listener(
         let mut pipeline = pipeline;
         while let Ok(command) = commands.recv() {
             match command {
-                ConsumerCommand::Transcribe(action, ring) => {
-                    pipeline.transcribe_utterance(action, ring, type_text)
-                }
+                ConsumerCommand::Transcribe(ring) => pipeline.transcribe_utterance(ring, type_text),
                 // A session opened while this command sat in the queue owns
                 // the ring now: the discard skips, the cancelled lead-in stays.
                 ConsumerCommand::Discard => {
@@ -289,10 +287,7 @@ fn bound_key_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
         HotkeyMode::Toggle => format!("Tap {hotkey} and speak, then tap it again to stop."),
         HotkeyMode::Hold => format!("Hold {hotkey} and speak, then release to stop."),
     };
-    format!(
-        "{press} The text lands in whatever app has focus.\n\
-         Shift + {hotkey} sends it to `banshee listen` instead of typing it."
-    )
+    format!("{press} The text lands in whatever app has focus.")
 }
 
 // Registered by the daemon, not by the pipeline: a press must still reach
@@ -319,8 +314,8 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
                 return;
             }
             match tracker.on_event(&event.event_type) {
-                Some(HotkeyAction::Start(target)) => owned = key_state.record_start(target),
-                Some(HotkeyAction::Toggle(target)) => owned = key_state.record_toggle(target),
+                Some(HotkeyAction::Start) => owned = key_state.record_start(),
+                Some(HotkeyAction::Toggle) => owned = key_state.record_toggle(),
                 Some(HotkeyAction::Stop) => key_state.record_stop(),
                 Some(HotkeyAction::Cancel) if owned => key_state.record_cancel(),
                 Some(HotkeyAction::Cancel) | None => {}
@@ -339,7 +334,6 @@ impl Pipeline {
     // Push-to-talk ended: the ring holds the whole utterance
     fn transcribe_utterance(
         &mut self,
-        action: TranscribeTarget,
         ring: crate::state::RingClaim,
         type_words: impl FnOnce(&str) -> Result<(), banshee_common::error::BansheeError>,
     ) {
@@ -358,7 +352,7 @@ impl Pipeline {
                 self.state.set_last_error(Some(reason(&e)));
                 self.cues.emit(Signal::Error {
                     reason: Reason::new(ReasonCode::TranscriptionFailed, None),
-                    target: Some(action.into()),
+                    target: Some(Target::Dictate),
                 });
                 return;
             }
@@ -414,7 +408,7 @@ impl Pipeline {
             );
             self.cues.emit(Signal::Error {
                 reason: Reason::new(ReasonCode::NoSpeech, device.as_deref()),
-                target: Some(action.into()),
+                target: Some(Target::Dictate),
             });
             return;
         }
@@ -423,7 +417,7 @@ impl Pipeline {
             log::info!("No speech detected in the audio. Skipping transcription.");
             self.cues.emit(Signal::Error {
                 reason: Reason::new(ReasonCode::NoSpeech, device.as_deref()),
-                target: Some(action.into()),
+                target: Some(Target::Dictate),
             });
             return;
         }
@@ -452,56 +446,32 @@ impl Pipeline {
                 }
                 log::debug!("Transcription: {transcription}");
 
-                // Whisper can return nothing for noise; skip before it reaches the ring or clipboard
+                // Whisper can return nothing for noise; skip before it reaches the clipboard
                 if transcription.is_empty() {
                     log::info!("Empty transcription. Skipping.");
                     self.cues.emit(Signal::Error {
                         reason: Reason::new(ReasonCode::EmptyTranscript, device.as_deref()),
-                        target: Some(action.into()),
+                        target: Some(Target::Dictate),
                     });
                     return;
                 }
 
                 // Ready only after the utterance is actually delivered
-                match action {
-                    TranscribeTarget::Mailbox => {
-                        self.state.push_transcription(transcription);
+                log::debug!("Dictating: {}", transcription);
+                self.state.set_typing(true);
+                let typed = type_words(&transcription);
+                self.state.set_typing(false);
+                match typed {
+                    Ok(_) => {
                         self.cues.emit(Signal::Ready {
-                            target: Target::Mailbox,
+                            target: Target::Dictate,
                         });
                     }
-                    TranscribeTarget::Dictate => {
-                        log::debug!("Dictating: {}", transcription);
-                        self.state.set_typing(true);
-                        let typed = type_words(&transcription);
-                        self.state.set_typing(false);
-                        match typed {
-                            Ok(_) => {
-                                self.cues.emit(Signal::Ready {
-                                    target: Target::Dictate,
-                                });
-                            }
-                            Err(e) => {
-                                log::error!("Failed to type text: {e}");
-                                self.cues.emit(Signal::Error {
-                                    reason: Reason::new(ReasonCode::TypeFailed, None),
-                                    target: Some(Target::Dictate),
-                                });
-                            }
-                        }
-                    }
-                    TranscribeTarget::Tell => {
-                        log::debug!("Telling the agent: {transcription}");
-                        let config = self.state.config();
-                        let cues = self.cues.clone();
-                        let state = Arc::clone(&self.state);
-                        let words = transcription;
-                        // Off the hotkey thread: an agent run takes tens of
-                        // seconds, and the key must answer the next press.
-                        std::thread::spawn(move || {
-                            deliver_tell(&state, &cues, || {
-                                crate::tell::run(&words, &config.tell, &|line| log::info!("{line}"))
-                            })
+                    Err(e) => {
+                        log::error!("Failed to type text: {e}");
+                        self.cues.emit(Signal::Error {
+                            reason: Reason::new(ReasonCode::TypeFailed, None),
+                            target: Some(Target::Dictate),
                         });
                     }
                 }
@@ -512,7 +482,7 @@ impl Pipeline {
                 self.state.set_last_error(Some(why));
                 self.cues.emit(Signal::Error {
                     reason: Reason::new(ReasonCode::TranscriptionFailed, None),
-                    target: Some(action.into()),
+                    target: Some(Target::Dictate),
                 });
             }
         }
@@ -732,84 +702,15 @@ fn save_history(state: &DaemonState, transcription: &str) {
     }
 }
 
-/// Runs one agent turn and answers for it. A run that worked sounds no cue:
-/// the agent already spoke through Banshee's MCP server.
-///
-/// The catch is here on purpose. Without it the thread ends with no cue and no
-/// error, and the user waits for nothing.
-fn deliver_tell(
-    state: &DaemonState,
-    cues: &Cues,
-    run: impl FnOnce() -> Result<crate::tell::Told, banshee_common::error::BansheeError>,
-) {
-    let _telling = Raised::on(state, |state, on| {
-        if on {
-            state.telling_started()
-        } else {
-            state.telling_ended()
-        }
-    });
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
-        Ok(Ok(told)) => warn_tell(state, cues, &told.warnings),
-        Ok(Err(error)) => fail_tell(state, cues, error.to_string()),
-        Err(panic) => fail_tell(
-            state,
-            cues,
-            format!("The command stopped on a fault: {}", panic_reason(panic)),
-        ),
-    }
-}
-
-/// What a run that exited 0 still got wrong. The hotkey path has no terminal,
-/// so `banshee status` names the warnings instead of the journal. A refused
-/// tool also sounds the failure cue: it sounds like a run that worked.
-fn warn_tell(state: &DaemonState, cues: &Cues, warnings: &[crate::tell::Warning]) {
-    if warnings.is_empty() {
-        state.set_tell_error(None);
-        cues.emit(Signal::Told);
-        return;
-    }
-    let reason = warnings
-        .iter()
-        .map(crate::tell::Warning::text)
-        .collect::<Vec<_>>()
-        .join(" ");
-    log::warn!("tell warned: {reason}");
-    state.set_tell_error(Some(reason));
-    cues.emit(Signal::Error {
-        reason: Reason::new(ReasonCode::TellWarned, None),
-        target: Some(Target::Tell),
-    });
-}
-
-fn fail_tell(state: &DaemonState, cues: &Cues, reason: String) {
-    log::error!("tell failed: {reason}");
-    state.set_tell_error(Some(reason));
-    cues.emit(Signal::Error {
-        reason: Reason::new(ReasonCode::TellFailed, None),
-        target: Some(Target::Tell),
-    });
-}
-
-/// What a panic carried. `catch_unwind` answers with a boxed payload, and
-/// `panic!` builds either a `&str` or a `String`.
-fn panic_reason(panic: Box<dyn std::any::Any + Send>) -> String {
-    panic
-        .downcast_ref::<&str>()
-        .map(|text| (*text).to_string())
-        .or_else(|| panic.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "no message".to_string())
-}
-
 #[cfg(test)]
-mod tell_tests {
+mod answer_tests {
     use super::*;
     use crate::audio::cues::Cue;
-    use crate::tell::Told;
 
     #[test]
     fn a_load_that_unwinds_still_clears_the_flag() {
-        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
+        let (state, _lines) =
+            crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
         assert!(!state.is_loading_model());
 
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -826,250 +727,6 @@ mod tell_tests {
             !state.is_loading_model(),
             "the guard clears the flag on the way out"
         );
-    }
-
-    /// Whether the player said nothing. The watcher thread hands a queued line
-    /// to the backend, so the wait comes before the answer.
-    fn said_nothing(lines: &crate::test_support::SpokenLines) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if !lines.lock().unwrap().is_empty() {
-                return false;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        true
-    }
-
-    #[test]
-    fn a_run_that_worked_says_nothing_and_adds_no_cue_of_its_own() {
-        let (state, lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, sounded) = Cues::recording();
-        let mut signals = cues.subscribe_signals();
-        deliver_tell(&state, &cues, || {
-            Ok(Told {
-                reply: Some("The gap is five.".to_string()),
-                warnings: vec![],
-            })
-        });
-        assert!(
-            said_nothing(&lines),
-            "the agent speaks for itself, and Banshee adds no voice of its own"
-        );
-        assert!(
-            sounded.try_recv().is_err(),
-            "the agent has already spoken, so a cue behind it says the same thing twice"
-        );
-        assert!(
-            matches!(signals.try_recv(), Ok(crate::audio::cues::Signal::Told)),
-            "a run with no warnings still tells a subscriber it finished"
-        );
-        assert_eq!(
-            state.last_error(),
-            None,
-            "a clean run leaves status nothing to name"
-        );
-    }
-
-    // The user hears the failure cue and dictates one message on the way to a
-    // terminal. Status is the only place left that holds why the run failed.
-    #[test]
-    fn a_dictation_that_works_leaves_the_tell_failure_for_status() {
-        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, _sounded) = Cues::recording();
-        deliver_tell(&state, &cues, || {
-            Err(banshee_common::error::BansheeError::Rejected(
-                "opencode exited exit status: 1".to_string(),
-            ))
-        });
-
-        state.set_last_error(None);
-
-        assert_eq!(
-            state.last_error(),
-            Some("opencode exited exit status: 1".to_string()),
-            "the cue has already sounded, so status is all the user has left"
-        );
-    }
-
-    #[test]
-    fn a_run_that_worked_clears_the_last_run_that_failed() {
-        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, _sounded) = Cues::recording();
-        deliver_tell(&state, &cues, || {
-            Err(banshee_common::error::BansheeError::Rejected(
-                "opencode exited exit status: 1".to_string(),
-            ))
-        });
-
-        deliver_tell(&state, &cues, || Ok(Told::default()));
-
-        assert_eq!(
-            state.last_error(),
-            None,
-            "a stale reason sends the user after a failure that is already fixed"
-        );
-    }
-
-    // "start over" reaches no agent and sounds nothing. The user chose silence
-    // here over a cue of its own. A reset that fails is still an error, so it
-    // sounds the error cue and `banshee status` names it.
-    #[test]
-    fn a_command_banshee_answers_itself_sounds_nothing() {
-        let (state, lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, sounded) = Cues::recording();
-        deliver_tell(&state, &cues, || {
-            Ok(Told {
-                reply: Some("Thread cleared.".to_string()),
-                warnings: vec![],
-            })
-        });
-        assert!(
-            sounded.try_recv().is_err(),
-            "the user asked for no sound on a reset that worked"
-        );
-        assert!(said_nothing(&lines));
-    }
-
-    #[test]
-    fn a_refused_tool_sounds_the_cue_and_keeps_the_warning_for_status() {
-        let (state, lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, sounded) = Cues::recording();
-        let mut signals = cues.subscribe_signals();
-        deliver_tell(&state, &cues, || {
-            Ok(Told {
-                reply: Some("The gap is five.".to_string()),
-                warnings: vec![crate::tell::Warning::DeniedTools(
-                    "claude was refused these tools, so it may have worked in silence: \
-                     mcp__banshee__speak_status"
-                        .to_string(),
-                )],
-            })
-        });
-        assert!(
-            matches!(sounded.try_recv(), Ok(Cue::Error)),
-            "a refused tool sounds exactly like a run that worked, so it needs a cue"
-        );
-        match signals.try_recv() {
-            Ok(crate::audio::cues::Signal::Error { reason, target }) => {
-                assert_eq!(reason.code, crate::audio::cues::ReasonCode::TellWarned);
-                assert_eq!(target, Some(Target::Tell));
-            }
-            other => panic!("expected tell_warned, got {other:?}"),
-        }
-        let reason = state.last_error().expect("the warning must be kept");
-        assert!(
-            reason.contains("mcp__banshee__speak_status"),
-            "status must name the tool: {reason}"
-        );
-        assert!(said_nothing(&lines));
-    }
-
-    #[test]
-    fn a_failed_run_sounds_the_cue_and_keeps_the_reason_for_status() {
-        let (state, lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, sounded) = Cues::recording();
-        let mut signals = cues.subscribe_signals();
-        deliver_tell(&state, &cues, || {
-            Err(banshee_common::error::BansheeError::Rejected(
-                "opencode exited exit status: 1".to_string(),
-            ))
-        });
-        assert!(matches!(sounded.try_recv(), Ok(Cue::Error)));
-        match signals.try_recv() {
-            Ok(crate::audio::cues::Signal::Error { reason, target }) => {
-                assert_eq!(reason.code, crate::audio::cues::ReasonCode::TellFailed);
-                assert_eq!(target, Some(Target::Tell));
-            }
-            other => panic!("expected tell_failed, got {other:?}"),
-        }
-        assert_eq!(
-            state.last_error(),
-            Some("opencode exited exit status: 1".to_string()),
-            "the cue says that something went wrong, and status says what"
-        );
-        assert!(
-            said_nothing(&lines),
-            "the reason is a machine string, and a voice reading it out is unpleasant"
-        );
-    }
-
-    #[test]
-    fn a_run_that_panics_sounds_the_cue_and_keeps_the_fault_for_status() {
-        let (state, lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, sounded) = Cues::recording();
-        let mut signals = cues.subscribe_signals();
-        deliver_tell(&state, &cues, || panic!("attempt to add with overflow"));
-        assert!(matches!(sounded.try_recv(), Ok(Cue::Error)));
-        match signals.try_recv() {
-            Ok(crate::audio::cues::Signal::Error { reason, target }) => {
-                assert_eq!(reason.code, crate::audio::cues::ReasonCode::TellFailed);
-                assert_eq!(target, Some(Target::Tell));
-            }
-            other => panic!("expected tell_failed, got {other:?}"),
-        }
-        let reason = state.last_error().expect("the fault must be kept");
-        assert!(
-            reason.contains("attempt to add with overflow"),
-            "the fault must name itself: {reason}"
-        );
-        assert!(said_nothing(&lines));
-    }
-
-    #[test]
-    fn a_run_raises_the_telling_flag_and_lowers_it_on_every_exit() {
-        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, _sounded) = Cues::recording();
-        assert!(!state.is_telling(), "the flag starts down");
-
-        let mut raised = false;
-        deliver_tell(&state, &cues, || {
-            raised = state.is_telling();
-            Ok(Told {
-                reply: None,
-                warnings: vec![],
-            })
-        });
-        assert!(raised, "the flag must be up while the agent runs");
-        assert!(!state.is_telling(), "a run that worked lowers it");
-
-        deliver_tell(&state, &cues, || {
-            Err(banshee_common::error::BansheeError::Rejected(
-                "opencode exited exit status: 1".to_string(),
-            ))
-        });
-        assert!(!state.is_telling(), "a run that failed lowers it");
-
-        deliver_tell(&state, &cues, || panic!("attempt to add with overflow"));
-        assert!(!state.is_telling(), "a run that panicked lowers it");
-    }
-
-    #[test]
-    fn a_second_press_that_ends_first_leaves_the_flag_up_for_the_run_still_going() {
-        let (state, _lines) = crate::test_support::daemon_state_recording_speech();
-        let (cues, _sounded) = Cues::recording();
-
-        let mut still_up = false;
-        deliver_tell(&state, &cues, || {
-            // The second press takes a delivery of its own, which the run lock
-            // rejects while the first still holds it.
-            deliver_tell(&state, &cues, || {
-                Err(banshee_common::error::BansheeError::Rejected(
-                    "a command is already running. Wait for it to finish.".to_string(),
-                ))
-            });
-            still_up = state.is_telling();
-            Ok(Told {
-                reply: None,
-                warnings: vec![],
-            })
-        });
-
-        assert!(
-            still_up,
-            "a rejected second press must leave the busy state up for the first run"
-        );
-        assert!(!state.is_telling(), "the last delivery to end lowers it");
     }
 
     type Settled = (
@@ -1092,22 +749,21 @@ mod tell_tests {
     }
 
     #[test]
-    fn an_answer_with_words_is_heard_and_sounds_nothing() {
-        let (text, signal, sounds, state) = settled(
-            Ok(Heard::Audio(vec![0.0; 16])),
-            Ok("yes please".to_string()),
-        );
-        assert_eq!(text, Ok("yes please".to_string()));
-        assert_eq!(signal, Signal::Answered { heard: true });
-        assert!(sounds.is_empty(), "answered has no earcon");
-        assert!(!state.is_transcribing(), "the flag falls on every exit");
-    }
-
-    #[test]
-    fn an_answer_whisper_hears_as_nothing_is_not_heard() {
-        let (text, signal, _, _) = settled(Ok(Heard::Audio(vec![0.0; 16])), Ok(String::new()));
-        assert_eq!(text, Ok(String::new()));
-        assert_eq!(signal, Signal::Answered { heard: false });
+    fn an_answer_is_heard_when_it_has_words_and_sounds_nothing() {
+        for (name, transcribed, heard) in [
+            ("an answer with words", "yes please", true),
+            ("an answer whisper hears as nothing", "", false),
+        ] {
+            let (text, signal, sounds, state) =
+                settled(Ok(Heard::Audio(vec![0.0; 16])), Ok(transcribed.to_string()));
+            assert_eq!(text, Ok(transcribed.to_string()), "{name}");
+            assert_eq!(signal, Signal::Answered { heard }, "{name}");
+            assert!(sounds.is_empty(), "{name}: answered has no earcon");
+            assert!(
+                !state.is_transcribing(),
+                "{name}: the flag falls on every exit"
+            );
+        }
     }
 
     #[test]
@@ -1155,7 +811,6 @@ mod utterance_tests {
     use super::*;
     use crate::config::STTPreset;
     use crate::speech_to_text::Speech;
-    use banshee_common::SileroVADConfig;
     use banshee_common::error::BansheeError;
     use ringbuf::traits::{Producer, Split};
     use std::sync::atomic::AtomicBool;
@@ -1194,7 +849,6 @@ mod utterance_tests {
     fn handle(
         audio: &[f32],
         answer: Result<&str, &str>,
-        action: TranscribeTarget,
         type_words: impl FnOnce(&DaemonState, &str) -> Result<(), BansheeError>,
     ) -> Handled {
         let (cues, _sounds) = Cues::recording();
@@ -1211,9 +865,7 @@ mod utterance_tests {
         let mut flag = state.subscribe_transcribing();
         flag.mark_unchanged();
         let typing = Arc::clone(&state);
-        pipeline.transcribe_utterance(action, state.claim_ring(), move |words| {
-            type_words(&typing, words)
-        });
+        pipeline.transcribe_utterance(state.claim_ring(), move |words| type_words(&typing, words));
         let rose = flag.has_changed().unwrap();
         let mut signals = Vec::new();
         while let Ok(signal) = subscribed.try_recv() {
@@ -1231,9 +883,9 @@ mod utterance_tests {
     fn a_transcription_frees_the_ring_before_it_transcribes() {
         let (commands, requests) = std::sync::mpsc::channel();
         let state = crate::test_support::daemon_state(commands);
-        assert!(state.record_start(TranscribeTarget::Mailbox));
+        assert!(state.record_start());
         state.record_stop();
-        let Ok(ConsumerCommand::Transcribe(_, ring)) = requests.try_recv() else {
+        let Ok(ConsumerCommand::Transcribe(ring)) = requests.try_recv() else {
             panic!("the stop sends the dictation to the consumer");
         };
         assert!(state.dictation_in_ring());
@@ -1246,7 +898,7 @@ mod utterance_tests {
         };
         let mut pipeline = holding(&spoken_then_quiet(), &state, Cues::recording().0, scripted);
 
-        pipeline.transcribe_utterance(TranscribeTarget::Mailbox, ring, |_| Ok(()));
+        pipeline.transcribe_utterance(ring, |_| Ok(()));
 
         assert!(
             !saw_a_dictation_in_ring.load(Ordering::Relaxed),
@@ -1270,7 +922,7 @@ mod utterance_tests {
                 sample_rate: SAMPLE_RATE,
             })),
             speech_to_text: Box::new(speech_to_text),
-            vad: VADEngine::new(SileroVADConfig::new(crate::models::VAD_MODEL)).unwrap(),
+            vad: VADEngine::open(&crate::test_support::silero()).unwrap(),
             state: Arc::clone(state),
             cues,
             endpoint_silence_ms: 800,
@@ -1351,63 +1003,50 @@ mod utterance_tests {
     }
 
     #[test]
-    fn no_speech_raises_the_flag_and_lowers_it() {
-        let handled = handle(
-            &[0.0; SAMPLE_RATE as usize],
-            Ok("unused"),
-            TranscribeTarget::Mailbox,
-            untyped,
-        );
-        assert!(
-            handled
-                .signals
-                .iter()
-                .any(failed(ReasonCode::NoSpeech, Target::Mailbox)),
-            "{:?}",
-            handled.signals
-        );
-        assert!(handled.rose, "the flag covers the voice detector too");
-        assert!(!handled.state.is_transcribing(), "the exit lowers it");
-    }
+    fn every_exit_of_a_dictation_that_is_not_typed_signals_its_reason_and_lowers_the_flag() {
+        let quiet = vec![0.0; SAMPLE_RATE as usize];
+        let speech = crate::speech_to_text::vad::test_speech();
+        let cases = [
+            (
+                "no speech: the flag covers the voice detector too",
+                quiet,
+                Ok("unused"),
+                ReasonCode::NoSpeech,
+                false,
+            ),
+            (
+                "an empty transcript",
+                speech.clone(),
+                Ok(""),
+                ReasonCode::EmptyTranscript,
+                true,
+            ),
+            (
+                "a failed transcription",
+                speech,
+                Err("the model is gone"),
+                ReasonCode::TranscriptionFailed,
+                true,
+            ),
+        ];
 
-    #[test]
-    fn an_empty_transcript_keeps_the_flag_up_and_lowers_it_on_the_way_out() {
-        let handled = handle(
-            &crate::speech_to_text::vad::test_speech(),
-            Ok(""),
-            TranscribeTarget::Dictate,
-            untyped,
-        );
-        assert!(
-            handled
-                .signals
-                .iter()
-                .any(failed(ReasonCode::EmptyTranscript, Target::Dictate)),
-            "{:?}",
-            handled.signals
-        );
-        assert!(handled.up_while_transcribing);
-        assert!(!handled.state.is_transcribing());
-    }
-
-    #[test]
-    fn a_failed_transcription_lowers_the_flag() {
-        let handled = handle(
-            &crate::speech_to_text::vad::test_speech(),
-            Err("the model is gone"),
-            TranscribeTarget::Mailbox,
-            untyped,
-        );
-        assert!(
-            handled
-                .signals
-                .iter()
-                .any(failed(ReasonCode::TranscriptionFailed, Target::Mailbox)),
-            "{:?}",
-            handled.signals
-        );
-        assert!(handled.up_while_transcribing);
-        assert!(!handled.state.is_transcribing());
+        for (name, audio, answer, code, up_while_transcribing) in cases {
+            let handled = handle(&audio, answer, untyped);
+            assert!(
+                handled.signals.iter().any(failed(code, Target::Dictate)),
+                "{name}: {:?}",
+                handled.signals
+            );
+            assert!(handled.rose, "{name}");
+            assert_eq!(
+                handled.up_while_transcribing, up_while_transcribing,
+                "{name}"
+            );
+            assert!(
+                !handled.state.is_transcribing(),
+                "{name}: the exit lowers it"
+            );
+        }
     }
 
     #[test]
@@ -1416,7 +1055,6 @@ mod utterance_tests {
         let handled = handle(
             &crate::speech_to_text::vad::test_speech(),
             Ok("hello there"),
-            TranscribeTarget::Dictate,
             |state, _| {
                 up_while_typing = state.is_transcribing();
                 Err(BansheeError::Other("no accessibility grant".to_string()))
