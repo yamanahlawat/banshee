@@ -49,9 +49,11 @@ confidence-threshold = 0.8
 # warning per crate on every run would bury the one that matters.
 multiple-versions = "allow"
 wildcards = "allow"
+deny = [
+    { crate = "espeak-rs", reason = "misaki-rs's default feature; links the GPL libespeak-ng" },
+    { crate = "espeak-rs-sys", reason = "misaki-rs's default feature; links the GPL libespeak-ng" },
+]
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# The misaki fork the workspace patches in
-allow-git = ["https://github.com/yamanahlawat/misaki-rs"]

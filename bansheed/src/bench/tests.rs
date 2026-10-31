@@ -57,17 +57,9 @@ fn a_models_folder_with_the_model_and_voice_misses_nothing() {
 }
 
 #[test]
-fn the_run_facts_name_the_voice_threads_and_espeak() {
-    let facts = run_facts();
-    let expected = [
-        format!("voice {VOICE}"),
-        format!("threads {}", crate::models::thread_count()),
-    ];
-    for part in &expected {
-        assert!(facts.contains(part), "{facts:?} lacks {part:?}");
-    }
-    assert!(
-        facts.ends_with("espeak-ng found") || facts.ends_with("espeak-ng absent"),
-        "{facts:?} does not say whether espeak-ng is present"
+fn the_run_facts_name_the_voice_and_threads() {
+    assert_eq!(
+        run_facts(),
+        format!("voice {VOICE}, threads {}", crate::models::thread_count())
     );
 }

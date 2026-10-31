@@ -9,6 +9,10 @@ Entries before the companion voice speak at a setting that has since gone: the s
 compare `kokoro` rows only between entries whose facts line names the same speed. A new entry
 has no speed in its facts line, and it plays at 1x.
 
+The entries below also ran with a separate program installed that pronounced words outside the
+lexicon. Banshee no longer uses one: a new entry reads such a word letter by letter, and its
+facts line names only the voice and the threads.
+
 ## 2026-09-28
 
 - Machine: Apple M5 Pro, macOS 26.6.2.
@@ -16,7 +20,7 @@ has no speed in its facts line, and it plays at 1x.
 - Load averages at the start were 1.93, 6.91 and 12.62. No other heavy process ran.
 - Each `kokoro` bench has its own `measurement_time`: 2, 7, 5 and 87 seconds.
 - The full run took 219 seconds.
-- Facts line: `kokoro: voice af_sky, speed 1.2, threads 8, espeak-ng found`
+- ~~Facts line: `kokoro: voice af_sky, speed 1.2, threads 8, espeak-ng found`~~ espeak-ng was removed on 2026-10-31.
 
 | Bench | Time (typical) | Throughput |
 |---|---|---|
@@ -94,7 +98,7 @@ performance and 10 efficiency. The runs alternated 8, 10, 8, 10, and each ran th
 - Load averages at the start were 7.34, 8.22 and 6.77. The machine was not idle.
 - The `kokoro` group's `measurement_time` is 105 seconds.
 - In this run, the `g2p` group runs G2P once over each whole text, not once per sentence.
-- Facts line: `kokoro: voice af_sky, speed 1.2, threads 8, espeak-ng found`
+- ~~Facts line: `kokoro: voice af_sky, speed 1.2, threads 8, espeak-ng found`~~ espeak-ng was removed on 2026-10-31.
 
 | Bench | Time (typical) | Throughput |
 |---|---|---|

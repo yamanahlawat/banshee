@@ -48,12 +48,21 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - A model download cannot be cancelled once it starts.
 - On Linux, a microphone chosen by name can open the `hw:` device that offers no float format.
 - An agent installed under `nvm` can stay invisible to `banshee connect`.
+- Some readings the voices get are untested by the round trip: `127.0.0.1` reads "one hundred
+  twenty seven point zero point zero point one", `I/O` and `N/A` read with "slash", and `€1.50`
+  reads "€one point five zero". Change each only with round-trip evidence.
+- The reading rules for units, numbers and paths each carry their own boundary checks, and those
+  checks already differ. Before more rules land, classify each whitespace-delimited token once
+  (URL, path, number, unit, word), drop the per-rule checks, and prove it with the round trip.
 
 ## Remote listener and speaker
 
 - Both remote keys live in a file in `~/.banshee`, not in the Keychain.
 - The speaker takes the OpenAI `/audio/speech` shape only.
 - `banshee setup` downloads the local voice even when speech is remote, unless `tts.fallback` is `none`.
+- The remote speaker gets the same spoken text as the local voices, with versions, paths, units,
+  PR numbers and hyphenated names written out as words. How a remote voice server reads that text
+  is not measured.
 
 ## The window
 

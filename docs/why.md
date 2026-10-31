@@ -21,8 +21,6 @@ types what you dictate into any app.
 - A mid-sentence pause to think does not cut you off.
 - **It handles your jargon in both directions.** `vocabulary` goes to the model
   where it takes words, and a corrector fixes the rest.
-- With a Kokoro voice, `espeak-ng` pronounces unfamiliar terms instead of
-  spelling them out.
 - **Not tied to one vendor.** It is an MCP server.
 - Claude Code, Cursor, OpenCode and anything else that speaks MCP all work.
 - **One daemon, both jobs.** Agent voice and dictation share the same

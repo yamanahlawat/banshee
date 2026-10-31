@@ -42,6 +42,3 @@ strip = true
 [profile.profiling]
 inherits = "release"
 debug = "line-tables-only"
-
-[patch.crates-io]
-misaki-rs = { git = "https://github.com/yamanahlawat/misaki-rs", rev = "0f84a2ae0f01e1455f793aeae8413521d1e9fdd5" }
