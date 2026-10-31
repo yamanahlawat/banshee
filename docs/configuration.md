@@ -122,12 +122,8 @@ banshee config set feedback.mode none
 
 ## Pronouncing unknown words
 
-- **Install `espeak-ng`** and a Kokoro voice pronounces unfamiliar words, such
-  as tech jargon and proper nouns.
-- **Without it** a Kokoro voice spells those words out letter by letter.
-- **The companion voice does not use it.**
-- **On macOS** that is `brew install espeak-ng`.
-- **`banshee status`** prints the command for your system.
+- **A Kokoro voice spells a word it does not know letter by letter**, so
+  `kustomize` reads "K U S T O M I Z E".
 
 ## Choosing a voice
 

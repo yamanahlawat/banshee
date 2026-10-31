@@ -12,7 +12,6 @@ use kokoro::{KokoroBackend, KokoroEngine};
 use pocket::{PocketBackend, PocketEngine};
 
 pub mod kokoro;
-pub mod oov;
 pub mod pocket;
 pub mod voices;
 

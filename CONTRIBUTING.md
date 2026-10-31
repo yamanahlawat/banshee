@@ -55,7 +55,6 @@ cargo build --release --workspace --exclude banshee-app
 
 - The VAD tests read the committed `bansheed/tests/data/silero_vad.onnx`, so
   plain `cargo test` needs no setup.
-- CI installs `espeak-ng` for the out-of-vocabulary test.
 - The Kokoro tests need the model and two voices, which are too large for CI, so
   they are `#[ignore]`d. Run them on a machine that has them:
 
@@ -200,14 +199,12 @@ cargo bench -p banshee --bench speech_out -- g2p
   if yours differs.
 - The `g2p` group runs G2P once per sentence, as the daemon does.
 - The bench uses the daemon's default settings, not your `config.toml`.
-- It prints the voice, the thread count and whether espeak-ng is present.
+- It prints the voice and the thread count.
 - Elements per second divided by 24000 gives the realtime factor.
 - Machine load changes Kokoro timing by a large margin. Compare runs only on an idle machine.
 - These numbers are for the `release` profile. Shipped archives use `dist`, which adds thin LTO.
 - A filter such as `-- g2p` still loads the Kokoro model and synthesizes two texts, when the
   model is on disk.
-- When espeak-ng is absent, every engine load probes for it again. `warm_cache_load` and
-  `first_speech` include that probe.
 - A full run takes about 4 minutes on an Apple M5 Pro. `docs/benchmarks.md` records the time
   and load of each run.
 

@@ -118,50 +118,75 @@ fn ensure_voice_on_the_loaded_voice_reads_nothing() {
 }
 
 #[test]
-fn flags_letter_spelled_words_only() {
-    let mut spelled = MToken::new("nginx".into(), "NN".into(), " ".into());
-    spelled.phonemes = Some("ˈɛn dʒˈiː ˈaɪ ɛn ɛks".into());
-    assert!(is_letter_spelled(&spelled));
-
-    let mut resolved = MToken::new("build".into(), "NN".into(), " ".into());
-    resolved.phonemes = Some("bˈɪld".into());
-    assert!(!is_letter_spelled(&resolved));
-
-    let mut hyphenated = MToken::new("twenty-one".into(), "CD".into(), " ".into());
-    hyphenated.phonemes = Some("twˈɛnti wˈʌn".into());
-    assert!(!is_letter_spelled(&hyphenated));
+fn an_unknown_word_is_spelled() {
+    let spelled = letters("kustomize");
+    assert!(!spelled.is_empty(), "kustomize has no letters to read");
+    let (phonemes, _) = english_g2p().g2p("kustomize").unwrap();
+    assert_eq!(phonemes.trim(), spelled);
 }
 
-// espeak-ng is one apt package, so CI installs it and this runs there. A
-// machine without it skips, unless it asked for the fixtures.
 #[test]
-fn espeak_resolves_a_letter_spelled_word() {
-    let Some(oov) = OovFallback::detect() else {
-        assert!(
-            std::env::var_os("BANSHEE_REQUIRE_FIXTURES").is_none(),
-            "espeak-ng is missing where the fixtures were required"
-        );
-        eprintln!("espeak-ng not installed; skipping");
-        return;
-    };
-    let word = "kustomize"; // not in misaki gold or our tables
-    let mut g2p = G2P::new(Language::EnglishUS);
-    let spelled = g2p.g2p(word).unwrap().1;
+fn a_word_of_digits_and_letters_is_spelled_whole() {
+    let (phonemes, _) = english_g2p().g2p("k8s").unwrap();
     assert!(
-        spelled.iter().any(is_letter_spelled),
-        "expected {word} to start out letter-spelled"
+        !phonemes.trim().is_empty() && !phonemes.contains('❓'),
+        "k8s came back as {phonemes:?}"
     );
+    assert_eq!(phonemes.trim(), letters("k8s"));
+}
 
-    let phonemes = oov.phonemize(word).expect("espeak should phonemize");
-    g2p.lexicon
-        .golds
-        .insert(word.to_string(), PhonemeEntry::Simple(phonemes));
-
-    let after = g2p.g2p(word).unwrap().1;
-    assert!(
-        !after.iter().any(is_letter_spelled),
-        "espeak phonemes should have resolved {word}"
+// Each name is misaki's own lexicon entry: "K", "eight", "S" and so on.
+#[test]
+fn letters_names_each_letter_and_digit_and_skips_the_rest() {
+    assert_eq!(letters("src"), "ˈɛs ˈɑɹ sˈi");
+    assert_eq!(letters("K8S"), "kˈA ˈAt ˈɛs");
+    assert_eq!(letters("a.b"), "ˈA bˈi");
+    assert_eq!(
+        letters("straße"),
+        letters("strae"),
+        "ß has no name of its own"
     );
+}
+
+// Kokoro's vocab has no token for misaki's ❓ marker, so a word with no name is silent.
+#[test]
+fn a_word_with_no_latin_letter_or_digit_is_silent() {
+    assert_eq!(letters("日本語"), "");
+    let (phonemes, _) = english_g2p().g2p("日本語").unwrap();
+    assert!(token_ids(&phonemes).is_empty(), "{phonemes:?}");
+}
+
+#[test]
+fn the_g2p_lexicon_names_the_letters_as_a_fresh_load_does() {
+    let g2p = english_g2p();
+    assert_eq!(
+        letter_names(&g2p.lexicon.golds),
+        letter_names(&misaki_rs::data::load_us_gold())
+    );
+}
+
+#[test]
+fn every_letter_and_digit_name_maps_into_vocab() {
+    let all = letters("abcdefghijklmnopqrstuvwxyz0123456789");
+    assert_eq!(
+        all.split(' ').count(),
+        36,
+        "a letter or digit has no name: {all}"
+    );
+    assert_eq!(token_ids(&all).len(), all.chars().count(), "{all}");
+}
+
+#[test]
+fn only_a_word_read_by_its_letters_counts_as_spelled() {
+    let (_, tokens) = english_g2p()
+        .g2p("kustomize the API webhook, plan b, async I slash O.")
+        .unwrap();
+    let spelled: Vec<_> = tokens
+        .iter()
+        .filter(|tk| is_letter_spelled(tk))
+        .map(|tk| tk.text.as_str())
+        .collect();
+    assert_eq!(spelled, ["kustomize"]);
 }
 
 #[test]
@@ -184,18 +209,6 @@ fn kokoro_synthesizes_audible_speech() {
     assert!(samples.len() > 10_000, "too few samples: {}", samples.len());
     let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     assert!(peak > 0.05, "output is near-silence, peak {peak}");
-}
-
-// The all-caps form is the one misaki tags NNP and spells out, so it is the one
-// espeak would be asked about.
-#[test]
-fn a_curated_word_is_curated_in_every_casing() {
-    let mut g2p = G2P::new(Language::EnglishUS);
-    crate::text_to_speech::pronunciation::install_dictionary(&mut g2p);
-    for word in ["webhook", "Webhook", "WEBHOOK"] {
-        assert!(curated(&g2p.lexicon, word), "{word} must count as curated");
-    }
-    assert!(!curated(&g2p.lexicon, "Zzzq"));
 }
 
 #[test]

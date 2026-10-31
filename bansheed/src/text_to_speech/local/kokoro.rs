@@ -1,16 +1,17 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use banshee_common::{KokoroTTSConfig, error::BansheeError, utils::oov_log_path};
-use misaki_rs::lexicon::{Lexicon, PhonemeEntry};
-use misaki_rs::{G2P, Language, MToken};
+use misaki_rs::fallback::FallbackError;
+use misaki_rs::lexicon::PhonemeEntry;
+use misaki_rs::{Fallback, G2P, Language, MToken};
 use ort::session::Session;
 
 use super::chunk_or_fault;
-use super::oov::OovFallback;
 use crate::text_to_speech::output::Output;
+use crate::text_to_speech::pronunciation::DIGITS;
 use crate::text_to_speech::{ActiveUtterance, Faults, TtsBackend, lock, lock_read, lock_write};
 
 // Voice files hold one style row per input token count: 510 rows x 256 floats
@@ -207,7 +208,8 @@ pub(crate) fn sentences(text: &str) -> impl Iterator<Item = &str> {
 }
 
 pub(crate) fn english_g2p() -> G2P {
-    let mut g2p = G2P::new(Language::EnglishUS);
+    let mut g2p = G2P::with_fallback(Language::EnglishUS, Some(Box::new(Spelled)));
+    LETTER_NAMES.get_or_init(|| letter_names(&g2p.lexicon.golds));
     crate::text_to_speech::pronunciation::install_dictionary(&mut g2p);
     g2p
 }
@@ -218,7 +220,6 @@ pub struct KokoroEngine {
     models: PathBuf,
     voice: Vec<f32>,
     loaded_voice: String,
-    oov: Option<OovFallback>,
     logged_oov: HashSet<String>,
 }
 
@@ -241,21 +242,12 @@ impl KokoroEngine {
 
         let g2p = english_g2p();
 
-        let oov = OovFallback::detect();
-        if oov.is_none() {
-            log::warn!(
-                "espeak-ng not found; unknown words will be spelled out. \
-                 Install espeak-ng for better pronunciation (run 'banshee status')."
-            );
-        }
-
         Ok(Self {
             session,
             g2p,
             models: models.to_path_buf(),
             voice: style,
             loaded_voice: voice.to_string(),
-            oov,
             logged_oov: HashSet::new(),
         })
     }
@@ -292,19 +284,10 @@ impl KokoroEngine {
 
     // Text in, 24kHz mono samples out; empty when nothing is speakable
     pub fn synthesize(&mut self, text: &str) -> Result<Vec<f32>, BansheeError> {
-        let mut out = self
+        let (phonemes, tokens) = self
             .g2p
             .g2p(text)
             .map_err(|e| BansheeError::Other(format!("G2P failed: {e}")))?;
-
-        // Re-run g2p so misaki reassembles with the inserted pronunciations.
-        if self.resolve_oov(&out.1) {
-            out = self
-                .g2p
-                .g2p(text)
-                .map_err(|e| BansheeError::Other(format!("G2P failed: {e}")))?;
-        }
-        let (phonemes, tokens) = out;
 
         self.note_letter_spelled(&tokens);
 
@@ -318,28 +301,6 @@ impl KokoroEngine {
             samples.extend(self.synthesize_window(window)?);
         }
         Ok(samples)
-    }
-
-    fn resolve_oov(&mut self, tokens: &[MToken]) -> bool {
-        let Some(oov) = &self.oov else { return false };
-        let mut resolved = Vec::new();
-        for tk in tokens {
-            // Skip words with a curated gold entry so espeak never overrides it.
-            if is_letter_spelled(tk)
-                && !curated(&self.g2p.lexicon, &tk.text)
-                && let Some(phonemes) = oov.phonemize(&tk.text)
-            {
-                // One casing serves the other, so the word is kept as it was spoken.
-                resolved.push((tk.text.clone(), phonemes));
-            }
-        }
-        for (word, phonemes) in &resolved {
-            self.g2p
-                .lexicon
-                .golds
-                .insert(word.clone(), PhonemeEntry::Simple(phonemes.clone()));
-        }
-        !resolved.is_empty()
     }
 
     // Log words still spelled out as table candidates; never changes audio.
@@ -469,18 +430,49 @@ impl TtsBackend for KokoroBackend {
     }
 }
 
-// A word misaki can't resolve is spelled letter-by-letter, giving one all-alphabetic
-// token whose phonemes are the per-letter names joined by spaces. Resolved words are a
-// single contiguous group; hyphenated/numeric tokens aren't all-alphabetic.
-// misaki answers the all-caps form from the lowercase entry, so the guard asks the same way.
-fn curated(lexicon: &Lexicon, word: &str) -> bool {
-    lexicon.in_gold(word) || lexicon.in_gold(&word.to_lowercase())
+/// misaki's fallback for a word outside its lexicon: the word read letter by letter.
+struct Spelled;
+
+impl Fallback for Spelled {
+    fn phonemize(&self, word: &str) -> Result<String, FallbackError> {
+        Ok(letters(word))
+    }
+}
+
+static LETTER_NAMES: OnceLock<HashMap<char, String>> = OnceLock::new();
+
+fn letter_names(golds: &HashMap<String, PhonemeEntry>) -> HashMap<char, String> {
+    let alphabet = ('A'..='Z').map(|letter| (letter, letter.to_string()));
+    let digits = ('0'..='9').zip(DIGITS.map(str::to_string));
+    alphabet
+        .chain(digits)
+        .filter_map(|(c, name)| match golds.get(&name) {
+            Some(PhonemeEntry::Simple(phonemes)) => Some((c, phonemes.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each letter and digit of `word` by its name, as misaki's lexicon says it.
+/// Any other character has no name and is skipped.
+fn letters(word: &str) -> String {
+    // english_g2p fills the table from its own lexicon; this load serves a
+    // caller that runs before any G2P exists
+    let names = LETTER_NAMES.get_or_init(|| letter_names(&misaki_rs::data::load_us_gold()));
+    word.chars()
+        .filter(char::is_ascii)
+        .map(|c| c.to_ascii_uppercase())
+        .filter_map(|c| names.get(&c).map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn is_letter_spelled(tk: &MToken) -> bool {
-    let w = tk.text.trim();
-    let is_word = w.chars().count() > 1 && w.chars().all(|c| c.is_alphabetic());
-    is_word && tk.phonemes.as_deref().is_some_and(|p| p.contains(' '))
+    tk.text.chars().filter(char::is_ascii_alphanumeric).count() > 1
+        && tk
+            .phonemes
+            .as_deref()
+            .is_some_and(|phonemes| phonemes.contains(' ') && phonemes == letters(&tk.text))
 }
 
 // Dedup is per run, so a word can repeat across restarts; sort -u at read time

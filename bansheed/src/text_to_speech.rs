@@ -517,6 +517,7 @@ impl SpeechPlayer {
         voice: Option<&str>,
         hold: bool,
     ) -> Result<u64, BansheeError> {
+        // Callers sanitize first, so a URL is already cut to its host
         let normalized = pronunciation::normalize(text);
         let text = normalized.as_str();
         let mut playback = self.lock();
@@ -955,9 +956,7 @@ mod tests {
     #[tokio::test]
     async fn lines_queued_up_to_the_question_play_and_the_rest_wait() {
         let (player, started, ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
+        player.speak("Agent C was speaking.", false, None).unwrap();
         player.speak_and_hold("The question.").unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
@@ -965,26 +964,20 @@ mod tests {
         falls_silent(&player).await;
         assert_eq!(
             started_lines(&started),
-            ["Agent C was mid-sentence.", "The question."]
+            ["Agent C was speaking.", "The question."]
         );
 
         player.release();
         assert_eq!(
             started_lines(&started),
-            [
-                "Agent C was mid-sentence.",
-                "The question.",
-                "Agent B reports."
-            ]
+            ["Agent C was speaking.", "The question.", "Agent B reports."]
         );
     }
 
     #[test]
     fn a_stop_during_a_hold_drops_the_backlog_and_keeps_the_lines_it_holds() {
         let (player, started, _ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
+        player.speak("Agent C was speaking.", false, None).unwrap();
         player.speak_and_hold("The question.").unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
@@ -994,7 +987,7 @@ mod tests {
         player.release();
         assert_eq!(
             started_lines(&started),
-            ["Agent C was mid-sentence.", "Agent B reports."]
+            ["Agent C was speaking.", "Agent B reports."]
         );
     }
 
@@ -1029,9 +1022,7 @@ mod tests {
     #[tokio::test]
     async fn a_line_that_will_not_start_keeps_the_lines_the_hold_keeps_back() {
         let (player, started, ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
+        player.speak("Agent C was speaking.", false, None).unwrap();
         player.speak_and_hold(REFUSED).unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
@@ -1040,16 +1031,14 @@ mod tests {
         player.release();
         assert_eq!(
             started_lines(&started),
-            ["Agent C was mid-sentence.", "Agent B reports."]
+            ["Agent C was speaking.", "Agent B reports."]
         );
     }
 
     #[tokio::test]
     async fn a_line_that_will_not_start_before_the_question_leaves_the_question_to_play() {
         let (player, started, ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
+        player.speak("Agent C was speaking.", false, None).unwrap();
         player.speak(REFUSED, false, None).unwrap();
         player.speak_and_hold("The question.").unwrap();
 
@@ -1057,16 +1046,14 @@ mod tests {
         falls_silent(&player).await;
         assert_eq!(
             started_lines(&started),
-            ["Agent C was mid-sentence.", "The question."]
+            ["Agent C was speaking.", "The question."]
         );
     }
 
     #[tokio::test]
     async fn a_release_drops_a_question_that_never_started() {
         let (player, started, ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
+        player.speak("Agent C was speaking.", false, None).unwrap();
         player.speak_and_hold("The question.").unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
@@ -1075,7 +1062,7 @@ mod tests {
         falls_silent(&player).await;
         assert_eq!(
             started_lines(&started),
-            ["Agent C was mid-sentence.", "Agent B reports."]
+            ["Agent C was speaking.", "Agent B reports."]
         );
     }
 

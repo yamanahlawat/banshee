@@ -77,6 +77,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A remote request no longer sends a `speed` field.**
 - **The window's Voice panel lists Companion first,** with the credit "Pocket
   TTS by Kyutai, CC-BY-4.0", and has no speaking rate.
+- **Kokoro uses misaki-rs 0.8.0 from crates.io instead of a fork.** A word it
+  does not know is spelled letter by letter. With `espeak-ng` installed, such a
+  word used to be pronounced, so `tokenizers` was said as a word and is now
+  spelled. See Removed.
+- **Both local voices read versions, paths, file names, PR numbers, units and
+  rates aloud.** `0.12.1` is "zero point twelve point one", `src/main.rs` is
+  "src slash main dot rs" with or without backticks, `PR #218` is "PR number
+  218", `1.2 GB` is "one point two gigabytes", and `2 MB/s` is "2 megabytes
+  per second". A decimal reads digit by digit after "point": `3.14` is "three
+  point one four". A hyphenated lowercase name reads as separate words:
+  `banshee-mcp-shim` is "banshee mcp shim", and "mid-sentence" is "mid
+  sentence". `w/o` is "without". The step runs before every voice, so a remote
+  voice server gets the same text.
 
 ### Removed
 
@@ -98,8 +111,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon won't start. `banshee status` names the key. Speech plays at 1x.
 - **The system voice is gone,** which was `say` on macOS and `espeak-ng` as a
   voice on Linux. If `config.toml` holds `fallback = "system"`, change it to
-  `"local"` or `"none"`, or the daemon won't start. `espeak-ng` stays only to
-  pronounce words Kokoro does not know.
+  `"local"` or `"none"`, or the daemon won't start.
+- **`espeak-ng` is no longer used or needed.** Kokoro spells a word it does not
+  know by letter names instead. If you installed `espeak-ng` for Banshee, you
+  can remove it. No config key changes.
 
 ### Security
 

@@ -14,15 +14,15 @@ static SPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap())
 pub fn sanitize(input: &str) -> String {
     let mut text = CODE_BLOCK_RE.replace_all(input, "").to_string();
 
-    // Unwrap identifier-shaped inline code so the pronunciation pass can verbalize
-    // it; drop anything else (commands, JSON) that would be read aloud as noise
+    // Unwrap identifier- and path-shaped inline code so the pronunciation pass can
+    // verbalize it; drop anything else (commands, JSON) that would be read aloud as noise
     text = INLINE_CODE_RE
         .replace_all(&text, |caps: &regex::Captures| {
             let code = &caps[1];
             if !code.is_empty()
                 && code
                     .chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '-' | '/'))
                 && code.chars().any(char::is_alphanumeric)
             {
                 code.to_string()
@@ -81,6 +81,16 @@ mod tests {
         assert_eq!(
             sanitize("Call `get_models_path` here"),
             "Call get_models_path here"
+        );
+    }
+
+    #[test]
+    fn a_backticked_path_reaches_the_reading_rules() {
+        let clean = sanitize("open `src/main.rs` on `feat/pocket-voice`");
+        assert_eq!(clean, "open src/main.rs on feat/pocket-voice");
+        assert_eq!(
+            crate::text_to_speech::pronunciation::normalize(&clean),
+            "open src slash main dot rs on feat slash pocket voice"
         );
     }
 

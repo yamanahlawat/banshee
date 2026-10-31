@@ -44,11 +44,11 @@ clap = { version = "4.6.1", features = ["derive"] }
 cpal = "0.18.2"
 dirs.workspace = true
 json5 = "1.3.1"
-# Default "espeak" feature is off on purpose: it links espeak-ng via cmake and
-# needs an espeak-ng-data dir next to the binary at runtime, which a single-file
-# release install has no place for. text_to_speech::local::oov shells out instead.
-misaki-rs = { version = "0.6.0", default-features = false }
+# The default feature links a C phonemizer through cmake and needs its data
+# folder beside the binary, which a single-file release install has no place for.
+misaki-rs = { version = "0.8.0", default-features = false }
 ndarray = "0.17.2"
+num2words = "0.4.1"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-rustls", "copy-dylibs", "api-24"] }
 rdev = "0.5.3"
 regex = "1.13.0"

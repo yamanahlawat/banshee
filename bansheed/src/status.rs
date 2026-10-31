@@ -71,10 +71,6 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             (line, None) => pass(&line),
             (line, Some(fix)) => fail(&line, fix),
         };
-        // Only Kokoro asks espeak-ng about a word its table lacks
-        if Engine::of(&config.tts.voice) == Engine::Kokoro {
-            check_espeak();
-        }
     }
 
     // Before the checks that depend on it: a dead daemon causes the microphone
@@ -168,18 +164,6 @@ fn check_credentials_mode() -> bool {
             &format!("run: chmod 600 {}", path.display()),
         ),
         None => true,
-    }
-}
-
-// Optional dependency, so it reports but never fails the health check.
-fn check_espeak() {
-    if crate::text_to_speech::local::oov::OovFallback::available() {
-        pass("espeak-ng present (pronounces unknown words)");
-    } else {
-        note(&format!(
-            "espeak-ng not installed; unknown words are spelled out. install: {}",
-            crate::text_to_speech::local::oov::espeak_install_hint()
-        ));
     }
 }
 

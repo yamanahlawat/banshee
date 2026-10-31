@@ -3,7 +3,6 @@ use banshee_common::error::BansheeError;
 
 use crate::text_to_speech::local::kokoro;
 use crate::text_to_speech::local::kokoro::KokoroEngine;
-use crate::text_to_speech::local::oov::OovFallback;
 use crate::text_to_speech::{pronunciation, sanitizer};
 
 pub const SAMPLE_RATE: u32 = crate::text_to_speech::output::SAMPLE_RATE.get();
@@ -60,15 +59,7 @@ pub fn engine() -> Result<KokoroEngine, BansheeError> {
 }
 
 pub fn run_facts() -> String {
-    let espeak = if OovFallback::available() {
-        "found"
-    } else {
-        "absent"
-    };
-    format!(
-        "voice {VOICE}, threads {}, espeak-ng {espeak}",
-        crate::models::thread_count()
-    )
+    format!("voice {VOICE}, threads {}", crate::models::thread_count())
 }
 
 #[cfg(test)]
