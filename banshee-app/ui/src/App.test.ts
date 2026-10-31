@@ -23,7 +23,6 @@ import {
   detectAgents,
   history,
   listen,
-  listLanguages,
   listVoices,
   listDevices,
   downloadModels,
@@ -69,18 +68,13 @@ beforeEach(async () => {
   // `clearAllMocks` empties the call list and leaves the implementation, so a
   // rejection set by one test is still set for the next one without this.
   vi.mocked(clearHistory).mockResolvedValue(undefined);
+  vi.mocked(startDaemon).mockResolvedValue(undefined);
   pushes.clear();
   vi.mocked(listen).mockImplementation((name: string, handler: unknown) => {
     pushes.set(name, handler as (event: { payload: unknown }) => void);
     return Promise.resolve(() => {});
   });
   vi.mocked(listDevices).mockResolvedValue({ devices: [], current: null });
-  vi.mocked(listLanguages).mockResolvedValue({
-    languages: [
-      { code: 'en', name: 'English' },
-      { code: 'hi', name: 'Hindi' },
-    ],
-  });
   vi.mocked(listVoices).mockResolvedValue({
     voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true }],
     current: 'af_sky',
@@ -417,12 +411,12 @@ it('names a remote listener the daemon cannot name', async () => {
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
   const cell = container.querySelector('#job-microphone') as HTMLElement;
-  expect(cell.textContent).toContain('A remote server');
+  expect(cell.textContent).toContain('A transcription server');
 
   await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
   await waitFor(() =>
     expect(panelHeading('Microphone').textContent).toContain(
-      'Banshee sends what you say to a remote server to be heard.',
+      'Banshee sends what you say to a transcription server to be heard.',
     ),
   );
 });
@@ -505,12 +499,12 @@ it('names no host it does not have, in the heading or the foot', async () => {
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
   const cell = container.querySelector('#job-microphone') as HTMLElement;
-  expect(cell.textContent).toContain('changing to a remote server when Banshee restarts');
+  expect(cell.textContent).toContain('changing to a transcription server when Banshee restarts');
 
   await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
   await waitFor(() =>
     expect(panelHeading('Microphone').textContent).toBe(
-      'Banshee will send what you say to a remote server when it restarts.',
+      'Banshee will send what you say to a transcription server when it restarts.',
     ),
   );
 });
@@ -571,6 +565,16 @@ it('starts the daemon itself when it finds it gone', async () => {
   await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
 });
 
+it('says why the daemon would not start', async () => {
+  const refusal =
+    'Banshee did not start: Delete `preset` under [stt]. Fix that, then run banshee start again.';
+  vi.mocked(status).mockRejectedValue({ message: 'not running' });
+  vi.mocked(startDaemon).mockRejectedValue({ message: refusal });
+  render(App);
+  await waitFor(() => expect(screen.getByText(refusal)).toBeTruthy());
+  expect(screen.getByText('Banshee is not running')).toBeTruthy();
+});
+
 it('reads the voices and the agents the strip needs', async () => {
   render(App);
   await waitFor(() => expect(vi.mocked(listVoices)).toHaveBeenCalled());
@@ -626,7 +630,7 @@ it('says no stream is open, rather than that there is no microphone', async () =
   expect(panelHeading('Microphone').textContent).toContain('Banshee is not listening yet');
 });
 
-it('asks which speech model to fetch before it fetches one', async () => {
+it('asks which listening model to fetch before it fetches one', async () => {
   vi.mocked(status).mockResolvedValue({
     ...ready,
     ready: false,
@@ -646,12 +650,14 @@ it('asks which speech model to fetch before it fetches one', async () => {
   });
   render(App);
 
-  // The preset decides what the run costs, and nothing else asks. The daemon
+  // The model decides what the run costs, and nothing else asks. The daemon
   // answers with what is still missing rather than a fixed total.
   await waitFor(() =>
-    expect(screen.getByRole('radiogroup', { name: 'Speech model' })).toBeTruthy(),
+    expect(screen.getByRole('radiogroup', { name: 'Listening model' })).toBeTruthy(),
   );
-  expect(screen.getByRole('radio', { name: 'Balanced' }).getAttribute('aria-checked')).toBe('true');
+  expect(screen.getByRole('radio', { name: 'Parakeet Unified' }).getAttribute('aria-checked')).toBe(
+    'true',
+  );
   expect(screen.getByText(/About 860 MB to fetch/)).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy();
 
@@ -687,7 +693,7 @@ it('offers a restart, not a download, when the files are already there', async (
   // Every file is on disk in this state, so counting it as a missing file lies.
   expect(screen.getByText('Banshee needs a restart')).toBeTruthy();
   expect(screen.queryByText(/file is missing|files are missing/)).toBeNull();
-  expect(screen.queryByRole('radiogroup', { name: 'Speech model' })).toBeNull();
+  expect(screen.queryByRole('radiogroup', { name: 'Listening model' })).toBeNull();
 
   // `startDaemon` is for a daemon that is down. This blocker is offered while
   // the daemon runs, so only a restart clears it.
@@ -724,7 +730,7 @@ it('says which file is downloading and how far it has come', async () => {
   pushes.get('daemon:downloads')?.({
     payload: {
       model: 'ggml.bin',
-      label: 'Speech model',
+      label: 'Listening model',
       index: 1,
       count: 4,
       bytes: 40,
@@ -732,13 +738,13 @@ it('says which file is downloading and how far it has come', async () => {
       state: 'downloading',
     },
   });
-  await waitFor(() => expect(screen.getByText('Speech model, 1 of 4 · 40%')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText('Listening model, 1 of 4 · 40%')).toBeTruthy());
 
   // The two blocking files land before the other two, so the daemon starts
   // asking for a restart while the run is still going. One thing is happening,
   // and the box says which.
   expect(screen.getByText(/Getting Banshee's models/)).toBeTruthy();
-  expect(screen.queryByRole('radiogroup', { name: 'Speech model' })).toBeNull();
+  expect(screen.queryByRole('radiogroup', { name: 'Listening model' })).toBeNull();
 
   vi.mocked(status).mockResolvedValue({
     ...ready,
@@ -772,7 +778,7 @@ it('says which file is downloading and how far it has come', async () => {
       ],
     }),
   );
-  await waitFor(() => expect(screen.getByText('Speech model, 1 of 4 · 40%')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText('Listening model, 1 of 4 · 40%')).toBeTruthy());
   expect(screen.queryByRole('button', { name: 'Restart Banshee' })).toBeNull();
 });
 
@@ -845,14 +851,14 @@ it('offers no command to copy, because every fix is a button', async () => {
   expect(screen.queryByRole('button', { name: 'banshee setup' })).toBeNull();
 });
 
-// Choosing a preset marks it pending at once, because the daemon cannot load a
+// Choosing a model marks it pending at once, because the daemon cannot load a
 // model that is not on disk. A restart reads the same config and fails the same
 // way, so the notice would be advice that cannot work.
 it('does not ask for a restart while the files it needs are still missing', async () => {
   vi.mocked(status).mockResolvedValue({
     ...ready,
     ready: false,
-    pending: ['stt.preset'],
+    pending: ['stt.model'],
     blockers: [
       {
         kind: 'model',
@@ -872,7 +878,7 @@ it('does not ask for a restart while the files it needs are still missing', asyn
 });
 
 it('asks for a restart once the files are there and a setting still waits', async () => {
-  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['stt.preset'] });
+  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['stt.model'] });
   render(App);
   await waitFor(() =>
     expect(screen.getByRole('button', { name: 'Restart to apply' })).toBeTruthy(),
@@ -1060,7 +1066,7 @@ it('keeps a permission reachable while a download runs', async () => {
   pushes.get('daemon:downloads')?.({
     payload: {
       model: 'ggml.bin',
-      label: 'Speech model',
+      label: 'Listening model',
       index: 1,
       count: 4,
       bytes: 1,
@@ -1125,51 +1131,6 @@ it('still asks for a restart for a key no download can settle', async () => {
   );
 });
 
-// Whisper translates one way only, any language in and English out, so the
-// answer control means nothing until a language other than English is set.
-it('offers a language, and asks what to answer in only once it can mean something', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'en' } },
-  });
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
-  await waitFor(() => expect(screen.getByRole('combobox', { name: 'Language' })).toBeTruthy());
-
-  expect(screen.queryByRole('radiogroup', { name: 'Answer in' })).toBeNull();
-
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'hi' } },
-  });
-  daemon.update((state) =>
-    reduceStatus(state, {
-      ...ready,
-      running: true,
-      config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'hi' } },
-    }),
-  );
-  await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Answer in' })).toBeTruthy());
-});
-
-// The English-only build holds no other language, so a control that looked
-// live would quietly do nothing.
-it('will not offer a language the fast model cannot hear', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    english_only: true,
-    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'fast', language: 'en' } },
-  });
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
-
-  const picker = await screen.findByRole('combobox', { name: 'Language' });
-  expect(picker.hasAttribute('disabled')).toBe(true);
-  expect(screen.getByText(/Fast hears English only/)).toBeTruthy();
-});
-
 // The ledger is the only route to the Record panel and it stands down while the
 // record is empty, so a fresh install could not reach the saving switch at all.
 it('reaches what Banshee keeps before anything has been said', async () => {
@@ -1213,22 +1174,6 @@ it('does not call an unplugged microphone a restart', async () => {
   expect(screen.queryByText('Banshee needs a restart')).toBeNull();
   expect(screen.getByRole('button', { name: 'Restart anyway' })).toBeTruthy();
   expect(screen.getByText(/onnect the microphone/)).toBeTruthy();
-});
-
-// `auto` is a value the config takes and the engine reads as detect it, so a
-// picker that cannot show it misreports the daemon and cannot set it back.
-it('offers detection among the languages', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'auto' } },
-  });
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
-
-  const picker = await screen.findByRole('combobox', { name: 'Language' });
-  expect(screen.getByRole('option', { name: 'Detect it' })).toBeTruthy();
-  expect((picker as HTMLSelectElement).value).toBe('auto');
 });
 
 // A panel replaces the whole body. The control that opened it is destroyed by
@@ -1284,32 +1229,6 @@ it('gives the keyboard back when Escape closes a panel', async () => {
   await waitFor(() =>
     expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Voice/ })),
   );
-});
-
-// The device picker keeps a row for a device that is not there. The language
-// picker had no such guard, so a code Whisper's table does not name left a
-// `select` whose value matched no option, which draws as an empty control.
-it('keeps a row for a language the daemon did not name', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'cy' } },
-  });
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
-
-  const picker = await screen.findByRole('combobox', { name: 'Language' });
-  expect((picker as HTMLSelectElement).value).toBe('cy');
-});
-
-// A swallowed failure left the same empty control with nothing to explain it.
-it('says when the language list did not arrive', async () => {
-  vi.mocked(listLanguages).mockRejectedValue(new Error('no such method'));
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
-
-  await waitFor(() => expect(screen.getByText(/could not list the languages/)).toBeTruthy());
 });
 
 // The key sat on the same ink underline the pickers use, so it read as a field
@@ -1922,7 +1841,7 @@ const VOICE_WAITS: [string, boolean][] = [
   ['tts.remote.api_key', true],
   ['tts.remote.response_format', true],
   ['tts.remote.sample_rate', true],
-  ['stt.language', false],
+  ['stt.model', false],
   ['audio.hotkey', false],
 ];
 
@@ -2259,7 +2178,7 @@ it('lands focus in the panel even where the platform defers the swap', async () 
   }
 });
 
-// `stt_model` and `english_only` arrive only with a full status, and the read a
+// `stt_model` and `stt_translates` arrive only with a full status, and the read a
 // write does happens before the file has landed, so without this the window
 // keeps reporting the model it was told about at the moment of the write.
 it('reads the daemon again when a model finishes loading', async () => {

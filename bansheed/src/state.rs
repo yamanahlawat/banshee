@@ -48,18 +48,20 @@ pub struct AskCommand {
 }
 
 pub enum ConsumerCommand {
+    // A push-to-talk began. The consumer reads the ring while the key is held
+    // and ends on the `Transcribe` or `Discard` that follows.
+    Stream,
     Transcribe(RingClaim),
     // The consumer empties the ring, so a cancelled session does not feed
     // the next transcription
     Discard,
     Ask(AskCommand),
-    // The listener owns the engine, so both of these reach it the way a rebind
-    // does. A push-to-talk leaves that thread idle until the key is released,
-    // so either can land while the microphone is open. The ring holds the audio,
-    // so the dictation that follows is whole.
+    // The listener owns the engine, so these reach it the way a rebind does.
+    // One that lands while a dictation streams waits until the dictation ends,
+    // so a model never changes under the stream that uses it.
     Retune(Vec<String>),
     Speak(crate::speech_to_text::Speech),
-    Reload(crate::config::STTPreset),
+    Reload(&'static banshee_common::listening::ListeningModel),
     Shutdown,
 }
 
@@ -93,6 +95,8 @@ impl RecordingMode {
 pub enum RecordingError {
     Microphone(String),
     Model(String),
+    /// The id of a listening model whose file is not downloaded.
+    NoListeningModel(&'static str),
     Provider(String),
     KeyFile(String),
 }
@@ -133,6 +137,12 @@ impl std::fmt::Display for RecordingError {
         match self {
             RecordingError::Microphone(e) => write!(f, "the microphone would not open: {e}"),
             RecordingError::Model(e) => write!(f, "a model would not load: {e}"),
+            RecordingError::NoListeningModel(id) => {
+                write!(
+                    f,
+                    "the listening model {id} is not downloaded: run banshee setup"
+                )
+            }
             RecordingError::Provider(e) => write!(f, "the remote listener is not reachable: {e}"),
             RecordingError::KeyFile(e) => {
                 write!(f, "the remote listener's key file is unreadable: {e}")
@@ -148,6 +158,9 @@ impl RecordingError {
     pub fn consequence(&self) -> String {
         match self {
             RecordingError::Model(_) => "a model would not load".to_string(),
+            RecordingError::NoListeningModel(_) => {
+                "no listening model yet: run banshee setup".to_string()
+            }
             RecordingError::Provider(_) => {
                 "dictation and ask_user do not work until the key or server is fixed".to_string()
             }
@@ -164,6 +177,7 @@ impl RecordingError {
             RecordingError::Microphone(_)
             | RecordingError::Model(_)
             | RecordingError::Provider(_) => Some("banshee start"),
+            RecordingError::NoListeningModel(_) => Some("banshee setup"),
             RecordingError::KeyFile(_) => None,
         }
     }
@@ -179,12 +193,33 @@ impl RecordingError {
                     .to_string()
             }
             RecordingError::Model(_) => "restart it: banshee start".to_string(),
+            RecordingError::NoListeningModel(_) => "download it: banshee setup".to_string(),
             RecordingError::Provider(_) => "set the key: banshee config set stt.remote.api_key, \
                  or fix [stt.remote] base_url, then restart: banshee start"
                 .to_string(),
             // A key written again reads the same file first, so the fix starts
             // by removing it.
             RecordingError::KeyFile(_) => crate::credentials::Credentials::remove_command(),
+        }
+    }
+}
+
+/// What the consumer holds of the listening model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Listening {
+    Loaded,
+    /// The id of a model whose file is still to download.
+    Awaited(&'static str),
+    /// Why the model whose file arrived did not load.
+    Failed(String),
+}
+
+impl Listening {
+    fn pipeline(&self) -> Pipeline {
+        match self {
+            Listening::Loaded => Pipeline::Open,
+            Listening::Awaited(id) => Pipeline::Broken(RecordingError::NoListeningModel(id)),
+            Listening::Failed(error) => Pipeline::Broken(RecordingError::Model(error.clone())),
         }
     }
 }
@@ -248,9 +283,9 @@ fn send_if_new<T: PartialEq>(channel: &watch::Sender<Option<T>>, value: Option<T
 pub struct DaemonState {
     version: &'static str,
     // The model the listener has loaded, not the one the file names. The
-    // window reads the blockers built from this, so a preset that was asked
+    // window reads the blockers built from this, so a model that was asked
     // for and never loaded must not clear them.
-    stt_model: RwLock<Option<&'static str>>,
+    stt_model: RwLock<Option<&'static banshee_common::listening::ListeningModel>>,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: RwLock<Option<String>>,
@@ -277,15 +312,19 @@ pub struct DaemonState {
     // Keys the daemon accepted and wrote but has not applied. A restart empties
     // it by nature; a live path clears its own key.
     pending: Mutex<std::collections::BTreeSet<String>>,
-    // Why recording is off, when it is. The microphone half clears when the
-    // watchdog rebinds; the model half still needs a restart.
+    // Why recording is off, when it is. The watchdog clears the microphone
+    // half when it rebinds; a listening model clears the other half as it loads.
     pipeline: watch::Sender<Pipeline>,
+    // Whether the consumer holds a listening model. Locked across each
+    // pipeline write it decides, so a microphone that opens cannot undo a load
+    // that just landed.
+    listening: Mutex<Listening>,
     recording: AtomicU8,
     started_at: Instant,
     db_connection: Mutex<Option<rusqlite::Connection>>,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
-    // Reading a Whisper file off disk takes seconds, and the listener answers
+    // Reading a model off disk can take seconds, and the listener answers
     // with the old model until it lands. Watched, so the window is told when it
     // does: `stt_model` is not a live field and nothing else reports the end.
     loading_model: watch::Sender<bool>,
@@ -327,6 +366,8 @@ pub struct DaemonState {
     answer_open: AtomicBool,
     level: watch::Sender<f32>,
     level_watchers: Arc<watch::Sender<usize>>,
+    // The committed words of the recording in progress, empty between recordings.
+    words: watch::Sender<String>,
 }
 
 impl DaemonState {
@@ -343,7 +384,7 @@ impl DaemonState {
         Self {
             machine,
             version: env!("CARGO_PKG_VERSION"),
-            stt_model: RwLock::new(crate::models::stt_file(&config)),
+            stt_model: RwLock::new(crate::models::stt_model(&config)),
             vad_model: crate::models::VAD_MODEL,
             vad_threshold: AtomicU32::new(config.stt.vad_threshold.to_bits()),
             audio_device: RwLock::new(None),
@@ -357,6 +398,7 @@ impl DaemonState {
             config: RwLock::new(config),
             pending: Mutex::new(std::collections::BTreeSet::new()),
             pipeline: watch::channel(Pipeline::Opening).0,
+            listening: Mutex::new(Listening::Loaded),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
             db_connection: Mutex::new(db_connection),
@@ -384,6 +426,7 @@ impl DaemonState {
             answer_open: AtomicBool::new(false),
             level: watch::channel(0.0).0,
             level_watchers: Arc::new(watch::channel(0).0),
+            words: watch::channel(String::new()).0,
         }
     }
 
@@ -452,6 +495,9 @@ impl DaemonState {
         // Discarded: a press starts from silence, not the last session's peak.
         self.take_peak();
         *deadline = Instant::now() + MAX_PUSH_TO_TALK;
+        // Under the push-to-talk lock, so it reaches the consumer before this
+        // press's stop or cancel.
+        let _ = self.commands.send(ConsumerCommand::Stream);
         true
     }
 
@@ -732,7 +778,7 @@ impl DaemonState {
         self.version
     }
 
-    pub fn stt_model(&self) -> Option<&'static str> {
+    pub fn stt_model(&self) -> Option<&'static banshee_common::listening::ListeningModel> {
         *self
             .stt_model
             .read()
@@ -740,7 +786,7 @@ impl DaemonState {
     }
 
     /// `None` for a listener that loads no file.
-    pub fn set_stt_model(&self, model: Option<&'static str>) {
+    pub fn set_stt_model(&self, model: Option<&'static banshee_common::listening::ListeningModel>) {
         *self
             .stt_model
             .write()
@@ -810,6 +856,56 @@ impl DaemonState {
 
     pub fn set_pipeline(&self, state: Pipeline) {
         self.pipeline.send_replace(state);
+    }
+
+    /// The pipeline stands, and listens once `id`'s file arrives and loads.
+    pub fn await_listening_model(&self, id: &'static str) {
+        self.hold(&mut lock(&self.listening), Listening::Awaited(id));
+    }
+
+    /// Whether the consumer holds no listening model, so a model chosen now is
+    /// the one it waits for.
+    pub fn lacks_listening_model(&self) -> bool {
+        *lock(&self.listening) != Listening::Loaded
+    }
+
+    /// The listening model whose file is still to download.
+    pub fn awaited_listening_model(&self) -> Option<&'static str> {
+        match *lock(&self.listening) {
+            Listening::Awaited(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Capture is open. The pipeline is open unless no listening model is held.
+    pub fn capture_open(&self) {
+        self.set_pipeline(lock(&self.listening).pipeline());
+    }
+
+    pub fn listening_model_loaded(&self) {
+        self.hold(&mut lock(&self.listening), Listening::Loaded);
+    }
+
+    /// A listening model did not load. Without one held, the load is the
+    /// fault; otherwise the model already loaded listens on.
+    pub fn listening_model_failed(&self, error: String) {
+        let mut listening = lock(&self.listening);
+        if *listening != Listening::Loaded {
+            self.hold(&mut listening, Listening::Failed(error));
+        }
+    }
+
+    /// A pipeline still opening, or one whose microphone failed, waits for
+    /// capture to open, which reads `now`.
+    fn hold(&self, listening: &mut Listening, now: Listening) {
+        *listening = now;
+        if matches!(
+            self.pipeline(),
+            Pipeline::Open
+                | Pipeline::Broken(RecordingError::NoListeningModel(_) | RecordingError::Model(_))
+        ) {
+            self.set_pipeline(listening.pipeline());
+        }
     }
 
     pub fn subscribe_pipeline(&self) -> watch::Receiver<Pipeline> {
@@ -1024,14 +1120,17 @@ impl DaemonState {
         self.commands.send(ConsumerCommand::Retune(words)).is_ok()
     }
 
-    /// What language the next utterance is read as, and whether it answers in
-    /// English. The engine reads both per utterance, so no model moves.
+    /// Whether the next utterance answers in English. The engine reads it per
+    /// utterance, so no model moves.
     pub fn set_speech(&self, speech: crate::speech_to_text::Speech) -> bool {
         self.commands.send(ConsumerCommand::Speak(speech)).is_ok()
     }
 
-    pub fn load_stt_model(&self, preset: crate::config::STTPreset) -> bool {
-        self.commands.send(ConsumerCommand::Reload(preset)).is_ok()
+    pub fn load_stt_model(
+        &self,
+        model: &'static banshee_common::listening::ListeningModel,
+    ) -> bool {
+        self.commands.send(ConsumerCommand::Reload(model)).is_ok()
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {
@@ -1131,6 +1230,22 @@ impl DaemonState {
     #[cfg(test)]
     pub fn level_watchers(&self) -> usize {
         *self.level_watchers.borrow()
+    }
+
+    /// Every call wakes each receiver, so a recording that ends with no words
+    /// still sends its empty text.
+    pub fn publish_words(&self, text: &str) {
+        self.words.send_replace(text.to_string());
+    }
+
+    pub fn subscribe_words(&self) -> watch::Receiver<String> {
+        self.words.subscribe()
+    }
+
+    /// Whether a client shows the words. Each subscriber's push task holds a
+    /// receiver until its connection ends.
+    pub fn is_words_watched(&self) -> bool {
+        self.words.receiver_count() > 0
     }
 
     pub fn cues(&self) -> &Cues {

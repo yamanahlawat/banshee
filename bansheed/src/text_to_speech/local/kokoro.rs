@@ -225,7 +225,7 @@ pub struct KokoroEngine {
 impl KokoroEngine {
     pub fn new(models: &Path, voice: &str) -> Result<Self, BansheeError> {
         let kokoro_config = KokoroTTSConfig::new(voice);
-        let threads = crate::models::onnx_threads();
+        let threads = crate::models::thread_count();
         let model_path = models.join(&kokoro_config.model_name);
         let voice_path = models.join(&kokoro_config.voice_name);
 

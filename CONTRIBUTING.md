@@ -31,7 +31,7 @@
 ```bash
 git clone https://github.com/yamanahlawat/banshee.git
 cd banshee
-cargo build    # Metal + CoreML acceleration for Whisper enabled automatically
+cargo build    # Metal acceleration for transcribe.cpp enabled automatically
 ```
 
 - On Linux, exclude `banshee-app`:

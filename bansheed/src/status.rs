@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use banshee_common::{Blocker, BlockerKind, error::BansheeError, utils};
 
-use crate::config::{BargeInMode, Config, HotkeyMode, STTPreset};
+use crate::config::{BargeInMode, Config, HotkeyMode};
 #[cfg(target_os = "macos")]
 use crate::permissions::Access;
 use crate::text_to_speech::local::Engine;
@@ -27,10 +27,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             let path = utils::config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "config.toml".to_string());
-            healthy &= fail(
-                &invalid_config_line(&e),
-                &format!("edit {path}, or delete it to use defaults"),
-            );
+            healthy &= fail(&invalid_config_line(&e), &invalid_config_fix(&path));
             Config::default()
         }
     };
@@ -223,10 +220,11 @@ fn local_voice_check(voice: &str, models_dir: &Path) -> (String, Option<&'static
 }
 
 fn check_model(models_dir: &Path, name: &str) -> bool {
+    let named = crate::models::name_of(name);
     if models_dir.join(name).exists() {
-        pass(&format!("model present: {name}"))
+        pass(&format!("{named} is here"))
     } else {
-        fail(&format!("model missing: {name}"), "run: banshee setup")
+        fail(&format!("{named} is missing"), "run: banshee setup")
     }
 }
 
@@ -665,11 +663,6 @@ fn report_settings(config: &Config, daemon: &Daemon) {
         BargeInMode::Stop => "stop",
         BargeInMode::None => "none",
     };
-    let preset = match config.stt.preset {
-        STTPreset::Fast => "fast",
-        STTPreset::Balanced => "balanced",
-        STTPreset::Quality => "quality",
-    };
     let on_off = |enabled: bool| if enabled { "on" } else { "off" };
 
     note(&format!(
@@ -683,16 +676,20 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     .map_or(config.stt.vad_threshold, |live| live as f32);
 
     note(&format!(
-        "stt {preset}, vad {}, endpoint {} ms, {} vocabulary {}",
+        "stt {}, vad {}, endpoint {} ms, {} {} to know",
+        config.stt.model,
         vad_threshold,
         config.stt.endpoint_silence_ms,
         config.stt.vocabulary.len(),
         if config.stt.vocabulary.len() == 1 {
-            "term"
+            "word"
         } else {
-            "terms"
+            "words"
         }
     ));
+    if let Some(line) = translate_line(config) {
+        note(&line);
+    }
     let stt_remote = live(daemon, |status| status["remote"]["stt"]["remote"].as_bool())
         .unwrap_or(config.stt.provider.is_remote());
     let tts_remote = live(daemon, |status| status["remote"]["tts"]["remote"].as_bool())
@@ -735,6 +732,18 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     }) {
         note(&format!("the last spoken reply failed: {error}"));
     }
+}
+
+/// `None` unless `stt.translate` asks a listening model that cannot translate.
+fn translate_line(config: &Config) -> Option<String> {
+    let model = crate::models::stt_model(config)?;
+    let facts = crate::speech_to_text::ModelFacts::of(Some(model));
+    (config.stt.translate && !facts.translates).then(|| {
+        format!(
+            "stt.translate is on, but {} does not translate, so it writes what it hears",
+            model.id
+        )
+    })
 }
 
 /// The voice the settings line names. Each speaker keeps its own, and a remote
@@ -787,6 +796,11 @@ fn install_shape(exe: &std::path::Path) -> &'static str {
 
 fn invalid_config_line(error: &BansheeError) -> String {
     format!("config.toml invalid: {error}")
+}
+
+/// The line above names each key and its section, so the fix points there.
+fn invalid_config_fix(path: &str) -> String {
+    format!("edit {path} as the line above says, then run banshee start")
 }
 
 fn pass(msg: &str) -> bool {

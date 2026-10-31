@@ -28,26 +28,42 @@ export function failureReads(label: string, said: string): string {
   return `${label.replace(/\.+$/, '')}: ${said.trim().replace(/\.+$/, '')}.`;
 }
 
-/// What the Language row says. The listener answers on the model it holds, so
-/// a preset just chosen and the model in force are two readings, and the row
-/// sits under both.
-export function languageNote(facts: {
-  languagesArrived: boolean;
-  englishOnly: boolean;
-  loading: boolean;
-  chosen: string;
-  isFast: boolean;
-}): string {
-  if (!facts.languagesArrived) {
-    return 'Banshee could not list the languages it knows. The one set here still applies.';
-  }
-  if (!facts.englishOnly) return 'The language you speak. Naming it beats detecting it.';
-  if (facts.isFast) {
-    return 'Fast hears English only. Choose Balanced or Quality above to speak another language.';
-  }
-  return facts.loading
-    ? `Banshee is reading ${facts.chosen} off disk. Until it lands, it still hears English only.`
-    : `Banshee has not picked up ${facts.chosen} yet, so it still hears English only.`;
+/// The languages a listening model hears: the names up to three, and a count
+/// beyond that.
+export function languagesHeard(codes: string[]): string {
+  if (codes.length > 3) return `${codes.length} languages`;
+  const names = new Intl.DisplayNames(['en'], { type: 'language' });
+  return new Intl.ListFormat('en', { type: 'conjunction' }).format(
+    codes.map((code) => names.of(code) ?? code),
+  );
+}
+
+/// What a listening model's row states, beside its name. Only the macOS chip
+/// shows words as they are heard, so elsewhere streaming goes unsaid.
+export function modelFacts(
+  model: Pick<ListeningModel, 'megabytes' | 'languages' | 'streams'>,
+  mac: boolean,
+): string {
+  const facts = `${downloadSize(model.megabytes)}. ${languagesHeard(model.languages)}.`;
+  if (!mac) return facts;
+  return `${facts} ${model.streams ? 'Shows words as you speak.' : 'Shows words once you stop.'}`;
+}
+
+/// Why a chosen model's download waits: the window cannot accept a licence.
+export function licenceWait(model: Pick<ListeningModel, 'label' | 'licence'>): string {
+  return `Banshee will not download ${model.label} until you accept its licence, ${model.licence.name}.`;
+}
+
+/// A failure says where the licence lives, so the reader can still open it.
+export function readLicence(model: Pick<ListeningModel, 'id' | 'label'>): void {
+  openLicence(model.id).catch((error: { message?: string }) =>
+    report(error?.message || `The licence for ${model.label} did not open.`),
+  );
+}
+
+/// Only the daemon knows which files are already here, so the window never sums a cost itself.
+export function downloadSize(megabytes: number): string {
+  return megabytes >= 1000 ? `${(megabytes / 1000).toFixed(1)} GB` : `${megabytes} MB`;
 }
 
 /// What a model the reader just chose costs. `owed` is the whole run, which
@@ -64,24 +80,24 @@ export function modelCost(chosen: string, megabytes: number, owed: number): stri
 export const TAKES_EFFECT = 'Your choice takes effect when Banshee restarts.';
 
 import { writable } from 'svelte/store';
-import { downloadSize } from './presets';
-import { copyText } from './tauri';
-import type { Listening, Speech } from './daemon';
+import { copyText, openLicence } from './tauri';
+import type { Listening, ListeningModel, Speech } from './daemon';
 
 // A side the daemon cannot name still gets a whole sentence.
-export const A_SERVER = 'a remote server';
+export const A_TRANSCRIPTION_SERVER = 'a transcription server';
+export const A_VOICE_SERVER = 'a voice server';
 
 export function listeningLead(facts: Listening): string {
   if (!facts.live) return 'Banshee is not running, so no microphone is open.';
   if (facts.remote) {
-    const host = facts.host ?? A_SERVER;
+    const host = facts.host ?? A_TRANSCRIPTION_SERVER;
     if (facts.stoppedBy === 'keyfile') return `Banshee cannot read the key file for ${host}.`;
     if (facts.stoppedBy !== null) return `Banshee cannot reach ${host} to hear you.`;
     if (facts.pending) return `Banshee sends what you say to ${host} until it restarts.`;
     return `Banshee sends what you say to ${host} to be heard.`;
   }
   if (facts.pending) {
-    return `Banshee will send what you say to ${facts.willUse ?? A_SERVER} when it restarts.`;
+    return `Banshee will send what you say to ${facts.willUse ?? A_TRANSCRIPTION_SERVER} when it restarts.`;
   }
   if (facts.device) return `Banshee is listening through the ${facts.device}.`;
   return facts.stoppedBy !== null
@@ -91,7 +107,7 @@ export function listeningLead(facts: Listening): string {
 
 export function listeningNote(facts: Listening): string {
   if (!facts.live) return 'Nothing is heard until Banshee starts.';
-  const host = facts.host ?? A_SERVER;
+  const host = facts.host ?? A_TRANSCRIPTION_SERVER;
   const waits = facts.pending ? ` ${TAKES_EFFECT}` : '';
   if (facts.remote) {
     if (facts.stoppedBy === 'keyfile') {
@@ -112,10 +128,10 @@ export function listeningNote(facts: Listening): string {
 // name only decorates it.
 export function speechLead(facts: Speech): string {
   if (!facts.live) return 'Banshee is not running, so nothing is spoken.';
-  const host = facts.host ?? A_SERVER;
+  const host = facts.host ?? A_VOICE_SERVER;
   if (!facts.remote) {
     if (facts.pending) {
-      return `Banshee will speak through ${facts.willUse ?? A_SERVER} when it restarts.`;
+      return `Banshee will speak through ${facts.willUse ?? A_VOICE_SERVER} when it restarts.`;
     }
     if (!facts.started) {
       const fix = facts.voiceDownloaded
@@ -145,7 +161,7 @@ export function speechLead(facts: Speech): string {
 // the text leaves. The key row and the voice row name the fix.
 export function speechNote(facts: Speech): string {
   if (!facts.live) return 'Nothing is spoken until Banshee starts.';
-  const host = facts.host ?? A_SERVER;
+  const host = facts.host ?? A_VOICE_SERVER;
   const waits = facts.pending ? ` ${TAKES_EFFECT}` : '';
   if (facts.remote && !facts.started) {
     return `The speaker on ${host} did not start, so text stays on this machine.${waits}`;

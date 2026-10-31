@@ -1,53 +1,87 @@
 pub mod local;
 pub mod remote;
 pub mod vad;
+mod vocabulary;
 
 use banshee_common::error::BansheeError;
+use banshee_common::listening::ListeningModel;
 
-use crate::config::{Provider, STTConfig, STTPreset};
+use crate::config::{Provider, STTConfig};
 use crate::state::RecordingError;
-use local::whisper::WhisperEngine;
+use local::transcribe::TranscribeEngine;
 use remote::openai_compatible::RemoteTranscriber;
 
 /// The rate every `Transcriber` reads, and the rate the pipeline resamples the
 /// microphone to before the VAD sees a chunk.
 pub const SAMPLE_RATE: u32 = 16_000;
 
-/// What language the next transcription reads the audio as, and whether it
-/// answers in English whatever was said.
+/// Whether the next transcription answers in English whatever was said.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Speech {
-    /// `None` asks the engine to detect it.
-    pub language: Option<String>,
     pub translate: bool,
 }
 
 impl From<&STTConfig> for Speech {
-    /// `auto` is the config's word for detect it, and `None` is the engine's.
     fn from(stt: &STTConfig) -> Self {
         Self {
-            language: (stt.language != "auto").then(|| stt.language.clone()),
             translate: stt.translate,
         }
     }
 }
 
-/// An English-only build carries `.en` in its name and holds no other language,
-/// so asking it for one produces an English-shaped guess at the sounds rather
-/// than an error.
-pub fn english_only(model_name: &str) -> bool {
-    model_name.contains(".en")
+/// What the listener in use can do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelFacts {
+    pub translates: bool,
+    pub streams: bool,
+    pub takes_vocabulary: bool,
+}
+
+impl ModelFacts {
+    /// `model` is the listening model in use, or `None` for a transcription
+    /// server. A server's model is not this machine's to read, so its answer is
+    /// what the endpoint offers: a prompt, and a translations path.
+    pub fn of(model: Option<&ListeningModel>) -> Self {
+        match model {
+            Some(model) => Self {
+                translates: model.translates,
+                streams: model.streams,
+                takes_vocabulary: model.takes_vocabulary,
+            },
+            None => Self {
+                translates: true,
+                streams: false,
+                takes_vocabulary: true,
+            },
+        }
+    }
 }
 
 // One thread owns the engine and calls it, so `Send` without `Sync`
 pub trait Transcriber: Send {
     /// `audio` is mono `f32` at `SAMPLE_RATE`.
-    fn transcribe(&self, audio: &[f32]) -> Result<String, BansheeError>;
+    fn transcribe(&mut self, audio: &[f32]) -> Result<String, BansheeError>;
+    /// Opens a stream for the audio that follows, abandoning any stream still
+    /// open. False for a listener that does not stream. The stream gives live
+    /// words only: the text kept is a `transcribe` of the whole recording.
+    fn begin_stream(&mut self) -> Result<bool, BansheeError> {
+        Ok(false)
+    }
+    /// `pcm_16k` is the next part of the open stream's audio. Answers the
+    /// committed text when it changed.
+    fn feed(&mut self, _pcm_16k: &[f32]) -> Result<Option<String>, BansheeError> {
+        Ok(None)
+    }
+    /// Abandons the open stream, if there is one.
+    fn cancel_stream(&mut self) {}
     fn set_vocabulary(&mut self, words: &[String]);
     fn set_speech(&mut self, speech: Speech);
-    /// `stt.preset` changed live. Answers the model file now loaded, or `None`
-    /// for a provider that loads no file.
-    fn reload(&mut self, preset: STTPreset) -> Result<Option<&'static str>, BansheeError>;
+    /// `stt.model` changed live. Answers the model now loaded, or `None` for a
+    /// provider that loads no file.
+    fn reload(
+        &mut self,
+        model: &'static ListeningModel,
+    ) -> Result<Option<&'static ListeningModel>, BansheeError>;
     /// What shortens a transcription that ran far slower than realtime, or
     /// `None` where the wait is not this machine's to shorten.
     fn slow_advice(&self) -> Option<&'static str> {
@@ -55,15 +89,56 @@ pub trait Transcriber: Send {
     }
 }
 
-pub fn select_transcriber(stt: &STTConfig) -> Result<Box<dyn Transcriber>, RecordingError> {
-    match stt.provider {
-        Provider::Local => {
-            let engine = WhisperEngine::new(stt.preset.model_name(), &stt.vocabulary, stt.into())
-                .map_err(|e| RecordingError::Model(e.to_string()))?;
-            Ok(Box::new(engine))
+/// A listener, and the listening model it waits for when that file is still
+/// to download. A waiting listener holds no model until a reload loads one.
+pub struct Listener {
+    pub engine: Box<dyn Transcriber>,
+    pub awaiting: Option<&'static ListeningModel>,
+}
+
+impl Listener {
+    fn ready(engine: Box<dyn Transcriber>) -> Self {
+        Self {
+            engine,
+            awaiting: None,
         }
-        Provider::Remote => select_remote(stt, crate::credentials::Credentials::load()),
     }
+}
+
+pub fn select_transcriber(stt: &STTConfig) -> Result<Listener, RecordingError> {
+    match stt.provider {
+        Provider::Local => select_local(
+            stt,
+            crate::models::download::models_dir()
+                .map_err(|e| RecordingError::Model(e.to_string()))?,
+        ),
+        Provider::Remote => {
+            select_remote(stt, crate::credentials::Credentials::load()).map(Listener::ready)
+        }
+    }
+}
+
+fn select_local(
+    stt: &STTConfig,
+    models_dir: std::path::PathBuf,
+) -> Result<Listener, RecordingError> {
+    let model = stt.listening_model().ok_or_else(|| {
+        RecordingError::Model(format!("'{}' is not a listening model", stt.model))
+    })?;
+    if !models_dir.join(model.file).exists() {
+        return Ok(Listener {
+            engine: Box::new(TranscribeEngine::awaiting(
+                models_dir,
+                model,
+                stt.into(),
+                &stt.vocabulary,
+            )),
+            awaiting: Some(model),
+        });
+    }
+    let engine = TranscribeEngine::new(models_dir, model, stt.into(), &stt.vocabulary)
+        .map_err(|e| RecordingError::Model(e.to_string()))?;
+    Ok(Listener::ready(Box::new(engine)))
 }
 
 fn select_remote(
@@ -84,7 +159,44 @@ fn select_remote(
 
 #[cfg(test)]
 mod tests {
-    use super::{RecordingError, Speech, english_only, select_remote};
+    use super::{ModelFacts, RecordingError, select_remote};
+
+    #[test]
+    fn a_listening_model_not_on_disk_is_awaited_by_a_listener_that_holds_none() {
+        let dir = crate::test_support::unique_scratch("select-local");
+        let stt = crate::config::STTConfig::default();
+        let Ok(listener) = super::select_local(&stt, dir.clone()) else {
+            panic!("the pipeline stands without the file");
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            listener.awaiting.map(|model| model.id),
+            Some(banshee_common::listening::DEFAULT_MODEL)
+        );
+    }
+
+    #[test]
+    fn a_listening_model_answers_the_facts_its_catalogue_entry_holds() {
+        let turbo = banshee_common::listening::find("whisper-large-v3-turbo").unwrap();
+        assert_eq!(
+            ModelFacts::of(Some(turbo)),
+            ModelFacts {
+                translates: false,
+                streams: false,
+                takes_vocabulary: true,
+            }
+        );
+        let parakeet =
+            banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
+        assert_eq!(
+            ModelFacts::of(Some(parakeet)),
+            ModelFacts {
+                translates: false,
+                streams: true,
+                takes_vocabulary: false,
+            }
+        );
+    }
 
     #[test]
     fn a_key_file_that_does_not_parse_is_a_key_file_fault() {
@@ -116,27 +228,5 @@ mod tests {
             matches!(&fault, RecordingError::Provider(reason) if reason.contains("stt.remote.api_key")),
             "{fault}"
         );
-    }
-
-    /// `auto` is the config's word for detect it and `None` is the engine's.
-    #[test]
-    fn auto_becomes_the_absence_the_engine_reads_as_detect_it() {
-        let mut stt = crate::config::STTConfig {
-            language: "auto".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(Speech::from(&stt).language, None);
-        stt.language = "de".to_string();
-        assert_eq!(Speech::from(&stt).language, Some("de".to_string()));
-    }
-
-    /// The daemon's `english_only` flag and the window's note on the Fast preset
-    /// both rest on this mapping, so it is pinned here.
-    #[test]
-    fn only_the_fast_preset_is_english_only() {
-        use crate::config::STTPreset;
-        assert!(english_only(STTPreset::Fast.model_name()));
-        assert!(!english_only(STTPreset::Balanced.model_name()));
-        assert!(!english_only(STTPreset::Quality.model_name()));
     }
 }

@@ -96,7 +96,9 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/yamanahlawat/banshee/re
 banshee setup
 ```
 
-- **It fetches** what is missing: Whisper, Silero VAD and the companion voice, about 950 MB.
+- **It fetches** what is missing: the Parakeet listening model (731 MB), Silero VAD and the companion voice (about 400 MB).
+- **Until the listening model arrives,** the daemon stays up and silent. Listening loads by itself when the file lands.
+- **Linux releases** need a CPU with AVX2 (x86_64) or any armv8-a, and no system BLAS.
 - **An interrupted download** resumes, and a re-run fetches only what is still missing.
 
 **2. Start it:**

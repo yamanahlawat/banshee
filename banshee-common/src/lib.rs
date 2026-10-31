@@ -11,6 +11,7 @@ use serde_json::Value;
 pub mod cue;
 pub mod error;
 pub mod feedback;
+pub mod listening;
 pub mod logging;
 pub mod utils;
 
@@ -129,7 +130,6 @@ pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
 pub const BANSHEE_RECORD_TOGGLE: &str = "banshee.record_toggle";
 pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
 pub const BANSHEE_LIST_VOICES: &str = "banshee.list_voices";
-pub const BANSHEE_LIST_LANGUAGES: &str = "banshee.list_languages";
 pub const BANSHEE_DOWNLOAD_MODELS: &str = "banshee.download_models";
 pub const BANSHEE_SUBSCRIBE: &str = "banshee.subscribe";
 pub const BANSHEE_AGENTS: &str = "banshee.agents";
@@ -141,6 +141,9 @@ pub const BANSHEE_STATE_CHANGED: &str = "banshee.state_changed";
 pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
 pub const BANSHEE_CUE: &str = "banshee.cue";
 pub const BANSHEE_LEVEL: &str = "banshee.level";
+/// `{"text": ...}`: the committed words of the recording in progress, and an
+/// empty text when a recording ends.
+pub const BANSHEE_WORDS: &str = "banshee.words";
 
 /// The codes a reply carries. JSON-RPC reserves -32700 to -32600; the
 /// -32000 block is this daemon's, one code per fix a client can offer.
@@ -169,6 +172,7 @@ pub const EVENT_STATE: &str = "state";
 pub const EVENT_DOWNLOADS: &str = "downloads";
 pub const EVENT_CUES: &str = "cues";
 pub const EVENT_LEVEL: &str = "level";
+pub const EVENT_WORDS: &str = "words";
 
 /// The microphone the daemon records from. A `banshee.status` reply and a
 /// `state_changed` push both carry it, so a subscriber reads it from every
@@ -368,14 +372,6 @@ pub enum Remedy {
     Grant,
 }
 
-/// A language Whisper can read, as the engine itself spells it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Language {
-    /// What `stt.language` carries, as in `en` or `hi`.
-    pub code: String,
-    pub name: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Voice {
     pub id: String,
@@ -403,23 +399,6 @@ pub struct PlannedChange {
     pub path: Option<String>,
     /// What `banshee connect` prints for this change, unchanged.
     pub diff: String,
-}
-
-pub struct WhisperConfig {
-    pub model_name: String,
-    pub download_url: String,
-}
-
-impl WhisperConfig {
-    pub fn new(model_name: &str) -> Self {
-        Self {
-            model_name: model_name.to_string(),
-            download_url: format!(
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
-                model_name
-            ),
-        }
-    }
 }
 
 pub struct SileroVADConfig {
@@ -551,8 +530,8 @@ mod wire_tests {
     #[test]
     fn progress_serializes_with_the_keys_clients_read() {
         let wire = serde_json::to_value(DownloadProgress {
-            model: "ggml-base.en.bin".to_string(),
-            label: "Speech model".to_string(),
+            model: "parakeet-unified-en-0.6b-Q8_0.gguf".to_string(),
+            label: "Listening model".to_string(),
             index: 1,
             count: 3,
             bytes: 512,
@@ -563,8 +542,8 @@ mod wire_tests {
         assert_eq!(
             wire,
             serde_json::json!({
-                "model": "ggml-base.en.bin",
-                "label": "Speech model",
+                "model": "parakeet-unified-en-0.6b-Q8_0.gguf",
+                "label": "Listening model",
                 "index": 1,
                 "count": 3,
                 "bytes": 512,
@@ -621,7 +600,7 @@ mod wire_tests {
         assert_eq!(Activity::of(&dictating), Activity::Recording);
     }
 
-    // On the other three flags alone, a slow Whisper run reads as idle.
+    // On the other three flags alone, a slow transcription reads as idle.
     #[test]
     fn transcribing_alone_is_busy() {
         let transcribing = serde_json::json!({

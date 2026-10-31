@@ -13,6 +13,17 @@ use crate::state::DaemonState;
 /// Dotted `section.field` keys, spelled as `config.toml` spells them.
 pub type Assignments = BTreeMap<String, serde_json::Value>;
 
+/// The catalogue model a write names, when it writes `stt.model`.
+pub fn listening_model_named(
+    key: &str,
+    value: &serde_json::Value,
+) -> Option<&'static banshee_common::listening::ListeningModel> {
+    if key != "stt.model" {
+        return None;
+    }
+    value.as_str().and_then(banshee_common::listening::find)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Live {
     VadThreshold,
@@ -22,7 +33,7 @@ enum Live {
     SaveHistory,
     Tts,
     Vocabulary,
-    Preset,
+    Model,
     Speech,
 }
 
@@ -37,9 +48,9 @@ fn live(key: &str) -> Option<Live> {
         // speaker does not start, which is settled once, at startup.
         "tts.voice" => Some(Live::Tts),
         "stt.vocabulary" => Some(Live::Vocabulary),
-        // Whisper reads both per utterance, so neither moves the model.
-        "stt.language" | "stt.translate" => Some(Live::Speech),
-        "stt.preset" => Some(Live::Preset),
+        // Read per utterance, so it moves no model.
+        "stt.translate" => Some(Live::Speech),
+        "stt.model" => Some(Live::Model),
         _ => None,
     }
 }
@@ -86,23 +97,33 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
         // A listener that has gone leaves the words unread, so say so rather
         // than report a prompt nothing holds
         Live::Vocabulary => state.set_vocabulary(config.stt.vocabulary.clone()),
-        Live::Preset => apply_preset(state, config),
+        Live::Model => apply_model(state, config),
         Live::Speech => state.set_speech((&config.stt).into()),
     }
 }
 
 /// Nothing loads when the model is already behind the engine or still to download; a download is
 /// minutes, so the key stays unapplied. A remote listener loads no file, so nothing has to load.
-fn apply_preset(state: &DaemonState, config: &Config) -> bool {
-    let Some(model) = crate::models::stt_file(config) else {
+fn apply_model(state: &DaemonState, config: &Config) -> bool {
+    let Some(model) = crate::models::stt_model(config) else {
         return true;
     };
+    if state.lacks_listening_model() {
+        state.await_listening_model(model.id);
+        if !crate::models::missing_in(state.models_dir(), &[model.file]).is_empty() {
+            return false;
+        }
+        return state.load_stt_model(model);
+    }
     if state.stt_model() == Some(model) {
         return true;
     }
-    let absent = crate::models::missing_in(state.models_dir(), &[model]);
+    let absent = crate::models::missing_in(state.models_dir(), &[model.file]);
     if !absent.is_empty() {
-        log::warn!("{model} is not downloaded yet, so the preset is unchanged");
+        log::warn!(
+            "the listening model {} is not downloaded yet, so the model is unchanged",
+            model.id
+        );
         return false;
     }
     // The engine that loads this starts on the pending restart, and a listener
@@ -110,7 +131,7 @@ fn apply_preset(state: &DaemonState, config: &Config) -> bool {
     if state.stt_model().is_none() {
         return true;
     }
-    state.load_stt_model(config.stt.preset)
+    state.load_stt_model(model)
 }
 
 fn history_for(config: &Config) -> Result<Option<rusqlite::Connection>, BansheeError> {
@@ -156,10 +177,13 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
     for (key, value) in assignments {
         // `[audio.cues]` is a section two deep, so only the last segment is a field
         let (path, field) = key.rsplit_once('.').ok_or_else(|| {
-            BansheeError::Rejected(format!("'{key}' must name a section, as in stt.language"))
+            BansheeError::Rejected(format!("'{key}' must name a section, as in stt.model"))
         })?;
         if value.is_null() {
-            if value_at(&Config::default(), key).is_none_or(|default| default.is_object()) {
+            let retired = crate::config::is_retired(key);
+            if !retired
+                && value_at(&Config::default(), key).is_none_or(|default| default.is_object())
+            {
                 return Err(BansheeError::Rejected(format!("'{key}' is not a setting")));
             }
             if let Some(section) = table_along(document.as_table_mut(), path)? {
@@ -181,6 +205,10 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
             }
         }
 
+        // Ids match ignoring case, and the file keeps the catalogue's spelling
+        let catalogue_id =
+            listening_model_named(key, value).map(|model| serde_json::Value::from(model.id));
+        let value = catalogue_id.as_ref().unwrap_or(value);
         let toml_value = value
             .serialize(toml_edit::ser::ValueSerializer::new())
             .map_err(|error| BansheeError::Rejected(format!("'{key}': {error}")))?;
@@ -207,23 +235,6 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
         refused => refused,
     })?;
     Ok((rendered, validated))
-}
-
-/// A code the engine cannot read is refused here, where a person is there to
-/// see why. `Config` reads the same field liberally, because a file written
-/// before anything read it can hold anything.
-fn refuse_unknown_language(assignments: &Assignments) -> Result<(), BansheeError> {
-    match assignments
-        .get("stt.language")
-        .and_then(|value| value.as_str())
-    {
-        Some(value) if !crate::config::known_language(value) => {
-            Err(BansheeError::Rejected(format!(
-                "'{value}' is not a language Whisper knows. Use a code like en, de or hi, or auto"
-            )))
-        }
-        _ => Ok(()),
-    }
 }
 
 /// Only a write that sets a side's server, or turns the side on, is refused:
@@ -276,9 +287,10 @@ fn startup_only(assignments: &Assignments) -> Option<&String> {
     assignments.keys().find(|key| live(key).is_none())
 }
 
-/// Asks again for the live settings that refused while their file was missing.
-/// The preset and the voice both answer no while their model is absent, and a
-/// download is the only thing that changes that answer.
+/// Asks again for the live settings that refused while their file was missing,
+/// and loads the listening model a pipeline stands without once its file is
+/// here. The listening model and the voice both answer no while their file is
+/// absent, and a download is the only thing that changes that answer.
 pub fn reapply_pending(state: &DaemonState) {
     // The same lock `configure` holds: a write landing between the snapshot and
     // `record_outcome` would be applied from the older config and struck off,
@@ -294,6 +306,24 @@ pub fn reapply_pending(state: &DaemonState) {
     // A key that still refuses is left where it was, not moved or cleared, and
     // a key with no live apply is not this function's to answer for.
     state.record_outcome(&outcome.applied, &[]);
+    // A waiting `stt.model` loaded its model above, if the file is here
+    if !waiting.iter().any(|key| key == "stt.model") {
+        load_awaited_model(state, &config);
+    }
+}
+
+/// Only while the config still names the awaited model: one that moved on
+/// waits as a pending `stt.model`.
+fn load_awaited_model(state: &DaemonState, config: &Config) {
+    let Some(id) = state.awaited_listening_model() else {
+        return;
+    };
+    let Some(model) = crate::models::stt_model(config).filter(|model| model.id == id) else {
+        return;
+    };
+    if crate::models::missing_in(state.models_dir(), &[model.file]).is_empty() {
+        state.load_stt_model(model);
+    }
 }
 
 /// The value a dotted key names, read off a serialized `Config` so both sides
@@ -315,29 +345,38 @@ fn in_effect(key: &str, state: &DaemonState, config: &Config) -> bool {
     was.is_some() && was == value_at(config, key)
 }
 
-/// A variant applies once however many of its keys one call carries: without
-/// the memo, `stt.language` and `stt.translate` together would reach the
-/// listener twice with the same pair.
 fn apply_each<'a>(
     state: &DaemonState,
     config: &Config,
     keys: impl Iterator<Item = &'a String>,
+) -> Outcome {
+    outcome_of(
+        keys,
+        |variant| apply(variant, state, config),
+        |key| in_effect(key, state, config),
+    )
+}
+
+/// A variant applies once however many of its keys one call carries: a null
+/// `audio.cues.enabled` beside `feedback.mode` names `Live::Feedback` twice.
+fn outcome_of<'a>(
+    keys: impl Iterator<Item = &'a String>,
+    mut apply: impl FnMut(Live) -> bool,
+    in_effect: impl Fn(&str) -> bool,
 ) -> Outcome {
     let mut outcome = Outcome::default();
     let mut done: BTreeMap<Live, bool> = BTreeMap::new();
     for key in keys {
         match live(key) {
             Some(variant) => {
-                let honoured = *done
-                    .entry(variant)
-                    .or_insert_with(|| apply(variant, state, config));
+                let honoured = *done.entry(variant).or_insert_with(|| apply(variant));
                 if honoured {
                     outcome.applied.push(key.clone());
                 } else {
                     outcome.restart_required.push(key.clone());
                 }
             }
-            None if in_effect(key, state, config) => outcome.applied.push(key.clone()),
+            None if in_effect(key) => outcome.applied.push(key.clone()),
             None => outcome.restart_required.push(key.clone()),
         }
     }
@@ -379,7 +418,6 @@ fn configure_at(
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
     refuse_retired_keys(&assignments)?;
-    refuse_unknown_language(&assignments)?;
 
     if !persist && let Some(key) = startup_only(&assignments) {
         return Err(BansheeError::Rejected(format!(

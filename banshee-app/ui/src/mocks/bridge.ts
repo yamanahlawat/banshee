@@ -5,7 +5,7 @@ import permissionsJson from './permissions.json';
 import notRunningJson from './not-running.json';
 import remoteJson from './remote.json';
 import remoteSpeechJson from './remote-speech.json';
-import type { AgentRow, Devices, HistoryRow, Languages, PlannedChange, Voices } from '../lib/tauri';
+import type { AgentRow, Devices, HistoryRow, PlannedChange, Voices } from '../lib/tauri';
 import type { Status } from '../lib/daemon';
 
 // A fixture is a captured reply, and JSON cannot carry the unions the type
@@ -79,22 +79,42 @@ const STATES: Record<string, Status> = {
   speaking: { ...ready, speaking: true, activity: 'speaking' },
   armed: { ...ready, recording: true, armed: true, activity: 'listening' },
   transcribing: { ...ready, transcribing: true, activity: 'busy' },
-  // Balanced is loaded and working; Quality has been chosen and is not here.
-  // The daemon is not blocked, so this is the errand, not a fault.
+  // Parakeet is loaded and working; Whisper turbo has been chosen and is not
+  // here. The daemon is not blocked, so this is the errand, not a fault.
   'needs-model': {
     ...ready,
-    config: { ...ready.config, stt: { ...ready.config?.stt, preset: 'quality' } },
-    download_megabytes: 1031,
-    missing_downloads: [{ name: 'ggml-large-v3-q5_0.bin', role: 'speech', megabytes: 1031 }],
+    config: { ...ready.config, stt: { ...ready.config?.stt, model: 'whisper-large-v3-turbo' } },
+    download_megabytes: 619,
+    missing_downloads: [
+      { name: 'whisper-large-v3-turbo-Q5_K_M.gguf', role: 'speech', megabytes: 619 },
+    ],
   },
-  // Balanced chosen, Fast still loaded: the seconds a heavier model takes to
-  // read off disk.
-  'model-lagging': {
+  // A model set through the CLI whose licence waits to be accepted, which the
+  // window cannot do.
+  'needs-licence': {
     ...ready,
-    config: { ...ready.config, stt: { ...ready.config?.stt, preset: 'balanced' } },
-    english_only: true,
-    loading_model: true,
+    config: { ...ready.config, stt: { ...ready.config?.stt, model: 'canary-1b' } },
+    stt_models: [
+      ...(ready.stt_models ?? []),
+      {
+        id: 'canary-1b',
+        label: 'canary-1b',
+        megabytes: 1012,
+        downloaded: false,
+        suggested: false,
+        languages: ['en', 'de', 'es', 'fr'],
+        streams: false,
+        credit: null,
+        licence: {
+          name: 'CC-BY-NC-4.0',
+          summary: 'Use and share it, crediting its authors, for non-commercial purposes only.',
+        },
+        accept_command: 'banshee setup --model canary-1b --accept-licence',
+      },
+    ],
   },
+  // A remote listener translates, so the Write it in row shows.
+  translating: { ...remote, stt_translates: true },
   saving_off: { ...ready, config: { ...ready.config, daemon: { save_history: false } } },
   pending: { ...ready, pending: ['audio.hotkey', 'daemon.save_history'] },
   // The listener the config asks for and the one the daemon runs, in each
@@ -232,6 +252,7 @@ const ANSWERS: Record<string, () => unknown> = {
   set_setting: () => [],
   // A failure has no other way to be looked at: every other state is a status
   // reply, and this one only happens when a call rejects.
+  open_licence: () => undefined,
   copy_text: () => {
     if (chosen() === 'copy-fails') throw new Error('the clipboard refused it');
     return undefined;
@@ -242,21 +263,6 @@ const ANSWERS: Record<string, () => unknown> = {
       { name: 'OnePlus Buds 3', default: false },
     ],
     current: 'OnePlus Buds 3',
-  }),
-  // Whisper's own order: English first, the rest by how much training data each
-  // had. A short slice of it, because a mock needs a list and not the list.
-  list_languages: (): Languages => ({
-    languages: [
-      { code: 'en', name: 'English' },
-      { code: 'zh', name: 'Chinese' },
-      { code: 'de', name: 'German' },
-      { code: 'es', name: 'Spanish' },
-      { code: 'ru', name: 'Russian' },
-      { code: 'ko', name: 'Korean' },
-      { code: 'fr', name: 'French' },
-      { code: 'ja', name: 'Japanese' },
-      { code: 'hi', name: 'Hindi' },
-    ],
   }),
   list_voices: (): Voices => ({
     voices: [
@@ -312,7 +318,13 @@ export function push(event: string, deliver: (payload: unknown) => void): () => 
   if (event !== 'daemon:downloads' || chosen() !== 'downloading') return () => {};
   // `mb` is the percentage's denominator, from the daemon's real byte count.
   const files = [
-    { label: 'Speech model', model: 'ggml-large-v3-turbo.bin', index: 1, count: 4, mb: 142 },
+    {
+      label: 'Listening model',
+      model: 'parakeet-unified-en-0.6b-Q8_0.gguf',
+      index: 1,
+      count: 4,
+      mb: 697,
+    },
     { label: 'Voice detection', model: 'silero_vad.onnx', index: 2, count: 4, mb: 2 },
   ];
   const at_ = (file: (typeof files)[number], percent: number) => {

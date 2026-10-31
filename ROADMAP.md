@@ -7,13 +7,16 @@ today, and `CHANGELOG.md` holds what has shipped.
 
 ## Next
 
-1. **Listening moves to transcribe.cpp.** Streaming Parakeet Unified becomes the default,
-   Whisper turbo the second suggestion, and every other transcribe.cpp model can be
-   downloaded. Fast and Quality go. On 200 Pipecat clips, Parakeet matched Balanced's error
-   rate (2.81% against 2.89%). Its median time to text was 145 ms on the Ryzen at 8 threads,
-   where Balanced took 10.5 s, and 38 ms on the Mac, where Balanced took 701 ms. It also shows
-   words while you speak. `whisper-rs` goes in the same change: both bundle ggml, and linked
-   together the build fails on Linux and mixes the two copies on the Mac.
+1. **Mic and models on demand.** The owner's reason: "model loading is just for optimizing the
+   resources usage per system - some system might use bigger models. so keep the model loaded
+   always doesn't make sense." And: "the mic should also not be held always." Banshee then
+   loads a model when it is needed and frees it when idle, and opens the microphone for a use
+   and closes it after. Loading is cheap enough: models load in under 360 ms on the Mac and the
+   Linux box. The first load after an install compiles Metal shaders and took 2.7 to 3.1 s,
+   so an on-demand load should not be the first load. A Bluetooth headset is the cost. Its first sound came about 311 ms after the open,
+   and its speaker drops to 1 channel at 16 kHz while the mic is open. That was measured on one
+   headset and one Mac. It holds the idle unload for the speech models and the listener, a
+   shorter hold or an open per use for the mic, and a check on other headsets.
 2. **The tray shows a lasting problem.** A warning mark, and a first menu line that names the
    problem and opens the window where it is fixed. Failures nobody sees are the most common
    complaint about dictation and agent voice tools.
@@ -44,8 +47,8 @@ today, and `CHANGELOG.md` holds what has shipped.
     process running as you can still reach the socket and read `banshee.db`. This item makes
     each use visible.
 10. **Linux packaging:** an AppImage and an AUR package, so the window and the tray install
-    without a source clone. transcribe.cpp builds for the host CPU on Linux unless told not
-    to, so a release build sets `GGML_NATIVE=OFF`. A GPU build (Vulkan, CUDA or ROCm) is tried
+    without a source clone. Release builds already target AVX2 on x86_64 and plain armv8-a on
+    aarch64. A GPU build (Vulkan, CUDA or ROCm) is tried
     here; none is measured yet. It comes before notarization because it can start today.
 11. **Notarization,** once a Developer ID is affordable. SentinelOne doesn't flag Handy,
     which is notarized and starts at login through `SMAppService`. Which of the two stops the

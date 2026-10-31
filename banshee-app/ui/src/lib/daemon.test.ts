@@ -141,10 +141,10 @@ describe('pending', () => {
     expect(state.pending.has('audio.hotkey')).toBe(true);
   });
   it('clears when the daemon stops reporting the key', () => {
-    let state = markPending(reduceStatus(empty(), pendingCues), ['stt.language']);
-    expect(state.pending.has('stt.language')).toBe(true);
+    let state = markPending(reduceStatus(empty(), pendingCues), ['stt.translate']);
+    expect(state.pending.has('stt.translate')).toBe(true);
     state = reduceStatus(state, ready);
-    expect(state.pending.has('stt.language')).toBe(false);
+    expect(state.pending.has('stt.translate')).toBe(false);
     expect(state.pending.has('audio.hotkey')).toBe(false);
   });
 });

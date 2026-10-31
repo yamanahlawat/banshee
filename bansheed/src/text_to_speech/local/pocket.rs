@@ -489,7 +489,7 @@ impl PocketEngine {
             .map_err(|error| fault(format!("tokenizer.json: {error}")))?;
         let splitter = Splitter::new(tokenizer, max_token_per_chunk)?;
 
-        let threads = crate::models::onnx_threads();
+        let threads = crate::models::thread_count();
         let model = |file: &str| Model::load(&dir.join(file), threads);
         let text_conditioner = model("text_conditioner.onnx")?;
         let mut flow_lm_main = model("flow_lm_main.onnx")?;

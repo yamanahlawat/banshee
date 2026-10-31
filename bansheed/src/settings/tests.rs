@@ -1,6 +1,5 @@
 use super::{Assignments, Outcome, edit, startup_only, write_first_feedback};
 use crate::config::Config;
-#[cfg(target_os = "macos")]
 use crate::config::FeedbackMode;
 use crate::credentials::RemoteKey;
 use crate::models::download::Download;
@@ -32,8 +31,19 @@ fn assignments(pairs: &[(&str, serde_json::Value)]) -> Assignments {
 }
 
 #[test]
+fn a_model_id_is_written_as_the_catalogue_spells_it() {
+    let (rendered, config) =
+        edit("", &assignments(&[("stt.model", "qwen3-asr-0.6b".into())])).unwrap();
+    assert!(
+        rendered.contains("model = \"Qwen3-ASR-0.6B\""),
+        "{rendered}"
+    );
+    assert_eq!(config.stt.model, "Qwen3-ASR-0.6B");
+}
+
+#[test]
 fn a_write_keeps_the_comments_around_it() {
-    let existing = "# how strict speech detection is\n[stt]\nvad_threshold = 0.5 # tune me\nlanguage = \"en\"\n";
+    let existing = "# how strict speech detection is\n[stt]\nvad_threshold = 0.5 # tune me\ntranslate = false\n";
     let (rendered, config) =
         edit(existing, &assignments(&[("stt.vad_threshold", 0.8.into())])).unwrap();
 
@@ -46,7 +56,7 @@ fn a_write_keeps_the_comments_around_it() {
         "the trailing comment must survive: {rendered}"
     );
     assert!(
-        rendered.contains("language = \"en\""),
+        rendered.contains("translate = false"),
         "an untouched key must survive: {rendered}"
     );
     assert_eq!(config.stt.vad_threshold, 0.8);
@@ -54,15 +64,19 @@ fn a_write_keeps_the_comments_around_it() {
 
 #[test]
 fn a_write_keeps_the_comment_above_the_key_it_changes() {
-    let existing = "[stt]\nvad_threshold = 0.5\n\n# the language spoken\nlanguage = \"en\"\n\ntranslate = false\n";
-    let (rendered, _) = edit(existing, &assignments(&[("stt.language", "de".into())])).unwrap();
+    let existing = "[stt]\nvad_threshold = 0.5\n\n# the model that listens\nmodel = \"parakeet-unified-en-0.6b\"\n\ntranslate = false\n";
+    let (rendered, _) = edit(
+        existing,
+        &assignments(&[("stt.model", "whisper-large-v3-turbo".into())]),
+    )
+    .unwrap();
 
     assert!(
-        rendered.contains("# the language spoken\nlanguage = \"de\""),
+        rendered.contains("# the model that listens\nmodel = \"whisper-large-v3-turbo\""),
         "the comment above the key must stay above it: {rendered}"
     );
     assert!(
-        rendered.contains("\n\n# the language spoken"),
+        rendered.contains("\n\n# the model that listens"),
         "the blank line separating it must survive: {rendered}"
     );
 }
@@ -106,12 +120,15 @@ fn a_nested_write_keeps_a_section_that_was_already_written() {
     assert!(rendered.contains("[stt.remote]"), "{rendered}");
 }
 
-/// Whisper reads the language and the task per utterance, so a write moves
-/// the next dictation and no model reloads.
+/// The task is read per utterance and the model loads live, so neither waits
+/// for a restart.
 #[test]
-fn the_spoken_language_applies_without_a_restart() {
+fn the_model_and_translate_apply_without_a_restart() {
     assert_eq!(
-        startup_only(&assignments(&[("stt.language", "de".into())])),
+        startup_only(&assignments(&[(
+            "stt.model",
+            "whisper-large-v3-turbo".into()
+        )])),
         None
     );
     assert_eq!(
@@ -120,19 +137,11 @@ fn the_spoken_language_applies_without_a_restart() {
     );
 }
 
-/// A code the engine does not know is refused where a person is there to
-/// read why. The config's own reader falls back to English instead, so a
-/// file written before the field was read cannot stop the daemon.
 #[test]
-fn a_language_the_engine_does_not_know_is_refused_at_the_boundary() {
-    let error = configure_in_scratch(
-        None,
-        assignments(&[("stt.language", "klingon".into())]),
-        false,
-    )
-    .expect_err("an unknown code must not be written");
-    assert!(error.to_string().contains("klingon"), "{error}");
-    assert!(error.to_string().contains("auto"), "{error}");
+fn a_model_banshee_does_not_know_is_refused_at_the_boundary() {
+    let error = configure_in_scratch(None, assignments(&[("stt.model", "nope".into())]), false)
+        .expect_err("an unknown model must not be written");
+    assert!(error.to_string().contains("nope"), "{error}");
 }
 
 #[test]
@@ -172,15 +181,9 @@ fn switching_a_side_to_local_over_an_old_plain_http_url_is_written() {
 fn an_unrelated_write_beside_an_old_plain_http_url_is_written() {
     configure_over(
         OLD_PLAIN_HTTP_LISTENER,
-        assignments(&[("stt.language", "de".into())]),
+        assignments(&[("stt.translate", true.into())]),
     )
     .expect("a write that touches no remote side is not refused");
-}
-
-#[test]
-fn a_language_the_engine_knows_is_written() {
-    configure_in_scratch(None, assignments(&[("stt.language", "de".into())]), false)
-        .expect("de is a language whisper knows");
 }
 
 #[test]
@@ -392,22 +395,44 @@ fn a_backend_that_refuses_the_voice_is_not_reported_as_applied() {
 }
 
 #[test]
-fn two_keys_of_one_setting_reach_the_daemon_once() {
-    let (commands, taken) = std::sync::mpsc::channel();
-    let state = crate::test_support::daemon_state(commands);
+fn two_keys_of_one_setting_apply_it_once() {
+    let keys = [
+        "audio.cues.enabled".to_string(),
+        "feedback.mode".to_string(),
+    ];
+    let mut applies = Vec::new();
+
+    let outcome = super::outcome_of(
+        keys.iter(),
+        |variant| {
+            applies.push(variant);
+            true
+        },
+        |_| false,
+    );
+
+    assert_eq!(applies.len(), 1, "one call, one apply: {}", applies.len());
+    assert_eq!(outcome.applied, keys, "both keys are in effect");
+}
+
+/// A null `audio.cues.enabled` is the one write of the retired key that passes,
+/// so it is the pair that reaches `apply_each` with one setting named twice.
+#[test]
+fn a_feedback_write_that_removes_the_retired_key_is_in_effect() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
 
     let outcome = configure_in_scratch(
         Some(&state),
         assignments(&[
-            ("stt.language", "de".into()),
-            ("stt.translate", true.into()),
+            ("feedback.mode", "sound".into()),
+            ("audio.cues.enabled", serde_json::Value::Null),
         ]),
         false,
     )
-    .expect("two known keys and legal values must apply");
+    .expect("a mode and the removal of the old switch must apply");
 
-    assert_eq!(taken.try_iter().count(), 1, "one write, one command");
-    assert_eq!(outcome.applied.len(), 2, "both keys are in effect");
+    assert_eq!(outcome.applied.len(), 2, "{outcome:?}");
+    assert_eq!(state.feedback_mode(), FeedbackMode::Sound);
 }
 
 #[test]
@@ -431,57 +456,135 @@ fn a_vocabulary_write_reaches_the_listener_that_holds_the_engine() {
     assert_eq!(outcome.applied, vec!["stt.vocabulary".to_string()]);
 }
 
+#[test]
+fn a_listening_model_that_arrives_is_loaded_into_the_waiting_pipeline() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    let parakeet =
+        banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
+
+    super::reapply_pending(&state);
+    assert!(taken.try_recv().is_err(), "nothing waits for a model");
+
+    state.await_listening_model(parakeet.id);
+    super::reapply_pending(&state);
+    assert!(taken.try_recv().is_err(), "the file is not here yet");
+
+    pretend_downloaded(&state, parakeet.file);
+    super::reapply_pending(&state);
+    match taken.try_recv() {
+        Ok(crate::state::ConsumerCommand::Reload(model)) => assert_eq!(model, parakeet),
+        _ => panic!("the model that arrived is loaded"),
+    }
+}
+
+#[test]
+fn a_model_the_config_no_longer_names_is_not_loaded_when_it_arrives() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    let parakeet =
+        banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
+    state.await_listening_model(parakeet.id);
+    let mut moved = Config::default();
+    moved.stt.model = TURBO.to_string();
+    state.set_config(std::sync::Arc::new(moved));
+
+    pretend_downloaded(&state, parakeet.file);
+    super::reapply_pending(&state);
+    assert!(
+        taken.try_recv().is_err(),
+        "the config chose turbo, so loading Parakeet is stale"
+    );
+}
+
+#[test]
+fn a_model_chosen_while_none_listens_is_the_one_awaited() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
+    state.listening_model_failed("the file is damaged".to_string());
+
+    let outcome = configure_in_scratch(
+        Some(&state),
+        assignments(&[("stt.model", TURBO.into())]),
+        true,
+    )
+    .expect("a known model is a legal write");
+    assert_eq!(outcome.restart_required, vec!["stt.model".to_string()]);
+    assert_eq!(
+        state.pipeline(),
+        crate::state::Pipeline::Broken(crate::state::RecordingError::NoListeningModel(TURBO)),
+        "the old failure is not this model's"
+    );
+    assert!(taken.try_recv().is_err(), "turbo is not here yet");
+
+    pretend_downloaded(&state, turbo().file);
+    super::reapply_pending(&state);
+    let reloads: Vec<_> = taken
+        .try_iter()
+        .filter_map(|command| match command {
+            crate::state::ConsumerCommand::Reload(model) => Some(model),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reloads, vec![turbo()], "turbo loads once when it arrives");
+}
+
 /// Puts an empty stand-in for `name` in the state's model directory, so the
-/// preset reads as downloaded.
+/// model reads as downloaded.
 fn pretend_downloaded(state: &crate::state::DaemonState, name: &str) {
     std::fs::create_dir_all(state.models_dir()).unwrap();
     std::fs::write(state.models_dir().join(name), b"").unwrap();
 }
 
-// These ask `apply_preset` directly, against the model directory the state
+const TURBO: &str = "whisper-large-v3-turbo";
+
+fn turbo() -> &'static banshee_common::listening::ListeningModel {
+    banshee_common::listening::find(TURBO).unwrap()
+}
+
+// These ask `apply_model` directly, against the model directory the state
 // holds, which starts empty.
 #[test]
-fn a_preset_write_reaches_the_listener_that_holds_the_engine() {
+fn a_model_write_reaches_the_listener_that_holds_the_engine() {
     let (commands, taken) = std::sync::mpsc::channel();
-    let mut running = Config::default();
-    running.stt.preset = crate::config::STTPreset::Fast;
-    let state = crate::test_support::daemon_state_running(running, commands);
-    let wanted = Config::default();
-    pretend_downloaded(&state, wanted.stt.preset.model_name());
+    let state = crate::test_support::daemon_state(commands);
+    let mut wanted = Config::default();
+    wanted.stt.model = TURBO.to_string();
+    pretend_downloaded(&state, turbo().file);
 
-    let applied = super::apply_preset(&state, &wanted);
+    let applied = super::apply_model(&state, &wanted);
 
-    assert!(applied, "a downloaded preset loads live");
+    assert!(applied, "a downloaded model loads live");
     match taken.try_recv() {
-        Ok(crate::state::ConsumerCommand::Reload(preset)) => {
-            assert_eq!(preset, wanted.stt.preset);
-        }
+        Ok(crate::state::ConsumerCommand::Reload(model)) => assert_eq!(model, turbo()),
         other => panic!("the listener was handed no model: {:?}", other.is_ok()),
     }
 }
 
-// Every click on the segmented control writes the key, the active one
-// included. Without the guard each of those costs a multi-second load and
-// holds two models at once.
+// Every click on a model writes the key, the active one included. Without the
+// guard each of those costs a load and holds two models at once.
 #[test]
-fn a_preset_already_behind_the_engine_loads_nothing() {
+fn a_model_already_behind_the_engine_loads_nothing() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
-    state.set_stt_model(Some("ggml-large-v3-turbo-q5_0.bin"));
+    state.set_stt_model(Some(turbo()));
+    let mut file = Config::default();
+    file.stt.model = TURBO.to_string();
 
-    assert!(super::apply_preset(&state, &Config::default()));
+    assert!(super::apply_model(&state, &file));
     assert!(taken.try_recv().is_err(), "the model was already loaded");
 }
 
 #[test]
-fn a_preset_write_under_a_remote_listener_is_applied_and_loads_nothing() {
+fn a_model_write_under_a_remote_listener_is_applied_and_loads_nothing() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
     let mut file = Config::default();
     file.stt.provider = crate::config::Provider::Remote;
-    file.stt.preset = crate::config::STTPreset::Fast;
+    file.stt.model = TURBO.to_string();
 
-    assert!(super::apply_preset(&state, &file));
+    assert!(super::apply_model(&state, &file));
     assert!(
         taken.try_recv().is_err(),
         "nothing is loaded for a remote listener"
@@ -489,17 +592,17 @@ fn a_preset_write_under_a_remote_listener_is_applied_and_loads_nothing() {
 }
 
 /// The file can name a local listener while a remote one is still running. The
-/// engine that loads the preset starts on the pending restart.
+/// engine that loads the model starts on the pending restart.
 #[test]
-fn a_preset_written_for_a_listener_that_is_not_running_yet_loads_nothing() {
+fn a_model_written_for_a_listener_that_is_not_running_yet_loads_nothing() {
     let (commands, taken) = std::sync::mpsc::channel();
     let mut running = Config::default();
     running.stt.provider = crate::config::Provider::Remote;
     let state = crate::test_support::daemon_state_running(running, commands);
     let mut file = Config::default();
-    file.stt.preset = crate::config::STTPreset::Fast;
+    file.stt.model = TURBO.to_string();
 
-    let applied = super::apply_preset(&state, &file);
+    let applied = super::apply_model(&state, &file);
 
     assert!(
         taken.try_recv().is_err(),
@@ -507,7 +610,7 @@ fn a_preset_written_for_a_listener_that_is_not_running_yet_loads_nothing() {
     );
     assert!(
         !applied,
-        "a model that is not downloaded leaves the preset waiting"
+        "a model that is not downloaded leaves the key waiting"
     );
 }
 
@@ -522,7 +625,7 @@ fn the_tts_fallback_still_needs_a_restart() {
 #[test]
 fn a_provider_write_is_kept_by_the_file() {
     let (rendered, config) = edit(
-        "[stt]\nlanguage = \"en\"\n",
+        "[stt]\ntranslate = false\n",
         &assignments(&[("stt.provider", "local".into())]),
     )
     .unwrap();
@@ -601,6 +704,39 @@ fn a_null_for_a_key_never_written_changes_nothing() {
 }
 
 #[test]
+fn a_null_removes_a_retired_setting() {
+    let existing = "[stt]\npreset = \"balanced\"\nvad_threshold = 0.6\n";
+    let (rendered, config) = edit(
+        existing,
+        &assignments(&[("stt.preset", serde_json::Value::Null)]),
+    )
+    .unwrap();
+    assert!(!rendered.contains("preset"), "{rendered}");
+    assert_eq!(config.stt.vad_threshold, 0.6);
+}
+
+#[test]
+fn a_null_for_one_retired_setting_names_the_ones_left() {
+    let existing = "[stt]\npreset = \"balanced\"\nlanguage = \"en\"\n";
+    let error = edit(
+        existing,
+        &assignments(&[("stt.preset", serde_json::Value::Null)]),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("`language`"), "{error}");
+    assert!(!error.contains("`preset`"), "{error}");
+}
+
+#[test]
+fn a_retired_setting_takes_no_value_but_null() {
+    let error = edit("", &assignments(&[("stt.language", "de".into())]))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("`language`"), "{error}");
+}
+
+#[test]
 fn a_null_for_an_unknown_key_is_refused() {
     let error = edit(
         "",
@@ -654,7 +790,7 @@ fn an_unknown_section_is_refused() {
 fn a_key_without_a_section_is_refused() {
     let error = edit("", &assignments(&[("voice", "af_sky".into())])).unwrap_err();
     assert!(
-        error.to_string().contains("stt.language"),
+        error.to_string().contains("stt.model"),
         "the error must show the dotted form: {error}"
     );
 }
@@ -690,19 +826,18 @@ fn a_setting_that_was_waiting_on_a_file_applies_once_the_download_ends() {
 #[test]
 fn a_setting_whose_file_is_still_missing_keeps_waiting() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    let preset = crate::config::STTPreset::Fast;
     assert_ne!(
-        preset,
-        state.config().stt.preset,
+        state.config().stt.model,
+        TURBO,
         "the fixture must ask for a model the daemon does not run"
     );
     let mut next = Config::default();
-    next.stt.preset = preset;
+    next.stt.model = TURBO.to_string();
     state.set_config(std::sync::Arc::new(next));
-    state.record_outcome(&[], &["stt.preset".to_string()]);
+    state.record_outcome(&[], &["stt.model".to_string()]);
 
     super::reapply_pending(&state);
-    assert_eq!(state.pending(), vec!["stt.preset".to_string()]);
+    assert_eq!(state.pending(), vec!["stt.model".to_string()]);
 }
 
 /// Nothing else in `pending` is a live key, and a restart-only key has no
@@ -902,11 +1037,15 @@ fn scratch_config(text: &str) -> (std::path::PathBuf, Vec<Download>) {
             megabytes: 1,
             name: "one.bin".to_string(),
             url: "https://example.test/one".to_string(),
+            sha256: None,
+            model: None,
         },
         Download {
             megabytes: 1,
             name: "two.bin".to_string(),
             url: "https://example.test/two".to_string(),
+            sha256: None,
+            model: None,
         },
     ];
     (path, wanted)

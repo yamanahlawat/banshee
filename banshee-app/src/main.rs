@@ -77,7 +77,6 @@ fn main() {
             commands::set_setting,
             commands::list_devices,
             commands::list_voices,
-            commands::list_languages,
             commands::preview_voice,
             commands::download_models,
             commands::detect_agents,
@@ -87,6 +86,7 @@ fn main() {
             commands::clear_history,
             commands::open_permission_pane,
             commands::copy_text,
+            commands::open_licence,
             commands::start_daemon,
             commands::restart_daemon,
         ])

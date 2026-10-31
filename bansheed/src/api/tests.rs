@@ -544,6 +544,11 @@ async fn an_ask_waits_until_the_dictation_leaves_the_ring() {
     let consumer = std::thread::spawn({
         let state = Arc::clone(&state);
         move || {
+            let Ok(ConsumerCommand::Stream) =
+                command_receiver.recv_timeout(std::time::Duration::from_secs(5))
+            else {
+                panic!("the press never reached the consumer");
+            };
             let Ok(ConsumerCommand::Transcribe(ring)) =
                 command_receiver.recv_timeout(std::time::Duration::from_secs(5))
             else {
@@ -736,6 +741,9 @@ async fn record_start_and_stop_drive_push_to_talk() {
         panic!("expected success response");
     };
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    let Ok(ConsumerCommand::Stream) = command_receiver.try_recv() else {
+        panic!("expected the start to stream");
+    };
     let Ok(ConsumerCommand::Transcribe(_)) = command_receiver.try_recv() else {
         panic!("expected a transcribe command");
     };
@@ -755,6 +763,9 @@ async fn recorded_with(params: Option<serde_json::Value>) -> Vec<crate::audio::c
     let stop = request(BANSHEE_RECORD_STOP, None);
     let JsonRpcResponse::Success { .. } = dispatch(stop, &state).await else {
         panic!("the stop must be accepted");
+    };
+    let Ok(ConsumerCommand::Stream) = command_receiver.try_recv() else {
+        panic!("the start must stream");
     };
     let Ok(ConsumerCommand::Transcribe(..)) = command_receiver.try_recv() else {
         panic!("the stop must send the audio to be transcribed");
@@ -809,6 +820,9 @@ async fn record_toggle_starts_then_stops_and_says_which() {
     };
     assert_eq!(result["recording"], serde_json::Value::Bool(false));
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    let Ok(ConsumerCommand::Stream) = command_receiver.try_recv() else {
+        panic!("expected the start to stream");
+    };
     let Ok(ConsumerCommand::Transcribe(_)) = command_receiver.try_recv() else {
         panic!("expected a transcribe command");
     };
@@ -886,13 +900,13 @@ fn a_pushed_change_agrees_with_what_status_reports() {
 fn status_carries_the_config_the_daemon_parsed() {
     let state = test_state(std::sync::mpsc::channel().0);
     let mut config = crate::config::Config::default();
-    config.stt.language = "de".to_string();
+    config.stt.model = "whisper-large-v3-turbo".to_string();
     config.stt.vocabulary = vec!["Tauri".to_string(), "Svelte".to_string()];
     config.tts.voice = "af_sky".to_string();
     state.set_config(std::sync::Arc::new(config));
 
     let status = status_payload(&state);
-    assert_eq!(status["config"]["stt"]["language"], "de");
+    assert_eq!(status["config"]["stt"]["model"], "whisper-large-v3-turbo");
     assert_eq!(
         status["config"]["stt"]["vocabulary"],
         serde_json::json!(["Tauri", "Svelte"])
@@ -924,25 +938,179 @@ fn status_reports_nothing_pending_on_a_fresh_daemon() {
     assert_eq!(status_payload(&state)["pending"], serde_json::json!([]));
 }
 
-/// A preset applied without `persist` reloads the model and leaves the file
-/// config where it was, so the flag has to follow the model.
+/// A model applied without `persist` reloads the listener and leaves the file
+/// config where it was, so the flag follows the listener. The catalogue knows
+/// it before any model loads.
 #[test]
-fn english_only_follows_the_model_the_listener_loaded() {
+fn translates_follows_the_listener_in_use() {
     let state = test_state(std::sync::mpsc::channel().0);
-    assert_eq!(status_payload(&state)["english_only"], false);
+    let status = status_payload(&state);
+    assert_eq!(status["stt_translates"], false, "Parakeet, loaded or not");
+    assert_eq!(
+        status.get("english_only"),
+        None,
+        "the window reads languages"
+    );
 
-    state.set_stt_model(Some("ggml-base.en.bin"));
-    assert_eq!(status_payload(&state)["english_only"], true);
+    state.set_stt_model(banshee_common::listening::find("Breeze-ASR-25"));
+    assert_eq!(status_payload(&state)["stt_translates"], true);
 }
 
 #[test]
-fn a_remote_listener_reports_no_model_and_is_not_english_only() {
+fn the_window_lists_the_suggestions_then_the_downloaded_models() {
+    use banshee_common::listening::find;
+    let dir = crate::test_support::unique_scratch("listening-models");
+    let breeze = find("Breeze-ASR-25").unwrap();
+    crate::test_support::write_empty(&dir, &[breeze.file]);
+    let accepted = crate::models::licences::Accepted::at(dir.join("accepted-licences"));
+
+    let listed = listening_models("parakeet-unified-en-0.6b", &dir, &accepted);
+    let ids: Vec<&str> = listed
+        .iter()
+        .map(|one| one["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "parakeet-unified-en-0.6b",
+            "whisper-large-v3-turbo",
+            "Breeze-ASR-25"
+        ]
+    );
+
+    let parakeet = &listed[0];
+    assert_eq!(parakeet["label"], "Parakeet Unified");
+    assert_eq!(parakeet["megabytes"], 731);
+    assert_eq!(parakeet["downloaded"], false);
+    assert_eq!(parakeet["suggested"], true);
+    assert_eq!(parakeet["languages"], serde_json::json!(["en"]));
+    assert_eq!(parakeet["streams"], true);
+    assert!(
+        parakeet["credit"]
+            .as_str()
+            .unwrap()
+            .contains("Licensed by NVIDIA Corporation under the NVIDIA Open Model License"),
+        "{parakeet}"
+    );
+    assert_eq!(
+        parakeet["licence"].get("url"),
+        None,
+        "the window opens a licence by id"
+    );
+    assert_eq!(parakeet["accept_command"], serde_json::Value::Null);
+
+    assert_eq!(listed[1]["label"], "Whisper turbo");
+    assert_eq!(listed[1]["streams"], false);
+    assert_eq!(listed[1]["credit"], serde_json::Value::Null);
+
+    let breeze = &listed[2];
+    assert_eq!(breeze["label"], "Breeze-ASR-25");
+    assert_eq!(breeze["downloaded"], true);
+    assert_eq!(breeze["suggested"], false);
+    assert_eq!(breeze["languages"], serde_json::json!(["zh", "en"]));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Set through the CLI, so the window has no other way to learn why its
+/// download is refused.
+#[test]
+fn a_configured_model_waiting_on_its_licence_is_listed_with_the_command_that_accepts_it() {
+    let dir = crate::test_support::unique_scratch("listening-models-licence");
+    let mut accepted = crate::models::licences::Accepted::at(dir.join("accepted-licences"));
+
+    let listed = listening_models("canary-1b", &dir, &accepted);
+    let canary = listed.last().unwrap();
+    assert_eq!(canary["id"], "canary-1b");
+    assert_eq!(canary["downloaded"], false);
+    assert_eq!(canary["licence"]["name"], "CC-BY-NC-4.0");
+    assert!(
+        canary["licence"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("non-commercial"),
+        "{canary}"
+    );
+    assert_eq!(
+        canary["accept_command"],
+        "banshee setup --model canary-1b --accept-licence"
+    );
+
+    accepted.add("CC-BY-NC-4.0").unwrap();
+    let listed = listening_models("canary-1b", &dir, &accepted);
+    assert_eq!(
+        listed.last().unwrap()["accept_command"],
+        serde_json::Value::Null
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// whisper-base sorts after canary-1b in the catalogue, so catalogue order
+/// alone would put the configured model before it.
+#[test]
+fn the_configured_model_comes_after_the_downloaded_ones() {
+    let dir = crate::test_support::unique_scratch("listening-models-order");
+    let base = banshee_common::listening::find("whisper-base").unwrap();
+    crate::test_support::write_empty(&dir, &[base.file]);
+    let accepted = crate::models::licences::Accepted::at(dir.join("accepted-licences"));
+
+    let listed = listening_models("canary-1b", &dir, &accepted);
+    let ids: Vec<&str> = listed
+        .iter()
+        .map(|one| one["id"].as_str().unwrap())
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        ids,
+        [
+            "parakeet-unified-en-0.6b",
+            "whisper-large-v3-turbo",
+            "whisper-base",
+            "canary-1b"
+        ]
+    );
+}
+
+/// The licence gate sits in the download path, so a file already here asks
+/// for nothing.
+#[test]
+fn a_downloaded_model_asks_for_no_acceptance() {
+    let dir = crate::test_support::unique_scratch("listening-models-here");
+    let canary = banshee_common::listening::find("canary-1b").unwrap();
+    crate::test_support::write_empty(&dir, &[canary.file]);
+    let accepted = crate::models::licences::Accepted::at(dir.join("accepted-licences"));
+
+    let listed = listening_models("canary-1b", &dir, &accepted);
+    let _ = std::fs::remove_dir_all(&dir);
+    let entry = listed.iter().find(|one| one["id"] == "canary-1b").unwrap();
+    assert_eq!(entry["downloaded"], true);
+    assert_eq!(entry["accept_command"], serde_json::Value::Null);
+}
+
+#[test]
+fn status_carries_the_listening_models() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let status = status_payload(&state);
+    assert_eq!(status["stt_models"][0]["id"], "parakeet-unified-en-0.6b");
+    assert_eq!(status["stt_models"][1]["id"], "whisper-large-v3-turbo");
+}
+
+#[test]
+fn stt_model_is_the_id_of_the_model_in_use() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    assert_eq!(
+        status_payload(&state)["stt_model"],
+        "parakeet-unified-en-0.6b"
+    );
+}
+
+#[test]
+fn a_remote_listener_reports_no_model_and_translates() {
     let mut config = crate::config::Config::default();
     config.stt.provider = crate::config::Provider::Remote;
     let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
     let status = status_payload(&state);
     assert_eq!(status["stt_model"], serde_json::Value::Null);
-    assert_eq!(status["english_only"], false);
+    assert_eq!(status["stt_translates"], true);
 }
 
 #[test]
@@ -1130,6 +1298,8 @@ async fn a_second_download_is_refused_while_one_runs() {
         megabytes: 1,
         name: "no-such-model-9f3a.bin".to_string(),
         url: "https://example.invalid/no-such-model-9f3a.bin".to_string(),
+        sha256: None,
+        model: None,
     }]);
     let slot = state.start_downloading().expect("the slot starts free");
 
@@ -1146,6 +1316,46 @@ async fn a_second_download_is_refused_while_one_runs() {
 
     drop(slot);
     assert!(state.start_downloading().is_some(), "the slot came back");
+}
+
+// With nothing else wanted, only the named model can reach the busy slot.
+#[tokio::test]
+async fn a_download_by_model_fetches_that_model_and_refuses_an_unknown_id() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_wanted_downloads(Vec::new());
+    let slot = state.start_downloading().expect("the slot starts free");
+
+    let JsonRpcResponse::Error { error, .. } = dispatch(
+        request(
+            BANSHEE_DOWNLOAD_MODELS,
+            Some(serde_json::json!({"model": "moonshine-tiny"})),
+        ),
+        &state,
+    )
+    .await
+    else {
+        panic!("expected the busy error");
+    };
+    assert_eq!(error.code, rpc_code::DOWNLOAD_RUNNING);
+    drop(slot);
+
+    let JsonRpcResponse::Error { error, .. } = dispatch(
+        request(
+            BANSHEE_DOWNLOAD_MODELS,
+            Some(serde_json::json!({"model": "no-such-model-9f3a"})),
+        ),
+        &state,
+    )
+    .await
+    else {
+        panic!("expected an unknown id to be refused");
+    };
+    assert_eq!(error.code, rpc_code::INVALID_PARAMS);
+    assert!(
+        error.message.contains("no-such-model-9f3a"),
+        "{}",
+        error.message
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -1174,6 +1384,8 @@ async fn a_first_download_writes_the_mode_into_the_daemons_own_config_after_the_
         megabytes: 1,
         name: "no-such-model-4c1d.bin".to_string(),
         url: "http://127.0.0.1:9/no-such-model-4c1d.bin".to_string(),
+        sha256: None,
+        model: None,
     }]);
 
     let JsonRpcResponse::Success { .. } =

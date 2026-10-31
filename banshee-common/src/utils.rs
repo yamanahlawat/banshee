@@ -184,6 +184,12 @@ pub fn models_path() -> Option<PathBuf> {
     Some(banshee_dir()?.join("models"))
 }
 
+/// The licences a person accepted for listening models whose licence limits
+/// commercial use, one name per line.
+pub fn accepted_licences_path() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("accepted-licences"))
+}
+
 pub fn config_path() -> Option<PathBuf> {
     Some(banshee_dir()?.join("config.toml"))
 }

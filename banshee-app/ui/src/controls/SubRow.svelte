@@ -3,7 +3,7 @@
 
   export let name: string;
   export let pending = false;
-  /// What the wait is for, where a restart is not it. A preset whose model is
+  /// What the wait is for, where a restart is not it. A chosen model that is
   /// absent waits on a download, and a restart with nothing on disk to load
   /// changes nothing.
   export let says: string | null = null;

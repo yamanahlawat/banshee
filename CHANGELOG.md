@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking: `preset` and `language` are gone from `[stt]`.** Delete both from
+  `config.toml`, or the daemon won't start. One error names every removed key.
+  `banshee config set stt.preset null` removes a key. The window shows why the
+  daemon refused to start. The tray points at `banshee start`, which prints it.
+- **Breaking: a config that names no model moves to Parakeet Unified.** Listening
+  stays silent until `banshee setup` fetches its 731 MB. The daemon stays up,
+  and `banshee status` says why. Listening loads by itself when the file lands.
+- **Breaking: Whisper turbo does not translate.** `stt.translate` has no effect
+  on it. A model or a server that translates still honours it.
+- **Breaking: Banshee deletes the old Whisper files at start.** It removes
+  `ggml-base.en.bin`, `ggml-large-v3-turbo-q5_0.bin` and `ggml-large-v3-q5_0.bin`
+  from `~/.banshee/models`, those names only. An older Banshee that you roll back
+  to downloads its Whisper file again.
+- **Listening runs on transcribe.cpp, and Parakeet Unified is the default.**
+  Whisper turbo is the second suggestion. `stt.model` takes a model id, and
+  `whisper-rs` is gone.
+- **Every transcribe.cpp model downloads by id.** `banshee setup --model <id>`
+  fetches one of 73, and `banshee setup --list` shows each id with its size,
+  languages, whether it streams and its licence. 18 models need
+  `--accept-licence`: the CC-BY-NC ones, Moonshine, HAI-DEF and FunASR.
+- **The macOS chip shows live words while you speak.** They appear during
+  dictation and spoken answers. When you let go, one full pass over the recording
+  produces the typed text. Linux has no capsule yet, so live words wait for it.
+- **Words to know start empty, and work on every model.** A model that takes
+  vocabulary receives the list. For any other model, a corrector swaps a close-sounding
+  word for a listed one, with the rule from Handy (threshold 0.10, Soundex weight 0.5).
+- **The window lists the suggested and the downloaded models.** Each row shows size,
+  languages and whether it streams.
+- **A transcription server gets no language hint.** `stt.language` is gone.
+- **Linux releases need AVX2 on x86_64,** or plain armv8-a on aarch64, and no system BLAS.
 - **On macOS, the daemon and the tray start at login through Login Items.**
   They show in System Settings > General > Login Items under "Allow in the
   Background", where you can switch them off. macOS shows "Background Items

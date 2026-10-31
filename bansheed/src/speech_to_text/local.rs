@@ -1,2 +1,1 @@
-pub mod languages;
-pub mod whisper;
+pub mod transcribe;

@@ -11,10 +11,26 @@ import {
   listeningFacts,
   reduceStatus,
   waitsOnARestart,
+  type ListeningModel,
   type Status,
 } from '../lib/daemon';
-import { downloadModels, listDevices, listLanguages, setSetting, status } from '../lib/tauri';
-import { announcement, forgetCopy, listeningNote, PENDING_SAYS, TAKES_EFFECT } from '../lib/copy';
+import {
+  copyText,
+  downloadModels,
+  listDevices,
+  openLicence,
+  setSetting,
+  status,
+} from '../lib/tauri';
+import {
+  announcement,
+  forgetCopy,
+  listeningNote,
+  problem,
+  report,
+  PENDING_SAYS,
+  TAKES_EFFECT,
+} from '../lib/copy';
 import { forgetTheAsk } from '../lib/downloads';
 import MicrophonePanel from './MicrophonePanel.svelte';
 
@@ -38,9 +54,80 @@ const LOCAL_IN_FORCE: Status['remote'] = {
   tts: { remote: false, host: null, speaker_started: true, key_present: false },
 };
 
+const PARAKEET: ListeningModel = {
+  id: 'parakeet-unified-en-0.6b',
+  label: 'Parakeet Unified',
+  megabytes: 731,
+  downloaded: true,
+  suggested: true,
+  languages: ['en'],
+  streams: true,
+  credit:
+    'Parakeet Unified by NVIDIA. Licensed by NVIDIA Corporation under the NVIDIA Open Model License.',
+  licence: {
+    name: 'NVIDIA Open Model License (2025-10-24)',
+    summary: 'Commercial use is allowed.',
+  },
+  accept_command: null,
+};
+const TURBO: ListeningModel = {
+  id: 'whisper-large-v3-turbo',
+  label: 'Whisper turbo',
+  megabytes: 619,
+  downloaded: false,
+  suggested: true,
+  languages: ['af', 'am', 'ar', 'as', 'az'],
+  streams: false,
+  credit: null,
+  licence: { name: 'MIT', summary: 'Use it.' },
+  accept_command: null,
+};
+const GIGAAM: ListeningModel = {
+  ...TURBO,
+  id: 'gigaam-v3-ctc',
+  label: 'gigaam-v3-ctc',
+  megabytes: 225,
+  downloaded: true,
+  suggested: false,
+  languages: ['ru'],
+};
+const CANARY: ListeningModel = {
+  ...TURBO,
+  id: 'canary-1b',
+  label: 'canary-1b',
+  suggested: false,
+  languages: ['en', 'de', 'es', 'fr'],
+  licence: {
+    name: 'CC-BY-NC-4.0',
+    summary: 'Use and share it, crediting its authors, for non-commercial purposes only.',
+  },
+  accept_command: 'banshee setup --model canary-1b --accept-licence',
+};
+
 // A local listener with a key the daemon still holds, which is the one state
 // that says what stays saved.
-const localStatus = withStt({ provider: 'local' }, LOCAL_IN_FORCE);
+const localStatus: Status = {
+  ...withStt({ provider: 'local', model: PARAKEET.id }, LOCAL_IN_FORCE),
+  stt_models: [PARAKEET, TURBO, GIGAAM],
+  stt_translates: false,
+};
+
+function choosing(model: ListeningModel, models = [PARAKEET, TURBO, GIGAAM]): Status {
+  return {
+    ...localStatus,
+    config: {
+      ...localStatus.config,
+      stt: { ...(localStatus.config?.stt ?? {}), model: model.id },
+    },
+    stt_models: models,
+  };
+}
+
+function modelRow(label: string): HTMLElement {
+  return screen
+    .getByRole('radio', { name: new RegExp(`^${label}`) })
+    .closest('.model') as HTMLElement;
+}
 
 // The two directions the choice can wait in: the config holds one listener and
 // the daemon runs the other.
@@ -57,8 +144,12 @@ function listenerGroup(): HTMLElement {
   return screen.getByRole('radiogroup', { name: 'Listening' }).closest('.row') as HTMLElement;
 }
 
-// The panel reads the hardware and the language table as it mounts.
+// The panel reads the platform from the user agent, which jsdom names as neither.
+const agent = vi.spyOn(navigator, 'userAgent', 'get');
+
+// The panel reads the hardware as it mounts.
 beforeEach(() => {
+  agent.mockReset();
   forgetTheAsk();
   daemon.set(empty());
   forgetCopy();
@@ -66,13 +157,12 @@ beforeEach(() => {
   vi.mocked(setSetting).mockResolvedValue([]);
   vi.mocked(status).mockResolvedValue(remoteStatus);
   vi.mocked(listDevices).mockResolvedValue({ devices: [], current: null });
-  vi.mocked(listLanguages).mockResolvedValue({ languages: [] });
 });
 
-it('offers the preset under a local listener and hides it under a remote one', () => {
-  daemon.set(reduceStatus(empty(), withStt({ provider: 'local' }, undefined)));
+it('offers the listening models under a local listener and hides them under a remote one', () => {
+  daemon.set(reduceStatus(empty(), localStatus));
   const local = render(MicrophonePanel);
-  expect(local.queryByRole('radiogroup', { name: 'Model' })).not.toBeNull();
+  expect(local.queryByRole('radiogroup', { name: 'Listening model' })).not.toBeNull();
   local.unmount();
 
   daemon.set(
@@ -91,7 +181,7 @@ it('offers the preset under a local listener and hides it under a remote one', (
     ),
   );
   render(MicrophonePanel);
-  expect(screen.queryByRole('radiogroup', { name: 'Model' })).toBeNull();
+  expect(screen.queryByRole('radiogroup', { name: 'Listening model' })).toBeNull();
   expect((screen.getByRole('textbox', { name: 'Server' }) as HTMLInputElement).value).toBe(
     'https://api.groq.com/openai/v1',
   );
@@ -100,22 +190,173 @@ it('offers the preset under a local listener and hides it under a remote one', (
   );
 });
 
-const absentSpeech = { name: 'ggml-large-v3-q5_0.bin', role: 'speech' as const, megabytes: 1031 };
-
-it('names what a chosen model still costs, and offers the fetch here', () => {
-  daemon.set(reduceStatus(empty(), { ...localStatus, missing_downloads: [absentSpeech] }));
-  const { container } = render(MicrophonePanel);
-  const said = container.querySelector('.note.pending')?.textContent ?? '';
-  expect(said).toContain('1.0 GB');
-  expect(said).not.toBe(PENDING_SAYS);
-  expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy();
+it('lists Parakeet Unified first, then Whisper turbo, then the downloaded models', () => {
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  const group = screen.getByRole('radiogroup', { name: 'Listening model' });
+  const labels = [...group.querySelectorAll('label')].map((one) => one.textContent?.trim());
+  expect(labels).toEqual([
+    'Parakeet Unified',
+    'Whisper turbo, not on this machine',
+    'gigaam-v3-ctc',
+  ]);
+  expect(
+    (screen.getByRole('radio', { name: /^Parakeet Unified/ }) as HTMLInputElement).checked,
+  ).toBe(true);
 });
 
-it('offers nothing while the speech model this preset names is here', () => {
+it('gives each model its size, its languages and, on macOS, whether words show as you speak', () => {
+  agent.mockReturnValue('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15');
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  expect(modelRow('Parakeet Unified').textContent).toContain(
+    '731 MB. English. Shows words as you speak.',
+  );
+  expect(modelRow('Whisper turbo').textContent).toContain(
+    '619 MB. 5 languages. Shows words once you stop.',
+  );
+  expect(modelRow('gigaam-v3-ctc').textContent).toContain('225 MB. Russian.');
+  expect(screen.queryByText(/Many languages/i)).toBeNull();
+});
+
+it('leaves live words unsaid off macOS', () => {
+  agent.mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  expect(modelRow('Parakeet Unified').textContent).toContain('731 MB. English.');
+  expect(screen.queryByText(/Shows words/)).toBeNull();
+});
+
+it('credits Parakeet, and opens its licence', async () => {
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  const parakeet = modelRow('Parakeet Unified');
+  expect(parakeet.textContent).toContain(
+    'Parakeet Unified by NVIDIA. Licensed by NVIDIA Corporation under the NVIDIA Open Model License.',
+  );
+  expect(modelRow('Whisper turbo').textContent).not.toContain('Licensed by');
+
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Read the licence for Parakeet Unified' }),
+  );
+  expect(vi.mocked(openLicence)).toHaveBeenCalledWith(PARAKEET.id);
+});
+
+it('shows no Language row', () => {
+  daemon.set(reduceStatus(empty(), { ...localStatus, stt_translates: true }));
+  render(MicrophonePanel);
+  expect(screen.queryByRole('combobox', { name: 'Language' })).toBeNull();
+  expect(screen.queryByText('Language')).toBeNull();
+});
+
+it('asks what to write it in only for a listener that translates', async () => {
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  expect(screen.queryByRole('radiogroup', { name: 'Write it in' })).toBeNull();
+
+  daemon.set(reduceStatus(empty(), { ...localStatus, stt_translates: true }));
+  await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Write it in' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('radio', { name: 'English' }));
+  expect(vi.mocked(setSetting)).toHaveBeenCalledWith('stt.translate', true);
+});
+
+it('writes the model chosen, and offers its download with its size', async () => {
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
+
+  await fireEvent.click(screen.getByRole('radio', { name: /^Whisper turbo/ }));
+  expect(vi.mocked(setSetting)).toHaveBeenCalledWith('stt.model', TURBO.id);
+
+  daemon.set(reduceStatus(empty(), { ...choosing(TURBO), pending: ['stt.model'] }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
+  expect(
+    screen.getByText('Whisper turbo is not on this machine. About 619 MB to fetch.'),
+  ).toBeTruthy();
+});
+
+it('offers nothing while the chosen model is here', () => {
   daemon.set(reduceStatus(empty(), { ...localStatus, missing_downloads: [] }));
   const { container } = render(MicrophonePanel);
   expect(container.querySelector('.note.pending')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
+});
+
+// The window offers no acceptance, so a model set through the CLI names its
+// licence and the command that accepts it.
+it('names the licence a chosen model waits on, and the command that accepts it', async () => {
+  daemon.set(reduceStatus(empty(), choosing(CANARY, [PARAKEET, TURBO, CANARY])));
+  render(MicrophonePanel);
+
+  expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
+  expect(
+    screen.getByText(
+      'Banshee will not download canary-1b until you accept its licence, CC-BY-NC-4.0.',
+    ),
+  ).toBeTruthy();
+  expect(
+    screen.getByText('Use and share it, crediting its authors, for non-commercial purposes only.'),
+  ).toBeTruthy();
+  expect(screen.getByText(CANARY.accept_command as string)).toBeTruthy();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Read the licence for canary-1b' }));
+  expect(vi.mocked(openLicence)).toHaveBeenCalledWith(CANARY.id);
+  await fireEvent.click(screen.getByRole('button', { name: 'Copy the command' }));
+  expect(vi.mocked(copyText)).toHaveBeenCalledWith(CANARY.accept_command);
+});
+
+// A Moonshine build carries a credit and waits on its licence, so the row and
+// the block below would each offer the same button.
+it('offers one licence button for a model whose licence waits', () => {
+  const moonshine: ListeningModel = {
+    ...CANARY,
+    id: 'moonshine-tiny-ja',
+    label: 'moonshine-tiny-ja',
+    languages: ['ja'],
+    credit: 'Powered by Moonshine AI',
+    accept_command: 'banshee setup --model moonshine-tiny-ja --accept-licence',
+  };
+  daemon.set(reduceStatus(empty(), choosing(moonshine, [PARAKEET, TURBO, moonshine])));
+  render(MicrophonePanel);
+  expect(screen.getByText(/Powered by Moonshine AI/)).toBeTruthy();
+  expect(
+    screen.getAllByRole('button', { name: 'Read the licence for moonshine-tiny-ja' }),
+  ).toHaveLength(1);
+});
+
+it('says where to read a licence the window could not open', async () => {
+  vi.mocked(openLicence).mockRejectedValue({
+    message: 'The licence did not open. Read it at https://example.com/licence.',
+  });
+  report('');
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Read the licence for Parakeet Unified' }),
+  );
+  await waitFor(() =>
+    expect(get(problem)).toBe('The licence did not open. Read it at https://example.com/licence.'),
+  );
+});
+
+it('draws no model list while the daemon has none to offer', () => {
+  daemon.set(reduceStatus(empty(), { ...localStatus, running: false, stt_models: undefined }));
+  render(MicrophonePanel);
+  expect(screen.queryByRole('radiogroup', { name: 'Listening model' })).toBeNull();
+});
+
+it('puts the mark back on the model in force when the daemon refuses a choice', async () => {
+  vi.mocked(setSetting).mockRejectedValue({ message: 'no' });
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  const turbo = screen.getByRole('radio', { name: /^Whisper turbo/ }) as HTMLInputElement;
+  await fireEvent.click(turbo);
+  await waitFor(() =>
+    expect(
+      (screen.getByRole('radio', { name: /^Parakeet Unified/ }) as HTMLInputElement).checked,
+    ).toBe(true),
+  );
+  expect(turbo.checked).toBe(false);
 });
 
 // The run's total covers the detector, the engine and a voice, so a voice the
@@ -319,59 +560,17 @@ it('puts the key under the server it opens', () => {
   expect(names).toEqual(['server', 'key', 'model']);
 });
 
-// Dictation carries on with the loaded model, so a heavier preset that is not
+// Dictation carries on with the loaded model, so a chosen model that is not
 // on disk raises no blocker at all.
 it('offers the fetch while the daemon is working and nothing is blocked', () => {
-  daemon.set(
-    reduceStatus(empty(), {
-      ...localStatus,
-      ready: true,
-      blockers: [],
-      missing_downloads: [absentSpeech],
-    }),
-  );
+  daemon.set(reduceStatus(empty(), { ...choosing(TURBO), ready: true, blockers: [] }));
   render(MicrophonePanel);
   expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy();
 });
 
-// `english_only` answers for the model the listener loaded, and a heavier one
-// takes seconds to read off disk.
-it('says the listener has not picked the chosen model up yet, and leaves the language reachable', () => {
-  daemon.set(
-    reduceStatus(empty(), {
-      ...withStt({ provider: 'local', preset: 'balanced' }, LOCAL_IN_FORCE),
-      english_only: true,
-    }),
-  );
-  render(MicrophonePanel);
-
-  expect(screen.getByText(/has not picked up Balanced yet/)).toBeTruthy();
-  expect(screen.queryByText(/Fast hears English only/)).toBeNull();
-  expect((screen.getByRole('combobox', { name: 'Language' }) as HTMLSelectElement).disabled).toBe(
-    false,
-  );
-});
-
-// Fast loaded and Fast chosen is not a gap: the model really does hear English
-// alone, so the picker stays shut.
-it('keeps the language shut while Fast is both chosen and loaded', () => {
-  daemon.set(
-    reduceStatus(empty(), {
-      ...withStt({ provider: 'local', preset: 'fast' }, LOCAL_IN_FORCE),
-      english_only: true,
-    }),
-  );
-  render(MicrophonePanel);
-
-  expect(screen.getByText(/Fast hears English only/)).toBeTruthy();
-  expect((screen.getByRole('combobox', { name: 'Language' }) as HTMLSelectElement).disabled).toBe(
-    true,
-  );
-});
-
 it('sends one download however fast the button is pressed', async () => {
   vi.mocked(downloadModels).mockResolvedValue(undefined);
-  daemon.set(reduceStatus(empty(), { ...localStatus, missing_downloads: [absentSpeech] }));
+  daemon.set(reduceStatus(empty(), choosing(TURBO)));
   render(MicrophonePanel);
 
   const fetch = screen.getByRole('button', { name: 'Download' });

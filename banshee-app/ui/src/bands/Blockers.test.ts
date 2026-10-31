@@ -1,14 +1,18 @@
 import { fireEvent, render } from '@testing-library/svelte';
-import { beforeEach, expect, it } from 'vitest';
+import { beforeEach, expect, it, vi } from 'vitest';
+
+vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTauri());
+
 import Blockers from './Blockers.svelte';
 import { claimTheRun, forgetTheAsk } from '../lib/downloads';
+import { setSetting } from '../lib/tauri';
 import permissions from '../mocks/permissions.json';
-import type { Blocker, BlockerKind } from '../lib/daemon';
+import type { Blocker, BlockerKind, ListeningModel } from '../lib/daemon';
 
 beforeEach(forgetTheAsk);
 
 const at = (bytes: number) => ({
-  label: 'Speech model',
+  label: 'Listening model',
   model: 'ggml-x.bin',
   index: 1,
   count: 4,
@@ -179,7 +183,7 @@ it('draws the download against its own length', () => {
   const { container } = render(Blockers, {
     blockers: [],
     download: {
-      label: 'Speech model',
+      label: 'Listening model',
       model: 'ggml.bin',
       index: 1,
       count: 4,
@@ -199,7 +203,7 @@ it('offers no retry while the run that failed a file is still going', () => {
   const { queryByRole, container } = render(Blockers, {
     blockers: [],
     download: {
-      label: 'Speech model',
+      label: 'Listening model',
       model: 'ggml.bin',
       index: 1,
       count: 4,
@@ -295,4 +299,75 @@ it('offers Download while nothing is running', () => {
   });
 
   expect((getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+const suggestion = (id: string, label: string, languages: string[]): ListeningModel => ({
+  id,
+  label,
+  megabytes: 700,
+  downloaded: false,
+  suggested: true,
+  languages,
+  streams: false,
+  credit: null,
+  licence: { name: 'MIT', summary: 'Use it.' },
+  accept_command: null,
+});
+
+// The model decides what the run costs, so the box asks before a download that
+// runs to gigabytes, and says what each suggestion hears.
+it('asks which listening model to fetch, from the suggestions alone', async () => {
+  const { getByRole, getByText, queryByRole } = render(Blockers, {
+    blockers: [missingModel],
+    download: null,
+    restart: () => {},
+    megabytes: 1440,
+    chosen: 'parakeet-unified-en-0.6b',
+    models: [
+      suggestion('parakeet-unified-en-0.6b', 'Parakeet Unified', ['en']),
+      suggestion('whisper-large-v3-turbo', 'Whisper turbo', ['af', 'am', 'ar', 'as']),
+      { ...suggestion('gigaam-v3-ctc', 'gigaam-v3-ctc', ['ru']), suggested: false },
+    ],
+  });
+
+  const group = getByRole('radiogroup', { name: 'Listening model' });
+  expect(
+    [...group.querySelectorAll('[role="radio"]')].map((one) => one.textContent?.trim()),
+  ).toEqual(['Parakeet Unified', 'Whisper turbo']);
+  expect(getByRole('radio', { name: 'Parakeet Unified' }).getAttribute('aria-checked')).toBe(
+    'true',
+  );
+  expect(
+    getByText(
+      'About 1.4 GB to fetch. Parakeet Unified hears English. Whisper turbo hears 4 languages. You can change this later.',
+    ),
+  ).toBeTruthy();
+  expect(queryByRole('radiogroup', { name: 'Speech model' })).toBeNull();
+
+  await fireEvent.click(getByRole('radio', { name: 'Whisper turbo' }));
+  expect(vi.mocked(setSetting)).toHaveBeenCalledWith('stt.model', 'whisper-large-v3-turbo');
+});
+
+// The window offers no acceptance, so a model set through the CLI shows its
+// licence here too, and a Download that would end in "failed" stays hidden.
+it('shows the licence a chosen model waits on, and offers no Download', () => {
+  const canary: ListeningModel = {
+    ...suggestion('canary-1b', 'canary-1b', ['en', 'de', 'es', 'fr']),
+    suggested: false,
+    licence: { name: 'CC-BY-NC-4.0', summary: 'Non-commercial use only.' },
+    accept_command: 'banshee setup --model canary-1b --accept-licence',
+  };
+  const { getByText, queryByRole } = render(Blockers, {
+    blockers: [missingModel],
+    download: null,
+    restart: () => {},
+    chosen: 'canary-1b',
+    models: [suggestion('parakeet-unified-en-0.6b', 'Parakeet Unified', ['en']), canary],
+  });
+
+  expect(
+    getByText('Banshee will not download canary-1b until you accept its licence, CC-BY-NC-4.0.'),
+  ).toBeTruthy();
+  expect(getByText('banshee setup --model canary-1b --accept-licence')).toBeTruthy();
+  expect(queryByRole('button', { name: 'Download' })).toBeNull();
 });

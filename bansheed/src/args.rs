@@ -16,7 +16,17 @@ pub enum CommandType {
     /// Shows the tray icon now and at every login
     Tray,
     /// Download required models locally
-    Setup,
+    Setup {
+        /// Download this listening model instead, by its id
+        #[clap(long)]
+        model: Option<String>,
+        /// Accept the model's licence where it asks for acceptance
+        #[clap(long, requires = "model")]
+        accept_licence: bool,
+        /// List every listening model Banshee can download
+        #[clap(long, conflicts_with_all = ["model", "accept_licence"])]
+        list: bool,
+    },
     /// Reports what Banshee is doing and what stops it working
     Status {
         /// Print the daemon's raw reply instead of the checklist
@@ -30,7 +40,7 @@ pub enum CommandType {
         /// Emit Waybar custom-module JSON instead of one word
         #[clap(long)]
         waybar: bool,
-        /// Print these events as JSON lines instead: cues, level
+        /// Print these events as JSON lines instead: cues, level, words
         #[clap(long, value_delimiter = ',', conflicts_with = "waybar")]
         events: Vec<String>,
     },
@@ -105,7 +115,7 @@ pub enum CompositorName {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
-    /// Write one setting, as in: banshee config set stt.language de
+    /// Write one setting, as in: banshee config set stt.model whisper-large-v3-turbo, then banshee setup
     Set {
         /// A section and a field from config.toml, as in stt.vad_threshold
         key: String,

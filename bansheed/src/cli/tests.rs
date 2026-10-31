@@ -258,18 +258,19 @@ fn a_failed_download_ends_the_wait_and_is_named_in_the_error() {
         (0, &["b.onnx".to_string()][..])
     );
 
-    let error = super::downloads_settled(&failed).expect_err("a failed model is an error");
+    let error =
+        super::downloads_settled(&failed, "banshee setup").expect_err("a failed model is an error");
     assert!(error.to_string().contains("b.onnx"), "{error}");
-    assert!(error.to_string().contains("banshee setup"), "{error}");
-    assert!(super::downloads_settled(&[]).is_ok());
+    assert!(error.to_string().contains("run: banshee setup"), "{error}");
+    assert!(super::downloads_settled(&[], "banshee setup").is_ok());
 }
 
 #[test]
 fn a_rejection_reads_as_the_daemon_wrote_it() {
-    let error = BansheeError::Rejected("'stt.preset' needs a value".into());
+    let error = BansheeError::Rejected("'stt.model' needs a value".into());
     assert_eq!(
         failure_line(&error),
-        "'stt.preset' needs a value",
+        "'stt.model' needs a value",
         "the caller's own mistake needs no wrapper and no Debug form"
     );
 }
@@ -308,6 +309,16 @@ fn an_io_failure_away_from_the_socket_is_not_blamed_on_the_daemon() {
 }
 
 #[test]
+fn a_missing_listening_model_is_named_by_its_id() {
+    let note = super::missing_models_note(&["parakeet-unified-en-0.6b-Q8_0.gguf".to_string()])
+        .expect("a missing model has something to say");
+    assert_eq!(
+        note,
+        "Recording waits on the listening model parakeet-unified-en-0.6b: run banshee setup"
+    );
+}
+
+#[test]
 fn a_missing_model_is_named_beside_the_command_that_fetches_it() {
     let note = super::missing_models_note(&["silero_vad.onnx".to_string()])
         .expect("a missing model has something to say");
@@ -323,15 +334,75 @@ fn a_missing_model_is_named_beside_the_command_that_fetches_it() {
     );
 }
 
+#[tokio::test]
+async fn a_config_that_does_not_load_starts_nothing() {
+    let mut registered = false;
+    let refused = super::start_with(
+        Err(BansheeError::Rejected(
+            "Delete `preset` under [stt]: Banshee listens with stt.model now.".to_string(),
+        )),
+        || {
+            registered = true;
+            Ok(String::new())
+        },
+    )
+    .await
+    .expect_err("a config the daemon refuses is no start");
+    assert!(!registered, "nothing may start a daemon that exits at once");
+    let refused = refused.to_string();
+    assert!(refused.contains("`preset` under [stt]"), "{refused}");
+    assert!(refused.contains("banshee start"), "{refused}");
+}
+
 #[test]
-fn a_model_that_arrived_through_a_running_daemon_names_the_restart() {
-    let whisper = crate::config::STTPreset::ALL[0].model_name();
-    let note = super::restart_note(&[whisper]).expect("a speech model loads only at start");
+fn a_listening_model_not_downloaded_is_fetched_and_never_restarted_into() {
+    let dir = crate::test_support::unique_scratch("cli-model");
+    let turbo = serde_json::json!("whisper-large-v3-turbo");
+    let line = super::restart_line("stt.model", &turbo, &dir);
+    assert!(line.contains("banshee setup"), "{line}");
+    assert!(line.contains("whisper-large-v3-turbo"), "{line}");
+    assert!(!line.contains("banshee start"), "{line}");
+    assert!(
+        !line.contains("the model it has"),
+        "a daemon waiting for its first model has none: {line}"
+    );
+
+    std::fs::write(dir.join("whisper-large-v3-turbo-Q5_K_M.gguf"), b"").unwrap();
+    let line = super::restart_line("stt.model", &turbo, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(line, "Restart to use it: banshee start");
+    assert_eq!(
+        super::restart_line("audio.hotkey", &serde_json::json!("F13"), &dir),
+        "Restart to use it: banshee start"
+    );
+}
+
+#[test]
+fn a_null_write_says_the_key_was_removed() {
+    assert_eq!(
+        super::written_line("stt.preset", &serde_json::Value::Null),
+        "Removed stt.preset from config.toml."
+    );
+    assert_eq!(
+        super::written_line("stt.vad_threshold", &serde_json::json!(0.6)),
+        "Set stt.vad_threshold in config.toml."
+    );
+}
+
+#[test]
+fn only_the_detector_that_arrived_through_a_running_daemon_names_the_restart() {
+    let note =
+        super::restart_note(&[crate::models::VAD_MODEL]).expect("the detector loads only at start");
     assert!(
         note.contains("banshee start"),
         "the line must name the command that reloads: {note}"
     );
-    assert!(super::restart_note(&[crate::models::VAD_MODEL]).is_some());
+    let parakeet = banshee_common::listening::SUGGESTED[0].file;
+    assert_eq!(
+        super::restart_note(&[parakeet]),
+        None,
+        "the daemon loads a listening model once its file arrives"
+    );
     assert_eq!(super::restart_note(&[]), None, "nothing arrived");
 }
 
@@ -417,11 +488,11 @@ async fn watch_into_a_file_never_reads_as_a_closed_reader() {
 }
 
 #[test]
-fn only_cues_and_level_can_be_watched_as_events() {
-    let names = vec!["cues".to_string(), "level".to_string()];
+fn only_cues_level_and_words_can_be_watched_as_events() {
+    let names = vec!["cues".to_string(), "level".to_string(), "words".to_string()];
     assert_eq!(
         super::watched_events(&names).unwrap(),
-        vec!["cues", "level"]
+        vec!["cues", "level", "words"]
     );
     assert!(super::watched_events(&["downloads".to_string()]).is_err());
 }
@@ -437,4 +508,98 @@ fn an_event_prints_as_one_json_line() {
     let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(parsed["method"], "banshee.cue");
     assert_eq!(parsed["params"]["cue"], "arm");
+}
+
+#[test]
+fn a_non_commercial_model_needs_the_licence_accepted() {
+    let dir = crate::test_support::unique_scratch("setup-licence");
+    let mut accepted = crate::models::licences::Accepted::at(dir.join("accepted-licences"));
+
+    let refused = super::model_to_fetch("canary-1b", false, &mut accepted);
+    let accepting = super::model_to_fetch("canary-1b", true, &mut accepted).map(|model| model.id);
+    let later = super::model_to_fetch("canary-1b", false, &mut accepted).map(|model| model.id);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let error = refused
+        .expect_err("an unaccepted licence refuses")
+        .to_string();
+    assert!(error.contains("CC-BY-NC-4.0"), "{error}");
+    assert!(error.contains("non-commercial purposes only"), "{error}");
+    assert!(
+        error.contains("https://creativecommons.org/licenses/by-nc/4.0/"),
+        "{error}"
+    );
+    assert!(
+        error.contains("banshee setup --model canary-1b --accept-licence"),
+        "{error}"
+    );
+    assert_eq!(accepting.unwrap(), "canary-1b");
+    assert_eq!(later.unwrap(), "canary-1b", "acceptance is recorded once");
+}
+
+#[test]
+fn an_unknown_model_id_names_the_id() {
+    let mut accepted =
+        crate::models::licences::Accepted::at("/no-such-dir-9f3a/accepted-licences".into());
+    let error = super::model_to_fetch("whisper-tiny-en", false, &mut accepted)
+        .expect_err("an id the catalogue lacks is refused")
+        .to_string();
+    assert!(error.contains("'whisper-tiny-en'"), "{error}");
+    assert!(
+        error.contains(banshee_common::listening::DEFAULT_MODEL),
+        "{error}"
+    );
+    assert!(error.contains("whisper-large-v3-turbo"), "{error}");
+    assert!(error.contains("whisper-tiny.en"), "the closest id: {error}");
+    assert!(error.contains("banshee setup --list"), "{error}");
+}
+
+#[test]
+fn a_model_id_in_any_case_fetches_the_catalogue_id() {
+    let mut accepted =
+        crate::models::licences::Accepted::at("/no-such-dir-9f3a/accepted-licences".into());
+    let model = super::model_to_fetch("QWEN3-asr-0.6b", false, &mut accepted).unwrap();
+    assert_eq!(model.id, "Qwen3-ASR-0.6B");
+}
+
+#[test]
+fn the_list_has_a_row_per_model_with_its_size_languages_streaming_and_licence() {
+    let lines = super::catalogue_lines();
+    assert_eq!(lines.len(), banshee_common::listening::CATALOGUE.len() + 1);
+    let parakeet = lines
+        .iter()
+        .find(|line| line.starts_with("parakeet-unified-en-0.6b "))
+        .expect("the default model is listed");
+    for column in [
+        "731 MB",
+        "English",
+        "yes",
+        "NVIDIA Open Model License (2025-10-24)",
+    ] {
+        assert!(parakeet.contains(column), "{parakeet}");
+    }
+    let voxtral = lines
+        .iter()
+        .find(|line| line.starts_with("Voxtral-Small-24B-2507 "))
+        .expect("the largest model is listed");
+    let heard = banshee_common::listening::find("Voxtral-Small-24B-2507")
+        .unwrap()
+        .languages
+        .len();
+    assert!(heard > 3, "this row stands for a count");
+    for column in ["GB", &format!("{heard} languages"), "no", "Apache-2.0"] {
+        assert!(voxtral.contains(column), "{voxtral}");
+    }
+    let moonshine = lines
+        .iter()
+        .find(|line| line.starts_with("moonshine-tiny-ja "))
+        .expect("a Moonshine build is listed");
+    assert!(moonshine.contains("Powered by Moonshine AI"), "{moonshine}");
+}
+
+#[test]
+fn up_to_three_languages_print_their_codes() {
+    assert_eq!(super::languages_heard(&["en"]), "English");
+    assert_eq!(super::languages_heard(&["zh", "en", "ja"]), "zh, en, ja");
+    assert_eq!(super::languages_heard(&["a", "b", "c", "d"]), "4 languages");
 }

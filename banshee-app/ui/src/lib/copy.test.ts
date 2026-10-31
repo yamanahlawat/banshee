@@ -11,8 +11,9 @@ import {
   speechLead,
   speechNote,
   TAKES_EFFECT,
-  languageNote,
+  languagesHeard,
   modelCost,
+  modelFacts,
 } from './copy';
 import type { Listening, Speech } from './daemon';
 beforeEach(() => vi.useFakeTimers());
@@ -79,7 +80,7 @@ const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
   [
     'a host the daemon cannot name',
     { host: null },
-    'Banshee sends what you say to a remote server to be heard.',
+    'Banshee sends what you say to a transcription server to be heard.',
   ],
   [
     'a flip away from a remote listener still sends there',
@@ -94,7 +95,7 @@ const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
   [
     'a flip to a server the config does not name',
     { remote: false, pending: true, willUse: null },
-    'Banshee will send what you say to a remote server when it restarts.',
+    'Banshee will send what you say to a transcription server when it restarts.',
   ],
   [
     'a local listener names its device',
@@ -140,7 +141,7 @@ it.each(LISTENING_LEADS)('the microphone lead, when %s', (_, over, says) => {
 const LISTENING_NOTES: [string, Partial<Listening>, string][] = [
   ['the daemon is down', { live: false, pending: true }, 'Nothing is heard until Banshee starts.'],
   ['a remote listener is in force', {}, 'Audio goes to api.openai.com.'],
-  ['the daemon cannot name the host', { host: null }, 'Audio goes to a remote server.'],
+  ['the daemon cannot name the host', { host: null }, 'Audio goes to a transcription server.'],
   [
     'a flip away from a remote listener waits',
     { pending: true },
@@ -203,7 +204,7 @@ const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
   [
     'the daemon cannot name the host',
     { host: null },
-    'Banshee speaks through a remote server as marin.',
+    'Banshee speaks through a voice server as marin.',
   ],
   [
     'a flip away from a started speaker waits',
@@ -251,7 +252,7 @@ const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
   [
     'a flip to a server the config does not name',
     { remote: false, pending: true, willUse: null },
-    'Banshee will speak through a remote server when it restarts.',
+    'Banshee will speak through a voice server when it restarts.',
   ],
 ];
 
@@ -262,7 +263,7 @@ it.each(SPEECH_LEADS)('the voice lead, when %s', (_, over, says) => {
 const SPEECH_NOTES: [string, Partial<Speech>, string][] = [
   ['the daemon is down', { live: false, pending: true }, 'Nothing is spoken until Banshee starts.'],
   ['a started remote speaker', {}, 'Text goes to api.openai.com.'],
-  ['the daemon cannot name the host', { host: null }, 'Text goes to a remote server.'],
+  ['the daemon cannot name the host', { host: null }, 'Text goes to a voice server.'],
   [
     'a flip away from a remote speaker waits',
     { pending: true },
@@ -304,56 +305,55 @@ it.each(SPEECH_NOTES)('the speaking note, when %s', (_, over, says) => {
   expect(speechNote({ ...SPOKEN, ...over })).toBe(says);
 });
 
-describe('languageNote', () => {
-  const heard = {
-    languagesArrived: true,
-    englishOnly: false,
-    loading: false,
-    chosen: 'Balanced',
-    isFast: false,
-  };
-
-  it('names the language as a choice once any model hears more than English', () => {
-    expect(languageNote(heard)).toContain('The language you speak');
+describe('languagesHeard', () => {
+  it('says English for a model that hears English alone', () => {
+    expect(languagesHeard(['en'])).toBe('English');
   });
 
-  it('sends the reader to a heavier model when Fast is the one in force', () => {
-    expect(languageNote({ ...heard, englishOnly: true, isFast: true })).toContain(
-      'Choose Balanced or Quality',
+  // One language that is not English is still one language, never "many".
+  it('names a single other language', () => {
+    expect(languagesHeard(['ru'])).toBe('Russian');
+  });
+
+  it('names up to three languages', () => {
+    expect(languagesHeard(['zh', 'en'])).toBe('Chinese and English');
+    expect(languagesHeard(['zh', 'en', 'ja'])).toBe('Chinese, English, and Japanese');
+  });
+
+  it('counts the languages beyond three', () => {
+    expect(languagesHeard(['en', 'de', 'es', 'fr'])).toBe('4 languages');
+  });
+});
+
+describe('modelFacts', () => {
+  it('states the size, the languages and, on macOS, whether words show as you speak', () => {
+    expect(modelFacts({ megabytes: 731, languages: ['en'], streams: true }, true)).toBe(
+      '731 MB. English. Shows words as you speak.',
+    );
+    expect(modelFacts({ megabytes: 1667, languages: ['zh', 'en'], streams: false }, true)).toBe(
+      '1.7 GB. Chinese and English. Shows words once you stop.',
     );
   });
 
-  // The control names the preset in the config; `englishOnly` names the model
-  // the listener holds. Both sit on one screen.
-  it('says the chosen model is not in force yet rather than naming Fast', () => {
-    const said = languageNote({ ...heard, englishOnly: true });
-    expect(said).toContain('has not picked up Balanced yet');
-    expect(said).not.toContain('Fast');
-  });
-
-  it('names the read while the daemon is doing one', () => {
-    expect(languageNote({ ...heard, englishOnly: true, loading: true })).toContain(
-      'reading Balanced off disk',
+  // Only the macOS chip shows words as they are heard.
+  it('says nothing about live words off macOS', () => {
+    expect(modelFacts({ megabytes: 731, languages: ['en'], streams: true }, false)).toBe(
+      '731 MB. English.',
     );
-  });
-
-  it('says the list failed before anything about a model', () => {
-    const said = languageNote({ ...heard, languagesArrived: false, englishOnly: true });
-    expect(said).toContain('could not list the languages');
   });
 });
 
 describe('modelCost', () => {
   it('prices the file when it is the only thing missing', () => {
-    expect(modelCost('Quality', 1031, 1031)).toBe(
-      'Quality is not on this machine. About 1.0 GB to fetch.',
+    expect(modelCost('Whisper turbo', 1031, 1031)).toBe(
+      'Whisper turbo is not on this machine. About 1.0 GB to fetch.',
     );
   });
 
   // Download starts a run over everything absent, so the file's own size
   // understates the press whenever the detector or a voice is missing too.
   it('names the whole run when pressing brings more than the model', () => {
-    const said = modelCost('Quality', 1031, 1345);
+    const said = modelCost('Whisper turbo', 1031, 1345);
     expect(said).toContain('About 1.0 GB to fetch');
     expect(said).toContain('1.3 GB in all');
   });

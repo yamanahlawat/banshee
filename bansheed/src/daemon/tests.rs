@@ -283,6 +283,58 @@ async fn a_level_subscriber_hears_the_level() {
     );
 }
 
+#[tokio::test]
+async fn a_words_subscriber_is_a_viewer_until_it_goes() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    assert!(!state.is_words_watched());
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["words"]}),
+    )
+    .await;
+    next_message(&mut lines).await;
+    let deadline = std::time::Instant::now() + ARRIVES;
+    while !state.is_words_watched() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(state.is_words_watched());
+
+    drop(writer);
+    drop(lines);
+    let deadline = std::time::Instant::now() + ARRIVES;
+    while state.is_words_watched() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !state.is_words_watched(),
+        "a viewer that left must not keep the stream running"
+    );
+}
+
+#[tokio::test]
+async fn a_words_subscriber_hears_the_words_and_their_end() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["words"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+
+    state.publish_words("hello there");
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_WORDS);
+    assert_eq!(pushed["params"]["text"], "hello there");
+
+    state.publish_words("");
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["params"]["text"], "", "the recording ended");
+}
+
 // The select loop is the only thing that writes a notification, so no unit
 // test reaches it. These drive a real socket.
 #[tokio::test]

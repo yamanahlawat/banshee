@@ -26,7 +26,8 @@
     problem,
     report,
     speechLead,
-    A_SERVER,
+    A_TRANSCRIPTION_SERVER,
+    A_VOICE_SERVER,
     DICTATION_FAILED,
     DICTATION_FAILURE,
     failureSays,
@@ -342,13 +343,19 @@
   }
 
   let starting = false;
+  /// What `banshee start` said when it refused, such as a config it will not read.
+  let startRefusal = '';
+  function startRefused(error: unknown) {
+    startRefusal = (error as { message?: string })?.message || '';
+  }
+
   async function start() {
     starting = true;
     try {
       await startDaemon();
       await readDaemon();
-    } catch {
-      // The state word still says Not running, so the failure is already said.
+    } catch (error) {
+      startRefused(error);
     }
     starting = false;
   }
@@ -379,12 +386,14 @@
         id: 'job-microphone',
         label: 'Microphone',
         title: 'Listening',
-        value: said(listening.remote ? (listening.host ?? 'A remote server') : 'On this machine'),
+        value: said(
+          listening.remote ? (listening.host ?? 'A transcription server') : 'On this machine',
+        ),
         pending:
           live && listening.pending
             ? listening.remote
               ? 'changing to this machine when Banshee restarts'
-              : `changing to ${listening.willUse ?? A_SERVER} when Banshee restarts`
+              : `changing to ${listening.willUse ?? A_TRANSCRIPTION_SERVER} when Banshee restarts`
             : waitsUnder('stt.remote.'),
       },
       {
@@ -403,7 +412,7 @@
           live && speech.pending
             ? speech.remote
               ? 'changing to this machine when Banshee restarts'
-              : `changing to ${speech.willUse ?? A_SERVER} when Banshee restarts`
+              : `changing to ${speech.willUse ?? A_VOICE_SERVER} when Banshee restarts`
             : (waits('tts.voice') ?? waitsUnder('tts.remote.')),
       },
       {
@@ -440,13 +449,14 @@
   async function readStatus(andStart = true): Promise<boolean> {
     try {
       await refreshStatus(status);
+      startRefusal = '';
       wasTranscribing = $daemon.live.transcribing;
       wasLoadingModel = $daemon.live.loading_model;
       return true;
     } catch (error) {
       const reason = (error as { message?: string })?.message || 'not running';
       daemon.update((s) => ({ ...s, down: reason }));
-      if (andStart) startDaemon().catch(() => {});
+      if (andStart) startDaemon().catch(startRefused);
       return false;
     }
   }
@@ -510,7 +520,7 @@
         applyPush(e.payload);
         if (e.payload.transcribing === false && wasTranscribing) readNewest().catch(() => {});
         if (e.payload.transcribing !== undefined) wasTranscribing = e.payload.transcribing;
-        // `stt_model` and `english_only` come only with a full status, and the
+        // `stt_model` and `stt_translates` come only with a full status, and the
         // read a write does happens before the file lands, so this is the only
         // word that the model in force moved. Held rather than read off the
         // store, which `applyPush` above has already advanced.
@@ -615,7 +625,8 @@
           {restart}
           busy={restarting}
           download={$daemon.download}
-          preset={String(config.stt?.preset ?? 'balanced')}
+          models={$daemon.status?.stt_models ?? []}
+          chosen={String(config.stt?.model ?? '')}
           megabytes={Number($daemon.status?.download_megabytes ?? 0)}
           first={savingHistory && nothingYet}
           remoteHost={listening.stoppedBy === null ? listening.host : null}
@@ -626,7 +637,8 @@
       {#if !live}
         <Absence
           label="Banshee is not running"
-          detail="Dictation and the hotkey do nothing until it starts. What you said before is still here."
+          detail={startRefusal ||
+            'Dictation and the hotkey do nothing until it starts. What you said before is still here.'}
           action={starting ? 'Starting' : 'Start Banshee'}
           act={start}
           busy={starting}

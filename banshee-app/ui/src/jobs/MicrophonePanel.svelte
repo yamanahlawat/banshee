@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import {
+    chosenWaitsOnLicence,
     daemon,
     deviceLabel,
     listeningFacts,
@@ -10,8 +11,7 @@
   } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { askForModels, fetching } from '../lib/downloads';
-  import { PRESETS } from '../lib/presets';
-  import { listDevices, listLanguages, type Devices, type Languages } from '../lib/tauri';
+  import { listDevices, type Devices } from '../lib/tauri';
   import Row from '../controls/Row.svelte';
   import Field from '../controls/Field.svelte';
   import KeyRow from '../controls/KeyRow.svelte';
@@ -20,16 +20,19 @@
   import ProviderGroup from '../controls/ProviderGroup.svelte';
   import SubRow from '../controls/SubRow.svelte';
   import Failure from '../controls/Failure.svelte';
-  import { claimKeys } from '../lib/keys';
+  import LicenceWait from '../controls/LicenceWait.svelte';
+  import { claimKeys, onMac } from '../lib/keys';
   import {
     announcer,
-    languageNote as saysAboutLanguage,
     listeningNote,
     modelCost,
+    modelFacts,
+    readLicence,
     report,
     DICTATION_FAILED,
     DICTATION_FAILURE,
   } from '../lib/copy';
+  import type { ListeningModel } from '../lib/daemon';
 
   // The choice and its consequence are one reading, so the group names the
   // sentence its radiogroup is described by.
@@ -44,17 +47,17 @@
   ];
   const HEARD = BANDS.map((b) => ({ value: b.word, label: b.word }));
   const QUIET = [1000, 1500, 2500, 4000];
-  // Whisper translates in one direction only: any language in, English out.
-  const ANSWER = [
-    { value: 'spoken', label: 'What I said' },
+  // A model translates in one direction only: any language in, English out.
+  const WRITE_IN = [
+    { value: 'spoken', label: 'The language spoken' },
     { value: 'english', label: 'English' },
   ];
+  const mac = onMac();
   const LISTENING = [
     { value: 'local', label: 'On this machine' },
-    { value: 'remote', label: 'A remote server' },
+    { value: 'remote', label: 'A transcription server' },
   ];
   let devices: Devices = { devices: [], current: null };
-  let spoken: Languages = { languages: [] };
   let adding = false;
   let field: HTMLInputElement | undefined;
   // Typing a word owns the keyboard; otherwise Escape would close the panel and Cmd+F open Find mid-word.
@@ -72,13 +75,6 @@
   }
 
   onDestroy(() => release?.());
-
-  // Whisper's own list, so the window cannot offer a code the engine refuses.
-  // It does not move while the panel is open.
-  let languagesArrived = true;
-  listLanguages()
-    .then((got) => (spoken = got))
-    .catch(() => (languagesArrived = false));
 
   // Ordered by request: a slow earlier read must not overwrite a later one.
   let reading = 0;
@@ -112,7 +108,9 @@
   // Keyed by word below, and a duplicate in a hand-edited config raises
   // Svelte's `each_key_duplicate` and renders no panel.
   $: vocabulary = [...new Set((stt.vocabulary ?? []) as string[])];
-  $: preset = String(stt.preset ?? 'balanced');
+  $: models = $daemon.status?.stt_models ?? [];
+  $: chosenId = String(stt.model ?? '');
+  $: chosen = models.find((one) => one.id === chosenId) ?? null;
   $: provider = String(stt.provider ?? 'local');
   $: remoteTable = (stt.remote ?? {}) as Record<string, unknown>;
   // The daemon says which listener is in force; `provider` above says only
@@ -126,19 +124,28 @@
     ? 'Words Banshee should expect to hear. They go to the server with your audio.'
     : 'Words Banshee should expect to hear.';
   $: lastError = $daemon.live.last_error;
-  // The missing list, not the blockers: dictation carries on with the loaded
-  // model, so a heavier preset raises nothing and would leave this row silent.
-  // Not `pending` either, which a restart empties while the file is still gone.
-  $: absentModel =
-    ($daemon.status?.missing_downloads ?? []).find((one) => one.role === 'speech') ?? null;
-  $: presetNeedsFetching = provider === 'local' && absentModel !== null;
+  $: waitsOnLicence = provider === 'local' ? chosenWaitsOnLicence(models, chosenId) : null;
+  // The model's own entry, not the blockers: dictation carries on with the
+  // loaded model, so a chosen one that is absent raises nothing. Not `pending`
+  // either, which a restart empties while the file is still gone.
+  $: needsFetching =
+    provider === 'local' && chosen !== null && !chosen.downloaded && waitsOnLicence === null;
   // No guard here: `askForModels` claims the run before it awaits anything.
   async function fetchModel() {
     await askForModels().catch(() => report('The download did not start.'));
   }
-  $: presetSays = absentModel
-    ? modelCost(presetName, absentModel.megabytes, Number($daemon.status?.download_megabytes ?? 0))
-    : null;
+  $: modelSays =
+    needsFetching && chosen
+      ? modelCost(chosen.label, chosen.megabytes, Number($daemon.status?.download_megabytes ?? 0))
+      : null;
+
+  async function choose(model: ListeningModel) {
+    if (await write('stt.model', model.id)) return;
+    // A refusal leaves `chosenId` where it was, so nothing renders the mark
+    // back from where the browser moved it.
+    const held = document.getElementById(`model-${chosenId}`);
+    if (held instanceof HTMLInputElement) held.checked = true;
+  }
 
   // Three fields appear or leave with no event of their own, and where the
   // audio goes changes with them, so a reader who is not looking hears the
@@ -150,28 +157,9 @@
       `${listenerNote} ${provider === 'remote' ? 'Server, key and model are below.' : 'Model is below.'}`,
     );
   }
-  $: language = String(stt.language ?? 'en');
   $: translate = stt.translate === true;
-  // The daemon's own word, so the preset name is not a second rule for one fact.
-  // It answers for the model the listener loaded, which lags the preset beside
-  // it while a heavier one is read off disk.
-  $: englishOnly = $daemon.status?.english_only === true;
-  $: loadingModel = $daemon.live.loading_model;
-  $: presetName = PRESETS.find((one) => one.value === preset)?.label ?? preset;
-  // A code Whisper's table does not name still needs its row: a select whose value matches no
-  // option draws empty.
-  $: languagesOffered =
-    language === 'auto' || spoken.languages.some((one) => one.code === language)
-      ? spoken.languages
-      : [{ code: language, name: language }, ...spoken.languages];
-
-  $: languageNote = saysAboutLanguage({
-    languagesArrived,
-    englishOnly,
-    loading: loadingModel,
-    chosen: presetName,
-    isFast: preset === 'fast',
-  });
+  // The catalogue's word for the model in force, known before any load.
+  $: translates = $daemon.status?.stt_translates === true;
 
   // `endpoint_silence_ms` is a plain u64 in the daemon, so a hand-edited config
   // can hold a value none of these offer.
@@ -257,16 +245,47 @@
         commit={(next) => write('stt.remote.model', next)}
       />
     </SubRow>
-  {:else}
-    <SubRow name="model" pending={presetNeedsFetching} says={presetSays}>
-      <Segmented
-        label="Model"
-        value={preset}
-        options={PRESETS}
-        change={(next) => write('stt.preset', next)}
-      />
+  {:else if models.length > 0}
+    <SubRow name="model" pending={modelSays !== null} says={modelSays}>
+      <div class="models" role="radiogroup" aria-label="Listening model">
+        {#each models as model (model.id)}
+          <div class="model" class:on={model.id === chosenId}>
+            <input
+              type="radio"
+              name="listening-model"
+              id={`model-${model.id}`}
+              checked={model.id === chosenId}
+              aria-describedby={`model-${model.id}-facts`}
+              on:change={() => choose(model)}
+            />
+            <!-- The dashed name is the mark for the eye; the hidden words are the
+                 same fact for a reader who hears the radio. -->
+            <label for={`model-${model.id}`}
+              ><span class="name" class:absent={!model.downloaded}>{model.label}</span
+              >{#if !model.downloaded}<span class="sr">, not on this machine</span>{/if}</label
+            >
+            <p class="facts" id={`model-${model.id}-facts`}>{modelFacts(model, mac)}</p>
+            {#if model.credit}
+              <p class="credit">
+                {model.credit}
+                {#if waitsOnLicence?.id !== model.id}
+                  <button
+                    class="caps btn-underline"
+                    aria-label={`Read the licence for ${model.label}`}
+                    on:click={() => readLicence(model)}>Read the licence</button
+                  >
+                {/if}
+              </p>
+            {/if}
+          </div>
+        {/each}
+      </div>
       <svelte:fragment slot="action">
-        {#if presetNeedsFetching}
+        {#if waitsOnLicence}
+          <div class="licence">
+            <LicenceWait model={waitsOnLicence} />
+          </div>
+        {:else if needsFetching}
           <button class="btn fetch" disabled={$fetching} on:click={fetchModel}>
             {$fetching ? 'Downloading' : 'Download'}
           </button>
@@ -280,37 +299,23 @@
   {/if}
 </ProviderGroup>
 
-<!-- Beside the preset it depends on: the English-only model rules every other
-     language out, and the two read as one decision only if they sit together. -->
-<Row name="Language" block note={languageNote} pending={$waitsOnARestart.has('stt.language')}>
-  <Picker
-    label="Language"
-    value={language}
-    disabled={englishOnly && preset === 'fast'}
-    change={(next) => write('stt.language', next)}
-  >
-    <!-- `auto` is a value the config takes and the engine reads as detect it,
-         so it belongs in the list a person picks from. Whisper's own table
-         holds only real languages. -->
-    <option value="auto">Detect it</option>
-    {#each languagesOffered as option (option.code)}
-      <option value={option.code}>{option.name}</option>
-    {/each}
-  </Picker>
-</Row>
-
-{#if !englishOnly && language !== 'en'}
-  <Row name="Answer in" pending={$waitsOnARestart.has('stt.translate')}>
+{#if translates}
+  <Row name="Write it in" pending={$waitsOnARestart.has('stt.translate')}>
     <Segmented
-      label="Answer in"
+      label="Write it in"
       value={translate ? 'english' : 'spoken'}
-      options={ANSWER}
+      options={WRITE_IN}
       change={(next) => write('stt.translate', next === 'english')}
     />
   </Row>
 {/if}
 
-<Row name="Vocabulary" block note={vocabularyNote} pending={$daemon.pending.has('stt.vocabulary')}>
+<Row
+  name="Words to know"
+  block
+  note={vocabularyNote}
+  pending={$daemon.pending.has('stt.vocabulary')}
+>
   <div class="chips">
     {#each vocabulary as word (word)}
       <span class="chip">
@@ -349,10 +354,82 @@
 
 <style>
   /* Under the sentence that explains it, aligned with the control it acts for. */
-  .fetch {
+  .fetch,
+  .licence {
     grid-column: 2;
     justify-self: start;
     margin-top: 12px;
+  }
+
+  .models {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+  }
+
+  /* The radio holds the first line, and the facts and credit hang under the
+     name rather than under the radio. */
+  .model {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    column-gap: 10px;
+    padding: 6px 0;
+    min-width: 0;
+  }
+
+  .model input {
+    margin: 0;
+    align-self: center;
+  }
+
+  .model label,
+  .facts,
+  .credit {
+    grid-column: 2;
+    min-width: 0;
+  }
+
+  .model label {
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+
+  .name {
+    font-variation-settings:
+      'wght' 600,
+      'wdth' 100;
+    font-size: 15px;
+  }
+
+  .on .name {
+    font-variation-settings:
+      'wght' 800,
+      'wdth' 105;
+  }
+
+  /* The dash this world uses for a thing that is not here yet. */
+  .absent {
+    border-bottom: 1px dashed var(--accent);
+  }
+
+  .facts,
+  .credit {
+    margin: 2px 0 0;
+    font-variation-settings:
+      'wght' var(--cut-agent-weight),
+      'wdth' var(--cut-agent-width);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .credit {
+    color: var(--dim);
+  }
+
+  .credit button {
+    margin-left: 4px;
+    color: var(--ink);
   }
 
   /* Centred, not stretched: a wrapped flex line sizes its items to the tallest, so the input would

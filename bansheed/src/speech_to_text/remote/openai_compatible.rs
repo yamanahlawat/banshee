@@ -4,7 +4,9 @@ use std::time::Duration;
 use banshee_common::error::BansheeError;
 use reqwest::blocking::{Client, multipart};
 
-use crate::config::{RemoteSttConfig, STTPreset};
+use banshee_common::listening::ListeningModel;
+
+use crate::config::RemoteSttConfig;
 use crate::credentials::{self, RemoteKey};
 use crate::speech_to_text::{SAMPLE_RATE, Speech, Transcriber};
 
@@ -65,7 +67,7 @@ impl RemoteTranscriber {
 }
 
 impl Transcriber for RemoteTranscriber {
-    fn transcribe(&self, audio: &[f32]) -> Result<String, BansheeError> {
+    fn transcribe(&mut self, audio: &[f32]) -> Result<String, BansheeError> {
         let file = multipart::Part::bytes(pcm16_wav(audio, SAMPLE_RATE))
             .file_name("utterance.wav")
             .mime_str("audio/wav")
@@ -74,12 +76,6 @@ impl Transcriber for RemoteTranscriber {
             .part("file", file)
             .text("model", self.model.clone())
             .text("response_format", "json");
-        // The translations endpoint takes no language: the answer is English
-        if let Some(language) = &self.speech.language
-            && !self.speech.translate
-        {
-            form = form.text("language", language.clone());
-        }
         if let Some(prompt) = &self.prompt {
             form = form.text("prompt", prompt.clone());
         }
@@ -135,7 +131,10 @@ impl Transcriber for RemoteTranscriber {
         self.speech = speech;
     }
 
-    fn reload(&mut self, _preset: STTPreset) -> Result<Option<&'static str>, BansheeError> {
+    fn reload(
+        &mut self,
+        _model: &'static ListeningModel,
+    ) -> Result<Option<&'static ListeningModel>, BansheeError> {
         Ok(None)
     }
 }
@@ -190,15 +189,12 @@ mod tests {
             &remote,
             "sk-test".to_string(),
             &["banshee".to_string(), "tokio".to_string()],
-            Speech {
-                language: Some("de".to_string()),
-                translate,
-            },
+            Speech { translate },
         )
     }
 
     #[test]
-    fn a_transcription_posts_the_wav_the_model_the_language_and_the_prompt_with_the_key() {
+    fn a_transcription_posts_the_wav_the_model_and_the_prompt_with_the_key_and_no_language() {
         let (base_url, served) = serve_once("200 OK", r#"{"text": " hallo welt "}"#);
         let text = transcriber(base_url, false)
             .transcribe(&[0.0; 1600])
@@ -216,7 +212,7 @@ mod tests {
         );
         assert!(request.contains("name=\"file\"; filename=\"utterance.wav\""));
         assert!(request.contains("name=\"model\"\r\n\r\nwhisper-1"));
-        assert!(request.contains("name=\"language\"\r\n\r\nde"));
+        assert!(!request.contains("name=\"language\""), "{request}");
         assert!(request.contains("name=\"prompt\"\r\n\r\nbanshee, tokio"));
         assert!(request.contains("name=\"response_format\"\r\n\r\njson"));
         assert!(
@@ -298,10 +294,7 @@ mod tests {
             &RemoteSttConfig::default(),
             "sk-test".to_string(),
             &[],
-            Speech {
-                language: None,
-                translate: false,
-            },
+            Speech { translate: false },
         )
         .expect("the client must build where the daemon builds it");
     }
@@ -323,6 +316,7 @@ mod tests {
     fn reload_loads_no_file() {
         let (base_url, _served) = serve_once("200 OK", "{}");
         let mut remote = transcriber(base_url, false);
-        assert_eq!(remote.reload(crate::config::STTPreset::Fast).unwrap(), None);
+        let turbo = banshee_common::listening::find("whisper-large-v3-turbo").unwrap();
+        assert_eq!(remote.reload(turbo).unwrap(), None);
     }
 }

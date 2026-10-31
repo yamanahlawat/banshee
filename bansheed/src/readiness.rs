@@ -6,15 +6,15 @@ use crate::{models, permissions};
 pub fn blockers(state: &DaemonState, pipeline: &Pipeline) -> Vec<Blocker> {
     let names = must_be_on_disk(
         pipeline,
-        state.stt_model(),
-        models::stt_file(&state.config()),
+        state.stt_model().map(|model| model.file),
+        models::stt_model(&state.config()).map(|model| model.file),
         state.vad_model(),
     );
     assemble(permissions::blockers(), models::blockers(&names), pipeline)
 }
 
 // A blocker says the daemon does not work, so this answers for the listener
-// that is running and never for a preset just picked: dictation carries on
+// that is running and never for a model just picked: dictation carries on
 // while a heavier model is still a download away.
 //
 // `stt_model` is seeded from the config at startup and corrected only by a load
@@ -42,8 +42,11 @@ fn assemble(
     pipeline: &Pipeline,
 ) -> Vec<Blocker> {
     let recording_error = pipeline.fault();
-    let models_explain_it =
-        !missing_models.is_empty() && matches!(recording_error, Some(RecordingError::Model(_)));
+    let models_explain_it = !missing_models.is_empty()
+        && matches!(
+            recording_error,
+            Some(RecordingError::Model(_) | RecordingError::NoListeningModel(_))
+        );
     grants.extend(missing_models);
     if let Some(error) = recording_error
         && !models_explain_it
@@ -51,18 +54,24 @@ fn assemble(
         grants.push(Blocker {
             // A model that will not load is a model fault, whatever it stops.
             kind: match error {
-                RecordingError::Model(_) => BlockerKind::Model,
+                RecordingError::Model(_) | RecordingError::NoListeningModel(_) => {
+                    BlockerKind::Model
+                }
                 RecordingError::Microphone(_) => BlockerKind::Pipeline,
                 RecordingError::Provider(_) => BlockerKind::Provider,
                 RecordingError::KeyFile(_) => BlockerKind::KeyFile,
             },
             role: None,
-            remedy: Some(banshee_common::Remedy::Restart),
+            remedy: Some(match error {
+                RecordingError::NoListeningModel(_) => banshee_common::Remedy::Download,
+                _ => banshee_common::Remedy::Restart,
+            }),
             id: "recording_pipeline".to_string(),
             // Each carries the id above, so the name is what parts them for
             // a reader.
             name: match error {
                 RecordingError::Model(_) => "Banshee needs a restart",
+                RecordingError::NoListeningModel(_) => "The listening model is missing",
                 RecordingError::Microphone(_) => "The microphone is not working",
                 RecordingError::Provider(_) => "The remote listener is not reachable",
                 RecordingError::KeyFile(_) => "The remote listener's key file is unreadable",
@@ -96,8 +105,8 @@ mod tests {
         }
     }
 
-    const LOADED: &str = "ggml-large-v3-turbo-q5_0.bin";
-    const ASKED: &str = "ggml-large-v3-q5_0.bin";
+    const LOADED: &str = "whisper-large-v3-turbo-Q5_K_M.gguf";
+    const ASKED: &str = "parakeet-unified-en-0.6b-Q8_0.gguf";
     const VAD: &str = "silero_vad.onnx";
 
     #[test]
@@ -209,7 +218,7 @@ mod tests {
         let error = RecordingError::Model("missing file".to_string());
         let blockers = assemble(
             vec![],
-            vec![blocker(BlockerKind::Model, "ggml.bin")],
+            vec![blocker(BlockerKind::Model, "model.gguf")],
             &Pipeline::Broken(error.clone()),
         );
         let [blocker] = &blockers[..] else {
@@ -224,7 +233,7 @@ mod tests {
         let error = RecordingError::Microphone("no device".to_string());
         let blockers = assemble(
             vec![],
-            vec![blocker(BlockerKind::Model, "ggml.bin")],
+            vec![blocker(BlockerKind::Model, "model.gguf")],
             &Pipeline::Broken(error.clone()),
         );
         let kinds: Vec<_> = blockers.iter().map(|b| b.kind).collect();
@@ -297,7 +306,7 @@ mod tests {
     fn a_grant_is_offered_before_a_download() {
         let blockers = assemble(
             vec![blocker(BlockerKind::Permission, "accessibility")],
-            vec![blocker(BlockerKind::Model, "ggml.bin")],
+            vec![blocker(BlockerKind::Model, "model.gguf")],
             &Pipeline::Open,
         );
         let kinds: Vec<_> = blockers.iter().map(|b| b.kind).collect();
