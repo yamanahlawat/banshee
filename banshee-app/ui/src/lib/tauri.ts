@@ -52,13 +52,6 @@ export function setSetting(key: string, value: unknown): Promise<string[]> {
 export function listDevices(): Promise<Devices> {
   return call('list_devices');
 }
-export type Language = { code: string; name: string };
-export type Languages = { languages: Language[] };
-
-/// Whisper's own list, so the window cannot offer a code the engine refuses.
-export function listLanguages(): Promise<Languages> {
-  return call('list_languages');
-}
 export function listVoices(): Promise<Voices> {
   return call('list_voices');
 }
@@ -88,6 +81,10 @@ export function openPermissionPane(id: string): Promise<void> {
 }
 export function copyText(text: string): Promise<void> {
   return call('copy_text', { text });
+}
+/// Opens the licence of a listening model, named by its id.
+export function openLicence(model: string): Promise<void> {
+  return call('open_licence', { model });
 }
 
 export function startDaemon(): Promise<void> {

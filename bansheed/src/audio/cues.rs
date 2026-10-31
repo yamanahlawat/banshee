@@ -67,7 +67,15 @@ pub fn sounds(mode: FeedbackMode, drawn: bool) -> bool {
 pub fn broken(fault: &crate::state::RecordingError) -> Reason {
     Reason {
         code: ReasonCode::PipelineBroken,
-        text: crate::speech_to_text::local::languages::capitalised(&fault.consequence()),
+        text: capitalised(&fault.consequence()),
+    }
+}
+
+pub(crate) fn capitalised(text: &str) -> String {
+    let mut letters = text.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + letters.as_str(),
+        None => String::new(),
     }
 }
 

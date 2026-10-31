@@ -16,11 +16,15 @@ This page lists what breaks, and the fix.
 - Run `banshee serve` in the foreground to watch it work.
 
 - **The microphone looks dead: you record, and nothing ever comes back.**
-  - Usually the machine is slow, not broken; the `balanced` model can take
-    minutes on a few seconds of speech on an older CPU.
+  - Usually the machine is slow, not broken; a large model can take minutes on a few
+    seconds of speech on an older CPU.
   - Run `banshee serve` and watch the `Transcribed` line; if it warns about
-    slower-than-realtime, set `preset = "fast"` and run `banshee setup`.
-  - On a 2014 dual-core laptop that took one clip from 104s to 4.8s.
+    slower-than-realtime, pick a smaller model: `banshee setup --list`, then
+    `banshee setup --model <id>` and `banshee config set stt.model <id>`.
+- **The daemon will not start and names `stt.preset` or `stt.language`.**
+  - Those keys are gone. Run `banshee config set stt.preset null`, and the same for
+    `stt.language`.
+  - The window shows the reason too. The tray points at `banshee start`, which prints it.
 - **`banshee status` fails the microphone check on a fresh install.**
   - Capture closes when a model cannot load, so the check fails until
     `banshee setup` finishes.

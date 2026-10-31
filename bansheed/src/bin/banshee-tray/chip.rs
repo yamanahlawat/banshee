@@ -16,10 +16,12 @@ pub const FLOAT: Duration = Duration::from_millis(440);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Show {
-    Recording,
+    /// With the committed words heard so far.
+    Recording(String),
     Working,
     YourTurn,
-    Answering,
+    /// With the committed words heard so far.
+    Answering(String),
     NothingHeard(String),
     Broken(String),
     Done(Done),
@@ -37,6 +39,28 @@ impl Done {
             Done::Typed => "Typed",
             Done::Sent => "Sent to the agent",
         }
+    }
+}
+
+/// Which end of a line too long for the capsule gives way.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cut {
+    Start,
+    End,
+}
+
+/// The line a scene shows, and the end cut when it does not fit. Live words
+/// keep their newest end; every other line keeps its start.
+#[cfg(any(target_os = "macos", test))]
+pub fn words_of(show: &Show) -> Option<(&str, Cut)> {
+    match show {
+        Show::Recording(words) | Show::Answering(words) if !words.is_empty() => {
+            Some((words, Cut::Start))
+        }
+        Show::YourTurn | Show::Answering(_) => Some(("Your turn", Cut::End)),
+        Show::NothingHeard(text) | Show::Broken(text) => Some((text, Cut::End)),
+        Show::Recording(_) | Show::Working | Show::Done(_) => None,
     }
 }
 
@@ -75,6 +99,8 @@ pub enum Input {
     Live(Live),
     /// The subscribe reply: the state a tray that starts mid-session inherits.
     Seed(Live),
+    /// The committed words of the recording in progress.
+    Words(String),
     Gone,
 }
 
@@ -101,6 +127,7 @@ pub struct Chip {
     done: Option<(Done, Instant)>,
     quiet_since: Option<Instant>,
     live: Option<Live>,
+    words: String,
     shown: Option<Show>,
     renewed: bool,
     serial: u64,
@@ -132,6 +159,7 @@ impl Chip {
                 };
                 self.seed(live);
             }
+            Input::Words(words) => self.words = words,
             Input::Gone => {
                 let serial = self.serial;
                 *self = Chip {
@@ -207,12 +235,14 @@ impl Chip {
                 target: Target::Answer,
             } => {
                 self.question = Some(Question::Holding);
+                self.words.clear();
                 self.begin();
             }
             Signal::RecordStart {
                 target: Target::Dictate,
             } => {
                 self.press = Some(Press::Recording);
+                self.words.clear();
                 self.begin();
             }
             Signal::RecordStop {
@@ -230,6 +260,7 @@ impl Chip {
             Signal::Arm => {
                 if !matches!(self.question, Some(Question::Holding)) {
                     self.question = Some(Question::Asking);
+                    self.words.clear();
                 }
                 self.begin();
             }
@@ -352,15 +383,15 @@ impl Chip {
     fn resolve(&self) -> Option<Show> {
         if let Some(press) = self.press {
             return Some(match press {
-                Press::Recording => Show::Recording,
+                Press::Recording => Show::Recording(self.words.clone()),
                 Press::Working => Show::Working,
             });
         }
         if let Some(question) = self.question {
             return Some(match question {
                 Question::Asking => Show::YourTurn,
-                Question::Answering => Show::Answering,
-                Question::Holding => Show::Recording,
+                Question::Answering => Show::Answering(self.words.clone()),
+                Question::Holding => Show::Recording(self.words.clone()),
                 Question::Working => Show::Working,
             });
         }
@@ -377,8 +408,16 @@ impl Chip {
         let resolved = self.resolve();
         let renewed = std::mem::take(&mut self.renewed)
             && matches!(resolved, Some(Show::NothingHeard(_) | Show::Broken(_)));
+        // New words are the recording going on, not a new state.
+        let reworded = matches!(
+            (&resolved, &self.shown),
+            (Some(Show::Recording(_)), Some(Show::Recording(_)))
+                | (Some(Show::Answering(_)), Some(Show::Answering(_)))
+        );
         if resolved != self.shown || renewed {
-            self.serial += 1;
+            if !reworded {
+                self.serial += 1;
+            }
             self.shown = resolved;
         }
     }
@@ -396,7 +435,7 @@ pub fn announcement(before: Option<&Scene>, after: Option<&Scene>) -> Option<Str
         Show::Working => Some("Working".to_string()),
         Show::Done(done) => Some(done.words().to_string()),
         Show::NothingHeard(text) | Show::Broken(text) => Some(text.clone()),
-        Show::Recording | Show::YourTurn | Show::Answering => None,
+        Show::Recording(_) | Show::YourTurn | Show::Answering(_) => None,
     }
 }
 
@@ -440,6 +479,8 @@ mod tests {
         }
     }
 
+    const RECORDING: Show = Show::Recording(String::new());
+
     const IDLE: Live = Live {
         recording: false,
         armed: false,
@@ -458,7 +499,7 @@ mod tests {
                 target: Target::Dictate,
             }],
         );
-        assert_eq!(shown(&chip), Some(Show::Recording));
+        assert_eq!(shown(&chip), Some(RECORDING));
         fed(
             &mut chip,
             clock.at(900),
@@ -498,7 +539,7 @@ mod tests {
                 },
             ],
         );
-        assert_eq!(shown(&chip), Some(Show::Recording));
+        assert_eq!(shown(&chip), Some(RECORDING));
         fed(
             &mut chip,
             clock.at(100),
@@ -508,7 +549,7 @@ mod tests {
         );
         assert_eq!(
             shown(&chip),
-            Some(Show::Recording),
+            Some(RECORDING),
             "the newer press keeps recording, so its levels still draw"
         );
         fed(
@@ -587,7 +628,7 @@ mod tests {
                 error(ReasonCode::SpeechFailed),
             ],
         );
-        assert_eq!(shown(&chip), Some(Show::Recording));
+        assert_eq!(shown(&chip), Some(RECORDING));
         fed(
             &mut chip,
             clock.at(500),
@@ -645,7 +686,7 @@ mod tests {
             fed(&mut chip, clock.at(0), signals);
             assert_eq!(shown(&chip), Some(shown_first), "{name}");
             fed(&mut chip, clock.at(pressed_at), [press.clone()]);
-            assert_eq!(shown(&chip), Some(Show::Recording), "{name}");
+            assert_eq!(shown(&chip), Some(RECORDING), "{name}");
             fed(
                 &mut chip,
                 clock.at(cancelled_at),
@@ -705,7 +746,7 @@ mod tests {
             let clock = Clock::new();
             let mut chip = Chip::default();
             fed(&mut chip, clock.at(0), signals);
-            assert_eq!(shown(&chip), Some(Show::Recording), "{name}");
+            assert_eq!(shown(&chip), Some(RECORDING), "{name}");
             fed(
                 &mut chip,
                 clock.at(900),
@@ -755,7 +796,7 @@ mod tests {
                 },
             ],
         );
-        assert_eq!(shown(&chip), Some(Show::Recording));
+        assert_eq!(shown(&chip), Some(RECORDING));
         fed(
             &mut chip,
             clock.at(100),
@@ -763,7 +804,7 @@ mod tests {
         );
         assert_eq!(
             shown(&chip),
-            Some(Show::Recording),
+            Some(RECORDING),
             "the user's press keeps showing"
         );
         // A failure held at t=100, not queued, would expire unseen before this.
@@ -1002,11 +1043,7 @@ mod tests {
             clock.at(100),
             [Signal::Answered { heard: false }],
         );
-        assert_eq!(
-            shown(&chip),
-            Some(Show::Recording),
-            "the press keeps showing"
-        );
+        assert_eq!(shown(&chip), Some(RECORDING), "the press keeps showing");
         let ends = clock.at(100) + FAULT_HOLD + Duration::from_millis(500);
         fed(
             &mut chip,
@@ -1228,7 +1265,7 @@ mod tests {
         assert_eq!(waiting.show, Show::YourTurn);
         fed(&mut chip, clock.at(900), [Signal::Onset]);
         let answering = chip.scene().unwrap();
-        assert_eq!(answering.show, Show::Answering);
+        assert_eq!(answering.show, Show::Answering(String::new()));
         assert_ne!(answering.serial, waiting.serial);
         fed(&mut chip, clock.at(1200), [Signal::Onset]);
         assert_eq!(
@@ -1255,7 +1292,7 @@ mod tests {
                 Signal::Onset,
             ],
         );
-        assert_eq!(shown(&chip), Some(Show::Recording));
+        assert_eq!(shown(&chip), Some(RECORDING));
         fed(&mut chip, clock.at(200), [Signal::Disarm, Signal::Onset]);
         assert_eq!(shown(&chip), Some(Show::Working));
     }
@@ -1289,7 +1326,7 @@ mod tests {
         let answering = || {
             let mut chip = Chip::default();
             fed(&mut chip, clock.at(0), [Signal::Arm, Signal::Onset]);
-            assert_eq!(shown(&chip), Some(Show::Answering));
+            assert_eq!(shown(&chip), Some(Show::Answering(String::new())));
             chip
         };
 
@@ -1356,5 +1393,129 @@ mod tests {
                 Some("The question was closed".to_string()),
             ]
         );
+    }
+
+    fn dictating(clock: &Clock, words: &str) -> Chip {
+        let mut chip = Chip::default();
+        fed(
+            &mut chip,
+            clock.at(0),
+            [Signal::RecordStart {
+                target: Target::Dictate,
+            }],
+        );
+        chip.feed(Input::Words(words.to_string()), clock.at(300));
+        chip
+    }
+
+    #[test]
+    fn live_words_keep_the_newest_end() {
+        let clock = Clock::new();
+        let long = "so the first thing I want to say is that the newest words matter most";
+        let chip = dictating(&clock, long);
+        let show = shown(&chip).expect("a dictation shows");
+        assert_eq!(show, Show::Recording(long.to_string()));
+        assert_eq!(words_of(&show), Some((long, Cut::Start)));
+        let failed = Show::Broken(long.to_string());
+        assert_eq!(
+            words_of(&failed),
+            Some((long, Cut::End)),
+            "a failure keeps the start, where it says what broke"
+        );
+        assert_eq!(words_of(&RECORDING), None, "no words, no line");
+    }
+
+    #[test]
+    fn a_new_recording_starts_with_no_words() {
+        let clock = Clock::new();
+        let mut typed = dictating(&clock, "the last dictation");
+        fed(
+            &mut typed,
+            clock.at(900),
+            [
+                Signal::RecordStop {
+                    target: Target::Dictate,
+                },
+                Signal::Ready {
+                    target: Target::Dictate,
+                },
+            ],
+        );
+        let mut cancelled = dictating(&clock, "a mistake");
+        fed(
+            &mut cancelled,
+            clock.at(900),
+            [Signal::Cancelled {
+                target: Target::Dictate,
+            }],
+        );
+        for (name, mut chip) in [("after a typed one", typed), ("after a cancel", cancelled)] {
+            fed(
+                &mut chip,
+                clock.at(1000),
+                [Signal::RecordStart {
+                    target: Target::Dictate,
+                }],
+            );
+            assert_eq!(shown(&chip), Some(RECORDING), "{name}");
+        }
+
+        let mut held = Chip::default();
+        fed(&mut held, clock.at(0), [Signal::Arm]);
+        held.feed(Input::Words("an earlier answer".to_string()), clock.at(100));
+        fed(
+            &mut held,
+            clock.at(200),
+            [Signal::RecordStart {
+                target: Target::Answer,
+            }],
+        );
+        assert_eq!(shown(&held), Some(RECORDING), "a held answer");
+    }
+
+    #[test]
+    fn voiceover_hears_no_live_words() {
+        let clock = Clock::new();
+        let mut chip = dictating(&clock, "");
+        let before = chip.scene();
+        chip.feed(Input::Words("hello there".to_string()), clock.at(400));
+        let after = chip.scene();
+        assert_eq!(
+            after.as_ref().map(|scene| &scene.show),
+            Some(&Show::Recording("hello there".to_string()))
+        );
+        assert_eq!(
+            before.as_ref().map(|scene| scene.serial),
+            after.as_ref().map(|scene| scene.serial),
+            "new words are the same state, so nothing plays or speaks again"
+        );
+        assert_eq!(announcement(before.as_ref(), after.as_ref()), None);
+        assert_eq!(announcement(None, after.as_ref()), None);
+    }
+
+    #[test]
+    fn an_answer_shows_its_words_once_any_arrive() {
+        let clock = Clock::new();
+        let mut chip = Chip::default();
+        chip.feed(Input::Words("the last dictation".to_string()), clock.at(0));
+        fed(&mut chip, clock.at(0), [Signal::Arm, Signal::Onset]);
+        let before = chip.scene();
+        let waiting = before.as_ref().map(|scene| scene.show.clone()).unwrap();
+        assert_eq!(waiting, Show::Answering(String::new()), "a new question");
+        assert_eq!(words_of(&waiting), Some(("Your turn", Cut::End)));
+
+        let long = "yes please go ahead and run the whole suite before you push it";
+        chip.feed(Input::Words(long.to_string()), clock.at(500));
+        let after = chip.scene();
+        let speaking = after.as_ref().map(|scene| scene.show.clone()).unwrap();
+        assert_eq!(speaking, Show::Answering(long.to_string()));
+        assert_eq!(words_of(&speaking), Some((long, Cut::Start)));
+        assert_eq!(
+            before.as_ref().map(|scene| scene.serial),
+            after.as_ref().map(|scene| scene.serial),
+            "new words are the same state"
+        );
+        assert_eq!(announcement(before.as_ref(), after.as_ref()), None);
+        assert_eq!(announcement(None, after.as_ref()), None);
     }
 }

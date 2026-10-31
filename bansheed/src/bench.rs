@@ -67,7 +67,7 @@ pub fn run_facts() -> String {
     };
     format!(
         "voice {VOICE}, threads {}, espeak-ng {espeak}",
-        crate::models::onnx_threads()
+        crate::models::thread_count()
     )
 }
 

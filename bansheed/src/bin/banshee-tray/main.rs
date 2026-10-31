@@ -24,8 +24,8 @@ mod tray {
     use banshee_common::cue::Signal;
     use banshee_common::feedback::FeedbackMode;
     use banshee_common::{
-        Activity, BANSHEE_CUE, BANSHEE_HISTORY, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED, EVENT_CUES,
-        EVENT_LEVEL, EVENT_STATE, utils,
+        Activity, BANSHEE_CUE, BANSHEE_HISTORY, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED,
+        BANSHEE_WORDS, EVENT_CUES, EVENT_LEVEL, EVENT_STATE, EVENT_WORDS, utils,
     };
     use serde::Deserialize;
     use serde_json::Value;
@@ -629,12 +629,12 @@ mod tray {
     }
 
     /// Any failure to read the socket is the daemon being unreachable: a state to show, not an
-    /// error to report. `to_draw` asks for the cue and level events too, and silences the
-    /// earcons `visual` gives the screen instead.
+    /// error to report. `to_draw` asks for the cue, level and words events too, and silences
+    /// the earcons `visual` gives the screen instead.
     async fn watch(postbox: impl Postbox, to_draw: bool) {
         let send = |message| postbox.post(message);
         let events: &[&str] = if to_draw {
-            &[EVENT_STATE, EVENT_CUES, EVENT_LEVEL]
+            &[EVENT_STATE, EVENT_CUES, EVENT_LEVEL, EVENT_WORDS]
         } else {
             &[EVENT_STATE]
         };
@@ -676,6 +676,14 @@ mod tray {
                         BANSHEE_LEVEL => {
                             match notification.params.get("level").and_then(Value::as_f64) {
                                 Some(level) => send(Message::Level(level as f32)),
+                                None => true,
+                            }
+                        }
+                        BANSHEE_WORDS => {
+                            match notification.params.get("text").and_then(Value::as_str) {
+                                Some(text) => {
+                                    send(Message::Chip(chip::Input::Words(text.to_string())))
+                                }
                                 None => true,
                             }
                         }

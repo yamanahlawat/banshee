@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/yamanahlawat/banshee"
 homepage = "https://github.com/yamanahlawat/banshee"
 readme = "README.md"
-keywords = ["voice", "dictation", "mcp", "whisper", "tts"]
+keywords = ["voice", "dictation", "mcp", "speech-to-text", "tts"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
 # One version per shared dependency; a crate adds only its own features.
@@ -25,7 +25,6 @@ tokio = "1.52.3"
 toml = "1.1.2"
 # Default features are Linux-only pieces the crates below pick per platform.
 tray-icon = { version = "0.26.0", default-features = false }
-whisper-rs = "0.16.0"
 
 [workspace.lints.clippy]
 # Every unsafe block says why it is sound, where a reader finds it.

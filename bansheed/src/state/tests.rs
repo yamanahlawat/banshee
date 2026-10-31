@@ -31,12 +31,17 @@ fn a_published_level_is_clamped_to_one() {
     assert_eq!(*state.subscribe_level().borrow(), 1.0);
 }
 
+const PARAKEET: &str = "parakeet-unified-en-0.6b-Q8_0.gguf";
+const TURBO: &str = "whisper-large-v3-turbo-Q5_K_M.gguf";
+
+fn turbo() -> &'static banshee_common::listening::ListeningModel {
+    banshee_common::listening::find("whisper-large-v3-turbo").unwrap()
+}
+
 #[test]
-fn the_models_wanted_follow_the_preset_the_config_names() {
+fn the_models_wanted_follow_the_model_the_config_names() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    let mut config = Config::default();
-    config.stt.preset = crate::config::STTPreset::Fast;
-    state.set_config(std::sync::Arc::new(config));
+    state.set_config(std::sync::Arc::new(Config::default()));
     let named = |state: &DaemonState| {
         state
             .wanted_downloads()
@@ -44,57 +49,52 @@ fn the_models_wanted_follow_the_preset_the_config_names() {
             .map(|d| d.name.clone())
             .collect::<Vec<_>>()
     };
-    assert!(named(&state).contains(&"ggml-base.en.bin".to_string()));
+    assert!(named(&state).contains(&PARAKEET.to_string()));
 
     let mut config = Config::default();
-    config.stt.preset = crate::config::STTPreset::Quality;
+    config.stt.model = "whisper-large-v3-turbo".to_string();
     state.set_config(std::sync::Arc::new(config));
 
     let after = named(&state);
-    assert!(after.contains(&"ggml-large-v3-q5_0.bin".to_string()));
+    assert!(after.contains(&TURBO.to_string()));
     assert!(
-        !after.contains(&"ggml-base.en.bin".to_string()),
+        !after.contains(&PARAKEET.to_string()),
         "the window must stop asking for the model the daemon left behind"
     );
 }
 
 #[test]
-fn a_preset_change_hands_the_listener_the_model_to_load() {
+fn a_model_change_hands_the_listener_the_model_to_load() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
 
-    assert!(state.load_stt_model(crate::config::STTPreset::Quality));
+    assert!(state.load_stt_model(turbo()));
 
     match taken.try_recv() {
-        Ok(ConsumerCommand::Reload(preset)) => {
-            assert_eq!(preset.model_name(), "ggml-large-v3-q5_0.bin")
-        }
+        Ok(ConsumerCommand::Reload(model)) => assert_eq!(model.file, TURBO),
         _ => panic!("the listener was handed no model"),
     }
 }
 
 // A listener that has gone cannot load anything, and saying otherwise would
-// report a preset in effect that nothing runs.
+// report a model in effect that nothing runs.
 #[test]
-fn a_preset_change_with_no_listener_is_not_reported_as_taken() {
+fn a_model_change_with_no_listener_is_not_reported_as_taken() {
     let (commands, gone) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
     drop(gone);
 
-    assert!(!state.load_stt_model(Config::default().stt.preset));
+    assert!(!state.load_stt_model(turbo()));
 }
 
 #[test]
 fn the_model_reported_is_the_one_the_listener_loaded() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    assert_eq!(
-        state.stt_model(),
-        Some(Config::default().stt.preset.model_name())
-    );
+    assert_eq!(state.stt_model().map(|model| model.file), Some(PARAKEET));
 
-    state.set_stt_model(Some("ggml-large-v3-q5_0.bin"));
+    state.set_stt_model(Some(turbo()));
 
-    assert_eq!(state.stt_model(), Some("ggml-large-v3-q5_0.bin"));
+    assert_eq!(state.stt_model().map(|model| model.file), Some(TURBO));
 }
 
 // The off direction alone would pass a `set_history` that always stores
@@ -124,6 +124,7 @@ fn a_recording_error_names_the_same_command_its_sentence_does() {
     for error in [
         RecordingError::Microphone(String::new()),
         RecordingError::Model(String::new()),
+        RecordingError::NoListeningModel("parakeet-unified-en-0.6b"),
         RecordingError::Provider(String::new()),
     ] {
         let command = error.command().expect("every fault names a command");
@@ -133,6 +134,112 @@ fn a_recording_error_names_the_same_command_its_sentence_does() {
             error.fix()
         );
     }
+}
+
+#[test]
+fn a_missing_listening_model_is_named_as_missing_and_fixed_by_setup() {
+    let error = RecordingError::NoListeningModel("parakeet-unified-en-0.6b");
+    assert_eq!(error.command(), Some("banshee setup"));
+    let chip = crate::audio::cues::broken(&error).text;
+    assert!(chip.contains("No listening model"), "{chip}");
+    assert!(!chip.contains("would not load"), "{chip}");
+    assert!(
+        error.to_string().contains("parakeet-unified-en-0.6b"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_pipeline_waiting_for_its_listening_model_opens_once_the_model_loads() {
+    let state = test_state();
+    let waiting = Pipeline::Broken(RecordingError::NoListeningModel(
+        banshee_common::listening::DEFAULT_MODEL,
+    ));
+    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
+    assert_eq!(state.pipeline(), waiting);
+    state.capture_open();
+    assert_eq!(
+        state.pipeline(),
+        waiting,
+        "a microphone that opens does not stand in for the model"
+    );
+    state.listening_model_loaded();
+    assert_eq!(state.pipeline(), Pipeline::Open);
+}
+
+#[test]
+fn a_model_that_loads_under_a_dead_microphone_leaves_the_microphone_fault() {
+    let state = test_state();
+    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
+    let dead = Pipeline::Broken(RecordingError::Microphone("no device".to_string()));
+    state.set_pipeline(dead.clone());
+    state.listening_model_loaded();
+    assert_eq!(state.pipeline(), dead);
+    state.capture_open();
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Open,
+        "nothing is waited for now"
+    );
+}
+
+#[test]
+fn a_failed_load_under_a_dead_microphone_keeps_the_microphone_fault_until_capture_opens() {
+    let state = test_state();
+    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
+    let dead = Pipeline::Broken(RecordingError::Microphone("no device".to_string()));
+    state.set_pipeline(dead.clone());
+    state.listening_model_failed("the file is damaged".to_string());
+    assert_eq!(state.pipeline(), dead);
+    state.capture_open();
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Broken(RecordingError::Model("the file is damaged".to_string()))
+    );
+}
+
+#[test]
+fn a_failed_load_survives_the_microphone_opening_again() {
+    let state = test_state();
+    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
+    state.listening_model_failed("the file is damaged".to_string());
+    let failed = Pipeline::Broken(RecordingError::Model("the file is damaged".to_string()));
+    assert_eq!(state.pipeline(), failed);
+    state.capture_open();
+    assert_eq!(
+        state.pipeline(),
+        failed,
+        "no model listens, so nothing is ready"
+    );
+    state.listening_model_loaded();
+    assert_eq!(state.pipeline(), Pipeline::Open);
+    state.capture_open();
+    assert_eq!(state.pipeline(), Pipeline::Open);
+}
+
+#[test]
+fn a_model_that_loads_before_capture_stands_leaves_the_pipeline_opening() {
+    let state = crate::test_support::daemon_state_before_the_pipeline();
+    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
+    state.listening_model_loaded();
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Opening,
+        "no microphone exists yet"
+    );
+    state.capture_open();
+    assert_eq!(state.pipeline(), Pipeline::Open);
+}
+
+#[test]
+fn a_reload_that_fails_with_nothing_awaited_leaves_the_pipeline() {
+    let state = test_state();
+    state.listening_model_failed("the file is damaged".to_string());
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Open,
+        "the old model still listens"
+    );
 }
 
 #[test]
@@ -352,6 +459,7 @@ fn a_toggle_stops_the_session_a_toggle_started() {
 
     assert!(state.record_toggle(), "idle: starts");
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+    assert!(matches!(requests.try_recv(), Ok(ConsumerCommand::Stream)));
 
     assert!(!state.record_toggle(), "in flight: stops");
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
@@ -374,6 +482,7 @@ fn cancel_discards_the_session_instead_of_routing_it() {
     assert!(state.record_start());
     state.record_cancel();
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    assert!(matches!(requests.try_recv(), Ok(ConsumerCommand::Stream)));
     assert!(matches!(requests.try_recv(), Ok(ConsumerCommand::Discard)));
     assert!(requests.try_recv().is_err(), "nothing may be transcribed");
 
@@ -419,6 +528,10 @@ fn watchdog_releases_a_push_to_talk_that_never_stopped() {
 
     assert!(state.record_start());
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+    assert!(matches!(
+        transcribe_requests.try_recv(),
+        Ok(ConsumerCommand::Stream)
+    ));
 
     // Nowhere near the ceiling yet: the mic stays open
     assert!(!state.expire_stuck_recording());

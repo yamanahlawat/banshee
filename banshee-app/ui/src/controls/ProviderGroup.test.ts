@@ -4,7 +4,7 @@ import ProviderGroup from './ProviderGroup.svelte';
 
 const OPTIONS = [
   { value: 'local', label: 'On this machine' },
-  { value: 'remote', label: 'A remote server' },
+  { value: 'remote', label: 'A transcription server' },
 ];
 
 function group(props: Record<string, unknown> = {}) {

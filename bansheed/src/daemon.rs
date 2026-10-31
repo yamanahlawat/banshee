@@ -1,7 +1,8 @@
 use banshee_common::utils::{banshee_dir, socket_path};
 use banshee_common::{
     BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED,
-    BANSHEE_SUBSCRIBE, JsonRpcNotification, JsonRpcRequest, SileroVADConfig, error::BansheeError,
+    BANSHEE_SUBSCRIBE, BANSHEE_WORDS, JsonRpcNotification, JsonRpcRequest, SileroVADConfig,
+    error::BansheeError,
 };
 use std::fs;
 use std::io;
@@ -55,11 +56,15 @@ struct Recording {
     capture: Arc<hotkey::Capture>,
     open: String,
     missing: Option<String>,
+    /// The listening model whose file is still to download.
+    awaiting: Option<&'static str>,
 }
 
 /// Capture, the models, and the thread that turns audio into text. All of it or
 /// none: with any piece missing the daemon cannot transcribe, so they share one
-/// error path and one reason for `banshee status` to report.
+/// error path and one reason for `banshee status` to report. A listening model
+/// still to download is the exception: the rest stands, and the model loads
+/// when its file arrives.
 fn start_recording(
     daemon_state: &Arc<DaemonState>,
     config: &Config,
@@ -81,10 +86,9 @@ fn start_recording(
         ),
         None => log::info!("Capture opened {}", selection.open),
     }
-    let speech_to_text =
-        crate::speech_to_text::select_transcriber(&config.stt).inspect_err(|_| {
-            drop_device_name(daemon_state);
-        })?;
+    let listener = crate::speech_to_text::select_transcriber(&config.stt).inspect_err(|_| {
+        drop_device_name(daemon_state);
+    })?;
     let vad = VADEngine::new(SileroVADConfig::new(models::VAD_MODEL)).map_err(|e| {
         drop_device_name(daemon_state);
         RecordingError::Model(e.to_string())
@@ -98,7 +102,7 @@ fn start_recording(
     let thread = hotkey::hotkey_listener(
         hotkey::Pipeline {
             source: Arc::clone(&shared_capture),
-            speech_to_text,
+            speech_to_text: listener.engine,
             vad,
             state: Arc::clone(daemon_state),
             cues,
@@ -115,6 +119,7 @@ fn start_recording(
         capture: shared_capture,
         open: selection.open,
         missing: selection.missing,
+        awaiting: listener.awaiting.map(|model| model.id),
     })
 }
 
@@ -122,6 +127,10 @@ fn start_recording(
 pub async fn start(config: Config) -> Result<u8, BansheeError> {
     let config = Arc::new(config);
     let (socket_path, listener, _lock) = claim()?;
+    transcribe_cpp::init_logging();
+    for deleted in models::delete_old_whisper_files(&models::download::models_dir()?) {
+        log::info!("Deleted {}, which nothing loads now", deleted.display());
+    }
     permissions::ask_for_accessibility();
     let db_connection = if config.daemon.save_history {
         Some(history::open()?)
@@ -192,6 +201,12 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
             // capture, and the thread is the only thing left to join
             match start_recording(&state, &config, command_receiver, cues) {
                 Ok(started) => {
+                    if let Some(id) = started.awaiting {
+                        log::warn!(
+                            "Recording waits for the listening model {id}: run banshee setup"
+                        );
+                        state.await_listening_model(id);
+                    }
                     let watchdog = audio::watchdog::spawn(
                         Arc::clone(&state),
                         started.stream,
@@ -199,7 +214,7 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
                         started.open,
                         started.missing,
                     );
-                    state.set_pipeline(crate::state::Pipeline::Open);
+                    state.capture_open();
                     Some((watchdog, started.thread))
                 }
                 // A missing mic or model leaves the daemon useful rather than
@@ -233,7 +248,7 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
         // Capture stops first, so no Rebind arrives at a thread that
         // has already left its loop
         watchdog.stop();
-        // Drop the Whisper context before atexit: ggml's Metal cleanup
+        // Drop the listening model before atexit: ggml's Metal cleanup
         // asserts if buffers are still resident
         let _ = daemon_state.commands().send(ConsumerCommand::Shutdown);
         let _ = consumer_thread.join();
@@ -298,6 +313,7 @@ struct Events {
     downloads: bool,
     cues: bool,
     level: bool,
+    words: bool,
     draws: bool,
 }
 
@@ -319,6 +335,7 @@ fn requested_events(params: Option<&serde_json::Value>) -> Events {
         downloads: asked(banshee_common::EVENT_DOWNLOADS),
         cues: asked(banshee_common::EVENT_CUES),
         level: asked(banshee_common::EVENT_LEVEL),
+        words: asked(banshee_common::EVENT_WORDS),
         draws: params
             .and_then(|params| params.get("draws"))
             .and_then(serde_json::Value::as_bool)
@@ -358,6 +375,20 @@ async fn push_level(writer: Arc<Mutex<OwnedWriteHalf>>, mut level: watch::Receiv
         let now = (f64::from(now) * 1000.0).round() / 1000.0;
         let notification =
             JsonRpcNotification::new(BANSHEE_LEVEL, serde_json::json!({"level": now}));
+        if write_line(&mut *writer.lock().await, &notification)
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+async fn push_words(writer: Arc<Mutex<OwnedWriteHalf>>, mut words: watch::Receiver<String>) {
+    while words.changed().await.is_ok() {
+        let text = words.borrow_and_update().clone();
+        let notification =
+            JsonRpcNotification::new(BANSHEE_WORDS, serde_json::json!({"text": text}));
         if write_line(&mut *writer.lock().await, &notification)
             .await
             .is_err()
@@ -433,6 +464,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
     let mut pushing_downloads: Option<tokio::task::JoinHandle<()>> = None;
     let mut pushing_cues: Option<tokio::task::JoinHandle<()>> = None;
     let mut pushing_level: Option<tokio::task::JoinHandle<()>> = None;
+    let mut pushing_words: Option<tokio::task::JoinHandle<()>> = None;
     let mut drawn: Option<crate::audio::cues::Drawn> = None;
     let mut watching_level: Option<crate::state::LevelWatch> = None;
     // A request that arrived while an earlier call was still running. The
@@ -489,6 +521,8 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             (asked.cues && pushing_cues.is_none()).then(|| state.cues().subscribe_signals());
         let opening_level =
             (asked.level && pushing_level.is_none()).then(|| state.subscribe_level());
+        let opening_words =
+            (asked.words && pushing_words.is_none()).then(|| state.subscribe_words());
         if asked.cues && asked.draws && drawn.is_none() {
             drawn = Some(state.cues().drawn());
         }
@@ -542,6 +576,9 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         if let Some(level) = opening_level {
             pushing_level = Some(tokio::spawn(push_level(Arc::clone(&writer), level)));
         }
+        if let Some(words) = opening_words {
+            pushing_words = Some(tokio::spawn(push_words(Arc::clone(&writer), words)));
+        }
     }
 
     for task in [
@@ -549,6 +586,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         pushing_downloads,
         pushing_cues,
         pushing_level,
+        pushing_words,
     ]
     .into_iter()
     .flatten()

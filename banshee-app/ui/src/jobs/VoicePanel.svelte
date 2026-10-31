@@ -25,7 +25,7 @@
   const SPEAKER_NOTE = 'speaker-note';
   const SPEAKING = [
     { value: 'local', label: 'On this machine' },
-    { value: 'remote', label: 'A remote server' },
+    { value: 'remote', label: 'A voice server' },
   ];
   const FORMATS = [
     { value: 'wav', label: 'WAV' },

@@ -64,7 +64,16 @@ pub async fn run() -> ExitCode {
         CommandType::Config {
             action: args::ConfigAction::Remote,
         } => cli::config_remote().await,
-        CommandType::Setup => cli::setup(config_result).await,
+        CommandType::Setup { list: true, .. } => {
+            cli::list_models();
+            Ok(())
+        }
+        CommandType::Setup {
+            model: Some(id),
+            accept_licence,
+            ..
+        } => cli::setup_model(&id, accept_licence).await,
+        CommandType::Setup { model: None, .. } => cli::setup(config_result).await,
         CommandType::Status { json } => cli::status(json, config_result).await,
         CommandType::Speak { text } => cli::speak(text).await,
         CommandType::History => cli::history().await,

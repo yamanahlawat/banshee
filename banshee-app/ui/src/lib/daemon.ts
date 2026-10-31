@@ -16,12 +16,42 @@ export type Blocker = {
   fix: string;
   command?: string;
 };
-/// A file the daemon has not got. Absent is not blocked: a heavier preset
-/// chosen while dictation runs on the loaded model is one of these and no
-/// blocker, so the two lists answer different questions.
+/// A file the daemon has not got. Absent is not blocked: another model chosen
+/// while dictation runs on the loaded one is one of these and no blocker, so
+/// the two lists answer different questions.
 export type MissingFile = { name: string; role: FileRole; megabytes: number };
+/// A listening model the window offers, with the facts its catalogue entry
+/// holds. `accept_command` is set while its licence waits to be accepted.
+export type ListeningModel = {
+  id: string;
+  label: string;
+  megabytes: number;
+  downloaded: boolean;
+  suggested: boolean;
+  languages: string[];
+  streams: boolean;
+  credit: string | null;
+  licence: { name: string; summary: string };
+  accept_command: string | null;
+};
+/// A listening model whose licence waits, with the command that accepts it.
+export type WaitsOnLicence = ListeningModel & { accept_command: string };
+
+/// The chosen model when its licence waits. The window cannot accept a
+/// licence and the daemon refuses the download, so the window shows the
+/// licence and the command in place of a Download.
+export function chosenWaitsOnLicence(
+  models: ListeningModel[],
+  chosen: string,
+): WaitsOnLicence | null {
+  return (
+    models.find((one): one is WaitsOnLicence => one.id === chosen && !!one.accept_command) ?? null
+  );
+}
 export type Status = Record<string, unknown> & {
-  english_only?: boolean;
+  /// Whether the listener in use can write what it hears in English.
+  stt_translates?: boolean;
+  stt_models?: ListeningModel[];
   download_megabytes?: number;
   missing_downloads?: MissingFile[];
   running: boolean;
@@ -54,8 +84,8 @@ export type Live = {
   speaking: boolean;
   armed: boolean;
   transcribing: boolean;
-  /// A Whisper file being read off disk. The listener answers on the model it
-  /// still holds while this runs, so it is work and not a stop.
+  /// A listening model being read off disk. The listener answers on the model
+  /// it still holds while this runs, so it is work and not a stop.
   loading_model: boolean;
   audio_device: string | null;
   missing_device: string | null;
@@ -279,7 +309,7 @@ export function endsTheRun(progress: Progress): boolean {
 /// A key that refuses for want of a file is answered by the download that
 /// brings it, and the daemon asks it again as the run ends, so naming a restart
 /// while one is arriving is advice that cannot work.
-const WAITS_ON_A_FILE = new Set(['stt.preset', 'tts.voice']);
+const WAITS_ON_A_FILE = new Set(['stt.model', 'tts.voice']);
 
 export const waitsOnARestart = derived(daemon, (state) => {
   const fetching =

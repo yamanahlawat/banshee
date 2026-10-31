@@ -78,47 +78,11 @@ impl Default for AudioConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum STTPreset {
-    Fast,
-    Balanced,
-    Quality,
-}
-
-impl STTPreset {
-    pub const ALL: [STTPreset; 3] = [STTPreset::Fast, STTPreset::Balanced, STTPreset::Quality];
-
-    pub fn model_name(&self) -> &'static str {
-        match self {
-            STTPreset::Fast => "ggml-base.en.bin",
-            STTPreset::Balanced => "ggml-large-v3-turbo-q5_0.bin",
-            STTPreset::Quality => "ggml-large-v3-q5_0.bin",
-        }
-    }
-}
-
-fn language<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    let value = String::deserialize(deserializer)?;
-    Ok(spoken_or_english(value))
-}
-
-/// The engine's table plus auto, the config's own word for detect it; read and write both ask this.
-pub fn known_language(value: &str) -> bool {
-    value == "auto" || whisper_rs::get_lang_id(value).is_some()
-}
-
-/// A code Whisper does not know, read as English rather than refused. Nothing
-/// read this field before, so a config written then can hold anything, and a
-/// daemon that exits on it is a daemon launchd restarts for ever. `banshee
-/// config set` refuses the same value at the boundary, where a person is there
-/// to read why.
-fn spoken_or_english(value: String) -> String {
-    if known_language(&value) {
-        return value;
-    }
-    log::warn!("'{value}' is not a language Whisper knows, so English is read instead");
-    "en".to_string()
+fn listening_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let id = String::deserialize(deserializer)?;
+    banshee_common::listening::find(&id)
+        .map(|model| model.id.to_string())
+        .ok_or_else(|| serde::de::Error::custom(crate::models::unknown_model(&id)))
 }
 
 // Out of range no probability ever matches, so VAD stops firing with no error
@@ -304,6 +268,109 @@ fn api_key_setting(text: &str) -> &'static str {
     }
 }
 
+/// A setting this release refuses, with the way out.
+struct Retired {
+    section: &'static str,
+    /// `None` retires the whole section.
+    key: Option<&'static str>,
+    /// `Some` retires this one value, and every other value stays legal.
+    value: Option<&'static str>,
+    way_out: &'static str,
+}
+
+const RETIRED: [Retired; 5] = [
+    Retired {
+        section: "stt",
+        key: Some("preset"),
+        value: None,
+        way_out: "Banshee listens with stt.model now, parakeet-unified-en-0.6b unless you set another.",
+    },
+    Retired {
+        section: "stt",
+        key: Some("language"),
+        value: None,
+        way_out: "Banshee detects the language. For languages other than English, set stt.model to whisper-large-v3-turbo.",
+    },
+    Retired {
+        section: "tts",
+        key: Some("speed"),
+        value: None,
+        way_out: "The voice has no speaking rate now.",
+    },
+    Retired {
+        section: "tts",
+        key: Some("fallback"),
+        value: Some("system"),
+        way_out: "The system voice is gone. Set it to local or none.",
+    },
+    Retired {
+        section: "tell",
+        key: None,
+        value: None,
+        way_out: "banshee tell is gone.",
+    },
+];
+
+impl Retired {
+    fn held_by(&self, document: &toml::Table) -> bool {
+        let Some(section) = document.get(self.section) else {
+            return false;
+        };
+        let Some(key) = self.key else {
+            return true;
+        };
+        match (section.get(key), self.value) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(held), Some(value)) => held.as_str() == Some(value),
+        }
+    }
+
+    fn instruction(&self) -> String {
+        let Retired {
+            section, way_out, ..
+        } = self;
+        match (self.key, self.value) {
+            (None, _) => format!("Delete the `{section}` section: {way_out}"),
+            (Some(key), None) => format!("Delete `{key}` under [{section}]: {way_out}"),
+            (Some(key), Some(value)) => {
+                format!("`{key}` under [{section}] cannot be `{value}`: {way_out}")
+            }
+        }
+    }
+
+    /// Whether `dotted` names this setting, so `config set` may remove it.
+    fn named_by(&self, dotted: &str) -> bool {
+        self.value.is_none()
+            && self
+                .key
+                .is_some_and(|key| dotted == format!("{}.{key}", self.section))
+    }
+}
+
+/// Every retired setting `text` holds, in one line, because serde stops at the
+/// first and a person would fix them one restart at a time.
+fn refuse_retired(text: &str) -> Result<(), BansheeError> {
+    // A file that is not TOML has its fault named by the parse that follows
+    let Ok(document) = text.parse::<toml::Table>() else {
+        return Ok(());
+    };
+    let held: Vec<String> = RETIRED
+        .iter()
+        .filter(|retired| retired.held_by(&document))
+        .map(Retired::instruction)
+        .collect();
+    if held.is_empty() {
+        return Ok(());
+    }
+    Err(BansheeError::Rejected(held.join(" ")))
+}
+
+/// A retired setting a null write may remove, though no field reads it.
+pub fn is_retired(dotted: &str) -> bool {
+    RETIRED.iter().any(|retired| retired.named_by(dotted))
+}
+
 fn api_key_refusal(setting: &str) -> String {
     format!("api_key does not belong in config.toml; set it with: banshee config set {setting}")
 }
@@ -374,12 +441,11 @@ impl RemoteTtsConfig {
 pub struct STTConfig {
     pub provider: Provider,
     pub remote: RemoteSttConfig,
-    pub preset: STTPreset,
-    /// A Whisper language code, or `auto` to detect it. The English-only build
-    /// holds no other language, so `preset = "fast"` reads English whatever
-    /// this says.
-    #[serde(deserialize_with = "language")]
-    pub language: String,
+    /// A listening model id, as `banshee_common::listening::find` takes it.
+    #[serde(deserialize_with = "listening_model")]
+    pub model: String,
+    /// Asked of a server, or of a model that translates. Every other model
+    /// transcribes in the language it hears.
     pub translate: bool,
     #[serde(deserialize_with = "probability")]
     pub vad_threshold: f32,
@@ -393,13 +459,19 @@ impl Default for STTConfig {
         Self {
             provider: Provider::Local,
             remote: RemoteSttConfig::default(),
-            preset: STTPreset::Balanced,
-            language: "en".to_string(),
+            model: banshee_common::listening::DEFAULT_MODEL.to_string(),
             translate: false,
             vad_threshold: 0.5,
-            vocabulary: vec!["banshee".to_string()],
+            vocabulary: Vec::new(),
             endpoint_silence_ms: 2500,
         }
+    }
+}
+
+impl STTConfig {
+    /// `None` only for a config built in code: a parsed one refuses an unknown id.
+    pub fn listening_model(&self) -> Option<&'static banshee_common::listening::ListeningModel> {
+        banshee_common::listening::find(&self.model)
     }
 }
 
@@ -458,6 +530,7 @@ impl Config {
 
     /// Parses a config document, and refuses an `api_key` in it.
     pub fn parse(text: &str) -> Result<Self, BansheeError> {
+        refuse_retired(text)?;
         let mut config: Config = toml::from_str(text).map_err(|error| {
             // toml renders a parse error with the offending line above it, so
             // the parser's own text would carry the key into stderr, the log and
@@ -493,6 +566,9 @@ impl Config {
     pub(crate) fn load_from(path: &Path) -> Result<Self, BansheeError> {
         let contents = Config::read(path)?;
         Config::parse(&contents).map_err(|error| match error {
+            BansheeError::Rejected(refusal) => {
+                BansheeError::Rejected(format!("{}: {refusal}", path.display()))
+            }
             BansheeError::Toml(toml) => {
                 let at = toml.span().map_or(String::new(), |span| {
                     let line = contents[..span.start].matches('\n').count() + 1;
@@ -506,32 +582,6 @@ impl Config {
             }
             other => other,
         })
-    }
-}
-
-#[cfg(test)]
-mod language_tests {
-    /// Nothing read this field before, so a config written then can hold any
-    /// string. Exiting on one is a daemon launchd restarts for ever.
-    #[test]
-    fn an_unknown_code_reads_as_english_rather_than_stopping_the_daemon() {
-        let config: super::Config =
-            toml::from_str("[stt]\nlanguage = \"en-US\"\n").expect("an old config must load");
-        assert_eq!(config.stt.language, "en");
-    }
-
-    #[test]
-    fn a_code_the_engine_knows_is_kept() {
-        let config: super::Config = toml::from_str("[stt]\nlanguage = \"hi\"\n").unwrap();
-        assert_eq!(config.stt.language, "hi");
-    }
-
-    /// `auto` is the config's own word for detect it and is not in the engine's
-    /// table, so it has to survive the same check.
-    #[test]
-    fn auto_survives() {
-        let config: super::Config = toml::from_str("[stt]\nlanguage = \"auto\"\n").unwrap();
-        assert_eq!(config.stt.language, "auto");
     }
 }
 
@@ -679,7 +729,7 @@ mod tests {
     #[test]
     fn a_config_without_the_key_reads_as_local() {
         let config: Config =
-            toml::from_str("[stt]\npreset = \"fast\"\n\n[tts]\nvoice = \"af_sky\"\n").unwrap();
+            toml::from_str("[stt]\ntranslate = true\n\n[tts]\nvoice = \"af_sky\"\n").unwrap();
         assert_eq!(config.stt.provider, Provider::Local);
         assert_eq!(config.tts.provider, Provider::Local);
     }
@@ -902,6 +952,99 @@ mod tests {
     }
 
     #[test]
+    fn a_removed_preset_key_is_refused_by_name() {
+        let error =
+            Config::parse("[stt]\npreset = \"balanced\"\n").expect_err("stt.preset is gone");
+        assert!(error.to_string().contains("`preset`"), "{error}");
+    }
+
+    #[test]
+    fn a_removed_language_key_is_refused_by_name() {
+        let error = Config::parse("[stt]\nlanguage = \"en\"\n").expect_err("stt.language is gone");
+        assert!(error.to_string().contains("`language`"), "{error}");
+    }
+
+    #[test]
+    fn every_retired_setting_in_the_file_is_named_at_once() {
+        let error = Config::parse(
+            "[stt]\npreset = \"balanced\"\nlanguage = \"de\"\n\n[tts]\nspeed = 1.2\nfallback = \"system\"\n\n[tell]\nagent = \"claude\"\n",
+        )
+        .expect_err("retired settings are refused");
+        let error = error.to_string();
+        for named in ["`preset`", "`language`", "`speed`", "`system`", "`tell`"] {
+            assert!(error.contains(named), "{named} is missing from: {error}");
+        }
+        assert!(!error.contains('\n'), "{error}");
+    }
+
+    #[test]
+    fn the_language_refusal_names_detection_and_the_model_for_other_languages() {
+        let error = Config::parse("[stt]\nlanguage = \"de\"\n")
+            .expect_err("stt.language is gone")
+            .to_string();
+        assert!(error.contains("detects the language"), "{error}");
+        assert!(error.contains("whisper-large-v3-turbo"), "{error}");
+    }
+
+    #[test]
+    fn a_retired_setting_names_its_section() {
+        let error = Config::parse("[stt]\npreset = \"balanced\"\n")
+            .expect_err("stt.preset is gone")
+            .to_string();
+        assert!(error.contains("`preset` under [stt]"), "{error}");
+        assert!(error.contains("stt.model"), "{error}");
+    }
+
+    #[test]
+    fn a_fallback_other_than_system_is_not_retired() {
+        assert!(Config::parse("[tts]\nfallback = \"none\"\n").is_ok());
+    }
+
+    #[test]
+    fn a_retired_setting_on_disk_names_the_file() {
+        let dir = crate::test_support::unique_scratch("config-retired");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[stt]\nlanguage = \"en\"\npreset = \"fast\"\n").unwrap();
+
+        let error = super::Config::load_from(&path).expect_err("retired settings are refused");
+        let _ = std::fs::remove_dir_all(&dir);
+        let error = error.to_string();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(
+            error.contains("`language`") && error.contains("`preset`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_model_id_is_refused() {
+        let error =
+            Config::parse("[stt]\nmodel = \"nope\"\n").expect_err("no model is called nope");
+        assert!(error.to_string().contains("nope"), "{error}");
+        assert!(
+            error.to_string().contains("whisper-large-v3-turbo"),
+            "the refusal names the ids it takes: {error}"
+        );
+    }
+
+    #[test]
+    fn a_model_id_in_another_case_reads_as_the_catalogue_writes_it() {
+        let config = Config::parse("[stt]\nmodel = \"qwen3-asr-0.6b\"\n").unwrap();
+        assert_eq!(config.stt.model, "Qwen3-ASR-0.6B");
+    }
+
+    #[test]
+    fn the_default_words_to_know_are_empty() {
+        assert!(Config::default().stt.vocabulary.is_empty());
+        assert!(Config::parse("").unwrap().stt.vocabulary.is_empty());
+    }
+
+    #[test]
+    fn the_default_model_is_parakeet() {
+        assert_eq!(Config::default().stt.model, "parakeet-unified-en-0.6b");
+    }
+
+    #[test]
     fn the_system_fallback_is_refused_by_name() {
         let error =
             Config::parse("[tts]\nfallback = \"system\"\n").expect_err("the system voice is gone");
@@ -1022,10 +1165,10 @@ mod tests {
     fn a_config_that_does_not_parse_names_the_file_and_the_line() {
         let dir = crate::test_support::unique_scratch("config-load");
         let path = dir.join("config.toml");
-        std::fs::write(&path, "# a\n\n[stt]\nlanguage = 5\n").unwrap();
+        std::fs::write(&path, "# a\n\n[stt]\nmodel = 5\n").unwrap();
 
         let error =
-            super::Config::load_from(&path).expect_err("a number must not load as a language");
+            super::Config::load_from(&path).expect_err("a number must not load as a model id");
         let _ = std::fs::remove_dir_all(&dir);
         let error = error.to_string();
         assert!(error.contains(&path.display().to_string()), "{error}");

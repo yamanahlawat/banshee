@@ -13,11 +13,10 @@ save_history = true    # keep transcriptions in ~/.banshee/banshee.db
 
 [stt]
 provider = "local"       # local | remote; see "A remote listener" below
-preset = "balanced"      # fast | balanced | quality (see below)
+model = "parakeet-unified-en-0.6b"  # a listening model id; see "Tuning the listener"
 vad_threshold = 0.5      # 0.0 to 1.0; higher means stricter speech detection
-vocabulary = ["banshee"] # words Whisper keeps mangling, for example ["clippy", "tokio"]
-language = "en"          # a Whisper code, or "auto" to detect it
-translate = false        # true answers in English whatever you spoke
+vocabulary = []          # words the model keeps mangling, for example ["clippy", "tokio"]
+translate = false        # true answers in English, for a model or server that translates
 endpoint_silence_ms = 2500  # trailing silence that ends a spoken answer
 
 [stt.remote]                           # read when provider = "remote"
@@ -106,8 +105,7 @@ banshee config set feedback.mode none
   legal ones.
 - **The command works** whether or not the daemon runs.
 - **Most settings take effect at once:**
-  - `stt.vad_threshold`, `stt.vocabulary`, `stt.preset`, `stt.language`,
-    `stt.translate`
+  - `stt.vad_threshold`, `stt.vocabulary`, `stt.model`, `stt.translate`
   - `audio.input_device`, `audio.barge_in`, `feedback.mode`
   - `tts.voice`, `daemon.save_history`
 - **The rest are read when the daemon starts,** so the command tells you to
@@ -161,10 +159,9 @@ Speak with one by: banshee config set tts.voice "<id>"
   directory](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/voices),
   for example `af_bella`, `am_michael`, or `bf_emma`.
 - **The prefix is accent and gender:** `a`merican/`b`ritish, `f`emale/`m`ale.
-- **After a change to `preset` or `voice`,** run `banshee setup` to fetch the
-  new file.
+- **After a change to `voice`,** run `banshee setup` to fetch the new file.
 - **The window's Voice panel** lists every voice Banshee can name and fetches
-  the one you pick, and its Microphone panel fetches a speech model you choose
+  the one you pick, and its Microphone panel fetches a listening model you choose
   and do not have.
 
 ## Tuning the listener
@@ -173,13 +170,29 @@ Speak with one by: banshee config set tts.voice "<id>"
 - **Lower it** if replies feel sluggish.
 - **Raise it** if Banshee cuts you off.
 
-The `preset` picks which Whisper model Banshee uses:
+`stt.model` names the listening model. Banshee runs it on transcribe.cpp.
 
-| Preset     | Model                          | Trade-off                                  |
-| ---------- | ------------------------------ | ------------------------------------------ |
-| `fast`     | `ggml-base.en.bin`             | Fastest and lightest, English only         |
-| `balanced` | `ggml-large-v3-turbo-q5_0.bin` | The default; accurate and reasonably quick |
-| `quality`  | `ggml-large-v3-q5_0.bin`       | Most accurate, heaviest                    |
+| Model id                    | Size   | Trade-off                                                                 |
+| --------------------------- | ------ | ------------------------------------------------------------------------- |
+| `parakeet-unified-en-0.6b`  | 731 MB | The default. English, shows live words in the chip while you speak.       |
+| `whisper-large-v3-turbo`    | 619 MB | Many languages. It does not translate, so `stt.translate` has no effect.  |
+
+- **Any of the 73 transcribe.cpp models downloads by id:** `banshee setup --model <id>`,
+  then `banshee config set stt.model <id>`. `banshee setup --list` shows each id with its
+  size, languages, whether it streams and its licence.
+- **18 models need `--accept-licence`:** the CC-BY-NC ones, Moonshine, HAI-DEF and FunASR.
+  The refusal names the licence and the command.
+  Banshee records an acceptance in `~/.banshee/accepted-licences`, one licence name per line.
+- **Typed text comes from a full pass over the recording** when you let go. The stream
+  drives only the live words in the chip, on macOS, during dictation and spoken answers.
+- **`stt.vocabulary` is empty by default.** A model that takes vocabulary receives the
+  words. For any other model, a corrector swaps a close-sounding word for the listed one,
+  with the rule from Handy (threshold 0.10, Soundex weight 0.5).
+- **`stt.preset` and `stt.language` are gone.** The daemon refuses to start while either is
+  in `config.toml`, and one error names every removed key. `banshee config set stt.preset null`
+  removes a key.
+- **Banshee deletes the old Whisper files** `ggml-base.en.bin`,
+  `ggml-large-v3-turbo-q5_0.bin` and `ggml-large-v3-q5_0.bin` from `~/.banshee/models` at start.
 
 ## Remote servers
 
@@ -215,7 +228,8 @@ The `preset` picks which Whisper model Banshee uses:
   `[stt.remote]` and types the text it answers.
 - **Any OpenAI-compatible transcription server works:** OpenAI, Groq, or a
   Whisper server you run.
-- **The `preset` is not read.** The server's `model` is.
+- **`stt.model` is not read.** The server's `model` is.
+- **The server gets no language hint.** `stt.language` is gone.
 - **The `vocabulary` list goes out with each request** as the server's prompt,
   so those words leave the machine too.
 - **`banshee config set stt.remote.api_key`** asks for the key by itself.

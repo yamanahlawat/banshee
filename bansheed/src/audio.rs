@@ -604,7 +604,7 @@ mod tests {
         );
     }
 
-    // A raw ALSA device can deliver integers only. Whisper reads the ring as
+    // A raw ALSA device can deliver integers only. The model reads the ring as
     // levels in -1.0..1.0, whatever the device delivered.
     #[test]
     fn integer_samples_reach_the_ring_as_the_same_level() {

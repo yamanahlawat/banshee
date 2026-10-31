@@ -118,6 +118,29 @@ fn a_removed_section_is_named_on_the_status_line() {
 }
 
 #[test]
+fn the_fix_for_a_refused_config_keeps_the_rest_of_the_file() {
+    let fix = super::invalid_config_fix("/home/me/.banshee/config.toml");
+    assert!(fix.contains("/home/me/.banshee/config.toml"), "{fix}");
+    assert!(!fix.contains("delete it"), "{fix}");
+}
+
+#[test]
+fn translate_on_a_model_that_cannot_translate_is_named() {
+    let mut config = crate::config::Config::default();
+    assert_eq!(super::translate_line(&config), None, "translate is off");
+    config.stt.translate = true;
+    let line = super::translate_line(&config).expect("Parakeet does not translate");
+    assert!(line.contains("stt.translate"), "{line}");
+    assert!(line.contains("parakeet-unified-en-0.6b"), "{line}");
+    config.stt.provider = crate::config::Provider::Remote;
+    assert_eq!(
+        super::translate_line(&config),
+        None,
+        "a transcription server is asked to translate"
+    );
+}
+
+#[test]
 fn the_last_error_line_names_no_producer() {
     assert_eq!(
         super::last_error_line("opencode exited exit status: 1"),

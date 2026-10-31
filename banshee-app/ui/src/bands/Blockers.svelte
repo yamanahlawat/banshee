@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    chosenWaitsOnLicence,
     downloadLine,
     percent,
     spokenProgress,
@@ -7,19 +8,22 @@
     fixProse,
     type Blocker,
     type BlockerKind,
+    type ListeningModel,
     type Progress,
     type Remedy,
   } from '../lib/daemon';
-  import { PRESETS, downloadSize } from '../lib/presets';
   import { write } from '../lib/settings';
   import { openPermissionPane } from '../lib/tauri';
   import { askForModels, fetching } from '../lib/downloads';
-  import { report, spell } from '../lib/copy';
+  import { downloadSize, languagesHeard, report, spell } from '../lib/copy';
   import Segmented from '../controls/Segmented.svelte';
+  import LicenceWait from '../controls/LicenceWait.svelte';
 
   export let blockers: Blocker[] = [];
   export let download: Progress | null = null;
-  export let preset = 'balanced';
+  /// The listening models the daemon offers, and the id the config holds.
+  export let models: ListeningModel[] = [];
+  export let chosen = '';
   /// What the daemon says this run still costs.
   export let megabytes = 0;
   /// The shell's, which re-reads the daemon afterwards. Restarting without that
@@ -46,6 +50,13 @@
   /// A grant reaches only a process started after it lands, and the window cannot see it, so after
   /// sending someone to System Settings it offers the restart.
   let asked: Record<string, boolean> = {};
+
+  $: suggestions = models.filter((one) => one.suggested);
+  $: waits = chosenWaitsOnLicence(models, chosen);
+  $: options = suggestions.map((one) => ({ value: one.id, label: one.label }));
+  $: hears = suggestions
+    .map((one) => `${one.label} hears ${languagesHeard(one.languages)}.`)
+    .join(' ');
 
   $: groups = fixGroups(blockers);
   // What a reader can actually see, with its remedy resolved once. A group a
@@ -99,9 +110,9 @@
           confirmsWithRestart: false,
           run: askForModels,
           settledByADownload: true,
-          // The preset decides which speech model is fetched, so it is worth
-          // asking before a download that runs to gigabytes. A missing voice or
-          // detector is the same whichever preset is set.
+          // The model decides which file is fetched, so it is worth asking
+          // before a download that runs to gigabytes. A missing voice or
+          // detector is the same whichever model is set.
           chooses: group.some((blocker) => blocker.role === 'speech'),
         };
       case 'restart':
@@ -188,21 +199,24 @@
 
     {#if fix.chooses}
       <div class="choice">
-        <span class="caps label">Speech model</span>
+        <span class="caps label">Listening model</span>
         <Segmented
-          label="Speech model"
-          value={preset}
-          options={PRESETS}
-          change={(next) => write('stt.preset', next)}
+          label="Listening model"
+          value={chosen}
+          {options}
+          change={(next) => write('stt.model', next)}
         />
-        <p class="size">
-          About {downloadSize(megabytes)} to fetch. Faster models hear less well. You can change this
-          later.
-        </p>
+        {#if waits}
+          <div class="waits"><LicenceWait model={waits} /></div>
+        {:else}
+          <p class="size">
+            About {downloadSize(megabytes)} to fetch. {hears} You can change this later.
+          </p>
+        {/if}
       </div>
     {/if}
 
-    {#if fix.label}
+    {#if fix.label && !(fix.chooses && waits)}
       <div class="actions">
         {#if fix.confirmsWithRestart && asked[group[0].id]}
           <button class="btn" on:click={restart} disabled={busy}>
@@ -274,6 +288,10 @@
   .size {
     margin-top: 10px;
     font-size: 13px;
+  }
+
+  .waits {
+    margin-top: 10px;
   }
 
   .actions {

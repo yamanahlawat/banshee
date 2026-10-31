@@ -61,7 +61,7 @@ fn the_run_facts_name_the_voice_threads_and_espeak() {
     let facts = run_facts();
     let expected = [
         format!("voice {VOICE}"),
-        format!("threads {}", crate::models::onnx_threads()),
+        format!("threads {}", crate::models::thread_count()),
     ];
     for part in &expected {
         assert!(facts.contains(part), "{facts:?} lacks {part:?}");

@@ -127,6 +127,9 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Build transcribe.cpp for any CPU of the target, with no system BLAS"
+        if: "runner.os == 'Linux'"
+        run: "echo \"TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF\" >> \"$GITHUB_ENV\""
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

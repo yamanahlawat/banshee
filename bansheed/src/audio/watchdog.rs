@@ -87,7 +87,7 @@ impl Binding {
         };
         self.open_device = Some(open);
         state.set_missing_device(missing);
-        state.set_pipeline(crate::state::Pipeline::Open);
+        state.capture_open();
     }
 
     /// Nothing records. `recording_error` carries the whole fault, so

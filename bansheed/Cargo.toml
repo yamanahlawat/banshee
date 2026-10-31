@@ -38,6 +38,7 @@ bench = false
 arboard.workspace = true
 audioadapter-buffers = "5.2.0"
 banshee-common = { path = "../banshee-common" }
+strsim = "0.11.1"
 chrono.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
 cpal = "0.18.2"
@@ -59,12 +60,14 @@ rubato = "5.0.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
+sha2 = "0.10.9"
 similar = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "signal", "fs"] }
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 toml.workspace = true
 toml_edit = { version = "0.25", features = ["serde"] }
-whisper-rs.workspace = true
+# Metal is the crate's default and builds only on macOS, which adds it below.
+transcribe-cpp = { version = "0.4.1", default-features = false }
 # The mark is a png on every platform. winit is macOS only, below.
 png = "0.18.1"
 log.workspace = true
@@ -106,9 +109,8 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = ["
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes", "CFArray", "CFAttributedString", "CFData", "CFDictionary", "CFNumber", "CFPreferences", "CFString"] }
 # The chip's words: Archivo from the window's own font file.
 objc2-core-text = { version = "0.3", default-features = false, features = ["std", "objc2-core-graphics", "CTFont", "CTFontDescriptor", "CTFontManager", "CTLine", "CTRun", "CTStringAttributes"] }
-# Metal + CoreML are always on for macOS (including prebuilt release binaries);
-# whisper.cpp falls back to CPU at runtime if the GPU path is unavailable.
-whisper-rs = { workspace = true, features = ["metal", "coreml"] }
+# Metal is always on for macOS, including prebuilt release binaries.
+transcribe-cpp = { version = "0.4.1", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false }
@@ -120,4 +122,4 @@ harness = false
 
 [features]
 # NVIDIA GPUs on Linux/Windows; opt-in because CUDA needs the toolkit installed.
-nvidia = ["whisper-rs/cuda"]
+nvidia = ["transcribe-cpp/cuda"]

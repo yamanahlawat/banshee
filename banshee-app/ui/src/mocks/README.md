@@ -21,7 +21,7 @@ them there, and each one names what is missing or invented when it fails:
 - `each_live_mock_names_the_activity_its_flags_rank` holds each live mock's
   `activity` to what `Activity::of` ranks from its own flags.
 
-The top level of a status mock is not guarded, so `english_only`,
+The top level of a status mock is not guarded, so `stt_translates`, `stt_models`,
 `download_megabytes` and `hotkey_listens` were added by hand and can drift.
 
 | File | What it is | How it was captured |

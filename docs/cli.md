@@ -13,12 +13,15 @@
 | `banshee start`                 | Start the daemon, now and at every login (on macOS as a Login Item); it registers again if already on and names any model that is missing |
 | `banshee stop`                  | Stop the running daemon                                    |
 | `banshee setup`                 | Download the required models; a re-run fetches only what is missing         |
+| `banshee setup --model <id>`    | Download one listening model by its id; then `banshee config set stt.model <id>` listens with it |
+| `banshee setup --model <id> --accept-licence` | The same for a model whose licence asks for acceptance; `setup --model` alone shows its terms and link |
+| `banshee setup --list`          | List every listening model: id, size, languages, whether it streams, and its licence |
 | `banshee status`                | What Banshee is doing, and what stops it working           |
 | `banshee status --json`         | The same as machine-readable state and blockers            |
 | `banshee devices`               | List the microphones, and mark the one in use              |
 | `banshee watch`                 | Follow what the daemon is doing, one line per change       |
 | `banshee watch --waybar`        | The same, as Waybar custom-module JSON                     |
-| `banshee watch --events cues,level` | Print each cue and level event as one JSON line         |
+| `banshee watch --events cues,level,words` | Print each cue, level and words event as one JSON line |
 | `banshee voices`                | List the speech voices on disk, and mark the one in use    |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee config remote`         | Set up the remote listener and speaker in one run, after showing each value |
@@ -35,8 +38,10 @@
 ## Following what the daemon is doing
 
 - `banshee watch` prints one word per state change, and keeps running.
-- `banshee watch --events cues,level` prints each event as one JSON line. The
-  one-word lines and `--waybar` stay as they are.
+- `banshee watch --events cues,level,words` prints each event as one JSON line.
+  A words event carries the words heard so far while you speak, and an empty
+  text when the recording ends. The one-word lines and `--waybar` stay as they
+  are.
 
 ```
 $ banshee watch

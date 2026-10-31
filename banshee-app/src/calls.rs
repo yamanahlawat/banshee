@@ -58,11 +58,6 @@ pub struct Voices {
     pub current: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Languages {
-    pub languages: Vec<banshee_common::Language>,
-}
-
 pub async fn status(client: &mut Client) -> Result<Value, CommandError> {
     client
         .call(BANSHEE_STATUS, json!({}))
@@ -99,14 +94,6 @@ pub async fn list_devices(client: &mut Client) -> Result<Devices, CommandError> 
 pub async fn list_voices(client: &mut Client) -> Result<Voices, CommandError> {
     let result = client
         .call(BANSHEE_LIST_VOICES, json!({}))
-        .await
-        .map_err(CommandError::from)?;
-    serde_json::from_value(result).map_err(shape_mismatch)
-}
-
-pub async fn list_languages(client: &mut Client) -> Result<Languages, CommandError> {
-    let result = client
-        .call(banshee_common::BANSHEE_LIST_LANGUAGES, json!({}))
         .await
         .map_err(CommandError::from)?;
     serde_json::from_value(result).map_err(shape_mismatch)

@@ -1,11 +1,12 @@
 use std::io::{IsTerminal, Write};
 
-use banshee_common::{Voice, error::BansheeError, utils};
+use banshee_common::{Voice, error::BansheeError, listening::ListeningModel, utils};
 
 use crate::{
     args, audio, config::Config, connect, daemon, hotkey, models, permissions, service, settings,
     status, text_to_speech,
 };
+use models::licences::{self, Accepted};
 
 fn show_progress(progress: banshee_common::DownloadProgress) {
     // Rewritten in place, so a percentage does not scroll the screen away
@@ -28,27 +29,28 @@ fn show_progress(progress: banshee_common::DownloadProgress) {
 
 // One writer at a time: the `.part` file that makes resume possible has a
 // stable name, so this process must not fetch alongside a daemon already doing it
-/// What `setup` says once files arrive through a running daemon. The listening
-/// pipeline was built without them, so a model or detector waits for a
-/// restart; a voice loads on the next reply.
+/// What `setup` says once files arrive through a running daemon. Only the
+/// detector waits for a restart; a listening model and a voice load by themselves.
 fn restart_note(arrived: &[&str]) -> Option<&'static str> {
     arrived
         .iter()
-        .any(|name| {
-            matches!(
-                crate::models::download::role(name),
-                banshee_common::FileRole::Speech | banshee_common::FileRole::Detector
-            )
-        })
+        .any(|name| crate::models::download::role(name) == banshee_common::FileRole::Detector)
         .then_some("Restart Banshee to use what just arrived: banshee start")
 }
 
-async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(), BansheeError> {
-    let reply = utils::call_daemon(
-        banshee_common::BANSHEE_DOWNLOAD_MODELS,
-        serde_json::json!({}),
-    )
-    .await?;
+/// `retry` is the command that fetches the same files again.
+async fn follow_daemon_download(
+    mut progress: utils::Subscription,
+    params: serde_json::Value,
+    retry: &str,
+) -> Result<(), BansheeError> {
+    let reply = match utils::call_daemon(banshee_common::BANSHEE_DOWNLOAD_MODELS, params).await {
+        Ok(reply) => reply,
+        Err(error) => {
+            eprintln!("To try again: {retry}");
+            return Err(error);
+        }
+    };
     // The counter terminates because only one download runs at a time, so every
     // notification on this connection belongs to the batch just asked for
     let asked: Vec<String> = reply
@@ -81,7 +83,7 @@ async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(),
         note_progress(&reported, &mut pending, &mut failed);
         show_progress(reported);
     }
-    downloads_settled(&failed)?;
+    downloads_settled(&failed, retry)?;
     let arrived: Vec<&str> = asked
         .iter()
         .filter(|name| !failed.contains(*name))
@@ -108,12 +110,12 @@ fn note_progress(
     }
 }
 
-fn downloads_settled(failed: &[String]) -> Result<(), BansheeError> {
+fn downloads_settled(failed: &[String], retry: &str) -> Result<(), BansheeError> {
     if failed.is_empty() {
         return Ok(());
     }
     Err(BansheeError::Rejected(format!(
-        "{} failed to download; run: banshee setup",
+        "{} failed to download; run: {retry}",
         failed.join(", ")
     )))
 }
@@ -339,8 +341,9 @@ fn watched_events(names: &[String]) -> Result<Vec<&'static str>, BansheeError> {
         .map(|name| match name.as_str() {
             "cues" => Ok(banshee_common::EVENT_CUES),
             "level" => Ok(banshee_common::EVENT_LEVEL),
+            "words" => Ok(banshee_common::EVENT_WORDS),
             other => Err(BansheeError::Rejected(format!(
-                "'{other}' is not an event watch prints. Use cues or level."
+                "'{other}' is not an event watch prints. Use cues, level or words."
             ))),
         })
         .collect()
@@ -551,18 +554,38 @@ pub async fn config(key: String, value: Option<String>) -> Result<(), BansheeErr
     // So `0.6` arrives as a number and `de` as a string
     let value: serde_json::Value =
         serde_json::from_str(&value).unwrap_or_else(|_| serde_json::Value::String(value.clone()));
-    let assignments = settings::Assignments::from([(key.clone(), value)]);
+    let written = written_line(&key, &value);
+    let assignments = settings::Assignments::from([(key.clone(), value.clone())]);
 
-    match write_settings(assignments).await {
-        Ok(restart_required) => {
-            println!("Set {key} in config.toml.");
-            if restart_required {
-                println!("Restart to use it: banshee start");
-            }
-        }
-        Err(error) => return Err(error),
+    let restart_required = write_settings(assignments).await?;
+    println!("{written}");
+    if restart_required {
+        let models_dir = models::download::models_dir()?;
+        println!("{}", restart_line(&key, &value, &models_dir));
     }
     Ok(())
+}
+
+/// A listening model whose file is absent waits for its download, and a
+/// restart would start a daemon that cannot listen.
+fn restart_line(key: &str, value: &serde_json::Value, models_dir: &std::path::Path) -> String {
+    let absent = settings::listening_model_named(key, value)
+        .filter(|model| !models_dir.join(model.file).exists());
+    match absent {
+        Some(model) => format!(
+            "{} is not downloaded yet: run banshee setup. Banshee listens with it once the file arrives.",
+            model.id
+        ),
+        None => "Restart to use it: banshee start".to_string(),
+    }
+}
+
+fn written_line(key: &str, value: &serde_json::Value) -> String {
+    if value.is_null() {
+        format!("Removed {key} from config.toml.")
+    } else {
+        format!("Set {key} in config.toml.")
+    }
 }
 
 /// The speech endpoint has no default voice, so an empty voice cannot send
@@ -660,18 +683,135 @@ fn report_key(side: crate::credentials::RemoteKey) {
 }
 
 pub async fn setup(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
-    download_missing(config_result.as_ref().ok()).await
+    let accepted = Accepted::in_banshee_dir();
+    // The download refuses this file too; said first, the reason is not lost
+    // behind a daemon's bare "failed".
+    if let Some(reason) = config_result
+        .as_ref()
+        .ok()
+        .and_then(models::stt_model)
+        .and_then(|model| licences::refusal(model, &accepted))
+    {
+        eprintln!("{reason}");
+    }
+    download_missing(config_result.as_ref().ok(), &accepted).await
+}
+
+/// Fetches one listening model by id, through the daemon when one runs.
+pub async fn setup_model(id: &str, accept_licence: bool) -> Result<(), BansheeError> {
+    let mut accepted = Accepted::in_banshee_dir();
+    let model = model_to_fetch(id, accept_licence, &mut accepted)?;
+    let dir = models::download::models_dir()?;
+    let retry = format!("banshee setup --model {}", model.id);
+    let watching = utils::Subscription::open(&[banshee_common::EVENT_DOWNLOADS]).await;
+    match watching {
+        Ok((_, subscription)) => {
+            follow_daemon_download(
+                subscription,
+                serde_json::json!({ "model": model.id }),
+                &retry,
+            )
+            .await?;
+        }
+        Err(error) if daemon_is_down(&error) => {
+            let wanted = [models::download::listening_file(model)];
+            if models::download::still_missing(&wanted, &dir).is_empty() {
+                println!("Everything is already downloaded.");
+            } else if let Err(error) =
+                models::download::download_all(&dir, &wanted, &accepted, &mut show_progress).await
+            {
+                eprintln!("{error}");
+                eprintln!("To try again: {retry}");
+                std::process::exit(1);
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    if models::missing_in(&dir, &[model.file]).is_empty() {
+        println!(
+            "To listen with it: banshee config set stt.model {}",
+            model.id
+        );
+    }
+    Ok(())
+}
+
+pub fn list_models() {
+    for line in catalogue_lines() {
+        println!("{line}");
+    }
+}
+
+/// One row per listening model: id, size, languages, whether it streams, licence.
+fn catalogue_lines() -> Vec<String> {
+    let models = banshee_common::listening::CATALOGUE;
+    let width = models.iter().map(|model| model.id.len()).max().unwrap_or(0);
+    let row = |id: &str, size: &str, languages: &str, streams: &str, licence: &str| {
+        format!("{id:<width$}  {size:>8}  {languages:<9}  {streams:<7}  {licence}")
+    };
+    std::iter::once(row("ID", "SIZE", "LANGUAGES", "STREAMS", "LICENCE"))
+        .chain(models.iter().map(|model| {
+            row(
+                model.id,
+                &size_of(model.bytes),
+                &languages_heard(model.languages),
+                if model.streams { "yes" } else { "no" },
+                &match model.credit() {
+                    Some(credit) => format!("{}, {credit}", model.licence.name),
+                    None => model.licence.name.to_string(),
+                },
+            )
+        }))
+        .collect()
+}
+
+/// "English" for the one, the codes for up to three, else a count.
+fn languages_heard(codes: &[&str]) -> String {
+    match codes {
+        ["en"] => "English".to_string(),
+        [..] if codes.len() > 3 => format!("{} languages", codes.len()),
+        _ => codes.join(", "),
+    }
+}
+
+fn size_of(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{} MB", bytes / 1_000_000)
+    }
+}
+
+/// The catalogue entry for `id` once its licence lets it download. Accepting
+/// is recorded, so later downloads of any model under that licence go ahead.
+fn model_to_fetch(
+    id: &str,
+    accept_licence: bool,
+    accepted: &mut Accepted,
+) -> Result<&'static ListeningModel, BansheeError> {
+    let model = banshee_common::listening::find(id)
+        .ok_or_else(|| BansheeError::Rejected(models::unknown_model(id)))?;
+    if accept_licence && model.licence.needs_acceptance {
+        accepted.add(model.licence.name)?;
+    }
+    match licences::refusal(model, accepted) {
+        Some(reason) => Err(BansheeError::Rejected(reason)),
+        None => Ok(model),
+    }
 }
 
 /// Fetches the models that are not on disk, through the daemon when one runs.
 /// The config is required only when no daemon runs.
-pub async fn download_missing(config: Option<&Config>) -> Result<(), BansheeError> {
+pub async fn download_missing(
+    config: Option<&Config>,
+    accepted: &Accepted,
+) -> Result<(), BansheeError> {
     // Subscribed before the download is asked for, so the first
     // notifications are not lost in the gap
     let watching = utils::Subscription::open(&[banshee_common::EVENT_DOWNLOADS]).await;
     match watching {
         Ok((_, subscription)) => {
-            follow_daemon_download(subscription).await?;
+            follow_daemon_download(subscription, serde_json::json!({}), "banshee setup").await?;
         }
         Err(error) if daemon_is_down(&error) => {
             // No daemon answers, and the daemon never downloads unasked, so this process is the only writer.
@@ -702,7 +842,7 @@ pub async fn download_missing(config: Option<&Config>) -> Result<(), BansheeErro
             // Printed here: `failure_line` reads a missing file as the daemon
             // being away, and this one is the model's
             if let Err(error) =
-                models::download::download_all(&dir, &missing, &mut show_progress).await
+                models::download::download_all(&dir, &missing, accepted, &mut show_progress).await
             {
                 eprintln!("{error}");
                 std::process::exit(1);
@@ -775,7 +915,11 @@ fn missing_models_note(missing: &[String]) -> Option<String> {
     (!missing.is_empty()).then(|| {
         format!(
             "Recording waits on {}: run banshee setup",
-            missing.join(", ")
+            missing
+                .iter()
+                .map(|file| models::name_of(file))
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     })
 }
@@ -800,50 +944,55 @@ fn link_the_command() {
 }
 
 pub async fn start(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
-    let follow_the_log = service::start(service::Agent::Daemon)?;
+    start_with(config_result, || service::start(service::Agent::Daemon)).await
+}
+
+/// `register` starts the daemon and answers where its log is. The daemon reads
+/// the same file and exits on a refusal, so a refusal starts nothing.
+async fn start_with(
+    config_result: Result<Config, BansheeError>,
+    register: impl FnOnce() -> Result<String, BansheeError>,
+) -> Result<(), BansheeError> {
+    let config = config_result.map_err(|error| {
+        BansheeError::Rejected(format!(
+            "Banshee did not start: {}. Fix that, then run banshee start again.",
+            error.to_string().trim_end_matches('.')
+        ))
+    })?;
+    let follow_the_log = register()?;
     println!("Banshee is running, and starts again at login.");
     link_the_command();
 
     // The daemon reports these to its log, which nobody reads on a first run
     let mut blocked = false;
-    let binding = match &config_result {
-        Ok(config) => {
-            if let Some(note) = missing_models_note(&models::missing(&models::required(config))) {
-                blocked = true;
-                println!();
-                println!("{note}");
-            }
-            // A remote listener downloads nothing, so the models say nothing
-            // about whether it can hear.
-            let listener = crate::credentials::RemoteKey::Stt;
-            if config.stt.provider.is_remote()
-                && !crate::credentials::Credentials::present(listener)
-            {
-                blocked = true;
-                println!();
-                println!(
-                    "No key for the remote {}: banshee config set {}",
-                    listener.side(),
-                    listener.setting()
-                );
-            }
-            Some((config.audio.hotkey, config.audio.hotkey_mode))
-        }
-        Err(error) => {
-            eprintln!("Failed to load config: {error}");
-            blocked = true;
-            None
-        }
-    };
+    if let Some(note) = missing_models_note(&models::missing(&models::required(&config))) {
+        blocked = true;
+        println!();
+        println!("{note}");
+    }
+    // A remote listener downloads nothing, so the models say nothing about
+    // whether it can hear.
+    let listener = crate::credentials::RemoteKey::Stt;
+    if config.stt.provider.is_remote() && !crate::credentials::Credentials::present(listener) {
+        blocked = true;
+        println!();
+        println!(
+            "No key for the remote {}: banshee config set {}",
+            listener.side(),
+            listener.setting()
+        );
+    }
 
     permissions::grant_note();
 
-    match binding {
-        Some((hotkey, mode)) if !blocked => {
-            println!();
-            println!("{}", hotkey::usage_hint(hotkey, mode));
-        }
-        _ => println!("Follow the log: {follow_the_log}"),
+    if blocked {
+        println!("Follow the log: {follow_the_log}");
+    } else {
+        println!();
+        println!(
+            "{}",
+            hotkey::usage_hint(config.audio.hotkey, config.audio.hotkey_mode)
+        );
     }
     Ok(())
 }

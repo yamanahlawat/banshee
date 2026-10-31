@@ -2,13 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use banshee_common::error::BansheeError;
+use banshee_common::listening::ListeningModel;
 use banshee_common::{
     BANSHEE_AGENTS, BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE,
     BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY,
-    BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_LANGUAGES, BANSHEE_LIST_VOICES,
-    BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_RECORD_TOGGLE,
-    BANSHEE_RESTART, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
-    BANSHEE_SUBSCRIBE, BANSHEE_TURN_ENDED,
+    BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START,
+    BANSHEE_RECORD_STOP, BANSHEE_RECORD_TOGGLE, BANSHEE_RESTART, BANSHEE_SPEAK, BANSHEE_STATUS,
+    BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE, BANSHEE_TURN_ENDED,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
@@ -190,7 +190,7 @@ fn count_speech(
 fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpcResponse {
     let code = match error {
         RecordingError::Microphone(_) => rpc_code::MICROPHONE,
-        RecordingError::Model(_) => rpc_code::MODEL,
+        RecordingError::Model(_) | RecordingError::NoListeningModel(_) => rpc_code::MODEL,
         RecordingError::Provider(_) => rpc_code::PROVIDER,
         RecordingError::KeyFile(_) => rpc_code::KEY_FILE,
     };
@@ -247,10 +247,11 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     // The same call the `banshee.state_changed` push answers with, so a reply
     // and a push cannot spell one fact two ways.
     let mut payload = live_state_at(daemon_state, &pipeline);
+    let facts = crate::speech_to_text::ModelFacts::of(daemon_state.stt_model());
     let rest = serde_json::json!({
         "running": true,
         "version": daemon_state.version(),
-        "stt_model": daemon_state.stt_model(),
+        "stt_model": daemon_state.stt_model().map(|model| model.id),
         "vad_model": daemon_state.vad_model(),
         "uptime_seconds": daemon_state.uptime().as_secs(),
         "vad_threshold": daemon_state.vad_threshold(),
@@ -261,8 +262,8 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             &daemon_state.wanted_downloads(),
             daemon_state.models_dir(),
         ),
-        // What is absent, which is not what stops Banshee working: a heavier
-        // preset chosen while dictation runs on the loaded one is a file to
+        // What is absent, which is not what stops Banshee working: another
+        // model chosen while dictation runs on the loaded one is a file to
         // fetch and no blocker at all. A client pricing one of these must not
         // reach for the sum above, which covers the detector and the voice too.
         "missing_downloads": crate::models::download::still_missing(
@@ -278,12 +279,14 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             })
         })
         .collect::<Vec<_>>(),
-        // The English-only build reads English whatever `stt.language` says.
-        // Read off the model the listener loaded, not the configured preset:
-        // a preset applied without persist moves one and not the other.
-        "english_only": daemon_state
-            .stt_model()
-            .is_some_and(crate::speech_to_text::english_only),
+        // The model the listener runs or waits for, not the configured one: a
+        // model applied without persist moves one and not the other.
+        "stt_translates": facts.translates,
+        "stt_models": listening_models(
+            &daemon_state.config().stt.model,
+            daemon_state.models_dir(),
+            &crate::models::licences::Accepted::in_banshee_dir(),
+        ),
         // False where the compositor holds the binding, so the window does not
         // name a key the daemon never listens for.
         "hotkey_listens": crate::hotkey::listens(),
@@ -311,6 +314,58 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         .expect("live_state answers an object")
         .extend(rest);
     with_key_press_access(payload)
+}
+
+/// The listening models the window offers: the suggestions, then each one
+/// already downloaded, then the configured one when it is neither.
+fn listening_models(
+    configured: &str,
+    dir: &std::path::Path,
+    accepted: &crate::models::licences::Accepted,
+) -> Vec<serde_json::Value> {
+    use crate::models::{download, licences};
+    use banshee_common::listening::{CATALOGUE, SUGGESTED, find};
+    let on_disk: std::collections::HashSet<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let offered: Vec<(&ListeningModel, bool, bool)> = CATALOGUE
+        .iter()
+        .map(|model| {
+            let suggested = SUGGESTED.iter().any(|one| one.id == model.id);
+            (model, suggested, on_disk.contains(model.file))
+        })
+        .filter(|&(_, suggested, here)| suggested || here)
+        .collect();
+    // Neither suggested nor here, or it would be offered already
+    let configured = find(configured)
+        .filter(|model| !offered.iter().any(|(one, ..)| one == model))
+        .map(|model| (model, false, false));
+    offered
+        .into_iter()
+        .chain(configured)
+        .map(|(model, suggested, here)| {
+            serde_json::json!({
+                "id": model.id,
+                "label": model.label(),
+                "megabytes": download::listening_file(model).megabytes,
+                "downloaded": here,
+                "suggested": suggested,
+                "languages": model.languages,
+                "streams": model.streams,
+                "credit": model.credit(),
+                "licence": {
+                    "name": model.licence.name,
+                    "summary": model.licence.summary,
+                },
+                "accept_command": (!here && accepted.blocks(model))
+                    .then(|| licences::accept_command(model)),
+            })
+        })
+        .collect()
 }
 
 /// Where each side sends what it handles, and whether its key is set. The key
@@ -630,7 +685,7 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
         return JsonRpcResponse::error(
             params.id(),
             rpc_code::INVALID_PARAMS,
-            "'settings' is required, as in {\"stt.language\": \"de\"}.",
+            "'settings' is required, as in {\"stt.model\": \"whisper-large-v3-turbo\"}.",
         );
     };
     let assignments: settings::Assignments = match serde_json::from_value(requested.clone()) {
@@ -661,9 +716,28 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
     }
 }
 
+/// With `model`, fetches that listening model's file alone; without, every file
+/// the config needs.
 fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     let dir = daemon_state.models_dir().to_path_buf();
-    let wanted = daemon_state.wanted_downloads();
+    let model = match params.optional_str("model") {
+        Ok(None) => None,
+        Ok(Some(id)) => match banshee_common::listening::find(id) {
+            Some(model) => Some(model),
+            None => {
+                return JsonRpcResponse::error(
+                    params.id(),
+                    rpc_code::INVALID_PARAMS,
+                    crate::models::unknown_model(id),
+                );
+            }
+        },
+        Err(response) => return *response,
+    };
+    let wanted = match model {
+        Some(model) => vec![crate::models::download::listening_file(model)],
+        None => daemon_state.wanted_downloads(),
+    };
     let missing = crate::models::download::still_missing(&wanted, &dir);
     if missing.is_empty() {
         return JsonRpcResponse::success(
@@ -687,33 +761,37 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
     let state = Arc::clone(daemon_state);
     let dir = dir.clone();
     tokio::spawn(async move {
-        let first = Arc::clone(&state);
-        let fetching = missing.clone();
-        let chosen = tokio::task::spawn_blocking(move || {
-            settings::write_first_feedback(
-                first.config_path(),
-                Some(&first),
-                &wanted,
-                &fetching,
-                || first.voiceover_on(),
-            )
-        })
-        .await;
-        match chosen {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => log::error!("Failed to choose a first feedback mode: {error}"),
-            Err(error) => log::error!("The first feedback mode write stopped: {error}"),
+        // One model fetched by name is not a first install.
+        if model.is_none() {
+            let first = Arc::clone(&state);
+            let fetching = missing.clone();
+            let chosen = tokio::task::spawn_blocking(move || {
+                settings::write_first_feedback(
+                    first.config_path(),
+                    Some(&first),
+                    &wanted,
+                    &fetching,
+                    || first.voiceover_on(),
+                )
+            })
+            .await;
+            match chosen {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => log::error!("Failed to choose a first feedback mode: {error}"),
+                Err(error) => log::error!("The first feedback mode write stopped: {error}"),
+            }
         }
         {
             let mut report = |progress| state.report_download(progress);
+            let accepted = crate::models::licences::Accepted::in_banshee_dir();
             if let Err(error) =
-                crate::models::download::download_all(&dir, &missing, &mut report).await
+                crate::models::download::download_all(&dir, &missing, &accepted, &mut report).await
             {
                 log::error!("Download failed: {error}");
             }
         }
         // The files these settings were waiting for are here now, so a
-        // preset or a voice chosen before its model arrived takes
+        // listening model or a voice chosen before its file arrived takes
         // effect rather than waiting for a restart with nothing to do.
         crate::settings::reapply_pending(&state);
         drop(slot);
@@ -729,15 +807,6 @@ fn list_voices(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRe
     JsonRpcResponse::success(
         params.id(),
         serde_json::json!({ "voices": voices, "current": daemon_state.tts_voice() }),
-    )
-}
-
-// The engine's own list, so a client offering a choice cannot drift
-// from what the engine will accept.
-fn list_languages(params: Params<'_>) -> JsonRpcResponse {
-    JsonRpcResponse::success(
-        params.id(),
-        serde_json::json!({ "languages": crate::speech_to_text::local::languages::all() }),
     )
 }
 
@@ -867,7 +936,6 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_CONFIGURE => configure(params, daemon_state),
         BANSHEE_DOWNLOAD_MODELS => download_models(params, daemon_state),
         BANSHEE_LIST_VOICES => list_voices(params, daemon_state),
-        BANSHEE_LIST_LANGUAGES => list_languages(params),
         BANSHEE_LIST_INPUT_DEVICES => list_input_devices(params, daemon_state),
         // Subscribing answers with the poll, so a client needs no first poll and
         // cannot miss a change in the gap before the pushes start. `daemon.rs`

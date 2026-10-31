@@ -14,7 +14,7 @@ export function mockTauri() {
     previewVoice: vi.fn(() => Promise.resolve()),
     downloadModels: vi.fn(() => Promise.resolve()),
     openPermissionPane: vi.fn(() => Promise.resolve()),
-    listLanguages: vi.fn(),
+    openLicence: vi.fn(() => Promise.resolve()),
     listVoices: vi.fn(),
     detectAgents: vi.fn(),
     startDaemon: vi.fn(() => Promise.resolve()),

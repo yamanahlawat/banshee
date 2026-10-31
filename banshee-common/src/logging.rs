@@ -40,12 +40,23 @@ impl Sink {
     }
 }
 
+/// transcribe.cpp writes many Info lines on every model load, and
+/// the daemon logs the backend it settled on itself.
+const QUIET_BELOW_WARN: &str = "transcribe_cpp";
+
+fn wanted(metadata: &Metadata) -> bool {
+    metadata.target() != QUIET_BELOW_WARN || metadata.level() <= log::Level::Warn
+}
+
 impl Log for Sink {
-    fn enabled(&self, _metadata: &Metadata) -> bool {
-        true
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        wanted(metadata)
     }
 
     fn log(&self, record: &Record) {
+        if !wanted(record.metadata()) {
+            return;
+        }
         let clock = chrono::Local::now().format("%H:%M:%S%.3f");
         let line = format!("{}\n", line(clock, record));
         match self {
@@ -149,6 +160,16 @@ mod tests {
             written.ends_with(&format!("INFO  daemon: {unique}\n")),
             "{written:?}"
         );
+    }
+
+    #[test]
+    fn transcribe_cpp_reaches_the_log_only_from_warn_up() {
+        let at =
+            |target, level| wanted(&log::Metadata::builder().target(target).level(level).build());
+        assert!(!at("transcribe_cpp", log::Level::Info));
+        assert!(at("transcribe_cpp", log::Level::Warn));
+        assert!(at("transcribe_cpp", log::Level::Error));
+        assert!(at("banshee::daemon", log::Level::Info));
     }
 
     #[test]

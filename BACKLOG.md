@@ -22,10 +22,22 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 
 - Any process running as the user can start a recording through the daemon's socket, and can
   read every transcript in `banshee.db`. Nothing shows which client opened the microphone.
-- Transcription runs on whisper.cpp only, after the speaker stops. No streaming model is wired
-  in, so text arrives only after the silence and a full pass.
+- The corrector for words to know has its threshold (0.10, Soundex weight 0.5) measured on
+  synthetic speech and plain-English references only. Real accents and jargon are not measured.
+- Live words on Linux wait for the capsule. The macOS chip shows them today.
+- An idea for answers: use the unusual words in an agent's question as vocabulary for that
+  answer.
+- A listening model download that fails for a reason other than a licence reaches the window
+  with no reason.
+- A second download that finishes while a model loads queues a duplicate Reload. It costs a
+  redundant load.
+- Choosing a remote listener while the local model file is missing leaves listening broken.
+- The answer path builds its resampler when listening starts.
+- The aarch64 Linux release targets plain armv8-a. Whether a dotprod floor is faster is not
+  measured.
 - Banshee downloads the Silero VAD model from the `master` branch with no pinned commit and no
-  hash check (`banshee-common/src/lib.rs:437`), while the Kokoro files are pinned. The file
+  hash check (`banshee-common/src/lib.rs:437`), while the Kokoro files are pinned. A download
+  also follows a redirect to any scheme. The file
   matched the pinned hash on 2026-10-30, but it can change under every install.
 - Dictation types the words exactly as heard. Nothing drops fillers such as "um" or applies a
   spoken edit such as "make that a list". An idea to test: a small local model as a cleanup

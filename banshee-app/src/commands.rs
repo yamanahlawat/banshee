@@ -252,19 +252,6 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn starting_the_daemon_leaves_a_running_unit_alone() {
-        assert_eq!(
-            super::systemctl_args(banshee_common::utils::DAEMON_AGENT, false),
-            Some(vec![
-                "--user".to_string(),
-                "start".to_string(),
-                "banshee.service".to_string(),
-            ])
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
     fn restarting_the_daemon_tears_the_unit_down_first() {
         assert_eq!(
             super::systemctl_args(banshee_common::utils::DAEMON_AGENT, true),
@@ -273,6 +260,36 @@ mod tests {
                 "restart".to_string(),
                 "banshee.service".to_string(),
             ])
+        );
+    }
+
+    #[test]
+    fn a_licence_opens_only_from_the_catalogue() {
+        assert_eq!(
+            super::licence_url("whisper-large-v3-turbo"),
+            Some("https://spdx.org/licenses/MIT.html")
+        );
+        assert_eq!(super::licence_url("https://example.com"), None);
+    }
+
+    #[test]
+    fn a_licence_that_did_not_open_names_its_url() {
+        assert_eq!(
+            super::not_opened("https://spdx.org/licenses/MIT.html"),
+            "The licence did not open. Read it at https://spdx.org/licenses/MIT.html."
+        );
+    }
+
+    #[test]
+    fn a_failed_command_answers_with_the_line_it_said_last() {
+        let said = b"Failed to choose a first feedback mode\nBanshee did not start: Delete `preset` under [stt].\n\n";
+        assert_eq!(
+            super::refusal_of("start", said),
+            "Banshee did not start: Delete `preset` under [stt]."
+        );
+        assert_eq!(
+            super::refusal_of("start", b""),
+            "banshee start did not finish"
         );
     }
 
@@ -321,13 +338,6 @@ pub async fn list_devices(daemon: State<'_, Daemon>) -> Result<Devices, CommandE
 pub async fn list_voices(daemon: State<'_, Daemon>) -> Result<Voices, CommandError> {
     daemon
         .call(|client| Box::pin(calls::list_voices(client)))
-        .await
-}
-
-#[tauri::command]
-pub async fn list_languages(daemon: State<'_, Daemon>) -> Result<calls::Languages, CommandError> {
-    daemon
-        .call(|client| Box::pin(calls::list_languages(client)))
         .await
 }
 
@@ -426,6 +436,36 @@ pub async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), Comman
         })
 }
 
+/// The window names a model, never a URL, so it can open only what the
+/// catalogue links to.
+fn licence_url(model: &str) -> Option<&'static str> {
+    banshee_common::listening::find(model).map(|model| model.licence.url)
+}
+
+#[tauri::command]
+pub async fn open_licence(model: String) -> Result<(), CommandError> {
+    let url =
+        licence_url(&model).ok_or_else(|| failed(format!("'{model}' is not a listening model")))?;
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let opened = tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new(opener).arg(url).status()
+    })
+    .await;
+    match opened {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        _ => Err(failed(not_opened(url))),
+    }
+}
+
+/// The reader can still go to the licence by hand.
+fn not_opened(url: &str) -> String {
+    format!("The licence did not open. Read it at {url}.")
+}
+
 fn failed(message: String) -> CommandError {
     CommandError {
         code: rpc_code::INTERNAL,
@@ -436,16 +476,28 @@ fn failed(message: String) -> CommandError {
 }
 
 /// The socket exists only while the daemon runs, so starting one cannot go over it.
+/// A failure answers with the command's own last line, which says why.
 pub fn run_cli(subcommand: &str) -> Result<(), CommandError> {
-    let status = utils::sibling_command("banshee")
+    let output = utils::sibling_command("banshee")
         .map_err(|error| failed(error.to_string()))?
         .arg(subcommand)
-        .status()
+        .output()
         .map_err(|error| failed(error.to_string()))?;
-    if status.success() {
+    if output.status.success() {
         return Ok(());
     }
-    Err(failed(format!("banshee {subcommand} did not finish")))
+    Err(failed(refusal_of(subcommand, &output.stderr)))
+}
+
+fn refusal_of(subcommand: &str, stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .map_or_else(
+            || format!("banshee {subcommand} did not finish"),
+            str::to_string,
+        )
 }
 
 /// Starts one systemd unit. Without `replace`, `start` leaves a running unit
@@ -487,14 +539,9 @@ pub fn open_the_tray() -> Result<(), CommandError> {
     kickstart(utils::TRAY_AGENT, "tray", false)
 }
 
-#[cfg(target_os = "macos")]
+/// `banshee start` on every platform, so a refusal comes back on its stderr.
 fn start_the_daemon() -> Result<(), CommandError> {
     run_cli("start")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn start_the_daemon() -> Result<(), CommandError> {
-    kickstart(utils::DAEMON_AGENT, "start", false)
 }
 
 // `banshee start` waits on the service manager, so running it on a worker

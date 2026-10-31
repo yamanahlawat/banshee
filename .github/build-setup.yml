@@ -1,0 +1,6 @@
+# ggml tunes itself to the build machine unless GGML_NATIVE is off, and
+# transcribe.cpp links any system BLAS it finds. Off, an x86_64 release still
+# needs AVX2, and an aarch64 one builds for plain armv8-a, without dotprod.
+- name: Build transcribe.cpp for any CPU of the target, with no system BLAS
+  if: runner.os == 'Linux'
+  run: echo "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF" >> "$GITHUB_ENV"

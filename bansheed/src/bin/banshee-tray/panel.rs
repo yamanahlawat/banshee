@@ -34,7 +34,7 @@ use objc2_quartz_core::{
     kCALineJoinRound,
 };
 
-use super::chip::{Scene, Show};
+use super::chip::{Cut, Scene, Show, words_of};
 use super::figure::{self, Pose, Segment, Voice};
 
 mod motion;
@@ -235,14 +235,6 @@ fn placement(mtm: MainThreadMarker) -> Option<Place> {
         right: frame.origin.x + frame.size.width - SCREEN_MARGIN,
         scale: screen.backingScaleFactor(),
     })
-}
-
-fn words_of(show: &Show) -> Option<&str> {
-    match show {
-        Show::YourTurn | Show::Answering => Some("Your turn"),
-        Show::NothingHeard(text) | Show::Broken(text) => Some(text),
-        Show::Recording | Show::Working | Show::Done(_) => None,
-    }
 }
 
 /// In the stacking order, inside the capsule. Each figure layer nests in the
@@ -565,7 +557,7 @@ fn moves(show: &Show, entrance: Entrance, calm: bool) -> Vec<Move> {
     let mut moves = Vec::new();
     if entrance == Entrance::Fresh {
         moves.push(if calm { Move::FadeIn } else { Move::Rise });
-        if !calm && matches!(show, Show::Recording) {
+        if !calm && matches!(show, Show::Recording(_)) {
             moves.push(Move::Emerge);
         }
     }
@@ -574,15 +566,15 @@ fn moves(show: &Show, entrance: Entrance, calm: bool) -> Vec<Move> {
         return moves;
     }
     moves.extend_from_slice(match (show, calm) {
-        (Show::Recording, false) => &[Move::Kindle][..],
-        (Show::Recording, true) => &[Move::KindleFade],
+        (Show::Recording(_), false) => &[Move::Kindle][..],
+        (Show::Recording(_), true) => &[Move::KindleFade],
         (Show::Working, false) => &[Move::Hover, Move::Orbit],
         (Show::YourTurn, false) => &[Move::Cups],
         (Show::NothingHeard(_), false) => &[Move::Shake, Move::Breaks],
         (Show::Broken(_), false) => &[Move::Strain, Move::Breaks],
         (Show::Done(_), false) => &[Move::Float, Move::FrameSink],
         (Show::Done(_), true) => &[Move::FadeOut],
-        (Show::Answering, calm) => opening(calm),
+        (Show::Answering(_), calm) => opening(calm),
         (Show::Working | Show::YourTurn | Show::NothingHeard(_) | Show::Broken(_), true) => &[],
     });
     if words_of(show).is_some() {
@@ -603,12 +595,12 @@ fn opening(calm: bool) -> &'static [Move] {
 
 /// Your turn becomes the answer in place: the capsule and the words stay.
 fn answer_opens(before: Option<&Show>, after: &Show) -> bool {
-    matches!((before, after), (Some(Show::YourTurn), Show::Answering))
+    matches!((before, after), (Some(Show::YourTurn), Show::Answering(_)))
 }
 
 /// The states whose figure fills and moves with the microphone level.
 fn holds_the_voice(show: &Show) -> bool {
-    matches!(show, Show::Recording | Show::Answering)
+    matches!(show, Show::Recording(_) | Show::Answering(_))
 }
 
 fn centred(midline: CGFloat, width: CGFloat) -> CGFloat {
@@ -717,6 +709,12 @@ impl Panel {
         if self.on_screen.as_ref() == scene {
             return;
         }
+        if let (Some(shown), Some(scene)) = (&self.on_screen, scene)
+            && shown.serial == scene.serial
+        {
+            self.reword(scene);
+            return;
+        }
         self.ticket.set(self.ticket.get() + 1);
         let Some(scene) = scene else {
             self.leave();
@@ -757,6 +755,19 @@ impl Panel {
         self.window
             .setIgnoresMouseEvents(!matches!(scene.show, Show::Broken(_)));
         self.window.orderFrontRegardless();
+        self.on_screen = Some(scene.clone());
+    }
+
+    /// The same state with new words: only the words and the capsule's width
+    /// change, so the figure keeps moving with the voice.
+    fn reword(&mut self, scene: &Scene) {
+        let Some(place) = self.place else {
+            return;
+        };
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.lay_words(&scene.show, place, false);
+        CATransaction::commit();
         self.on_screen = Some(scene.clone());
     }
 
@@ -918,26 +929,7 @@ impl Panel {
         let layers = &self.layers;
         let working = matches!(show, Show::Working);
         let failed = matches!(show, Show::NothingHeard(_) | Show::Broken(_));
-
-        let room = 2.0 * (place.right - place.anchor.x) - (INSET + FIGURE + WORDS_GAP + WORDS_TAIL);
-        let words = words_of(show).and_then(|words| self.words(words, room));
-        let width = words.as_ref().map_or(CAPSULE, |words| {
-            INSET + FIGURE + WORDS_GAP + words.width + WORDS_TAIL
-        });
-        let from = if entering || self.calm {
-            width
-        } else {
-            self.shown_width()
-        };
-        let reach = width.max(from);
-        let (window, root, capsule) = (&self.window, &self.root, &layers.capsule);
-        fit(window, root, capsule, place, reach);
-        capsule.setBounds(rect(0.0, 0.0, width, CAPSULE));
-        if from != width {
-            layers
-                .capsule
-                .addAnimation_forKey(&motion::chip_width(from, width), Some(ns_string!("width")));
-        }
+        self.lay_words(show, place, entering);
 
         let rest = figure::pose(0.0, 0.0, self.calm);
         let depth = if working && !self.calm {
@@ -966,7 +958,31 @@ impl Panel {
         layers.fill.setHidden(!holds_the_voice(show));
         layers
             .headphones
-            .setHidden(!matches!(show, Show::YourTurn | Show::Answering));
+            .setHidden(!matches!(show, Show::YourTurn | Show::Answering(_)));
+    }
+
+    /// Sizes the capsule to the scene's words and sets them in it.
+    fn lay_words(&self, show: &Show, place: Place, entering: bool) {
+        let layers = &self.layers;
+        let room = 2.0 * (place.right - place.anchor.x) - (INSET + FIGURE + WORDS_GAP + WORDS_TAIL);
+        let words = words_of(show).and_then(|(words, cut)| self.words(words, cut, room));
+        let width = words.as_ref().map_or(CAPSULE, |words| {
+            INSET + FIGURE + WORDS_GAP + words.width + WORDS_TAIL
+        });
+        let from = if entering || self.calm {
+            width
+        } else {
+            self.shown_width()
+        };
+        let reach = width.max(from);
+        let (window, root, capsule) = (&self.window, &self.root, &layers.capsule);
+        fit(window, root, capsule, place, reach);
+        capsule.setBounds(rect(0.0, 0.0, width, CAPSULE));
+        if from != width {
+            layers
+                .capsule
+                .addAnimation_forKey(&motion::chip_width(from, width), Some(ns_string!("width")));
+        }
 
         if let Some(words) = &words {
             let line = words.ascent + words.descent;
@@ -991,18 +1007,20 @@ impl Panel {
         layers.words.setHidden(words.is_none());
     }
 
-    /// Lays the words out in one Core Text line, cut with a trailing ellipsis
+    /// Lays the words out in one Core Text line, cut at `cut` with an ellipsis
     /// past `room` points, and takes each glyph's outline. A glyph Archivo
     /// lacks comes from the font Core Text falls back to.
-    fn words(&self, words: &str, room: CGFloat) -> Option<Words> {
+    fn words(&self, words: &str, cut: Cut, room: CGFloat) -> Option<Words> {
         let font = self.font.as_deref()?;
         let attributes = self.text_attributes.as_deref()?;
         let whole = line_of(words, attributes)?;
+        let cut = match cut {
+            Cut::Start => CTLineTruncationType::Start,
+            Cut::End => CTLineTruncationType::End,
+        };
         // SAFETY: `whole` is live, and the ellipsis line, when present, is live too.
-        let line = unsafe {
-            whole.truncated_line(room, CTLineTruncationType::End, self.ellipsis.as_deref())
-        }
-        .unwrap_or(whole);
+        let line =
+            unsafe { whole.truncated_line(room, cut, self.ellipsis.as_deref()) }.unwrap_or(whole);
         let (mut ascent, mut descent) = (0.0, 0.0);
         // SAFETY: both pointers are to live locals, and a null leading is allowed.
         let width = unsafe { line.typographic_bounds(&mut ascent, &mut descent, ptr::null_mut()) };
@@ -1144,10 +1162,10 @@ mod tests {
     fn every_show() -> Vec<Show> {
         let [nothing_heard, broken] = failed();
         vec![
-            Show::Recording,
+            Show::Recording(String::new()),
             Show::Working,
             Show::YourTurn,
-            Show::Answering,
+            Show::Answering(String::new()),
             nothing_heard,
             broken,
             Show::Done(Done::Typed),
@@ -1163,7 +1181,7 @@ mod tests {
             assert!(!staying.contains(&Move::Rise), "{show:?}");
             assert_eq!(
                 entering.contains(&Move::Emerge),
-                show == Show::Recording,
+                matches!(show, Show::Recording(_)),
                 "{show:?}"
             );
             assert!(!staying.contains(&Move::Emerge), "{show:?}");
@@ -1178,7 +1196,7 @@ mod tests {
             [Cups, Words]
         );
         assert_eq!(
-            moves(&Show::Answering, Entrance::NewWords, false),
+            moves(&Show::Answering(String::new()), Entrance::NewWords, false),
             [Open, Tilt, Words]
         );
         let [nothing_heard, broken] = failed();
@@ -1205,25 +1223,34 @@ mod tests {
     fn answering_in_place_only_opens_and_drops_the_words_reveal() {
         use Move::*;
         assert_eq!(
-            moves(&Show::Answering, Entrance::SameWords, false),
+            moves(&Show::Answering(String::new()), Entrance::SameWords, false),
             [Open, Tilt]
         );
         assert_eq!(
-            moves(&Show::Answering, Entrance::SameWords, true),
+            moves(&Show::Answering(String::new()), Entrance::SameWords, true),
             [OpenFade]
         );
     }
 
     #[test]
     fn only_your_turn_opens_into_the_answer() {
-        assert!(answer_opens(Some(&Show::YourTurn), &Show::Answering));
+        assert!(answer_opens(
+            Some(&Show::YourTurn),
+            &Show::Answering(String::new())
+        ));
         for (before, after) in [
-            (None, Show::Answering),
-            (Some(Show::Working), Show::Answering),
-            (Some(Show::Recording), Show::Answering),
-            (Some(Show::Answering), Show::Answering),
+            (None, Show::Answering(String::new())),
+            (Some(Show::Working), Show::Answering(String::new())),
+            (
+                Some(Show::Recording(String::new())),
+                Show::Answering(String::new()),
+            ),
+            (
+                Some(Show::Answering(String::new())),
+                Show::Answering(String::new()),
+            ),
             (Some(Show::YourTurn), Show::YourTurn),
-            (Some(Show::YourTurn), Show::Recording),
+            (Some(Show::YourTurn), Show::Recording(String::new())),
         ] {
             assert!(
                 !answer_opens(before.as_ref(), &after),
@@ -1237,7 +1264,7 @@ mod tests {
         for show in every_show() {
             assert_eq!(
                 holds_the_voice(&show),
-                matches!(show, Show::Recording | Show::Answering),
+                matches!(show, Show::Recording(_) | Show::Answering(_)),
                 "{show:?}"
             );
         }
@@ -1253,7 +1280,7 @@ mod tests {
     fn reduce_motion_keeps_only_the_fades() {
         use Move::*;
         assert_eq!(
-            moves(&Show::Recording, Entrance::Fresh, true),
+            moves(&Show::Recording(String::new()), Entrance::Fresh, true),
             [FadeIn, KindleFade]
         );
         assert_eq!(moves(&Show::Working, Entrance::NewWords, true), []);
@@ -1262,7 +1289,7 @@ mod tests {
             [FadeIn, WordsFade]
         );
         assert_eq!(
-            moves(&Show::Answering, Entrance::NewWords, true),
+            moves(&Show::Answering(String::new()), Entrance::NewWords, true),
             [OpenFade, WordsFade]
         );
         for fault in failed() {
@@ -1278,10 +1305,10 @@ mod tests {
     fn done_leaves_by_its_float_and_everything_else_sinks() {
         assert_eq!(leaving(&Show::Done(Done::Typed), false), None);
         for show in [
-            Show::Recording,
+            Show::Recording(String::new()),
             Show::Working,
             Show::YourTurn,
-            Show::Answering,
+            Show::Answering(String::new()),
         ]
         .into_iter()
         .chain(failed())
