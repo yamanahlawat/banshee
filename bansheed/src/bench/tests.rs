@@ -38,7 +38,7 @@ fn the_short_text_is_one_sentence_and_the_medium_text_is_several() {
 
 #[test]
 fn a_models_folder_without_the_voice_names_the_voice() {
-    let (_, config) = defaults();
+    let config = KokoroTTSConfig::new(VOICE);
     let dir = crate::test_support::unique_scratch("bench-models");
     std::fs::write(dir.join(&config.model_name), b"").unwrap();
     assert_eq!(
@@ -49,7 +49,7 @@ fn a_models_folder_without_the_voice_names_the_voice() {
 
 #[test]
 fn a_models_folder_with_the_model_and_voice_misses_nothing() {
-    let (_, config) = defaults();
+    let config = KokoroTTSConfig::new(VOICE);
     let dir = crate::test_support::unique_scratch("bench-models");
     std::fs::write(dir.join(&config.model_name), b"").unwrap();
     std::fs::write(dir.join(&config.voice_name), b"").unwrap();
@@ -57,13 +57,11 @@ fn a_models_folder_with_the_model_and_voice_misses_nothing() {
 }
 
 #[test]
-fn the_run_facts_name_the_voice_speed_threads_and_espeak() {
+fn the_run_facts_name_the_voice_threads_and_espeak() {
     let facts = run_facts();
-    let (tts, _) = defaults();
     let expected = [
-        format!("voice {}", tts.voice),
-        format!("speed {}", tts.speed),
-        format!("threads {}", crate::models::kokoro_threads()),
+        format!("voice {VOICE}"),
+        format!("threads {}", crate::models::onnx_threads()),
     ];
     for part in &expected {
         assert!(facts.contains(part), "{facts:?} lacks {part:?}");

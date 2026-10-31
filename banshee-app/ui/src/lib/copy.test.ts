@@ -62,6 +62,7 @@ const SPOKEN: Speech = {
   host: 'api.openai.com',
   willUse: 'api.groq.com',
   voiceName: 'marin',
+  voiceDownloaded: true,
 };
 
 const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
@@ -233,9 +234,14 @@ const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
   ['a local speaker names its voice', { remote: false }, 'Banshee speaks as marin.'],
   ['a local speaker has no voice', { remote: false, voiceName: '' }, 'Banshee has no voice yet.'],
   [
-    'the local voice failed to load',
+    'the local voice is not on this machine',
+    { remote: false, started: false, voiceName: 'Bella', voiceDownloaded: false },
+    'Bella did not load, so Banshee is silent. Get its files below, or pick another voice.',
+  ],
+  [
+    'the local voice is on this machine and did not load',
     { remote: false, started: false, voiceName: 'Bella' },
-    'Banshee speaks with the system voice. Bella did not load.',
+    'Bella did not load, so Banshee is silent. Pick another voice.',
   ],
   [
     'a flip to a remote speaker names the server the config asks for',

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { daemon, shownFloat, speechFacts, waitsOnARestart } from '../lib/daemon';
+  import { daemon, speechFacts, waitsOnARestart } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { previewVoice, type Voice, type Voices } from '../lib/tauri';
   import { claimTheRun, fetching, forgetTheAsk, runTheDownload } from '../lib/downloads';
@@ -11,7 +11,6 @@
     SPEECH_FAILED,
     SPEECH_FAILURE,
   } from '../lib/copy';
-  import Row from '../controls/Row.svelte';
   import Field from '../controls/Field.svelte';
   import KeyRow from '../controls/KeyRow.svelte';
   import ProviderGroup from '../controls/ProviderGroup.svelte';
@@ -34,12 +33,6 @@
   ];
 
   $: tts = ($daemon.status?.config?.tts ?? {}) as Record<string, unknown>;
-  // The rate the daemon assumes when the config names none. It is what the
-  // word beside the readout is measured against.
-  const ASSUMED_SPEED = 1.0;
-  $: speed = shownFloat(Number(tts.speed ?? ASSUMED_SPEED));
-  $: speedWord =
-    Number(speed) === ASSUMED_SPEED ? 'usual' : Number(speed) < ASSUMED_SPEED ? 'slower' : 'faster';
   // The config leads, so the mark moves to the voice a write just chose.
   $: current = String(tts.voice ?? voices.current ?? '');
   $: provider = String(tts.provider ?? 'local');
@@ -214,21 +207,6 @@
   {/if}
 </ProviderGroup>
 
-<!-- Outside the group: the rate applies to whichever speaker is in force. -->
-<Row name="Speaking rate" centred pending={$waitsOnARestart.has('tts.speed')}>
-  <input
-    class="range"
-    type="range"
-    aria-label="Speaking rate"
-    min="0.5"
-    max="2"
-    step="0.1"
-    value={speed}
-    on:change={(e) => write('tts.speed', Number(e.currentTarget.value))}
-  />
-  <span class="readout">{speed}&times; {speedWord}</span>
-</Row>
-
 <!-- `tts.fallback` is deliberately absent: it serves no job this audience has.
      It stays in config.toml and the CLI. -->
 
@@ -275,7 +253,7 @@
       'wght' 600,
       'wdth' 100;
     font-size: 15px;
-    width: 72px;
+    width: 88px;
     flex: none;
   }
 

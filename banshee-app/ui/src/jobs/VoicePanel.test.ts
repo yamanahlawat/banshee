@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 
@@ -19,6 +19,12 @@ import VoicePanel from './VoicePanel.svelte';
 
 const VOICES: Voices = {
   voices: [
+    {
+      id: 'companion',
+      name: 'Companion',
+      description: 'Pocket TTS by Kyutai, CC-BY-4.0',
+      downloaded: false,
+    },
     { id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true },
     { id: 'am_adam', name: 'Adam', description: 'American, low', downloaded: false },
   ],
@@ -27,7 +33,7 @@ const VOICES: Voices = {
 
 const LOCAL: Status = {
   running: true,
-  config: { tts: { provider: 'local', voice: 'af_sky', speed: 1.2, remote: {} } },
+  config: { tts: { provider: 'local', voice: 'af_sky', remote: {} } },
   remote: {
     stt: { remote: false, host: null, key_present: false },
     tts: { remote: false, host: null, speaker_started: true, key_present: false },
@@ -174,16 +180,6 @@ it('says nothing is spoken while the daemon is down', () => {
   expect(screen.getByText('Nothing is spoken until Banshee starts.')).toBeTruthy();
 });
 
-// `Row` draws the one line that says a value waits on a restart. This is the
-// suite's only caller that proves it renders, rather than that it does not.
-it('says the speaking rate waits on a restart', () => {
-  daemon.set(reduceStatus(empty(), { ...LOCAL, pending: ['tts.speed'] }));
-  const { container } = render(VoicePanel, { voices: VOICES });
-  const pending = container.querySelectorAll('.note.pending');
-  expect(pending).toHaveLength(1);
-  expect(pending[0].textContent).toBe(PENDING_SAYS);
-});
-
 // The daemon refuses a voice whose file has not landed, and a refusal is
 // exactly when the reader is left with a mark they did not move and no
 // sentence. The line belongs at the voices, not at the group above them.
@@ -301,14 +297,6 @@ it('fetches nothing for a voice already on the machine', async () => {
 
   await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalled());
   expect(vi.mocked(downloadModels)).not.toHaveBeenCalled();
-});
-
-// The Speaking rate applies to both speakers, so it stays outside the group.
-it('keeps the speaking rate outside the group', () => {
-  daemon.set(reduceStatus(empty(), remoteStatus));
-  render(VoicePanel, { voices: VOICES });
-  const rate = screen.getByRole('slider', { name: 'Speaking rate' });
-  expect(speakingGroup().contains(rate)).toBe(false);
 });
 
 function remoteAsking(format?: string, rate?: number | null): Status {
@@ -456,8 +444,21 @@ it('sends one fetch however fast Get is pressed', async () => {
   expect((get as HTMLButtonElement).disabled).toBe(true);
 });
 
-it('calls a rate of one the usual speed', () => {
-  daemon.set(reduceStatus(empty(), speaking({ speed: 1.0 })));
+it("lists the companion first, with Kyutai's credit", () => {
   render(VoicePanel, { voices: VOICES });
-  expect(screen.getByText(/×\s*usual/)).toBeTruthy();
+  const first = within(screen.getByRole('radiogroup', { name: 'Voice' })).getAllByRole('radio')[0];
+  expect(first.id).toBe('voice-companion');
+  expect(screen.getByText('Pocket TTS by Kyutai, CC-BY-4.0')).toBeTruthy();
+});
+
+it('has no speaking rate', () => {
+  render(VoicePanel, { voices: VOICES });
+  expect(screen.queryByText('Speaking rate')).toBeNull();
+  expect(screen.queryByRole('slider')).toBeNull();
+});
+
+it('offers Get Companion when its files have not arrived', () => {
+  render(VoicePanel, { voices: VOICES });
+  expect(screen.getByRole('button', { name: /Get Companion/ })).toBeTruthy();
+  expect(screen.getByRole('radio', { name: /Companion.*not on this machine/ })).toBeTruthy();
 });

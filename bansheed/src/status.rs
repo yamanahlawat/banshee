@@ -2,11 +2,12 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use banshee_common::{Blocker, BlockerKind, KokoroTTSConfig, error::BansheeError, utils};
+use banshee_common::{Blocker, BlockerKind, error::BansheeError, utils};
 
-use crate::config::{BargeInMode, Config, HotkeyMode, STTPreset, TTSFallback};
+use crate::config::{BargeInMode, Config, HotkeyMode, STTPreset};
 #[cfg(target_os = "macos")]
 use crate::permissions::Access;
+use crate::text_to_speech::local::Engine;
 
 // Reports and names the fix, never mutates; true when every required check passed
 pub async fn run(config: Result<Config, BansheeError>) -> bool {
@@ -58,8 +59,8 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             stt_answer,
         );
     }
-    // A remote speaker loads no Kokoro model and no espeak-ng table, so each
-    // local check would name a fix that changes nothing.
+    // A remote speaker loads no local voice until it fails, so each local
+    // check would name a fix for a speaker that is not running.
     if config.tts.provider.is_remote() {
         healthy &= check_remote_side(
             crate::credentials::RemoteKey::Tts,
@@ -69,28 +70,14 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         );
         healthy &= check_remote_voice(&config.tts.remote.voice);
     } else {
-        let kokoro = KokoroTTSConfig::new(&config.tts.voice);
-        let kokoro_present = models_dir.join(&kokoro.model_name).exists()
-            && models_dir.join(&kokoro.voice_name).exists();
-        match (kokoro_present, &config.tts.fallback) {
-            (true, _) => {
-                pass(&format!(
-                    "kokoro tts model present (voice {})",
-                    config.tts.voice
-                ));
-            }
-            (false, TTSFallback::System) => note(
-                "kokoro tts model missing, will fall back to system voice (run: banshee setup)",
-            ),
-            (false, TTSFallback::None) => {
-                healthy &= fail(
-                    "kokoro tts model missing and [tts] fallback = \"none\"",
-                    "run: banshee setup",
-                );
-            }
+        healthy &= match local_voice_check(&config.tts.voice, &models_dir) {
+            (line, None) => pass(&line),
+            (line, Some(fix)) => fail(&line, fix),
+        };
+        // Only Kokoro asks espeak-ng about a word its table lacks
+        if Engine::of(&config.tts.voice) == Engine::Kokoro {
+            check_espeak();
         }
-
-        check_espeak();
     }
 
     // Before the checks that depend on it: a dead daemon causes the microphone
@@ -219,6 +206,20 @@ fn runnable(candidate: &Path) -> bool {
     }
     #[cfg(not(unix))]
     candidate.is_file()
+}
+
+/// The line for the local voice, and the fix when a file it speaks with is
+/// missing. Nothing else speaks in its place, so a missing file is a failure.
+fn local_voice_check(voice: &str, models_dir: &Path) -> (String, Option<&'static str>) {
+    let engine = Engine::of(voice).name();
+    let files = crate::models::download::voice_files(voice);
+    match crate::models::download::still_missing(&files, models_dir).first() {
+        None => (format!("local voice {voice} present ({engine})"), None),
+        Some(file) => (
+            format!("local voice {voice} ({engine}) is missing {}", file.name),
+            Some("run: banshee setup"),
+        ),
+    }
 }
 
 fn check_model(models_dir: &Path, name: &str) -> bool {
@@ -697,9 +698,8 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     let tts_remote = live(daemon, |status| status["remote"]["tts"]["remote"].as_bool())
         .unwrap_or(config.tts.provider.is_remote());
     note(&format!(
-        "tts {} at {}x, history {}",
+        "tts {}, history {}",
         settings_voice(config, tts_remote),
-        config.tts.speed,
         on_off(config.daemon.save_history)
     ));
     if !stt_remote && !tts_remote {
@@ -737,8 +737,8 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     }
 }
 
-/// The voice the settings line names. Each speaker keeps its own, and nothing
-/// reads `tts.voice` while a remote speaker is in force.
+/// The voice the settings line names. Each speaker keeps its own, and a remote
+/// speaker in force speaks in `tts.remote.voice`.
 fn settings_voice(config: &Config, tts_remote: bool) -> &str {
     if tts_remote {
         &config.tts.remote.voice

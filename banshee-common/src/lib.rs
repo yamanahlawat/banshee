@@ -196,9 +196,9 @@ pub fn remote_tts_host(status: &Value) -> Option<&str> {
 
 /// Whether the speaker the config names is the one running. The daemon holds
 /// a voice only for a backend that started, so this is false whenever the
-/// system voice took over: a key that is missing, a voice that is not named,
-/// a server the daemon cannot reach at startup, or a local Kokoro that failed
-/// to load.
+/// fallback or silence took over: a key that is missing, a voice that is not
+/// named, a server the daemon cannot reach at startup, or a local voice that
+/// failed to load.
 pub fn speaker_started(status: &Value) -> bool {
     status["remote"]["tts"]["speaker_started"].as_bool() == Some(true)
 }
@@ -461,6 +461,11 @@ impl KokoroTTSConfig {
         }
     }
 }
+
+/// The one voice Pocket speaks, built into the daemon.
+pub const COMPANION_VOICE: &str = "companion";
+
+pub const POCKET_DIR: &str = "pocket-english_2026-04";
 
 #[cfg(test)]
 mod wire_tests {

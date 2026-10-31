@@ -7,7 +7,8 @@
 - Gives your AI coding agent a voice.
 - Speaks its decisions and questions out loud.
 - You answer by talking, hands-free.
-- Whisper, Kokoro and Silero run inside Banshee. Nothing to host, no account.
+- Whisper, Silero and the voice run inside Banshee. Nothing to host, no account.
+- The default voice is Pocket TTS by Kyutai, CC-BY-4.0, speaking a synthetic voice made for Banshee. Kokoro voices stay as choices.
 - Words leave your laptop only with a remote listener or voice you set. The tray and `banshee status` say so.
 - Also a dictation tool: hold a hotkey, speak. The text lands in the app you are focused on.
 

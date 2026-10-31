@@ -28,6 +28,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   debug log, stop Banshee and run `BANSHEE_LOG=debug banshee serve` in a
   terminal. Raw output from native libraries such as whisper and ggml no
   longer lands in a file on macOS.
+- **The default voice is the companion, a synthetic voice on Pocket TTS by
+  Kyutai (CC-BY-4.0).** A config that names no voice moves to the companion,
+  and `tts.voice = "af_sky"` keeps the old voice. Kokoro's voices stay as
+  choices: set any other `tts.voice`, and the change applies at once. The
+  companion's files, about 400 MB, download to
+  `~/.banshee/models/pocket-english_2026-04/` with `banshee setup` or the
+  window's Get button. Until they arrive the daemon stays up and silent,
+  `speak` fails naming `banshee setup`, and `banshee status` says why. The
+  next reply after the files arrive loads the voice with no restart. On an M5
+  Pro Mac, first audio took about 30 ms and speech ran at 8.2x to 8.8x real
+  time.
+- **A failed remote reply is spoken by the local voice.** `tts.fallback` is now
+  `local` (the default) or `none`. With `local`, when a remote server fails
+  before a reply starts, the voice that `tts.voice` names speaks it, and it
+  loads on first use. With `none` you hear silence, and a remote speaker
+  downloads no local voice.
+- **A remote request no longer sends a `speed` field.**
+- **The window's Voice panel lists Companion first,** with the credit "Pocket
+  TTS by Kyutai, CC-BY-4.0", and has no speaking rate.
 
 ### Removed
 
@@ -45,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Settings > General > Login Items. On Linux, run
   `systemctl --user disable --now banshee-tray.service`. `banshee tray` puts
   it back.
+- **`tts.speed` is gone.** Delete `speed` from `[tts]` in `config.toml`, or the
+  daemon won't start. `banshee status` names the key. Speech plays at 1x.
+- **The system voice is gone,** which was `say` on macOS and `espeak-ng` as a
+  voice on Linux. If `config.toml` holds `fallback = "system"`, change it to
+  `"local"` or `"none"`, or the daemon won't start. `espeak-ng` stays only to
+  pronounce words Kokoro does not know.
 
 ### Security
 

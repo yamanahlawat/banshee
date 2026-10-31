@@ -1914,7 +1914,7 @@ it('blames the stopped daemon rather than the voice', async () => {
 // another job's is the discriminating half: it marks that job's cell instead.
 const VOICE_WAITS: [string, boolean][] = [
   ['tts.voice', true],
-  ['tts.speed', true],
+  ['tts.speed', false],
   ['tts.remote.base_url', true],
   ['tts.remote.model', true],
   ['tts.remote.voice', true],

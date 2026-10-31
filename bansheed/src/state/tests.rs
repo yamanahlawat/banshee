@@ -170,7 +170,7 @@ fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<Consume
     let state = DaemonState::new(
         std::sync::Arc::new(Config::default()),
         None,
-        crate::text_to_speech::SpeechPlayer::default(),
+        crate::test_support::quiet_speech(),
         crate::text_to_speech::Speaker::Fallback,
         commands,
         crate::audio::cues::Cues::silent(),
@@ -584,7 +584,8 @@ async fn an_unchanged_speech_error_wakes_nobody() {
 
 // The backend cannot reach the cue player or the state, so a channel carries
 // both what failed and the first chunk that played. A reply the fallback spoke
-// still records why the speaker the config names failed.
+// still records why the speaker the config names failed, and only that
+// speaker playing clears it.
 #[test]
 fn the_drain_sounds_the_cue_for_a_failure_and_clears_the_reason_when_one_plays() {
     use crate::text_to_speech::{Fault, drain_faults};
@@ -637,6 +638,68 @@ fn the_drain_sounds_the_cue_for_a_failure_and_clears_the_reason_when_one_plays()
             "{name}: an utterance that played sounds no cue: {sounded:?}"
         );
     }
+}
+
+#[test]
+fn the_fallback_playing_keeps_the_reason_it_spoke_for() {
+    use crate::text_to_speech::{Fault, Faults, drain_faults};
+
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (faults, receiver) = std::sync::mpsc::channel();
+    let faults = Faults::new(faults);
+    faults.send(Fault::SpokenByFallback(
+        "the remote speaker refused the key".to_string(),
+    ));
+    faults.standing_in().send(Fault::Played);
+    drop(faults);
+    drain_faults(
+        std::sync::Arc::clone(&state),
+        crate::audio::cues::Cues::recording().0,
+        receiver,
+    );
+
+    assert_eq!(
+        state.last_speech_error().as_deref(),
+        Some("the remote speaker refused the key")
+    );
+}
+
+#[test]
+fn a_local_voice_standing_in_for_a_remote_speaker_keeps_its_reason() {
+    use crate::text_to_speech::{Fault, Faults, drain_faults};
+
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    state.set_last_speech_error(Some("no key for the remote speaker".to_string()));
+    let (faults, receiver) = std::sync::mpsc::channel();
+    Faults::new(faults).standing_in().send(Fault::Played);
+    drain_faults(
+        std::sync::Arc::clone(&state),
+        crate::audio::cues::Cues::recording().0,
+        receiver,
+    );
+
+    assert_eq!(
+        state.last_speech_error().as_deref(),
+        Some("no key for the remote speaker")
+    );
+}
+
+#[test]
+fn a_voice_loaded_after_the_start_is_the_speaker_started() {
+    use crate::text_to_speech::{Fault, drain_faults};
+
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    assert!(!state.speaker_started(), "the voice did not load at start");
+    let (faults, receiver) = std::sync::mpsc::channel();
+    faults.send(Fault::Loaded).unwrap();
+    drop(faults);
+    drain_faults(
+        std::sync::Arc::clone(&state),
+        crate::audio::cues::Cues::recording().0,
+        receiver,
+    );
+
+    assert!(state.speaker_started());
 }
 
 struct StopWaits {

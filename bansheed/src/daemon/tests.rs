@@ -513,8 +513,8 @@ async fn stale_socket_is_reclaimed() {
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
     assert!(path.exists());
 
-    // Between fork and exec a `say` child holds a copy of the dead listener
-    // fd, so the probe can transiently see the socket as alive
+    // Between fork and exec a child another test spawns holds a copy of the
+    // dead listener fd, so the probe can transiently see the socket as alive
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let claimed = loop {
         match claim_socket(&path) {

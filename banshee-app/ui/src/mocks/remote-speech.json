@@ -78,8 +78,7 @@
         "sample_rate": null
       },
       "voice": "af_sky",
-      "speed": 1.0,
-      "fallback": "system"
+      "fallback": "local"
     }
   },
   "pending": [],

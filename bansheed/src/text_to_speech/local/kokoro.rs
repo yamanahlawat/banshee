@@ -1,15 +1,17 @@
 use std::collections::HashSet;
 use std::fs;
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
 
 use banshee_common::{KokoroTTSConfig, error::BansheeError, utils::oov_log_path};
 use misaki_rs::lexicon::{Lexicon, PhonemeEntry};
 use misaki_rs::{G2P, Language, MToken};
 use ort::session::Session;
 
+use super::chunk_or_fault;
 use super::oov::OovFallback;
-use crate::text_to_speech::output::{CHANNELS, Chunk, Output, SAMPLE_RATE};
-use crate::text_to_speech::{ActiveUtterance, Fault, TtsBackend, lock};
+use crate::text_to_speech::output::Output;
+use crate::text_to_speech::{ActiveUtterance, Faults, TtsBackend, lock, lock_read, lock_write};
 
 // Voice files hold one style row per input token count: 510 rows x 256 floats
 const STYLE_DIM: usize = 256;
@@ -161,12 +163,8 @@ fn read_voice_file(voice_path: &std::path::Path) -> Result<Vec<f32>, BansheeErro
     Ok(voice)
 }
 
-fn strip_bin_suffix(voice_name: &str) -> &str {
-    voice_name.strip_suffix(".bin").unwrap_or(voice_name)
-}
-
-fn installed(voice: &str) -> Result<(), BansheeError> {
-    if crate::models::installed_voices()
+pub(crate) fn installed(models: &Path, voice: &str) -> Result<(), BansheeError> {
+    if crate::models::installed_voices_in(models)
         .iter()
         .any(|id| id == voice)
     {
@@ -217,18 +215,19 @@ pub(crate) fn english_g2p() -> G2P {
 pub struct KokoroEngine {
     session: Session,
     g2p: G2P,
+    models: PathBuf,
     voice: Vec<f32>,
     loaded_voice: String,
-    speed: f32,
     oov: Option<OovFallback>,
     logged_oov: HashSet<String>,
 }
 
 impl KokoroEngine {
-    pub fn new(kokoro_config: &KokoroTTSConfig, speed: f32) -> Result<Self, BansheeError> {
-        let threads = crate::models::kokoro_threads();
-        let model_path = crate::models::model_path(&kokoro_config.model_name)?;
-        let voice_path = crate::models::model_path(&kokoro_config.voice_name)?;
+    pub fn new(models: &Path, voice: &str) -> Result<Self, BansheeError> {
+        let kokoro_config = KokoroTTSConfig::new(voice);
+        let threads = crate::models::onnx_threads();
+        let model_path = models.join(&kokoro_config.model_name);
+        let voice_path = models.join(&kokoro_config.voice_name);
 
         // Pre-packed weights cost 32 MB of resident memory and bought no synthesis
         // time: three timed runs each way of a two-sentence utterance all took 1.2 s.
@@ -238,7 +237,7 @@ impl KokoroEngine {
             &[("session.disable_prepacking", "1")],
         )?;
 
-        let voice = read_voice_file(&voice_path)?;
+        let style = read_voice_file(&voice_path)?;
 
         let g2p = english_g2p();
 
@@ -253,18 +252,18 @@ impl KokoroEngine {
         Ok(Self {
             session,
             g2p,
-            voice,
-            loaded_voice: strip_bin_suffix(&kokoro_config.voice_name).to_string(),
-            speed,
+            models: models.to_path_buf(),
+            voice: style,
+            loaded_voice: voice.to_string(),
             oov,
             logged_oov: HashSet::new(),
         })
     }
 
     pub fn set_voice(&mut self, voice_name: &str) -> Result<(), BansheeError> {
-        installed(voice_name)?;
+        installed(&self.models, voice_name)?;
         let voice_config = KokoroTTSConfig::new(voice_name);
-        let voice_path = crate::models::model_path(&voice_config.voice_name)?;
+        let voice_path = self.models.join(&voice_config.voice_name);
         self.voice = read_voice_file(&voice_path)?;
         self.loaded_voice = voice_name.to_string();
         Ok(())
@@ -279,12 +278,6 @@ impl KokoroEngine {
 
     pub fn loaded_voice(&self) -> &str {
         &self.loaded_voice
-    }
-
-    /// Read into the synthesis tensor for each sentence, so the next one is
-    /// spoken at the new rate without the model loading again.
-    pub fn set_speed(&mut self, speed: f32) {
-        self.speed = speed;
     }
 
     #[cfg(test)]
@@ -378,9 +371,8 @@ impl KokoroEngine {
                 .map_err(|e| BansheeError::Other(e.to_string()))?,
         )
         .map_err(|e| BansheeError::Other(e.to_string()))?;
-        let speed_tensor =
-            ort::value::Tensor::from_array(ndarray::Array1::from_vec(vec![self.speed]))
-                .map_err(|e| BansheeError::Other(e.to_string()))?;
+        let speed_tensor = ort::value::Tensor::from_array(ndarray::Array1::from_vec(vec![1.0f32]))
+            .map_err(|e| BansheeError::Other(e.to_string()))?;
 
         let outputs = self
             .session
@@ -399,10 +391,6 @@ impl KokoroEngine {
     }
 }
 
-fn lock_read<T>(value: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    value.read().unwrap_or_else(|poison| poison.into_inner())
-}
-
 /// The voice a live `[tts]` write puts in effect, or `None` when this machine
 /// does not hold it. A voice accepted here but missing fails later inside the
 /// chunk iterator, which can only report the fault after the reply went silent.
@@ -416,49 +404,21 @@ fn voice_for(requested: Option<&str>, configured: &str) -> String {
     requested.unwrap_or(configured).to_string()
 }
 
-/// One sentence's audio, or the fault that ends the utterance. The first
-/// sentence that plays clears the last speech error, like the remote speaker's.
-fn chunk_or_fault(
-    synthesized: Result<Vec<f32>, BansheeError>,
-    played: &mut bool,
-    faults: &std::sync::mpsc::Sender<Fault>,
-) -> Option<Chunk> {
-    match synthesized {
-        Ok(samples) => {
-            if !*played {
-                *played = true;
-                let _ = faults.send(Fault::Played);
-            }
-            Some(Chunk {
-                samples,
-                rate: SAMPLE_RATE,
-                channels: CHANNELS,
-            })
-        }
-        Err(error) => {
-            let _ = faults.send(Fault::Failed(format!("Kokoro synthesis failed: {error}")));
-            None
-        }
-    }
-}
-
 pub struct KokoroBackend {
     engine: Arc<Mutex<KokoroEngine>>,
+    models: PathBuf,
     output: Arc<Output>,
     // What an utterance that names no voice speaks in. A live `tts.voice`
     // moves it, so it cannot be fixed at construction.
     configured_voice: RwLock<String>,
-    faults: std::sync::mpsc::Sender<Fault>,
+    faults: Faults,
 }
 
 impl KokoroBackend {
-    pub fn new(
-        engine: KokoroEngine,
-        output: Arc<Output>,
-        faults: std::sync::mpsc::Sender<Fault>,
-    ) -> Self {
+    pub fn new(engine: KokoroEngine, output: Arc<Output>, faults: Faults) -> Self {
         let configured_voice = engine.loaded_voice().to_string();
         Self {
+            models: engine.models.clone(),
             engine: Arc::new(Mutex::new(engine)),
             output,
             configured_voice: RwLock::new(configured_voice),
@@ -469,12 +429,11 @@ impl KokoroBackend {
 
 impl TtsBackend for KokoroBackend {
     fn reconfigure(&self, tts: &crate::config::TTSConfig) -> Option<String> {
-        let taken = voice_to_take(&tts.voice, &crate::models::installed_voices())?;
-        *self
-            .configured_voice
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = taken.clone();
-        lock(&self.engine).set_speed(tts.speed);
+        let taken = voice_to_take(
+            &tts.voice,
+            &crate::models::installed_voices_in(&self.models),
+        )?;
+        *lock_write(&self.configured_voice) = taken.clone();
         Some(taken)
     }
 
@@ -484,7 +443,7 @@ impl TtsBackend for KokoroBackend {
         voice: Option<&str>,
     ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
         if let Some(requested) = voice {
-            installed(requested)?;
+            installed(&self.models, requested)?;
         }
         let desired = voice_for(voice, &lock_read(&self.configured_voice));
         let engine = Arc::clone(&self.engine);
@@ -504,7 +463,7 @@ impl TtsBackend for KokoroBackend {
                     .ensure_voice(&desired)
                     .and_then(|()| engine.synthesize(&sentence))
             };
-            chunk_or_fault(synthesized, &mut played, &faults)
+            chunk_or_fault("Kokoro", synthesized, &mut played, &faults)
         });
         Ok(Box::new(self.output.play(chunks, self.faults.clone())?))
     }
