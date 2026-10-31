@@ -1,10 +1,12 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
 use crate::history::TranscriptionHistory;
 use crate::state::{ConsumerCommand, DaemonState};
-use crate::text_to_speech::{ActiveUtterance, Speaker, SpeechPlayer, TtsBackend};
+use crate::text_to_speech::local::OnFirstUse;
+use crate::text_to_speech::output::Output;
+use crate::text_to_speech::{ActiveUtterance, Faults, Speaker, SpeechPlayer, TtsBackend};
 
 pub fn silero() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/silero_vad.onnx")
@@ -98,6 +100,73 @@ pub fn write_executable(path: &std::path::Path, body: &str) {
     );
 }
 
+/// A models folder holding an empty file for each name, under a fresh temp
+/// directory. Enough for a check that files are there; nothing loads them.
+pub fn models_holding(names: &[&str]) -> PathBuf {
+    let models = unique_scratch("models-holding");
+    write_empty(&models, names);
+    models
+}
+
+/// An empty file in `models` for each name.
+pub fn write_empty(models: &Path, names: &[&str]) {
+    for name in names {
+        let path = models.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"").unwrap();
+    }
+}
+
+/// A models folder holding the companion's files, and Kokoro's with each of `voices`.
+pub fn companion_models_with(voices: &[&str]) -> PathBuf {
+    let models = companion_models();
+    for voice in voices {
+        let files = crate::models::download::voice_files(voice);
+        write_empty(
+            &models,
+            &files
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+        );
+    }
+    models
+}
+
+/// A models folder holding the companion's files.
+pub fn companion_models() -> PathBuf {
+    let files = crate::models::download::pocket_files();
+    models_holding(
+        &files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// A fault channel a test does not read.
+pub fn ignored_faults() -> Faults {
+    Faults::new(std::sync::mpsc::channel().0)
+}
+
+/// The companion on `models`, loaded by `load` on its first utterance.
+pub fn on_first_use(
+    models: &Path,
+    load: impl Fn(&str) -> Result<Box<dyn TtsBackend>, banshee_common::error::BansheeError>
+    + Send
+    + Sync
+    + 'static,
+    faults: Faults,
+) -> OnFirstUse {
+    OnFirstUse::new(
+        models,
+        banshee_common::COMPANION_VOICE,
+        load,
+        Arc::new(Output::silent()),
+        faults,
+    )
+}
+
 /// Makes a fresh temp directory. Deletes a leftover from a killed run first.
 pub fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("banshee-{name}-{}", std::process::id()));
@@ -106,9 +175,8 @@ pub fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-// Silent backend, so no test spawns a real `say` process
 struct NullBackend;
-struct Done;
+pub struct Done;
 
 impl ActiveUtterance for Done {
     fn is_finished(&mut self) -> bool {
@@ -125,6 +193,28 @@ impl TtsBackend for NullBackend {
     ) -> Result<Box<dyn ActiveUtterance>, banshee_common::error::BansheeError> {
         Ok(Box::new(Done))
     }
+}
+
+/// What a backend was asked to say, and in which voice.
+pub type Asked = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+/// Keeps what it is asked to say. Every line finishes at once.
+pub struct Listening(pub Asked);
+
+impl TtsBackend for Listening {
+    fn start(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, banshee_common::error::BansheeError> {
+        crate::text_to_speech::lock(&self.0).push((text.to_string(), voice.map(str::to_string)));
+        Ok(Box::new(Done))
+    }
+}
+
+/// A player whose every line finishes at once.
+pub fn quiet_speech() -> SpeechPlayer {
+    SpeechPlayer::new(Box::new(NullBackend))
 }
 
 /// A line with this text never ends, which is what a stalled backend looks like.
@@ -192,8 +282,8 @@ pub fn daemon_state_holding_speech(
     }
 }
 
-/// The voice and rate the last live `[tts]` write handed the backend.
-pub type RecordedTts = Arc<std::sync::Mutex<Vec<(String, f32)>>>;
+/// The voice each live `[tts]` write handed the backend.
+pub type RecordedTts = Arc<std::sync::Mutex<Vec<String>>>;
 
 struct RecordingBackend(RecordedTts);
 
@@ -207,7 +297,7 @@ impl TtsBackend for RecordingBackend {
     }
 
     fn reconfigure(&self, tts: &crate::config::TTSConfig) -> Option<String> {
-        self.0.lock().unwrap().push((tts.voice.clone(), tts.speed));
+        self.0.lock().unwrap().push(tts.voice.clone());
         Some(tts.voice.clone())
     }
 }

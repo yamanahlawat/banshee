@@ -9,7 +9,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::config::FeedbackMode;
 use crate::text_to_speech::output::{Chunk, Output};
-use crate::text_to_speech::{ActiveUtterance, Fault};
+use crate::text_to_speech::{ActiveUtterance, Fault, Faults};
 
 pub use banshee_common::cue::{Reason, ReasonCode, Signal, Target};
 
@@ -199,6 +199,7 @@ pub fn start_cue_player(mode: FeedbackMode, output: Arc<Output>) -> Cues {
         // faults are only logged and stay out of `last_speech_error`.
         let (faults, cue_faults) = mpsc::channel::<Fault>();
         thread::spawn(move || cue_faults.iter().for_each(|fault| fault.log()));
+        let faults = Faults::new(faults);
         serve_cues(receiver, &gate, |cue| play(&output, cue, &faults));
     });
 
@@ -218,7 +219,7 @@ fn serve_cues(receiver: mpsc::Receiver<Cue>, gate: &Gate, mut play: impl FnMut(C
 /// Plays one cue through the daemon's output and stays with it to the end, so a
 /// device that dies mid-cue is replaced the way it is mid-sentence. The wait is
 /// what keeps two cues from overlapping.
-fn play(output: &Arc<Output>, cue: Cue, faults: &mpsc::Sender<Fault>) {
+fn play(output: &Arc<Output>, cue: Cue, faults: &Faults) {
     let tones: Vec<Chunk> = cue
         .tones()
         .iter()

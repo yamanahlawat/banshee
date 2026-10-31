@@ -9,6 +9,7 @@
 # removed rather than forgotten.
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error, under gtk 0.18" },
+    { id = "RUSTSEC-2024-0436", reason = "paste, under tokenizers 0.23" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser, under winit 0.30 through sctk-adwaita and ab_glyph" },
     { id = "RUSTSEC-2025-0081", reason = "unic-char-property, under tauri-utils through urlpattern" },
     { id = "RUSTSEC-2025-0075", reason = "unic-char-range, under tauri-utils through urlpattern" },

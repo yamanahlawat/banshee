@@ -118,7 +118,10 @@ export function speechLead(facts: Speech): string {
       return `Banshee will speak through ${facts.willUse ?? A_SERVER} when it restarts.`;
     }
     if (!facts.started) {
-      return `Banshee speaks with the system voice. ${facts.voiceName || 'The local voice'} did not load.`;
+      const fix = facts.voiceDownloaded
+        ? 'Pick another voice.'
+        : 'Get its files below, or pick another voice.';
+      return `${facts.voiceName || 'The local voice'} did not load, so Banshee is silent. ${fix}`;
     }
     return facts.voiceName ? `Banshee speaks as ${facts.voiceName}.` : 'Banshee has no voice yet.';
   }

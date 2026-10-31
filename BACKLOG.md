@@ -10,6 +10,11 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - Dictating replaces a copied image for good. Banshee saves only clipboard text to put back: with
   a 2x2 image copied, the clipboard held no image and only the dictated words 1.5 s later. Files
   and rich text are likely the same; not tested. The Linux path is separate and not tested.
+- An upgrade can leave both login items unable to start. On 2026-10-31, `make install` over an
+  installed build re-registered them, and launchd then failed every spawn with exit 78
+  (`EX_CONFIG`), 6 tries for the daemon and 13 for the tray. No Banshee code exits 78. The
+  binaries ran from a terminal and the bundle signature verified. A second `banshee start` and
+  `banshee tray`, about a minute later, brought both up. The cause is not known.
 - Nothing has tested a logout and login with the login items. CI registers, restarts, stops
   and removes them on a runner, but cannot log in again.
 
@@ -35,9 +40,8 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 ## Remote listener and speaker
 
 - Both remote keys live in a file in `~/.banshee`, not in the Keychain.
-- A server that refuses the `speed` field refuses every reply at that speed.
 - The speaker takes the OpenAI `/audio/speech` shape only.
-- `banshee setup` downloads Kokoro even when speech is remote.
+- `banshee setup` downloads the local voice even when speech is remote, unless `tts.fallback` is `none`.
 
 ## The window
 

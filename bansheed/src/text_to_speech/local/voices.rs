@@ -1,6 +1,14 @@
-use banshee_common::Voice;
+use std::path::Path;
 
-/// The id is the value config.toml carries.
+use banshee_common::{COMPANION_VOICE, Voice};
+
+const COMPANION: (&str, &str, &str) = (
+    COMPANION_VOICE,
+    "Companion",
+    "Pocket TTS by Kyutai, CC-BY-4.0",
+);
+
+/// Kokoro's voices. The id is the value config.toml carries.
 const NAMED: &[(&str, &str, &str)] = &[
     ("af_sky", "Sky", "American, clear"),
     ("af_bella", "Bella", "American, warm"),
@@ -16,14 +24,40 @@ const NAMED: &[(&str, &str, &str)] = &[
     ("bm_lewis", "Lewis", "British, low"),
 ];
 
-/// Every voice this build can name, on this machine or not. A client that can
-/// fetch one offers the whole list; setup itself fetches only the voice set.
+/// Every voice this build can name, on this machine or not, the companion
+/// first. A client that can fetch one offers the whole list; setup itself
+/// fetches only the voice set.
 pub fn catalogue() -> impl Iterator<Item = &'static str> {
-    NAMED.iter().map(|(id, _, _)| *id)
+    std::iter::once(&COMPANION)
+        .chain(NAMED)
+        .map(|(id, _, _)| *id)
+}
+
+/// The catalogue and any other Kokoro voice in `models`, each marked by
+/// whether every file it speaks with is there.
+pub fn listed(models: &Path) -> Vec<Voice> {
+    let mut ids: Vec<String> = catalogue().map(str::to_string).collect();
+    for id in crate::models::installed_voices_in(models) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids.iter()
+        .map(|id| {
+            let files = crate::models::download::voice_files(id);
+            describe(
+                id,
+                crate::models::download::still_missing(&files, models).is_empty(),
+            )
+        })
+        .collect()
 }
 
 pub fn describe(id: &str, downloaded: bool) -> Voice {
-    if let Some((_, name, description)) = NAMED.iter().find(|(known, _, _)| *known == id) {
+    if let Some((_, name, description)) = std::iter::once(&COMPANION)
+        .chain(NAMED)
+        .find(|(known, _, _)| *known == id)
+    {
         return Voice {
             id: id.to_string(),
             name: name.to_string(),
@@ -61,6 +95,11 @@ mod tests {
             .expect("the mock answers list_voices");
         let listed = &bridge[start..start + 2000];
 
+        let companion = describe(banshee_common::COMPANION_VOICE, true);
+        assert!(listed.contains(&format!("id: '{}'", companion.id)));
+        assert!(listed.contains(&format!("name: '{}'", companion.name)));
+        assert!(listed.contains(&format!("description: '{}'", companion.description)));
+
         for (id, name, description) in super::NAMED {
             assert!(
                 listed.contains(&format!("id: '{id}'")),
@@ -75,6 +114,17 @@ mod tests {
                 "the mock describes {id} differently from this build"
             );
         }
+    }
+
+    #[test]
+    fn the_companion_is_listed_first_with_its_credit() {
+        assert_eq!(
+            super::catalogue().next(),
+            Some(banshee_common::COMPANION_VOICE)
+        );
+        let voice = describe(banshee_common::COMPANION_VOICE, true);
+        assert_eq!(voice.name, "Companion");
+        assert_eq!(voice.description, "Pocket TTS by Kyutai, CC-BY-4.0");
     }
 
     #[test]

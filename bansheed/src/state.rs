@@ -262,10 +262,10 @@ pub struct DaemonState {
     wanted_device: Mutex<String>,
     // Follows a live `tts.voice`, so the voice reported is the one now loaded
     tts_voice: RwLock<Option<String>>,
-    // Said once by the branch that built the speaker. A live `[tts]` write moves
-    // the voice above and not this: a backend that takes a voice name is still
-    // the fallback.
-    speaker_started: bool,
+    // Said by the branch that built the speaker, and again by a local voice that
+    // loads later. A live `[tts]` write moves the voice above and not this: a
+    // backend that takes a voice name is still the fallback.
+    speaker_started: AtomicBool,
     wanted_downloads: RwLock<Vec<crate::models::download::Download>>,
     // The file as last parsed. `vad_threshold`, `wanted_device` and `barge_in`
     // beside it are live values the file may no longer agree with.
@@ -349,7 +349,7 @@ impl DaemonState {
             audio_device: RwLock::new(None),
             missing_device: RwLock::new(None),
             wanted_device: Mutex::new(config.audio.input_device.clone()),
-            speaker_started: speaker.started(),
+            speaker_started: AtomicBool::new(speaker.started()),
             tts_voice: RwLock::new(speaker.voice()),
             wanted_downloads: RwLock::new(wanted_downloads),
             barge_in: Mutex::new(config.audio.barge_in),
@@ -908,10 +908,16 @@ impl DaemonState {
             .clone()
     }
 
-    /// Whether the speaker `[tts]` names is the one running. False under the OS
-    /// voice, which sends no text out whatever the config asks for.
+    /// Whether the speaker `[tts]` names is the one running. False under the
+    /// fallback or silence, which send no text out whatever the config asks for.
     pub fn speaker_started(&self) -> bool {
         self.speaker_started
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_speaker_started(&self, started: bool) {
+        self.speaker_started
+            .store(started, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// True when the backend took the change. The voice the window marks as

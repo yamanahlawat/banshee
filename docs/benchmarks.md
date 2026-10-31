@@ -4,9 +4,10 @@ Each entry is one run of `cargo bench -p banshee --bench speech_out`, newest fir
 also holds the profile hotspots and the experiments made against that run.
 [CONTRIBUTING.md](../CONTRIBUTING.md) states how to run it.
 
-The bench speaks at the default `tts.speed`, which moved from 1.2 to 1.0 after 0.16.2. Slower
-speech makes longer audio, so compare `kokoro` rows only between entries whose facts line names
-the same speed.
+Entries before the companion voice speak at a setting that has since gone: the speed moved from
+1.2 to 1.0 after 0.16.2, and no speed setting remains. Slower speech makes longer audio, so
+compare `kokoro` rows only between entries whose facts line names the same speed. A new entry
+has no speed in its facts line, and it plays at 1x.
 
 ## 2026-09-28
 

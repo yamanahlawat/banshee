@@ -135,7 +135,12 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
     // One output for every sound the daemon makes. The voice and the cues on
     // one device is the point: two holders drift apart the moment one dies.
     let output = Arc::new(text_to_speech::output::Output::lazy());
-    let speech = text_to_speech::select_backend(&config.tts, faults, Arc::clone(&output))?;
+    let speech = text_to_speech::select_backend(
+        &config.tts,
+        &models::download::models_dir()?,
+        faults,
+        Arc::clone(&output),
+    );
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let cues = audio::cues::start_cue_player(config.feedback_mode(), output);
     let daemon_state = Arc::new(DaemonState::new(

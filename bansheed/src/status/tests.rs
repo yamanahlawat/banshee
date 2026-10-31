@@ -140,8 +140,8 @@ fn the_speech_note_says_text_stays_here_until_the_speaker_starts() {
 }
 
 // Each speaker keeps its voice in its own table, and the settings line has
-// room for one. `tts.voice` is Kokoro's, and a remote server has never heard
-// of it.
+// room for one. `tts.voice` is the local voice's, and a remote server has
+// never heard of it.
 #[test]
 fn the_settings_line_names_the_voice_of_the_speaker_in_force() {
     let mut config = crate::config::Config::default();
@@ -153,6 +153,30 @@ fn the_settings_line_names_the_voice_of_the_speaker_in_force() {
         config.tts.remote.voice
     );
     assert_eq!(super::settings_voice(&config, false), config.tts.voice);
+}
+
+#[test]
+fn the_local_voice_line_names_the_voice_and_its_engine() {
+    let models = crate::test_support::companion_models_with(&["af_sky"]);
+
+    let (companion, fix) = super::local_voice_check("companion", &models);
+    assert_eq!(fix, None, "{companion}");
+    assert!(
+        companion.contains("companion") && companion.contains("Pocket"),
+        "{companion}"
+    );
+    let (sky, fix) = super::local_voice_check("af_sky", &models);
+    assert_eq!(fix, None, "{sky}");
+    assert!(sky.contains("af_sky") && sky.contains("Kokoro"), "{sky}");
+}
+
+#[test]
+fn a_missing_companion_says_run_banshee_setup() {
+    let models = crate::test_support::unique_scratch("status-models");
+
+    let (line, fix) = super::local_voice_check("companion", &models);
+    assert_eq!(fix, Some("run: banshee setup"), "{line}");
+    assert!(line.contains("companion"), "{line}");
 }
 
 #[cfg(target_os = "macos")]

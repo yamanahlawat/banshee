@@ -30,22 +30,27 @@ pub fn onnx_session(
 /// threading to reach.
 pub const VAD_THREADS: usize = 1;
 
-/// The highest count measured to pay. Past it the curve is the machine's.
-const KOKORO_THREAD_CAP: usize = 8;
+/// The highest count measured to pay for Kokoro. Past it the curve is the
+/// machine's. Pocket's best count is not measured.
+const ONNX_THREAD_CAP: usize = 8;
 
 /// Threads pay for synthesis, and a machine contends past its own core count.
-pub fn kokoro_threads() -> usize {
+pub fn onnx_threads() -> usize {
     // A machine that cannot say how many cores it holds is asked for one
     std::thread::available_parallelism().map_or(1, |cores| threads_for(cores.get()))
 }
 
 fn threads_for(cores: usize) -> usize {
-    cores.min(KOKORO_THREAD_CAP)
+    cores.min(ONNX_THREAD_CAP)
+}
+
+pub fn model_path(name: &str) -> Result<std::path::PathBuf, BansheeError> {
+    model_in(&download::models_dir()?, name)
 }
 
 /// Where a model file is, so every engine refuses a missing one the same way.
-pub fn model_path(name: &str) -> Result<std::path::PathBuf, BansheeError> {
-    let path = download::models_dir()?.join(name);
+pub fn model_in(dir: &std::path::Path, name: &str) -> Result<std::path::PathBuf, BansheeError> {
+    let path = dir.join(name);
     if !path.exists() {
         return Err(BansheeError::Other(format!(
             "{name} is not in the models directory. Run 'banshee setup' to download it."
@@ -101,11 +106,8 @@ fn voices_among(files: impl Iterator<Item = String>) -> Vec<String> {
     voices
 }
 
-/// On-disk only: an undownloaded voice cannot be spoken with.
-pub fn installed_voices() -> Vec<String> {
-    let Ok(dir) = download::models_dir() else {
-        return Vec::new();
-    };
+/// The Kokoro voices on disk: an undownloaded voice cannot be spoken with.
+pub fn installed_voices_in(dir: &std::path::Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };

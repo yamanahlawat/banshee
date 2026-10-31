@@ -316,8 +316,7 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
 /// Where each side sends what it handles, and whether its key is set. The key
 /// read is a parameter so a test can answer for one side without a key file.
 /// `speaker_started` says whether the speaker the config names is the one
-/// running. It is false under a local provider whose Kokoro failed to load,
-/// because the system voice speaks then too.
+/// running. It is false under a local provider whose voice has not loaded.
 fn remote_report(
     config: &crate::config::Config,
     key_present: impl Fn(crate::credentials::RemoteKey) -> bool,
@@ -726,19 +725,7 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
 // that can fetch one needs the whole list to offer a choice; one that
 // cannot filters to the installed ones itself.
 fn list_voices(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let installed = crate::models::installed_voices();
-    let mut ids: Vec<String> = crate::text_to_speech::local::voices::catalogue()
-        .map(str::to_string)
-        .collect();
-    for id in &installed {
-        if !ids.contains(id) {
-            ids.push(id.clone());
-        }
-    }
-    let voices: Vec<_> = ids
-        .iter()
-        .map(|id| crate::text_to_speech::local::voices::describe(id, installed.contains(id)))
-        .collect();
+    let voices = crate::text_to_speech::local::voices::listed(daemon_state.models_dir());
     JsonRpcResponse::success(
         params.id(),
         serde_json::json!({ "voices": voices, "current": daemon_state.tts_voice() }),

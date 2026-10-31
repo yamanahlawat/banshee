@@ -417,6 +417,14 @@ describe('the facts each side reports', () => {
     expect(speechFacts(spoken, NO_KEYS, KOKORO).voiceName).toBe('marin');
   });
 
+  // The lead offers the Get button only for a voice whose files are missing.
+  it('says whether the local voice is on this machine', () => {
+    const here = [{ id: 'af_sky', name: 'Sky', downloaded: true }];
+    const missing = [{ id: 'af_sky', name: 'Sky', downloaded: false }];
+    expect(speechFacts(running(), NO_KEYS, here).voiceDownloaded).toBe(true);
+    expect(speechFacts(running(), NO_KEYS, missing).voiceDownloaded).toBe(false);
+  });
+
   // A voice the daemon holds that Kokoro's list does not name still reaches the
   // reader, because the list arrives from a call of its own and can be empty.
   it('falls back to the voice the config names', () => {

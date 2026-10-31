@@ -346,11 +346,7 @@ fn a_voice_write_reaches_the_running_daemon() {
     .expect("a known key and a legal value must apply");
 
     assert_eq!(
-        spoken
-            .lock()
-            .unwrap()
-            .last()
-            .map(|(voice, _)| voice.clone()),
+        spoken.lock().unwrap().last().cloned(),
         Some("am_adam".to_string()),
         "the next utterance must be spoken in the new voice"
     );
@@ -364,22 +360,10 @@ fn a_voice_write_reaches_the_running_daemon() {
 }
 
 #[test]
-fn a_speed_write_reaches_the_running_daemon() {
-    let (state, spoken) = crate::test_support::daemon_state_recording_tts();
-
-    let outcome = configure_in_scratch(
-        Some(&state),
-        assignments(&[("tts.speed", 1.5.into())]),
-        false,
-    )
-    .expect("a known key and a legal value must apply");
-
-    assert_eq!(
-        spoken.lock().unwrap().last().map(|(_, speed)| *speed),
-        Some(1.5),
-        "the next utterance must be spoken at the new rate"
-    );
-    assert_eq!(outcome.applied, vec!["tts.speed".to_string()]);
+fn a_speed_write_is_refused_by_name() {
+    let error = configure_in_scratch(None, assignments(&[("tts.speed", 1.2.into())]), false)
+        .expect_err("tts.speed is no longer a setting");
+    assert!(error.to_string().contains("speed"), "{error}");
 }
 
 // A backend that cannot take the voice must not be reported as speaking in
@@ -408,21 +392,21 @@ fn a_backend_that_refuses_the_voice_is_not_reported_as_applied() {
 }
 
 #[test]
-fn the_voice_and_the_speed_together_reach_the_backend_once() {
-    let (state, spoken) = crate::test_support::daemon_state_recording_tts();
+fn two_keys_of_one_setting_reach_the_daemon_once() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
 
     let outcome = configure_in_scratch(
         Some(&state),
-        assignments(&[("tts.voice", "am_adam".into()), ("tts.speed", 1.5.into())]),
+        assignments(&[
+            ("stt.language", "de".into()),
+            ("stt.translate", true.into()),
+        ]),
         false,
     )
     .expect("two known keys and legal values must apply");
 
-    assert_eq!(
-        spoken.lock().unwrap().len(),
-        1,
-        "one write, one reconfigure"
-    );
+    assert_eq!(taken.try_iter().count(), 1, "one write, one command");
     assert_eq!(outcome.applied.len(), 2, "both keys are in effect");
 }
 
@@ -530,7 +514,7 @@ fn a_preset_written_for_a_listener_that_is_not_running_yet_loads_nothing() {
 #[test]
 fn the_tts_fallback_still_needs_a_restart() {
     assert_eq!(
-        startup_only(&assignments(&[("tts.fallback", "system".into())])),
+        startup_only(&assignments(&[("tts.fallback", "none".into())])),
         Some(&"tts.fallback".to_string())
     );
 }

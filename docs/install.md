@@ -96,7 +96,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/yamanahlawat/banshee/re
 banshee setup
 ```
 
-- **It fetches** what is missing: Whisper, Silero VAD, Kokoro, about 860 MB.
+- **It fetches** what is missing: Whisper, Silero VAD and the companion voice, about 950 MB.
 - **An interrupted download** resumes, and a re-run fetches only what is still missing.
 
 **2. Start it:**

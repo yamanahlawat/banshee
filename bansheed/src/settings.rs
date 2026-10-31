@@ -33,9 +33,9 @@ fn live(key: &str) -> Option<Live> {
         "audio.barge_in" => Some(Live::BargeIn),
         "feedback.mode" | "audio.cues.enabled" => Some(Live::Feedback),
         "daemon.save_history" => Some(Live::SaveHistory),
-        // `tts.fallback` is not here: it decides what to do when Kokoro will
-        // not load, which is settled once, at startup.
-        "tts.voice" | "tts.speed" => Some(Live::Tts),
+        // `tts.fallback` is not here: it decides what speaks when the remote
+        // speaker does not start, which is settled once, at startup.
+        "tts.voice" => Some(Live::Tts),
         "stt.vocabulary" => Some(Live::Vocabulary),
         // Whisper reads both per utterance, so neither moves the model.
         "stt.language" | "stt.translate" => Some(Live::Speech),
@@ -80,8 +80,8 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
                 false
             }
         },
-        // The next utterance reads both, so neither reloads the model. The
-        // system fallback takes neither, and says so.
+        // A voice of the loaded engine reloads nothing; one of the other engine
+        // loads it. Silence takes no voice, and says so.
         Live::Tts => state.set_tts(&config.tts),
         // A listener that has gone leaves the words unread, so say so rather
         // than report a prompt nothing holds
@@ -316,8 +316,8 @@ fn in_effect(key: &str, state: &DaemonState, config: &Config) -> bool {
 }
 
 /// A variant applies once however many of its keys one call carries: without
-/// the memo, `tts.voice` and `tts.speed` together would reconfigure the backend
-/// twice with the same pair.
+/// the memo, `stt.language` and `stt.translate` together would reach the
+/// listener twice with the same pair.
 fn apply_each<'a>(
     state: &DaemonState,
     config: &Config,

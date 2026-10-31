@@ -40,9 +40,7 @@ export type Status = Record<string, unknown> & {
     tts: {
       remote: boolean;
       host: string | null;
-      /// Whether the speaker the config names is the one running. False
-      /// whenever the system voice took over instead, a local Kokoro that
-      /// failed to load included.
+      /// Whether the speaker the config names is the one running.
       speaker_started: boolean;
       key_present: boolean;
     };
@@ -281,7 +279,7 @@ export function endsTheRun(progress: Progress): boolean {
 /// A key that refuses for want of a file is answered by the download that
 /// brings it, and the daemon asks it again as the run ends, so naming a restart
 /// while one is arriving is advice that cannot work.
-const WAITS_ON_A_FILE = new Set(['stt.preset', 'tts.voice', 'tts.speed']);
+const WAITS_ON_A_FILE = new Set(['stt.preset', 'tts.voice']);
 
 export const waitsOnARestart = derived(daemon, (state) => {
   const fetching =
@@ -310,7 +308,7 @@ export type Listening = Side & {
   stoppedBy: BlockerKind | null;
 };
 
-export type Speech = Side & { started: boolean; voiceName: string };
+export type Speech = Side & { started: boolean; voiceName: string; voiceDownloaded: boolean };
 
 function hostOf(url: string): string | null {
   try {
@@ -348,11 +346,12 @@ export function listeningFacts(state: Daemon, waits: Set<string>): Listening {
 export function speechFacts(
   state: Daemon,
   waits: Set<string>,
-  voices: { id: string; name: string }[],
+  voices: { id: string; name: string; downloaded?: boolean }[],
 ): Speech {
   const tts = (state.status?.config?.tts ?? {}) as Record<string, unknown>;
   const remote = state.status?.remote?.tts?.remote === true;
   const id = String(tts.voice ?? '');
+  const listed = voices.find((one) => one.id === id);
   return {
     live: !isDown(state),
     remote,
@@ -364,9 +363,8 @@ export function speechFacts(
     // The config leads, as it does for every value the window shows. A remote
     // speaker names its voice in its own table, and Kokoro's list holds no
     // entry for it, so there is no name to look up.
-    voiceName: remote
-      ? String(table(tts).voice ?? '')
-      : (voices.find((one) => one.id === id)?.name ?? id),
+    voiceName: remote ? String(table(tts).voice ?? '') : (listed?.name ?? id),
+    voiceDownloaded: listed?.downloaded !== false,
   };
 }
 

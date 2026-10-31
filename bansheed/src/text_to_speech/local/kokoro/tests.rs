@@ -3,7 +3,8 @@ use super::*;
 /// A second installed voice, whichever this machine holds. Naming one would fix
 /// the test to a file `banshee setup` does not fetch.
 fn another_voice_than(loaded: &str) -> String {
-    crate::models::installed_voices()
+    let models = crate::models::download::models_dir().expect("a home directory");
+    crate::models::installed_voices_in(&models)
         .into_iter()
         .find(|id| id != loaded)
         .unwrap_or_else(|| {
@@ -20,8 +21,8 @@ fn another_voice_than(loaded: &str) -> String {
 /// The engine, or the reason it could not load. Every caller is `#[ignore]`d,
 /// so a machine that runs one wants the failure.
 fn engine_for(voice: &str) -> KokoroEngine {
-    let config = KokoroTTSConfig::new(voice);
-    KokoroEngine::new(&config, 1.0)
+    let models = crate::models::download::models_dir().expect("a home directory");
+    KokoroEngine::new(&models, voice)
         .unwrap_or_else(|error| panic!("run `banshee setup` first: {voice} did not load: {error}"))
 }
 
@@ -177,8 +178,7 @@ fn g2p_output_maps_into_vocab() {
 #[test]
 #[ignore]
 fn kokoro_synthesizes_audible_speech() {
-    let config = KokoroTTSConfig::new("af_sky");
-    let mut engine = KokoroEngine::new(&config, 1.0).unwrap();
+    let mut engine = engine_for("af_sky");
     let samples = engine.synthesize("Kokoro is alive.").unwrap();
     // ~1s of speech at 24kHz, with actual signal in it
     assert!(samples.len() > 10_000, "too few samples: {}", samples.len());
@@ -273,45 +273,4 @@ fn every_closing_bracket_ends_the_sentence_after_it() {
         let chunks = sentences(text).collect::<Vec<_>>();
         assert_eq!(chunks.len(), 2, "{text:?} gave {chunks:?}");
     }
-}
-
-#[test]
-fn a_synthesis_failure_is_reported_as_a_fault() {
-    let (faults, reported) = std::sync::mpsc::channel();
-    let mut played = false;
-
-    let chunk = chunk_or_fault(
-        Err(BansheeError::Other("the style file is gone".into())),
-        &mut played,
-        &faults,
-    );
-
-    assert!(chunk.is_none(), "a failed sentence plays nothing");
-    match reported.try_recv() {
-        Ok(Fault::Failed(reason)) => assert!(
-            reason.contains("the style file is gone"),
-            "the fault carries the cause: {reason}"
-        ),
-        other => panic!("the failure reaches the fault channel, got {other:?}"),
-    }
-}
-
-#[test]
-fn the_first_chunk_reports_the_utterance_played_once() {
-    let (faults, reported) = std::sync::mpsc::channel();
-    let mut played = false;
-
-    let first = chunk_or_fault(Ok(vec![0.1, 0.2]), &mut played, &faults);
-    let second = chunk_or_fault(Ok(vec![0.3]), &mut played, &faults);
-
-    assert_eq!(first.map(|chunk| chunk.samples), Some(vec![0.1, 0.2]));
-    assert_eq!(second.map(|chunk| chunk.samples), Some(vec![0.3]));
-    assert!(
-        matches!(reported.try_recv(), Ok(Fault::Played)),
-        "the first sentence clears the last speech error"
-    );
-    assert!(
-        reported.try_recv().is_err(),
-        "the second sentence reports nothing new"
-    );
 }

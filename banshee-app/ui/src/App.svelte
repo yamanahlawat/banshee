@@ -404,7 +404,7 @@
             ? speech.remote
               ? 'changing to this machine when Banshee restarts'
               : `changing to ${speech.willUse ?? A_SERVER} when Banshee restarts`
-            : (waits('tts.voice', 'tts.speed') ?? waitsUnder('tts.remote.')),
+            : (waits('tts.voice') ?? waitsUnder('tts.remote.')),
       },
       {
         id: 'job-agents',

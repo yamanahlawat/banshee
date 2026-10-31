@@ -260,6 +260,12 @@ const ANSWERS: Record<string, () => unknown> = {
   }),
   list_voices: (): Voices => ({
     voices: [
+      {
+        id: 'companion',
+        name: 'Companion',
+        description: 'Pocket TTS by Kyutai, CC-BY-4.0',
+        downloaded: true,
+      },
       { id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true },
       { id: 'af_bella', name: 'Bella', description: 'American, warm', downloaded: false },
       { id: 'af_heart', name: 'Heart', description: 'American, soft', downloaded: true },

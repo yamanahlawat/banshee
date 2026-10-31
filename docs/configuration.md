@@ -26,9 +26,8 @@ model = "whisper-1"                    # the model that server names
 
 [tts]
 provider = "local"     # local | remote; see "A remote voice" below
-voice = "af_sky"       # any voice from the Kokoro voices directory
-speed = 1.0            # 0.5 to 2.0; playback speed multiplier
-fallback = "system"    # system = use the OS voice (say, or espeak-ng on Linux) | none
+voice = "companion"    # companion, or any voice from the Kokoro voices directory
+fallback = "local"     # local = the voice above speaks a failed remote reply | none
 
 [tts.remote]                           # read when provider = "remote"
 base_url = "https://api.openai.com/v1" # an OpenAI-compatible /v1 root; https, or http on your own network
@@ -110,7 +109,7 @@ banshee config set feedback.mode none
   - `stt.vad_threshold`, `stt.vocabulary`, `stt.preset`, `stt.language`,
     `stt.translate`
   - `audio.input_device`, `audio.barge_in`, `feedback.mode`
-  - `tts.voice`, `tts.speed`, `daemon.save_history`
+  - `tts.voice`, `daemon.save_history`
 - **The rest are read when the daemon starts,** so the command tells you to
   restart. Among them:
   - `audio.hotkey`, `audio.hotkey_mode`, `stt.endpoint_silence_ms`
@@ -125,9 +124,10 @@ banshee config set feedback.mode none
 
 ## Pronouncing unknown words
 
-- **Install `espeak-ng`** and Banshee pronounces unfamiliar words, such as tech
-  jargon and proper nouns.
-- **Without it** Banshee spells those words out letter by letter.
+- **Install `espeak-ng`** and a Kokoro voice pronounces unfamiliar words, such
+  as tech jargon and proper nouns.
+- **Without it** a Kokoro voice spells those words out letter by letter.
+- **The companion voice does not use it.**
 - **On macOS** that is `brew install espeak-ng`.
 - **`banshee status`** prints the command for your system.
 
@@ -138,18 +138,26 @@ with `*`:
 
 ```
 $ banshee voices
+* Companion  Pocket TTS by Kyutai, CC-BY-4.0  (companion)
   Heart  American, soft  (af_heart)
-* Sky  American, clear  (af_sky)
+  Sky  American, clear  (af_sky)
   Adam  American, low  (am_adam)
-  Santa  American, deep  (am_santa)
 
 Speak with one by: banshee config set tts.voice "<id>"
 ```
 
 - **It lists only what is downloaded,** so every name it prints works today.
-- **Nothing is marked when Kokoro did not load.** The system fallback speaks in
-  whatever voice macOS is set to, which Banshee did not choose.
-- **`voice` takes any file** in the [Kokoro voices
+- **The default is `companion`,** a synthetic voice made for Banshee. It runs
+  on Pocket TTS by Kyutai, CC-BY-4.0.
+- **Its files are about 400 MB.** They land in
+  `~/.banshee/models/pocket-english_2026-04/` when `banshee setup` or the
+  window's Get button fetches them.
+- **Speech plays at 1x.** No setting changes the rate.
+- **Nothing is marked when the voice did not load.** The daemon stays up and
+  silent, `speak` fails and names `banshee setup`, and `banshee status` says
+  why. Once the files arrive, the next reply loads the voice with no restart.
+- **A Kokoro voice needs two files:** Kokoro's engine file and the voice's own.
+- **Any other `voice` takes a file** in the [Kokoro voices
   directory](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/voices),
   for example `af_bella`, `am_michael`, or `bf_emma`.
 - **The prefix is accent and gender:** `a`merican/`b`ritish, `f`emale/`m`ale.
@@ -239,11 +247,7 @@ The `preset` picks which Whisper model Banshee uses:
 - **The default `tts-1` ignores it.** A server may also refuse the whole request
   over the field: Groq answers ``unknown field `instructions` in request body``.
 - **Leave `instructions` empty** unless the model you name reads it.
-- **`tts.speed` still applies, and it stays live.** A write reaches the server
-  on the next reply.
-- **At 1.0, Banshee leaves `speed` out of the request.** 1.0 is the API's
-  default, and some servers refuse any request that names a speed their model
-  can't apply.
+- **The request carries no `speed` field.** Speech plays at 1x.
 - **`banshee config set tts.remote.api_key`** asks for the key by itself.
 - **`banshee config set tts.remote.voice marin`** names the voice.
 - **`response_format` is what the server is asked to send.** The default is
@@ -273,19 +277,21 @@ The `preset` picks which Whisper model Banshee uses:
 - **Under `pcm`, the bytes play as samples whatever they look like.** A server
   that sent another format under a type that names none would play as noise.
   None of the servers tested so far does.
-- **With `fallback = "system"`,** an utterance the server refuses plays the
-  error tone, and the system voice says it instead.
+- **With `fallback = "local"`,** the default, an utterance the server refuses
+  before its reply starts plays the error tone, and the local voice named by
+  `tts.voice` says it instead.
 - You still hear an agent's question.
-- **That voice is `say` on macOS and `espeak-ng` on Linux.** Without `espeak-ng`
-  installed, the fallback does not start, and the reason names the install
-  command.
-- **With `fallback = "none"`** the tone plays and Banshee says nothing.
+- **The local voice loads on first use.** If its files are missing, the fallback
+  stays silent, and the reason names `banshee setup`.
+- **With `fallback = "none"`** the tone plays and Banshee says nothing. A remote
+  speaker then downloads no local voice.
+- **`fallback = "system"` is refused by name.** Change it to `local` or `none`.
 - **A question asked through `ask_user`** still opens the microphone after it,
   so you hear the tone and then silence while Banshee waits for your answer.
 - **Either way three places say why:** `banshee status`, the status reply's
   `last_speech_error` and the window's Voice panel.
 - **A reply that fails after its first words ends where it stopped.** A restart
-  in the system voice mid-sentence is worse than a stop.
+  in another voice mid-sentence is worse than a stop.
 - **A speaker that will not start never stops the daemon,** so dictation goes
   on.
 

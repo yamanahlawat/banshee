@@ -5,17 +5,18 @@ pub mod remote;
 pub mod sanitizer;
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::path::Path;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread;
 use std::time::Duration;
 
-use banshee_common::{KokoroTTSConfig, error::BansheeError};
+use banshee_common::error::BansheeError;
 use tokio::sync::watch;
 
 use crate::audio::cues::{Cues, Reason, ReasonCode, Signal};
 use crate::config::{Provider, TTSConfig, TTSFallback};
-use local::kokoro::{KokoroBackend, KokoroEngine};
-use local::say::SayBackend;
+use local::{Engine, OnFirstUse, local_backend, local_on_first_use};
 use output::Output;
 use remote::openai_compatible::RemoteSpeechBackend;
 
@@ -32,7 +33,10 @@ pub enum Fault {
     /// The speaker `[tts]` names failed before its first sample, and the
     /// fallback voice took the sentence. The reason is that speaker's.
     SpokenByFallback(String),
+    /// An utterance played its first sample.
     Played,
+    /// The local voice `[tts]` names loaded after the daemon started.
+    Loaded,
 }
 
 impl Fault {
@@ -46,13 +50,49 @@ impl Fault {
                 log::Level::Warn,
                 format!("the fallback voice took over the reply: {reason}"),
             )),
-            Fault::Played => None,
+            Fault::Played | Fault::Loaded => None,
         }
     }
 
     pub fn log(&self) {
         if let Some((level, line)) = self.log_line() {
             log::log!(level, "{line}");
+        }
+    }
+}
+
+/// The fault channel as one speaker holds it. The voice standing in for a
+/// remote speaker reports what fails and nothing else, so its playing clears no
+/// reason the remote speaker left and its load does not start that speaker.
+#[derive(Clone)]
+pub struct Faults {
+    sender: Sender<Fault>,
+    reports_progress: bool,
+}
+
+impl Faults {
+    pub fn new(sender: Sender<Fault>) -> Self {
+        Self {
+            sender,
+            reports_progress: true,
+        }
+    }
+
+    pub(crate) fn standing_in(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            reports_progress: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reports_progress(&self) -> bool {
+        self.reports_progress
+    }
+
+    pub fn send(&self, fault: Fault) {
+        if self.reports_progress || !matches!(fault, Fault::Played | Fault::Loaded) {
+            let _ = self.sender.send(fault);
         }
     }
 }
@@ -64,17 +104,19 @@ pub fn drain_faults(
     cues: Cues,
     faults: std::sync::mpsc::Receiver<Fault>,
 ) {
+    let failed = |reason: String| {
+        cues.emit(Signal::Error {
+            reason: Reason::new(ReasonCode::SpeechFailed, None),
+            target: None,
+        });
+        state.set_last_speech_error(Some(reason));
+    };
     for fault in faults {
         fault.log();
         match fault {
             Fault::Played => state.set_last_speech_error(None),
-            Fault::Failed(reason) | Fault::SpokenByFallback(reason) => {
-                cues.emit(Signal::Error {
-                    reason: Reason::new(ReasonCode::SpeechFailed, None),
-                    target: None,
-                });
-                state.set_last_speech_error(Some(reason));
-            }
+            Fault::Loaded => state.set_speaker_started(true),
+            Fault::Failed(reason) | Fault::SpokenByFallback(reason) => failed(reason),
         }
     }
 }
@@ -89,11 +131,42 @@ pub trait TtsBackend: Send + Sync {
         voice: Option<&str>,
     ) -> Result<Box<dyn ActiveUtterance>, BansheeError>;
 
+    /// `start` for a caller that holds no lock, so a backend that loads on
+    /// first use may load here rather than on a thread of its own.
+    fn start_unlocked(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+        self.start(text, voice)
+    }
+
     /// A live `[tts]` change. Answers the voice utterances now speak in, or
-    /// `None` when the backend cannot honour the change: the system fallback
-    /// speaks in whatever voice the OS is set to and takes no rate.
+    /// `None` when the backend cannot honour the change, as silence cannot.
     fn reconfigure(&self, _tts: &TTSConfig) -> Option<String> {
         None
+    }
+}
+
+impl<T: TtsBackend + ?Sized> TtsBackend for Arc<T> {
+    fn start(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+        (**self).start(text, voice)
+    }
+
+    fn start_unlocked(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+        (**self).start_unlocked(text, voice)
+    }
+
+    fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
+        (**self).reconfigure(tts)
     }
 }
 
@@ -103,8 +176,8 @@ pub trait ActiveUtterance: Send {
 }
 
 /// Which speaker started, said by the branch that built it. `Configured` is the
-/// one `[tts]` asks for, with the voice it speaks in; `Fallback` is the OS voice
-/// or silence, which speaks in whatever the OS is set to and sends no text out.
+/// one `[tts]` asks for, with the voice it speaks in; `Fallback` is a local
+/// voice still to load, or silence behind a remote speaker that did not start.
 pub enum Speaker {
     Configured(String),
     Fallback,
@@ -136,11 +209,13 @@ pub struct Selection {
 /// utterance it could not speak.
 pub fn select_backend(
     tts_config: &TTSConfig,
-    faults: std::sync::mpsc::Sender<Fault>,
+    models: &Path,
+    faults: Sender<Fault>,
     output: Arc<Output>,
-) -> Result<Selection, BansheeError> {
+) -> Selection {
+    let faults = Faults::new(faults);
     match tts_config.provider {
-        Provider::Local => select_local_backend(tts_config, faults, output),
+        Provider::Local => select_local_backend(tts_config, models, faults, output),
         Provider::Remote => {
             // Not propagated: a credentials file that will not parse holds no
             // key the speaker can use, so it takes the path a missing key takes
@@ -150,7 +225,7 @@ pub fn select_backend(
                     .key(crate::credentials::RemoteKey::Tts)
                     .map(str::to_string)
             });
-            select_remote_backend(tts_config, faults, api_key, output)
+            select_remote_backend(tts_config, models, faults, api_key, output)
         }
     }
 }
@@ -158,10 +233,12 @@ pub fn select_backend(
 /// `api_key` is the key, its absence, or the fault that hid it.
 fn select_remote_backend(
     tts_config: &TTSConfig,
-    faults: std::sync::mpsc::Sender<Fault>,
+    models: &Path,
+    faults: Faults,
     api_key: Result<Option<String>, BansheeError>,
     output: Arc<Output>,
-) -> Result<Selection, BansheeError> {
+) -> Selection {
+    let fallback = fallback_for(tts_config, models, Arc::clone(&output), &faults);
     let built = match api_key {
         Err(unreadable) => Err(unreadable),
         Ok(None) => Err(BansheeError::Other(
@@ -170,10 +247,9 @@ fn select_remote_backend(
         Ok(Some(key)) => RemoteSpeechBackend::new(
             &tts_config.remote,
             key,
-            tts_config.speed,
-            fallback_for(tts_config),
+            fallback.clone().map(|f| f as Arc<dyn TtsBackend>),
             output,
-            faults.clone(),
+            faults,
         ),
     };
     match built {
@@ -184,43 +260,54 @@ fn select_remote_backend(
                 tts_config.remote.voice
             );
             let voice = tts_config.remote.voice.clone();
-            Ok(Selection {
+            Selection {
                 backend: Box::new(backend),
                 speaker: Speaker::Configured(voice),
                 fault: None,
-            })
+            }
         }
         // The daemon stays up: a speaker is not the recording pipeline, and an
         // agent's question still has to be heard.
         Err(error) => {
             let reason = error.to_string();
             log::warn!("The remote speaker will not start: {reason}");
-            let backend: Box<dyn TtsBackend> = match tts_config.fallback {
-                TTSFallback::System => Box::new(SayBackend),
-                TTSFallback::None => Box::new(Silent {
+            let backend: Box<dyn TtsBackend> = match fallback {
+                Some(fallback) => Box::new(fallback),
+                None => Box::new(Silent {
                     reason: reason.clone(),
                 }),
             };
-            Ok(Selection {
+            Selection {
                 backend,
                 speaker: Speaker::Fallback,
                 fault: Some(reason),
-            })
+            }
         }
     }
 }
 
 /// What speaks when the server does not. `tts.fallback = "none"` asks for
 /// silence, and silence needs no backend.
-fn fallback_for(tts_config: &TTSConfig) -> Option<Arc<dyn TtsBackend>> {
+fn fallback_for(
+    tts_config: &TTSConfig,
+    models: &Path,
+    output: Arc<Output>,
+    faults: &Faults,
+) -> Option<Arc<OnFirstUse>> {
     match tts_config.fallback {
-        TTSFallback::System => Some(Arc::new(SayBackend)),
+        TTSFallback::Local => Some(Arc::new(local_on_first_use(
+            models,
+            &tts_config.voice,
+            output,
+            faults.standing_in(),
+        ))),
         TTSFallback::None => None,
     }
 }
 
-/// Answers every utterance with the reason there is no speaker, so `speak`
-/// fails with it rather than reporting an utterance nobody will hear.
+/// A remote speaker that did not start, under `tts.fallback = "none"`. Answers
+/// every utterance with the reason, so `speak` fails with it rather than
+/// reporting an utterance nobody will hear.
 struct Silent {
     reason: String,
 }
@@ -235,43 +322,65 @@ impl TtsBackend for Silent {
     }
 }
 
-/// Kokoro, or the OS voice when `tts.fallback` allows it and Kokoro cannot load.
-/// The output opens here rather than in `daemon.rs`: a machine with no output
-/// device has to reach the system voice, not stop the daemon.
+/// The local voice. One that will not load is tried again by each utterance,
+/// whatever `tts.fallback` says: the speaker is not the recording pipeline,
+/// and its files may still be arriving.
 fn select_local_backend(
     tts_config: &TTSConfig,
-    faults: std::sync::mpsc::Sender<Fault>,
+    models: &Path,
+    faults: Faults,
     output: Arc<Output>,
-) -> Result<Selection, BansheeError> {
-    let kokoro_config = KokoroTTSConfig::new(&tts_config.voice);
-    let loaded = KokoroEngine::new(&kokoro_config, tts_config.speed)
-        .map(|engine| KokoroBackend::new(engine, output, faults));
-    match loaded {
+) -> Selection {
+    match local_backend(
+        models,
+        &tts_config.voice,
+        Arc::clone(&output),
+        faults.clone(),
+    ) {
         Ok(backend) => {
-            log::info!("TTS: Kokoro (voice {})", tts_config.voice);
-            Ok(Selection {
-                backend: Box::new(backend),
+            log::info!(
+                "TTS: {} (voice {})",
+                Engine::of(&tts_config.voice).name(),
+                tts_config.voice
+            );
+            Selection {
+                backend,
                 speaker: Speaker::Configured(tts_config.voice.clone()),
                 fault: None,
-            })
-        }
-        Err(e) => match tts_config.fallback {
-            TTSFallback::System => {
-                log::warn!("Kokoro unavailable, falling back to system TTS: {e}");
-                Ok(Selection {
-                    backend: Box::new(SayBackend),
-                    speaker: Speaker::Fallback,
-                    fault: Some(e.to_string()),
-                })
             }
-            TTSFallback::None => Err(e),
-        },
+        }
+        Err(error) => {
+            let reason = error.to_string();
+            log::warn!("The local voice will not load: {reason}");
+            Selection {
+                backend: Box::new(local_on_first_use(
+                    models,
+                    &tts_config.voice,
+                    output,
+                    faults,
+                )),
+                speaker: Speaker::Fallback,
+                fault: Some(reason),
+            }
+        }
     }
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) fn lock_read<T>(value: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    value
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) fn lock_write<T>(value: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    value
+        .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -342,7 +451,7 @@ pub struct SpeechPlayer {
 
 impl SpeechPlayer {
     /// What a live `[tts]` write reaches. An utterance already speaking keeps
-    /// the voice and rate it started with.
+    /// the voice it started with.
     pub fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
         self.backend.reconfigure(tts)
     }
@@ -549,12 +658,6 @@ impl SpeechPlayer {
     }
 }
 
-impl Default for SpeechPlayer {
-    fn default() -> Self {
-        Self::new(Box::new(SayBackend))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,7 +695,7 @@ mod tests {
 
     #[test]
     fn utterance_ids_increment() {
-        let player = Arc::new(SpeechPlayer::default());
+        let player = Arc::new(crate::test_support::quiet_speech());
         assert!(!player.is_speaking());
 
         let first = player.speak("", false, None).unwrap();
@@ -602,7 +705,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_utterances_drain_and_signal_completion() {
-        let player = Arc::new(SpeechPlayer::default());
+        let player = Arc::new(crate::test_support::quiet_speech());
         let mut playing = player.subscribe_playing();
         player.speak("", false, None).unwrap();
         player.speak("", false, None).unwrap();
@@ -613,24 +716,34 @@ mod tests {
             .expect("playing sender dropped");
     }
 
-    #[test]
-    fn a_remote_speaker_with_no_key_falls_back_and_says_why() {
-        let tts = crate::config::TTSConfig {
-            provider: crate::config::Provider::Remote,
+    fn remote_without_a_key(
+        fallback: TTSFallback,
+        api_key: Result<Option<String>, BansheeError>,
+    ) -> Selection {
+        let tts = TTSConfig {
+            provider: Provider::Remote,
             remote: crate::config::RemoteTtsConfig {
                 voice: "marin".to_string(),
                 ..Default::default()
             },
-            fallback: crate::config::TTSFallback::System,
+            fallback,
             ..Default::default()
         };
-        let (faults, _reports) = std::sync::mpsc::channel();
+        select_remote_backend(
+            &tts,
+            &crate::test_support::unique_scratch("remote-models"),
+            Faults::new(std::sync::mpsc::channel().0),
+            api_key,
+            Arc::new(Output::silent()),
+        )
+    }
 
-        let selected =
-            select_remote_backend(&tts, faults, Ok(None), Arc::new(Output::silent())).unwrap();
+    #[test]
+    fn a_remote_speaker_with_no_key_falls_back_and_says_why() {
+        let selected = remote_without_a_key(TTSFallback::Local, Ok(None));
         assert!(
             !selected.speaker.started(),
-            "the system voice is not the speaker the config names"
+            "the local voice is not the speaker the config names"
         );
         let reason = selected.fault.expect("the missing key must be reported");
         assert!(
@@ -641,26 +754,14 @@ mod tests {
 
     #[test]
     fn a_credentials_file_that_will_not_parse_falls_back_and_says_why() {
-        let tts = crate::config::TTSConfig {
-            provider: crate::config::Provider::Remote,
-            remote: crate::config::RemoteTtsConfig {
-                voice: "marin".to_string(),
-                ..Default::default()
-            },
-            fallback: crate::config::TTSFallback::System,
-            ..Default::default()
-        };
-        let (faults, _reports) = std::sync::mpsc::channel();
         let unreadable = Err(BansheeError::Other(
             "/tmp/credentials.toml does not parse; fix it or delete it and set the keys again"
                 .to_string(),
         ));
-
-        let selected =
-            select_remote_backend(&tts, faults, unreadable, Arc::new(Output::silent())).unwrap();
+        let selected = remote_without_a_key(TTSFallback::Local, unreadable);
         assert!(
             !selected.speaker.started(),
-            "the system voice is not the speaker the config names"
+            "the local voice is not the speaker the config names"
         );
         let reason = selected.fault.expect("the parse fault must be reported");
         assert!(reason.contains("does not parse"), "{reason}");
@@ -668,19 +769,7 @@ mod tests {
 
     #[test]
     fn with_no_fallback_every_utterance_fails_with_the_reason() {
-        let tts = crate::config::TTSConfig {
-            provider: crate::config::Provider::Remote,
-            remote: crate::config::RemoteTtsConfig {
-                voice: "marin".to_string(),
-                ..Default::default()
-            },
-            fallback: crate::config::TTSFallback::None,
-            ..Default::default()
-        };
-        let (faults, _reasons) = std::sync::mpsc::channel();
-
-        let selected =
-            select_remote_backend(&tts, faults, Ok(None), Arc::new(Output::silent())).unwrap();
+        let selected = remote_without_a_key(TTSFallback::None, Ok(None));
         let reason = refusal_of(selected.backend.as_ref());
         assert!(
             reason.contains("banshee config set tts.remote.api_key"),
@@ -690,51 +779,69 @@ mod tests {
 
     #[test]
     fn a_remote_speaker_with_no_voice_names_the_voice_key() {
-        let tts = crate::config::TTSConfig {
-            provider: crate::config::Provider::Remote,
-            fallback: crate::config::TTSFallback::None,
+        let tts = TTSConfig {
+            provider: Provider::Remote,
+            fallback: TTSFallback::None,
             ..Default::default()
         };
-        let (faults, _reasons) = std::sync::mpsc::channel();
 
         let selected = select_remote_backend(
             &tts,
-            faults,
+            &crate::test_support::unique_scratch("remote-models"),
+            Faults::new(std::sync::mpsc::channel().0),
             Ok(Some("sk-test".to_string())),
             Arc::new(Output::silent()),
-        )
-        .unwrap();
+        );
         let reason = refusal_of(selected.backend.as_ref());
         assert!(reason.contains("tts.remote.voice"), "{reason}");
     }
 
     #[test]
-    fn a_kokoro_start_failure_falls_back_and_says_why() {
-        let tts = crate::config::TTSConfig {
-            voice: "banshee-test-nonexistent-voice".to_string(),
-            fallback: crate::config::TTSFallback::System,
+    fn the_local_fallback_stands_in_and_the_local_speaker_does_not() {
+        let tts = TTSConfig::default();
+        let models = crate::test_support::companion_models();
+        let faults = Faults::new(std::sync::mpsc::channel().0);
+
+        let fallback = fallback_for(&tts, &models, Arc::new(Output::silent()), &faults)
+            .expect("a local fallback");
+        assert!(!fallback.faults().reports_progress());
+        assert!(faults.reports_progress());
+    }
+
+    /// The companion in an empty models folder, which is a first run before
+    /// `banshee setup` or a download cut short.
+    fn unloadable(fallback: TTSFallback) -> Selection {
+        let tts = TTSConfig {
+            voice: banshee_common::COMPANION_VOICE.to_string(),
+            fallback,
             ..Default::default()
         };
-        let kokoro_config = KokoroTTSConfig::new(&tts.voice);
-        let expected = KokoroEngine::new(&kokoro_config, tts.speed)
-            .err()
-            .expect("a nonexistent voice must not load")
-            .to_string();
-
-        let selected = select_local_backend(
+        select_local_backend(
             &tts,
-            std::sync::mpsc::channel().0,
+            &crate::test_support::unique_scratch("empty-models"),
+            Faults::new(std::sync::mpsc::channel().0),
             Arc::new(Output::silent()),
         )
-        .unwrap();
+    }
+
+    fn refused_with_a_reason(selected: Selection) {
         assert!(
             !selected.speaker.started(),
-            "the system voice is not the speaker the config names"
+            "a voice that did not load is not the speaker the config names"
         );
-        let reason = selected
-            .fault
-            .expect("the Kokoro start failure must be reported");
-        assert_eq!(reason, expected);
+        let reason = selected.fault.expect("the load failure must be reported");
+        assert!(reason.contains("banshee setup"), "{reason}");
+        assert_eq!(refusal_of(selected.backend.as_ref()), reason);
+    }
+
+    #[test]
+    fn a_local_voice_that_will_not_load_keeps_the_daemon_up_with_a_reason() {
+        refused_with_a_reason(unloadable(TTSFallback::Local));
+    }
+
+    #[test]
+    fn none_also_stays_up() {
+        refused_with_a_reason(unloadable(TTSFallback::None));
     }
 
     /// A voice that goes missing between two replies, which `installed` refuses

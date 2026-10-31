@@ -63,6 +63,14 @@ cargo build --release --workspace --exclude banshee-app
 cargo test kokoro -- --ignored
 ```
 
+- The Pocket tests need the companion voice's files, about 400 MB, so they are
+  `#[ignore]`d too. Fetch them into `~/.banshee/models/pocket-english_2026-04/`
+  with `banshee setup`, then run:
+
+```bash
+cargo test pocket -- --ignored
+```
+
 - Before opening a PR, make sure both of these pass:
 
 ```bash
@@ -192,7 +200,7 @@ cargo bench -p banshee --bench speech_out -- g2p
   if yours differs.
 - The `g2p` group runs G2P once per sentence, as the daemon does.
 - The bench uses the daemon's default settings, not your `config.toml`.
-- It prints the voice, the speed, the thread count and whether espeak-ng is present.
+- It prints the voice, the thread count and whether espeak-ng is present.
 - Elements per second divided by 24000 gives the realtime factor.
 - Machine load changes Kokoro timing by a large margin. Compare runs only on an idle machine.
 - These numbers are for the `release` profile. Shipped archives use `dist`, which adds thin LTO.

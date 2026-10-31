@@ -988,7 +988,7 @@ fn remote_speaker(voice: &str) -> crate::config::Config {
 }
 
 // The speaker the daemon built says this, and a voice name says nothing about
-// it: a missing key leaves the config naming a voice and the system voice
+// it: a missing key leaves the config naming a voice and the local voice
 // speaking every reply, and a live `[tts]` write leaves the voice held either
 // way.
 #[test]
@@ -1041,6 +1041,37 @@ async fn list_voices_names_no_current_voice_until_one_is_set_and_then_the_one_he
             .any(|voice| voice["id"] == "af_sky"),
         "the local catalogue stays the list: {result}"
     );
+}
+
+async fn listed_voices(state: &Arc<DaemonState>) -> Vec<serde_json::Value> {
+    let JsonRpcResponse::Success { result, .. } =
+        dispatch(request(BANSHEE_LIST_VOICES, None), state).await
+    else {
+        panic!("expected success response");
+    };
+    result["voices"].as_array().expect("a voices array").clone()
+}
+
+#[tokio::test]
+async fn the_companion_is_downloaded_only_when_all_seven_files_are_there() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let files = crate::models::download::pocket_files();
+    let (last, rest) = files.split_last().unwrap();
+    crate::test_support::write_empty(
+        state.models_dir(),
+        &rest
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>(),
+    );
+
+    let companion = listed_voices(&state).await.remove(0);
+    assert_eq!(companion["id"], banshee_common::COMPANION_VOICE);
+    assert_eq!(companion["downloaded"], false, "{} is missing", last.name);
+
+    crate::test_support::write_empty(state.models_dir(), &[&last.name]);
+    let companion = listed_voices(&state).await.remove(0);
+    assert_eq!(companion["downloaded"], true);
 }
 
 #[test]
@@ -1129,7 +1160,7 @@ async fn a_first_download_writes_the_mode_into_the_daemons_own_config_after_the_
     let state = Arc::new(DaemonState::new(
         Arc::new(crate::config::Config::default()),
         None,
-        crate::text_to_speech::SpeechPlayer::default(),
+        crate::test_support::quiet_speech(),
         crate::text_to_speech::Speaker::Fallback,
         std::sync::mpsc::channel().0,
         crate::audio::cues::Cues::silent(),

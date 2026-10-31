@@ -132,18 +132,6 @@ fn probability<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Err
     Ok(value)
 }
 
-// Below 0.5 an utterance drags, above 2.0 it slurs. The window's slider offers
-// this range, and the file has to refuse what the slider cannot ask for.
-fn rate<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
-    let value = f32::deserialize(deserializer)?;
-    if !(0.5..=2.0).contains(&value) {
-        return Err(serde::de::Error::custom(format!(
-            "must be between 0.5 and 2.0, got {value}"
-        )));
-    }
-    Ok(value)
-}
-
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
@@ -415,10 +403,11 @@ impl Default for STTConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+/// What speaks when a remote speaker does not: the local voice, or nothing.
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TTSFallback {
-    System,
+    Local,
     None,
 }
 
@@ -428,8 +417,6 @@ pub struct TTSConfig {
     pub provider: Provider,
     pub remote: RemoteTtsConfig,
     pub voice: String,
-    #[serde(deserialize_with = "rate")]
-    pub speed: f32,
     pub fallback: TTSFallback,
 }
 
@@ -438,9 +425,8 @@ impl Default for TTSConfig {
         Self {
             provider: Provider::Local,
             remote: RemoteTtsConfig::default(),
-            voice: "af_sky".to_string(),
-            speed: 1.0,
-            fallback: TTSFallback::System,
+            voice: banshee_common::COMPANION_VOICE.to_string(),
+            fallback: TTSFallback::Local,
         }
     }
 }
@@ -910,9 +896,27 @@ mod tests {
     }
 
     #[test]
-    fn a_tts_table_that_names_no_speed_speaks_at_the_api_default() {
-        let config: Config = toml::from_str("[tts]\nvoice = \"af_sky\"\n").unwrap();
-        assert_eq!(config.tts.speed, 1.0);
+    fn a_removed_speed_key_is_refused_by_name() {
+        let error = Config::parse("[tts]\nspeed = 1.2\n").expect_err("tts.speed is gone");
+        assert!(error.to_string().contains("`speed`"), "{error}");
+    }
+
+    #[test]
+    fn the_system_fallback_is_refused_by_name() {
+        let error =
+            Config::parse("[tts]\nfallback = \"system\"\n").expect_err("the system voice is gone");
+        assert!(error.to_string().contains("`system`"), "{error}");
+    }
+
+    #[test]
+    fn the_default_voice_is_the_companion() {
+        assert_eq!(Config::default().tts.voice, banshee_common::COMPANION_VOICE);
+    }
+
+    #[test]
+    fn the_default_fallback_is_local() {
+        let config = Config::parse("[tts]\nprovider = \"remote\"\n").unwrap();
+        assert_eq!(config.tts.fallback, TTSFallback::Local);
     }
 
     #[test]

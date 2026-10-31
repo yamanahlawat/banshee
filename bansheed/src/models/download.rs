@@ -2,12 +2,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use banshee_common::{
-    DownloadProgress, DownloadState, FileRole, KokoroTTSConfig, SileroVADConfig, WhisperConfig,
-    error::BansheeError, utils::models_path,
+    COMPANION_VOICE, DownloadProgress, DownloadState, FileRole, KokoroTTSConfig, POCKET_DIR,
+    SileroVADConfig, WhisperConfig, error::BansheeError, utils::models_path,
 };
 use tokio::io::AsyncWriteExt;
 
-use crate::config::Config;
+use crate::config::{Config, Provider, TTSFallback};
 
 pub fn percent(bytes: u64, total: Option<u64>) -> Option<u64> {
     let total = total?;
@@ -41,7 +41,7 @@ pub struct Download {
     pub url: String,
 }
 
-/// Every preset also pulls these three. Measured on disk on 2026-08-30.
+/// Measured on disk on 2026-08-30.
 const KOKORO_MEGABYTES: u64 = 311;
 const DETECTOR_MEGABYTES: u64 = 2;
 const VOICE_MEGABYTES: u64 = 1;
@@ -55,24 +55,36 @@ fn speech_megabytes(file: &str) -> u64 {
     }
 }
 
-pub fn wanted(config: &Config) -> Vec<Download> {
-    let vad = SileroVADConfig::new(crate::models::VAD_MODEL);
-    let kokoro = KokoroTTSConfig::new(&config.tts.voice);
-    let mut downloads = Vec::with_capacity(4);
-    if let Some(speech) = crate::models::stt_file(config) {
-        let whisper = WhisperConfig::new(speech);
-        downloads.push(Download {
-            megabytes: speech_megabytes(&whisper.model_name),
-            name: whisper.model_name,
-            url: whisper.download_url,
-        });
+/// Pinned to revisions so a repo update cannot silently change the model.
+pub fn pocket_files() -> Vec<Download> {
+    const ONNX_REPO: &str = "https://huggingface.co/KevinAHM/pocket-tts-onnx/resolve/58a6d00cf13d239b6748cb0769f35c580a8f606c/onnx/english_2026-04";
+    const KYUTAI_REPO: &str = "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/a7056f505a4a8ca72d8b5fb1440071d6f1a35739";
+    [
+        (ONNX_REPO, "flow_lm_main.onnx", 303),
+        (ONNX_REPO, "flow_lm_flow.onnx", 40),
+        (ONNX_REPO, "mimi_decoder.onnx", 42),
+        (ONNX_REPO, "text_conditioner.onnx", 17),
+        (ONNX_REPO, "bundle.json", 1),
+        (ONNX_REPO, "bos_before_voice.npy", 1),
+        (KYUTAI_REPO, "tokenizer.json", 1),
+    ]
+    .into_iter()
+    .map(|(repo, file, megabytes)| Download {
+        megabytes,
+        name: format!("{POCKET_DIR}/{file}"),
+        url: format!("{repo}/{file}"),
+    })
+    .collect()
+}
+
+/// Every file a local voice speaks with: Pocket's for the companion, Kokoro and
+/// the voice's own file for any other id.
+pub fn voice_files(voice: &str) -> Vec<Download> {
+    if voice == COMPANION_VOICE {
+        return pocket_files();
     }
-    downloads.extend([
-        Download {
-            megabytes: DETECTOR_MEGABYTES,
-            name: vad.model_name,
-            url: vad.download_url,
-        },
+    let kokoro = KokoroTTSConfig::new(voice);
+    vec![
         Download {
             megabytes: KOKORO_MEGABYTES,
             name: kokoro.model_name,
@@ -83,7 +95,34 @@ pub fn wanted(config: &Config) -> Vec<Download> {
             name: kokoro.voice_name,
             url: kokoro.voice_url,
         },
-    ]);
+    ]
+}
+
+/// The local voice speaks under a local speaker, and under a remote one that
+/// falls back to it.
+fn speaks_locally(config: &Config) -> bool {
+    config.tts.provider == Provider::Local || config.tts.fallback == TTSFallback::Local
+}
+
+pub fn wanted(config: &Config) -> Vec<Download> {
+    let vad = SileroVADConfig::new(crate::models::VAD_MODEL);
+    let mut downloads = Vec::new();
+    if let Some(speech) = crate::models::stt_file(config) {
+        let whisper = WhisperConfig::new(speech);
+        downloads.push(Download {
+            megabytes: speech_megabytes(&whisper.model_name),
+            name: whisper.model_name,
+            url: whisper.download_url,
+        });
+    }
+    downloads.push(Download {
+        megabytes: DETECTOR_MEGABYTES,
+        name: vad.model_name,
+        url: vad.download_url,
+    });
+    if speaks_locally(config) {
+        downloads.extend(voice_files(&config.tts.voice));
+    }
     downloads
 }
 
@@ -124,7 +163,7 @@ pub fn role(file: &str) -> FileRole {
         FileRole::Speech
     } else if file == crate::models::VAD_MODEL {
         FileRole::Detector
-    } else if file == banshee_common::KOKORO_MODEL {
+    } else if file == banshee_common::KOKORO_MODEL || Path::new(file).starts_with(POCKET_DIR) {
         FileRole::Engine
     } else {
         FileRole::Voice
@@ -184,6 +223,9 @@ async fn fetch(
     on_progress: &mut impl FnMut(DownloadProgress),
 ) -> Result<(), BansheeError> {
     let part = dir.join(format!("{}.part", download.name));
+    if let Some(folder) = part.parent() {
+        tokio::fs::create_dir_all(folder).await?;
+    }
     let partial = tokio::fs::metadata(&part)
         .await
         .map(|meta| meta.len())
@@ -339,6 +381,61 @@ mod size_tests {
             speech.megabytes,
             pending_megabytes(&wanted(&config), dir)
         );
+    }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::{pocket_files, role, wanted};
+    use crate::config::{Config, Provider, TTSFallback};
+    use banshee_common::{FileRole, KOKORO_MODEL};
+
+    fn names(config: &Config) -> Vec<String> {
+        wanted(config).into_iter().map(|d| d.name).collect()
+    }
+
+    fn pocket_names() -> Vec<String> {
+        pocket_files().into_iter().map(|file| file.name).collect()
+    }
+
+    fn speaker_files(config: &Config) -> Vec<String> {
+        names(config)
+            .into_iter()
+            .filter(|name| matches!(role(name), FileRole::Engine | FileRole::Voice))
+            .collect()
+    }
+
+    #[test]
+    fn a_companion_config_wants_the_seven_pocket_files() {
+        let config = Config::default();
+        assert_eq!(speaker_files(&config), pocket_names());
+        assert_eq!(pocket_names().len(), 7);
+        for name in pocket_names() {
+            assert_eq!(role(&name), FileRole::Engine, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_kokoro_voice_wants_kokoro_and_its_voice() {
+        let mut config = Config::default();
+        config.tts.voice = "am_adam".to_string();
+        assert_eq!(speaker_files(&config), [KOKORO_MODEL, "am_adam.bin"]);
+    }
+
+    #[test]
+    fn a_remote_speaker_with_no_fallback_wants_no_voice() {
+        let mut config = Config::default();
+        config.tts.provider = Provider::Remote;
+        config.tts.fallback = TTSFallback::None;
+        assert_eq!(speaker_files(&config), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_remote_speaker_with_a_local_fallback_wants_the_local_voice() {
+        let mut config = Config::default();
+        config.tts.provider = Provider::Remote;
+        config.tts.fallback = TTSFallback::Local;
+        assert_eq!(speaker_files(&config), pocket_names());
     }
 }
 

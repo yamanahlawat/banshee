@@ -28,10 +28,19 @@ fn show_progress(progress: banshee_common::DownloadProgress) {
 
 // One writer at a time: the `.part` file that makes resume possible has a
 // stable name, so this process must not fetch alongside a daemon already doing it
-/// What `setup` says once files arrive through a running daemon: its pipeline
-/// was built without them, so only a restart loads them.
-fn restart_note(fetched: usize) -> Option<&'static str> {
-    (fetched > 0).then_some("Restart Banshee to use what just arrived: banshee start")
+/// What `setup` says once files arrive through a running daemon. The listening
+/// pipeline was built without them, so a model or detector waits for a
+/// restart; a voice loads on the next reply.
+fn restart_note(arrived: &[&str]) -> Option<&'static str> {
+    arrived
+        .iter()
+        .any(|name| {
+            matches!(
+                crate::models::download::role(name),
+                banshee_common::FileRole::Speech | banshee_common::FileRole::Detector
+            )
+        })
+        .then_some("Restart Banshee to use what just arrived: banshee start")
 }
 
 async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(), BansheeError> {
@@ -42,16 +51,22 @@ async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(),
     .await?;
     // The counter terminates because only one download runs at a time, so every
     // notification on this connection belongs to the batch just asked for
-    let mut pending: usize = reply
+    let asked: Vec<String> = reply
         .get("downloading")
         .and_then(|names| names.as_array())
-        .map_or(0, Vec::len);
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut pending = asked.len();
     if pending == 0 {
         println!("Everything is already downloaded.");
         return Ok(());
     }
 
-    let asked = pending;
     let mut failed = Vec::new();
     while pending > 0 {
         let Some(params) = progress
@@ -67,7 +82,12 @@ async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(),
         show_progress(reported);
     }
     downloads_settled(&failed)?;
-    if let Some(note) = restart_note(asked - failed.len()) {
+    let arrived: Vec<&str> = asked
+        .iter()
+        .filter(|name| !failed.contains(*name))
+        .map(String::as_str)
+        .collect();
+    if let Some(note) = restart_note(&arrived) {
         println!("{note}");
     }
     Ok(())
@@ -280,13 +300,10 @@ pub async fn voices() -> Result<(), BansheeError> {
                 .and_then(|voice| voice.as_str())
                 .map(str::to_string),
         ),
-        // A voice gets chosen before there is a daemon to ask. These
-        // came off the disk, so every one of them is here.
+        // A voice gets chosen before there is a daemon to ask, so the
+        // models folder answers.
         Err(error) if daemon_is_down(&error) => (
-            models::installed_voices()
-                .iter()
-                .map(|id| text_to_speech::local::voices::describe(id, true))
-                .collect(),
+            text_to_speech::local::voices::listed(&models::download::models_dir()?),
             None,
         ),
         Err(error) => return Err(error),

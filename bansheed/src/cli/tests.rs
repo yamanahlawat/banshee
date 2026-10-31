@@ -324,17 +324,27 @@ fn a_missing_model_is_named_beside_the_command_that_fetches_it() {
 }
 
 #[test]
-fn a_file_that_arrived_through_a_running_daemon_names_the_restart() {
-    let note = super::restart_note(1).expect("a file that arrived has something to say");
+fn a_model_that_arrived_through_a_running_daemon_names_the_restart() {
+    let whisper = crate::config::STTPreset::ALL[0].model_name();
+    let note = super::restart_note(&[whisper]).expect("a speech model loads only at start");
     assert!(
         note.contains("banshee start"),
         "the line must name the command that reloads: {note}"
     );
-    assert_eq!(
-        super::restart_note(0),
-        None,
-        "a run that fetched nothing asks for no restart"
-    );
+    assert!(super::restart_note(&[crate::models::VAD_MODEL]).is_some());
+    assert_eq!(super::restart_note(&[]), None, "nothing arrived");
+}
+
+#[test]
+fn a_voice_that_arrived_asks_for_no_restart() {
+    let companion: Vec<String> =
+        crate::models::download::voice_files(banshee_common::COMPANION_VOICE)
+            .into_iter()
+            .map(|file| file.name)
+            .collect();
+    let names: Vec<&str> = companion.iter().map(String::as_str).collect();
+    assert_eq!(super::restart_note(&names), None, "the next reply loads it");
+    assert_eq!(super::restart_note(&["af_sky.bin"]), None);
 }
 
 // Both halves of what an orphaned socket answers with: nothing at all, and a
