@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
+import { tick } from 'svelte';
 import remote from '../mocks/remote.json';
 
 vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTauri());
@@ -9,6 +10,7 @@ import {
   daemon,
   empty,
   listeningFacts,
+  reduceLive,
   reduceStatus,
   waitsOnARestart,
   type ListeningModel,
@@ -579,4 +581,112 @@ it('sends one download however fast the button is pressed', async () => {
 
   expect(vi.mocked(downloadModels)).toHaveBeenCalledTimes(1);
   expect((fetch as HTMLButtonElement).disabled).toBe(true);
+});
+
+// Capture opens and closes once per use, and the device stays named between
+// uses, so a push that moves only the open flag lists nothing again.
+it('lists the devices once, however often the microphone opens and closes', async () => {
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  await waitFor(() => expect(vi.mocked(listDevices)).toHaveBeenCalledTimes(1));
+
+  // Each push lands in a tick of its own, as the daemon's pushes do.
+  for (let use = 0; use < 3; use++) {
+    daemon.update((s) => reduceLive(s, { microphone_open: true, recording: true }));
+    await tick();
+    daemon.update((s) => reduceLive(s, { microphone_open: false, recording: false }));
+    await tick();
+  }
+  expect(vi.mocked(listDevices)).toHaveBeenCalledTimes(1);
+
+  daemon.update((s) => reduceLive(s, { audio_device: 'OnePlus Buds 3' }));
+  await waitFor(() => expect(vi.mocked(listDevices)).toHaveBeenCalledTimes(2));
+});
+
+it('keeps the microphone and memory settings under More, closed until asked', async () => {
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  const more = screen.getByRole('button', { name: 'More listening settings' });
+  expect(more.textContent?.trim()).toBe('More');
+  expect(more.getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByRole('radiogroup', { name: 'Microphone' })).toBeNull();
+
+  await fireEvent.click(more);
+  expect(more.getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByRole('radiogroup', { name: 'Microphone' })).toBeTruthy();
+  expect(screen.getByRole('combobox', { name: 'Free memory' })).toBeTruthy();
+});
+
+it('offers the microphone held open, off by default, and says what each choice does', async () => {
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  await fireEvent.click(screen.getByRole('button', { name: 'More listening settings' }));
+
+  const group = screen.getByRole('radiogroup', { name: 'Microphone' });
+  expect(screen.getByRole('radio', { name: 'When you speak' }).getAttribute('aria-checked')).toBe(
+    'true',
+  );
+  expect(group.getAttribute('aria-describedby')).toBe('microphone-opens-note');
+  expect(document.getElementById('microphone-opens-note')?.textContent).toBe(
+    'Banshee opens the microphone when you speak and closes it right after.',
+  );
+
+  await fireEvent.click(screen.getByRole('radio', { name: 'Always' }));
+  expect(vi.mocked(setSetting)).toHaveBeenCalledWith('audio.keep_open', true);
+
+  daemon.set(
+    reduceStatus(empty(), {
+      ...localStatus,
+      config: {
+        ...localStatus.config,
+        audio: { ...(localStatus.config?.audio ?? {}), keep_open: true },
+      },
+    }),
+  );
+  await waitFor(() =>
+    expect(document.getElementById('microphone-opens-note')?.textContent).toBe(
+      'The microphone stays open, so recording starts at once. The system shows the microphone in use, and a Bluetooth headset plays at phone-call quality.',
+    ),
+  );
+  expect(screen.getByRole('radio', { name: 'Always' }).getAttribute('aria-checked')).toBe('true');
+});
+
+it('offers Never and the idle times Handy offers for freeing memory', async () => {
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(MicrophonePanel);
+  await fireEvent.click(screen.getByRole('button', { name: 'More listening settings' }));
+
+  const picker = screen.getByRole('combobox', { name: 'Free memory' }) as HTMLSelectElement;
+  expect([...picker.options].map((one) => one.textContent)).toEqual([
+    'Never',
+    'After 2 minutes idle',
+    'After 5 minutes idle',
+    'After 10 minutes idle',
+    'After 15 minutes idle',
+    'After 1 hour idle',
+  ]);
+  expect(picker.value).toBe('5');
+  expect(
+    screen.getByText(
+      'The listening model and the voice leave memory when Banshee has been idle this long. The next use loads them again.',
+    ),
+  ).toBeTruthy();
+
+  await fireEvent.change(picker, { target: { value: '0' } });
+  expect(vi.mocked(setSetting)).toHaveBeenCalledWith('models.unload_after', 0);
+});
+
+it('keeps a hand-edited idle time among the choices', async () => {
+  daemon.set(
+    reduceStatus(empty(), {
+      ...localStatus,
+      config: { ...localStatus.config, models: { unload_after: 30 } },
+    }),
+  );
+  render(MicrophonePanel);
+  await fireEvent.click(screen.getByRole('button', { name: 'More listening settings' }));
+
+  const picker = screen.getByRole('combobox', { name: 'Free memory' }) as HTMLSelectElement;
+  expect(picker.value).toBe('30');
+  expect(picker.options[0].textContent).toBe('After 30 minutes idle');
 });

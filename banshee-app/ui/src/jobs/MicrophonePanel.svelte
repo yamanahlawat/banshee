@@ -57,6 +57,15 @@
     { value: 'local', label: 'On this machine' },
     { value: 'remote', label: 'A transcription server' },
   ];
+  const OPENS = [
+    { value: 'use', label: 'When you speak' },
+    { value: 'always', label: 'Always' },
+  ];
+  // `models.unload_after` counts whole minutes and 0 is never, so no choice
+  // unloads at the end of a use.
+  const UNLOAD = [0, 2, 5, 10, 15, 60];
+  const MORE = 'microphone-more';
+  let more = false;
   let devices: Devices = { devices: [], current: null };
   let adding = false;
   let field: HTMLInputElement | undefined;
@@ -164,6 +173,25 @@
   // `endpoint_silence_ms` is a plain u64 in the daemon, so a hand-edited config
   // can hold a value none of these offer.
   $: offered = QUIET.includes(silence) ? QUIET : [silence, ...QUIET];
+
+  $: audio = ($daemon.status?.config?.audio ?? {}) as Record<string, unknown>;
+  $: keepOpen = audio.keep_open === true;
+  $: openNote = keepOpen
+    ? 'The microphone stays open, so recording starts at once. The system shows the microphone in use, and a Bluetooth headset plays at phone-call quality.'
+    : 'Banshee opens the microphone when you speak and closes it right after.';
+  $: unloadAfter = Number($daemon.status?.config?.models?.unload_after ?? 5);
+  // A hand-edited config can hold a value none of these offer.
+  $: unloadOffered = UNLOAD.includes(unloadAfter) ? UNLOAD : [unloadAfter, ...UNLOAD];
+  $: unloadNote =
+    unloadAfter === 0
+      ? 'The listening model and the voice stay in memory.'
+      : 'The listening model and the voice leave memory when Banshee has been idle this long. The next use loads them again.';
+
+  function idleFor(minutes: number): string {
+    if (minutes === 0) return 'Never';
+    if (minutes === 60) return 'After 1 hour idle';
+    return `After ${minutes} minute${minutes === 1 ? '' : 's'} idle`;
+  }
 
   function quietFor(ms: number): string {
     return `After ${ms / 1000} second${ms === 1000 ? '' : 's'} of quiet`;
@@ -352,6 +380,62 @@
   </div>
 </Row>
 
+<button
+  class="caps btn-underline more"
+  aria-label="More listening settings"
+  aria-expanded={more}
+  aria-controls={MORE}
+  on:click={() => (more = !more)}
+>
+  More
+  <svg width="11" height="7" viewBox="0 0 11 7" aria-hidden="true" focusable="false">
+    <path
+      d="M1 1.5 L5.5 5.5 L10 1.5"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+  </svg>
+</button>
+
+<div id={MORE}>
+  {#if more}
+    <Row
+      name="Microphone"
+      note={openNote}
+      noteId="microphone-opens-note"
+      pending={$daemon.pending.has('audio.keep_open')}
+    >
+      <Segmented
+        label="Microphone"
+        value={keepOpen ? 'always' : 'use'}
+        options={OPENS}
+        describedBy="microphone-opens-note"
+        change={(next) => write('audio.keep_open', next === 'always')}
+      />
+    </Row>
+
+    <Row
+      name="Free memory"
+      block
+      note={unloadNote}
+      pending={$daemon.pending.has('models.unload_after')}
+    >
+      <Picker
+        label="Free memory"
+        value={String(unloadAfter)}
+        change={(next) => write('models.unload_after', Number(next))}
+      >
+        {#each unloadOffered as minutes (minutes)}
+          <option value={String(minutes)}>{idleFor(minutes)}</option>
+        {/each}
+      </Picker>
+    </Row>
+  {/if}
+</div>
+
 <style>
   /* Under the sentence that explains it, aligned with the control it acts for. */
   .fetch,
@@ -445,5 +529,28 @@
   .add {
     background: transparent;
     width: 110px;
+  }
+
+  .more {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--ink);
+    margin-bottom: 22px;
+  }
+
+  .more svg {
+    transition: transform 120ms ease-out;
+  }
+
+  /* The chevron points where the rows went. */
+  .more[aria-expanded='true'] svg {
+    transform: rotate(180deg);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .more svg {
+      transition: none;
+    }
   }
 </style>

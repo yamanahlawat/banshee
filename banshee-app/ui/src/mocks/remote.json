@@ -13,6 +13,8 @@
   "vad_model": "silero_vad.onnx",
   "audio_device": "MacBook Pro Microphone",
   "missing_device": null,
+  "microphone_open": false,
+  "microphone_refused": false,
   "recording": false,
   "armed": false,
   "transcribing": false,
@@ -169,6 +171,7 @@
       "hotkey": "RightCommand",
       "hotkey_mode": "toggle",
       "barge_in": "stop",
+      "keep_open": false,
       "cues": {
         "enabled": true
       }
@@ -213,6 +216,9 @@
       },
       "voice": "af_sky",
       "fallback": "local"
+    },
+    "models": {
+      "unload_after": 5
     }
   },
   "pending": [],

@@ -9,14 +9,14 @@ use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use banshee_common::error::BansheeError;
 use tokio::sync::watch;
 
 use crate::audio::cues::{Cues, Reason, ReasonCode, Signal};
 use crate::config::{Provider, TTSConfig, TTSFallback};
-use local::{Engine, OnFirstUse, local_backend, local_on_first_use};
+use local::{Engine, OnDemand, local_backend, local_on_demand};
 use output::Output;
 use remote::openai_compatible::RemoteSpeechBackend;
 
@@ -35,7 +35,8 @@ pub enum Fault {
     SpokenByFallback(String),
     /// An utterance played its first sample.
     Played,
-    /// The local voice `[tts]` names loaded after the daemon started.
+    /// The local voice `[tts]` names loaded after the daemon started, or
+    /// again after it idled out.
     Loaded,
 }
 
@@ -146,6 +147,12 @@ pub trait TtsBackend: Send + Sync {
     fn reconfigure(&self, _tts: &TTSConfig) -> Option<String> {
         None
     }
+
+    /// Takes the local voice out of memory, and hands it over so the caller
+    /// drops it outside any lock. `None` when no voice is loaded.
+    fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
+        None
+    }
 }
 
 impl<T: TtsBackend + ?Sized> TtsBackend for Arc<T> {
@@ -167,6 +174,10 @@ impl<T: TtsBackend + ?Sized> TtsBackend for Arc<T> {
 
     fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
         (**self).reconfigure(tts)
+    }
+
+    fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
+        (**self).unload()
     }
 }
 
@@ -293,9 +304,9 @@ fn fallback_for(
     models: &Path,
     output: Arc<Output>,
     faults: &Faults,
-) -> Option<Arc<OnFirstUse>> {
+) -> Option<Arc<OnDemand>> {
     match tts_config.fallback {
-        TTSFallback::Local => Some(Arc::new(local_on_first_use(
+        TTSFallback::Local => Some(Arc::new(local_on_demand(
             models,
             &tts_config.voice,
             output,
@@ -322,7 +333,8 @@ impl TtsBackend for Silent {
     }
 }
 
-/// The local voice. One that will not load is tried again by each utterance,
+/// The local voice, loaded at start and again by the first utterance after
+/// it idles out. One that will not load is tried again by each utterance,
 /// whatever `tts.fallback` says: the speaker is not the recording pipeline,
 /// and its files may still be arriving.
 fn select_local_backend(
@@ -331,12 +343,13 @@ fn select_local_backend(
     faults: Faults,
     output: Arc<Output>,
 ) -> Selection {
-    match local_backend(
+    let voice = local_on_demand(
         models,
         &tts_config.voice,
         Arc::clone(&output),
         faults.clone(),
-    ) {
+    );
+    match local_backend(models, &tts_config.voice, output, faults) {
         Ok(backend) => {
             log::info!(
                 "TTS: {} (voice {})",
@@ -344,7 +357,7 @@ fn select_local_backend(
                 tts_config.voice
             );
             Selection {
-                backend,
+                backend: Box::new(voice.holding(backend)),
                 speaker: Speaker::Configured(tts_config.voice.clone()),
                 fault: None,
             }
@@ -353,17 +366,28 @@ fn select_local_backend(
             let reason = error.to_string();
             log::warn!("The local voice will not load: {reason}");
             Selection {
-                backend: Box::new(local_on_first_use(
-                    models,
-                    &tts_config.voice,
-                    output,
-                    faults,
-                )),
+                backend: Box::new(voice),
                 speaker: Speaker::Fallback,
                 fault: Some(reason),
             }
         }
     }
+}
+
+/// Frees the voice once it idles past `models.unload_after`, on a thread of
+/// its own: every thread that speaks shares the voice, so none of them owns
+/// it. The caller hands the thread to the state, which wakes it when the
+/// limit moves.
+pub fn unload_when_idle(state: Arc<crate::state::DaemonState>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        loop {
+            let now = Instant::now();
+            match state.speech().unload_idle(now, state.unload_after()) {
+                Some(due) => thread::park_timeout(due.saturating_duration_since(now)),
+                None => thread::park(),
+            }
+        }
+    })
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -414,21 +438,30 @@ struct Playback {
     queue: VecDeque<Line>,
     watcher_running: bool,
     hold: Hold,
+    /// When an utterance last began or ended, which the voice's idle unload
+    /// counts from.
+    used: Instant,
 }
 
 impl Playback {
     fn stop_active(&mut self) {
         if let Some(mut active) = self.active.take() {
             active.utterance.stop();
+            self.used = Instant::now();
         }
     }
 
     fn begin(&mut self, utterance_id: u64, utterance: Box<dyn ActiveUtterance>) {
         self.last_started = utterance_id;
+        self.used = Instant::now();
         self.active = Some(Active {
             utterance_id,
             utterance,
         });
+    }
+
+    fn busy(&self) -> bool {
+        self.active.is_some() || !self.queue.is_empty()
     }
 
     fn drop_unheld(&mut self) {
@@ -453,7 +486,33 @@ impl SpeechPlayer {
     /// What a live `[tts]` write reaches. An utterance already speaking keeps
     /// the voice it started with.
     pub fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
+        self.lock().used = Instant::now();
         self.backend.reconfigure(tts)
+    }
+
+    /// Frees the voice once nothing has played for `limit`, and answers when
+    /// to look again: `None` when the voice stays loaded. The voice leaves
+    /// under the playback lock, so no utterance starts on it as it goes, and
+    /// drops after the lock, so a stop never waits on the drop.
+    pub fn unload_idle(&self, now: Instant, limit: Option<Duration>) -> Option<Instant> {
+        let freed = {
+            let mut playback = self.lock();
+            if playback.busy() {
+                return crate::models::unload_due(now, limit);
+            }
+            let due = crate::models::unload_due(playback.used, limit)?;
+            if now < due {
+                return Some(due);
+            }
+            playback.used = now;
+            self.backend.unload()
+        };
+        if let Some(voice) = freed {
+            drop(voice);
+            crate::models::return_freed_memory();
+            log::info!("The voice unloaded after it idled");
+        }
+        crate::models::unload_due(now, limit)
     }
 
     pub fn new(backend: Box<dyn TtsBackend>) -> Self {
@@ -466,6 +525,7 @@ impl SpeechPlayer {
                 queue: VecDeque::new(),
                 watcher_running: false,
                 hold: Hold(None),
+                used: Instant::now(),
             }),
             playing: watch::channel(None).0,
         }
@@ -608,6 +668,7 @@ impl SpeechPlayer {
                 continue;
             }
             playback.active = None;
+            playback.used = Instant::now();
             let next = self.start_next(&mut playback);
             self.publish(&playback);
             if !next {
@@ -692,6 +753,93 @@ mod tests {
             ))
         );
         assert_eq!(Fault::Played.log_line(), None);
+    }
+
+    /// A voice whose replies run until they are stopped, counting each time
+    /// it is freed.
+    struct Freed(Arc<Mutex<usize>>);
+
+    struct Endless;
+
+    impl ActiveUtterance for Endless {
+        fn is_finished(&mut self) -> bool {
+            false
+        }
+        fn stop(&mut self) {}
+    }
+
+    impl TtsBackend for Freed {
+        fn start(
+            &self,
+            _text: &str,
+            _voice: Option<&str>,
+        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+            Ok(Box::new(Endless))
+        }
+
+        fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
+            *lock(&self.0) += 1;
+            Some(Arc::new(Silent {
+                reason: String::new(),
+            }))
+        }
+    }
+
+    const LIMIT: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn the_voice_unloads_once_nothing_has_played_for_the_limit_and_not_before() {
+        let unloads = Arc::new(Mutex::new(0));
+        let before = Instant::now();
+        let player = SpeechPlayer::new(Box::new(Freed(Arc::clone(&unloads))));
+        let after = Instant::now();
+        let returns = crate::models::returns_on_this_thread();
+
+        assert_eq!(
+            player.unload_idle(after + LIMIT, None),
+            None,
+            "zero keeps it"
+        );
+        assert!(
+            player
+                .unload_idle(before + LIMIT - Duration::from_millis(1), Some(LIMIT))
+                .is_some()
+        );
+        assert_eq!(*lock(&unloads), 0);
+        assert_eq!(crate::models::returns_on_this_thread(), returns);
+
+        assert_eq!(
+            player.unload_idle(after + LIMIT, Some(LIMIT)),
+            Some(after + LIMIT + LIMIT)
+        );
+        assert_eq!(*lock(&unloads), 1);
+        assert_eq!(
+            crate::models::returns_on_this_thread(),
+            returns + 1,
+            "the freed memory goes back to the system"
+        );
+    }
+
+    #[test]
+    fn a_voice_that_is_speaking_never_unloads_and_its_idle_wait_starts_when_it_stops() {
+        let unloads = Arc::new(Mutex::new(0));
+        let player = Arc::new(SpeechPlayer::new(Box::new(Freed(Arc::clone(&unloads)))));
+        player.speak("a long reply", false, None).unwrap();
+
+        assert!(
+            player
+                .unload_idle(Instant::now() + LIMIT + LIMIT, Some(LIMIT))
+                .is_some()
+        );
+        assert_eq!(*lock(&unloads), 0, "mid-reply");
+
+        let stopping = Instant::now();
+        player.stop();
+        let stopped = Instant::now();
+        player.unload_idle(stopping + LIMIT - Duration::from_nanos(1), Some(LIMIT));
+        assert_eq!(*lock(&unloads), 0, "the wait counts from the stop");
+        player.unload_idle(stopped + LIMIT, Some(LIMIT));
+        assert_eq!(*lock(&unloads), 1);
     }
 
     #[test]

@@ -1,4 +1,8 @@
 use super::*;
+use crate::audio::cues::{Cue, Cues};
+use crate::hotkey::{Capture, CaptureSource};
+use crate::state::{Pipeline, RecordingMode};
+use crate::test_support::{Bench, BenchCall};
 
 struct Tick {
     name: &'static str,
@@ -260,7 +264,7 @@ fn the_tick_decides_whether_to_wait() {
 }
 
 fn test_state() -> Arc<DaemonState> {
-    crate::test_support::daemon_state(mpsc::channel().0)
+    crate::test_support::daemon_state(std::sync::mpsc::channel().0)
 }
 
 // A substitution satisfies no setting, so a corrected setting reaches the
@@ -301,7 +305,7 @@ fn a_reverted_setting_still_clears_the_recording_error() {
     ));
 
     // A fault from an earlier attempt must not outlive this one
-    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
+    state.set_mic(crate::state::Mic::Faulted(RecordingError::Microphone(
         "gone".to_string(),
     )));
     // The corrected setting is served by the open device, so nothing opens
@@ -467,39 +471,6 @@ fn a_fault_leaves_no_fact_from_the_previous_attempt() {
     ));
 }
 
-// Startup can substitute, so the seed comes from what startup resolved.
-// A seed that claims the setting is satisfied latches the first tick, and
-// the named device is never taken back.
-#[test]
-fn a_substituted_startup_seeds_an_unsatisfied_setting() {
-    let binding = Binding::seeded(
-        "yeti".to_string(),
-        "MacBook Pro Microphone".to_string(),
-        Some("yeti".to_string()),
-    );
-    assert_eq!(binding.opened_for, None, "a substitute satisfies nothing");
-    assert_eq!(
-        binding.open_device.as_deref(),
-        Some("MacBook Pro Microphone")
-    );
-    assert!(
-        should_attempt(false, false, "yeti", binding.opened_for.as_deref(), false),
-        "the first tick must rescan while the yeti is absent"
-    );
-
-    // Startup opened the wanted device, so the tick rests
-    let binding = Binding::seeded("yeti".to_string(), "Yeti".to_string(), None);
-    assert_eq!(binding.opened_for.as_deref(), Some("yeti"));
-    assert_eq!(binding.open_device.as_deref(), Some("Yeti"));
-    assert!(!should_attempt(
-        false,
-        false,
-        "yeti",
-        binding.opened_for.as_deref(),
-        false
-    ));
-}
-
 #[test]
 fn a_failed_attempt_retries_when_the_throttle_expires() {
     // A failure clears `opened_for`, so the decision stands
@@ -507,4 +478,616 @@ fn a_failed_attempt_retries_when_the_throttle_expires() {
     assert!(should_attempt(false, false, wanted, opened_for, false));
     assert!(!should_attempt(false, false, wanted, opened_for, true));
     assert!(should_attempt(false, false, wanted, opened_for, false));
+}
+
+const BUILT_IN: &str = "MacBook Pro Microphone";
+const BUDS: &str = "OnePlus Buds 3";
+const WAIT: Duration = Duration::from_secs(5);
+
+fn select() -> BenchCall {
+    BenchCall::Select("default".to_string())
+}
+
+fn open(name: &str) -> BenchCall {
+    BenchCall::Open(name.to_string())
+}
+
+fn close(name: &str) -> BenchCall {
+    BenchCall::Close(name.to_string())
+}
+
+fn owner_of(state: &Arc<DaemonState>, bench: &Bench) -> (Owner<Bench>, Arc<Capture>) {
+    let capture = Arc::new(Capture::new(CaptureSource::unopened()));
+    let owner = Owner::new(
+        Arc::clone(state),
+        Arc::clone(&capture),
+        bench.clone(),
+        Instant::now(),
+    );
+    (owner, capture)
+}
+
+#[test]
+fn a_press_opens_capture_and_its_release_closes_it() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    let (mut owner, _) = owner_of(&state, &bench);
+    let now = Instant::now();
+
+    assert_eq!(owner.step(now), None, "an idle daemon waits for a use");
+    assert!(bench.asked().is_empty(), "and opens nothing");
+
+    assert!(state.record_start());
+    owner.step(now);
+    assert_eq!(bench.asked(), [select(), open(BUILT_IN)]);
+    assert_eq!(state.mic(), Mic::Open);
+    assert_eq!(state.audio_device().as_deref(), Some(BUILT_IN));
+
+    state.record_stop();
+    assert_eq!(owner.step(now), None);
+    assert_eq!(bench.asked(), [select(), open(BUILT_IN), close(BUILT_IN)]);
+    assert_eq!(state.mic(), Mic::Closed);
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Open,
+        "a closed microphone is ready for the next press"
+    );
+}
+
+// The default hotkey is AltGr held alone, so every AltGr chord typed opens the
+// microphone on its press. The chord's release cancels, and that must close.
+#[test]
+fn an_altgr_chord_closes_the_capture_its_press_opened() {
+    use crate::binding::{Hotkey, HotkeyTracker};
+    use rdev::{EventType, Key};
+
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    let (mut owner, _) = owner_of(&state, &bench);
+    let now = Instant::now();
+    let mut tracker = HotkeyTracker::new(Hotkey::default(), crate::config::HotkeyMode::Hold);
+    let mut owned = false;
+    let mut press = |event: EventType| {
+        if let Some(action) = tracker.on_event(&event) {
+            crate::hotkey::act(&state, action, &mut owned);
+        }
+    };
+
+    press(EventType::KeyPress(Key::AltGr));
+    owner.step(now);
+    assert_eq!(bench.asked(), [select(), open(BUILT_IN)]);
+
+    press(EventType::KeyPress(Key::KeyE));
+    press(EventType::KeyRelease(Key::KeyE));
+    press(EventType::KeyRelease(Key::AltGr));
+    owner.step(now);
+    assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    assert_eq!(bench.asked(), [select(), open(BUILT_IN), close(BUILT_IN)]);
+}
+
+#[test]
+fn a_question_opens_capture_once_it_has_played_and_its_end_closes_it() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    let (mut owner, _) = owner_of(&state, &bench);
+    let now = Instant::now();
+
+    let session = state.arm_for_ask().expect("an idle daemon arms");
+    owner.step(now);
+    assert!(
+        bench.asked().is_empty(),
+        "the question is still playing, so nothing listens yet"
+    );
+
+    assert!(state.hear_answer(session));
+    owner.step(now);
+    assert_eq!(bench.asked(), [select(), open(BUILT_IN)]);
+
+    state.disarm(session);
+    owner.step(now);
+    assert_eq!(bench.asked(), [select(), open(BUILT_IN), close(BUILT_IN)]);
+}
+
+// A closed stream never calls back, so its liveness stamp goes stale, and the
+// setting and the OS default can move. Closed capture acts on none of them:
+// the next open reads the devices afresh.
+#[test]
+fn closed_capture_reads_no_device_however_long_it_waits() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN, BUDS], Some(BUILT_IN));
+    let (mut owner, _) = owner_of(&state, &bench);
+    let now = Instant::now();
+    assert!(state.record_start());
+    owner.step(now);
+    state.record_stop();
+    owner.step(now);
+    let asked = bench.asked();
+
+    bench.set_default(Some(BUDS));
+    state.set_wanted_device(BUDS.to_string());
+    for later in [TICK, RETRY, RETRY * 10] {
+        assert_eq!(owner.step(now + later), None);
+    }
+    assert_eq!(bench.asked(), asked);
+}
+
+#[test]
+fn the_next_use_opens_the_device_that_is_the_default_by_then() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN, BUDS], Some(BUILT_IN));
+    let (mut owner, _) = owner_of(&state, &bench);
+    let now = Instant::now();
+    assert!(state.record_start());
+    owner.step(now);
+    state.record_stop();
+    owner.step(now);
+
+    // The headset connects between uses, and the OS makes it the default
+    bench.set_default(Some(BUDS));
+    assert!(state.record_start());
+    owner.step(now);
+
+    assert_eq!(
+        bench.asked(),
+        [
+            select(),
+            open(BUILT_IN),
+            close(BUILT_IN),
+            select(),
+            open(BUDS)
+        ]
+    );
+    assert_eq!(state.audio_device().as_deref(), Some(BUDS));
+}
+
+#[test]
+fn a_device_that_will_not_open_fails_the_press_with_its_name() {
+    let (cues, sounds) = Cues::recording();
+    let state = crate::test_support::daemon_state_with_cues(cues);
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    bench.refuse(Some(BUILT_IN));
+    let (mut owner, capture) = owner_of(&state, &bench);
+    let now = Instant::now();
+
+    assert!(state.record_start());
+    owner.step(now);
+
+    assert_eq!(
+        state.recording_mode(),
+        RecordingMode::Idle,
+        "the press ends"
+    );
+    assert_eq!(sounds.try_recv().ok(), Some(Cue::Error));
+    let why = state.last_error().expect("the failure is kept for status");
+    assert!(why.contains(BUILT_IN), "{why}");
+    assert!(
+        why.starts_with("the microphone would not open: ")
+            && why.ends_with(
+                ". Connect the microphone, or choose another in Listening. The next use tries again."
+            ),
+        "status shows the cause, then the fix: {why}"
+    );
+    assert_eq!(
+        capture.failure().as_deref(),
+        Some(why.as_str()),
+        "an answer reads the same reason and fix"
+    );
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Open,
+        "the next press tries again"
+    );
+    assert_eq!(owner.step(now), None, "and nothing retries until it does");
+
+    bench.refuse(None);
+    assert!(state.record_start());
+    owner.step(now);
+    assert_eq!(state.mic(), Mic::Open);
+    assert_eq!(capture.failure(), None);
+}
+
+// The grant is read, so a refused microphone is never walked or opened, and
+// the press fails with the one fix that lifts it.
+#[test]
+fn a_refused_grant_fails_the_press_with_its_fix_and_opens_nothing() {
+    let (cues, sounds) = Cues::recording();
+    let state = crate::test_support::daemon_state_with_cues(cues);
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    bench.refuse_access(Some(Refusal::Denied));
+    let (mut owner, capture) = owner_of(&state, &bench);
+    let now = Instant::now();
+
+    assert!(state.record_start());
+    owner.step(now);
+
+    assert!(
+        bench.asked().is_empty(),
+        "nothing walked or opened: {:?}",
+        bench.asked()
+    );
+    assert_eq!(
+        state.recording_mode(),
+        RecordingMode::Idle,
+        "the press ends"
+    );
+    assert_eq!(sounds.try_recv().ok(), Some(Cue::Error));
+    let why = state.last_error().expect("the failure is kept for status");
+    assert_eq!(
+        why,
+        "the microphone would not open: macOS does not allow Banshee to use it. \
+         Allow Banshee in System Settings > Privacy & Security > Microphone."
+    );
+    assert_eq!(capture.failure().as_deref(), Some(why.as_str()));
+    assert_eq!(state.microphone_refusal(), Some(Refusal::Denied));
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Open,
+        "the next press reads again"
+    );
+
+    bench.refuse_access(None);
+    assert!(state.record_start());
+    owner.step(now);
+    assert_eq!(state.mic(), Mic::Open);
+    assert_eq!(state.microphone_refusal(), None);
+}
+
+#[test]
+fn a_restricted_grant_names_the_administrator() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    bench.refuse_access(Some(Refusal::Restricted));
+    let (mut owner, _) = owner_of(&state, &bench);
+
+    assert!(state.record_start());
+    owner.step(Instant::now());
+
+    assert_eq!(
+        state.last_error().as_deref(),
+        Some(
+            "the microphone would not open: this Mac restricts it. \
+             Ask the administrator of this Mac for microphone access."
+        )
+    );
+}
+
+// Status and the tray tell a refused microphone from an idle one before any
+// press, so the start reads the grant once.
+#[test]
+fn the_start_reads_the_grant_without_opening() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    bench.refuse_access(Some(Refusal::Denied));
+    let (mut owner, _) = owner_of(&state, &bench);
+
+    owner.seed();
+
+    assert_eq!(state.microphone_refusal(), Some(Refusal::Denied));
+    assert!(
+        !bench
+            .asked()
+            .contains(&BenchCall::Open(BUILT_IN.to_string()))
+    );
+}
+
+// Held open, the fault carries the recovery fix, and the grant blocker names
+// the refusal beside it.
+#[test]
+fn a_held_open_microphone_that_macos_refuses_is_a_fault() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    bench.refuse_access(Some(Refusal::Denied));
+    let (mut owner, _) = owner_of(&state, &bench);
+
+    state.set_keep_open(true);
+    owner.step(Instant::now());
+
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Broken(RecordingError::Microphone(
+            "macOS does not allow Banshee to use it".to_string()
+        ))
+    );
+}
+
+#[test]
+fn no_microphone_at_all_fails_the_press_and_says_so() {
+    let state = test_state();
+    let bench = Bench::with(&[], None);
+    let (mut owner, _) = owner_of(&state, &bench);
+
+    assert!(state.record_start());
+    owner.step(Instant::now());
+
+    assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    let why = state.last_error().expect("the failure is kept for status");
+    assert!(why.contains("no input device"), "{why}");
+}
+
+#[test]
+fn keep_open_holds_capture_open_between_uses_and_switches_live() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    let (mut owner, _) = owner_of(&state, &bench);
+    let now = Instant::now();
+
+    state.set_keep_open(true);
+    owner.step(now);
+    assert_eq!(
+        bench.asked(),
+        [select(), open(BUILT_IN)],
+        "open with no use"
+    );
+
+    assert!(state.record_start());
+    owner.step(now);
+    state.record_stop();
+    owner.step(now);
+    assert_eq!(
+        bench.asked(),
+        [select(), open(BUILT_IN)],
+        "a use changes nothing"
+    );
+
+    state.set_keep_open(false);
+    owner.step(now);
+    assert_eq!(state.mic(), Mic::Closed);
+
+    state.set_keep_open(true);
+    owner.step(now);
+    assert_eq!(
+        bench.asked(),
+        [
+            select(),
+            open(BUILT_IN),
+            close(BUILT_IN),
+            select(),
+            open(BUILT_IN)
+        ]
+    );
+}
+
+#[test]
+fn keep_open_switched_during_a_press_takes_effect_when_the_press_ends() {
+    for keep_open_before in [true, false] {
+        let state = test_state();
+        let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+        let (mut owner, _) = owner_of(&state, &bench);
+        let now = Instant::now();
+        state.set_keep_open(keep_open_before);
+        assert!(state.record_start());
+        owner.step(now);
+
+        state.set_keep_open(!keep_open_before);
+        owner.step(now);
+        assert_eq!(state.mic(), Mic::Open, "the press still records");
+
+        state.record_stop();
+        owner.step(now);
+        let closed = state.mic() == Mic::Closed;
+        assert_eq!(
+            closed, keep_open_before,
+            "keep_open now {}",
+            !keep_open_before
+        );
+    }
+}
+
+#[test]
+fn a_held_open_microphone_that_will_not_open_is_a_fault_until_keep_open_goes() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    bench.refuse(Some(BUILT_IN));
+    let (mut owner, _) = owner_of(&state, &bench);
+    let now = Instant::now();
+
+    state.set_keep_open(true);
+    assert_eq!(owner.step(now), Some(now + RETRY), "it tries again later");
+    assert!(matches!(
+        state.pipeline().fault(),
+        Some(RecordingError::Microphone(why)) if why.contains(BUILT_IN)
+    ));
+    owner.step(now + TICK);
+    assert_eq!(bench.asked().len(), 1, "not before the throttle allows");
+
+    state.set_keep_open(false);
+    assert_eq!(owner.step(now + TICK), None);
+    assert_eq!(state.pipeline(), Pipeline::Open, "a press may try again");
+}
+
+// The press opens capture whatever the voice is doing, and barge-in stops
+// the voice.
+#[test]
+fn a_press_while_the_voice_speaks_opens_capture_at_once() {
+    for (barge_in, stops) in [
+        (crate::config::BargeInMode::Stop, true),
+        (crate::config::BargeInMode::None, false),
+    ] {
+        let held = crate::test_support::daemon_state_holding_speech(
+            Duration::from_secs(60),
+            std::sync::mpsc::channel().0,
+        );
+        let state = held.state;
+        state.set_barge_in(barge_in);
+        let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+        let (mut owner, _) = owner_of(&state, &bench);
+        state
+            .speech()
+            .speak("a long reply", false, None)
+            .expect("the line starts");
+
+        assert!(state.record_start());
+        owner.step(Instant::now());
+
+        assert_eq!(
+            held.cut_short.load(std::sync::atomic::Ordering::SeqCst),
+            stops,
+            "{barge_in:?}"
+        );
+        assert_eq!(state.mic(), Mic::Open, "{barge_in:?}");
+    }
+}
+
+#[test]
+fn a_press_while_the_voice_loads_opens_capture_and_waits_on_nothing() {
+    use crate::text_to_speech::{TtsBackend, lock};
+    for (barge_in, still_speaking) in [
+        (crate::config::BargeInMode::Stop, false),
+        (crate::config::BargeInMode::None, true),
+    ] {
+        let (entered_to, entered) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        let asked = crate::test_support::Asked::default();
+        let heard = Arc::clone(&asked);
+        let loaded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = Arc::clone(&loaded);
+        let voice = crate::test_support::on_demand(
+            &crate::test_support::companion_models(),
+            move |_voice: &str| {
+                let _ = entered_to.send(());
+                let _ = lock(&released).recv_timeout(Duration::from_secs(5));
+                finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Box::new(crate::test_support::Listening(Arc::clone(&heard)))
+                    as Box<dyn TtsBackend>)
+            },
+            crate::test_support::ignored_faults(),
+        );
+        let state = crate::test_support::daemon_state_speaking_through(
+            crate::text_to_speech::SpeechPlayer::new(Box::new(voice)),
+        );
+        state.set_barge_in(barge_in);
+        let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+        let (mut owner, _) = owner_of(&state, &bench);
+        state
+            .speech()
+            .speak("a reply after the voice idled out", false, None)
+            .expect("the line starts while its voice loads");
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the voice is loading");
+
+        assert!(state.record_start(), "{barge_in:?}");
+        owner.step(Instant::now());
+        assert!(
+            !loaded.load(std::sync::atomic::Ordering::SeqCst),
+            "{barge_in:?}: the press came back before the voice loaded"
+        );
+
+        assert_eq!(state.mic(), Mic::Open, "{barge_in:?}");
+        assert_eq!(state.speech().is_speaking(), still_speaking, "{barge_in:?}");
+        release.send(()).unwrap();
+        if still_speaking {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while lock(&asked).is_empty() {
+                assert!(Instant::now() < deadline, "the reply plays once loaded");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+// A press while the consumer is still busy with the last dictation opens
+// capture again before that dictation is read.
+#[test]
+fn a_released_dictation_left_unread_survives_the_next_open() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    let (mut owner, capture) = owner_of(&state, &bench);
+    let now = Instant::now();
+    assert!(state.record_start());
+    owner.step(now);
+    bench.play(&[0.25; 160]);
+    state.record_stop();
+    owner.step(now);
+
+    assert!(state.record_start());
+    owner.step(now);
+    bench.play(&[0.5; 160]);
+
+    let held = capture.drain();
+    assert_eq!(held.len(), 320, "{} samples", held.len());
+    assert!(held[..160].iter().all(|&sample| sample == 0.25));
+}
+
+#[test]
+fn a_seed_names_the_device_the_first_use_opens_and_opens_nothing() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    let (mut owner, _) = owner_of(&state, &bench);
+
+    owner.seed();
+
+    assert_eq!(bench.asked(), [select()]);
+    assert_eq!(state.audio_device().as_deref(), Some(BUILT_IN));
+    assert_eq!(state.mic(), Mic::Closed);
+}
+
+#[test]
+fn the_thread_opens_for_a_press_cues_its_first_sound_and_closes_after() {
+    let (cues, sounds) = Cues::recording();
+    let state = crate::test_support::daemon_state_with_cues(cues);
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    let told = bench.tell();
+    let capture = Arc::new(Capture::new(CaptureSource::unopened()));
+    let owner = spawn(Arc::clone(&state), capture, bench.clone());
+    assert_eq!(told.recv_timeout(WAIT), Ok(select()), "the seed");
+
+    assert!(state.record_start());
+    assert_eq!(told.recv_timeout(WAIT), Ok(select()));
+    assert_eq!(told.recv_timeout(WAIT), Ok(open(BUILT_IN)));
+    bench.play(&[0.0; 160]);
+    bench.play(&[0.25; 160]);
+    assert_eq!(sounds.recv_timeout(WAIT), Ok(Cue::RecordStart));
+
+    state.record_stop();
+    assert_eq!(told.recv_timeout(WAIT), Ok(close(BUILT_IN)));
+    owner.stop();
+}
+
+#[test]
+fn a_named_device_gone_between_uses_is_named_while_the_default_records() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN, "Yeti"], Some(BUILT_IN));
+    state.set_wanted_device("Yeti".to_string());
+    let (mut owner, _) = owner_of(&state, &bench);
+    let now = Instant::now();
+    assert!(state.record_start());
+    owner.step(now);
+    state.record_stop();
+    owner.step(now);
+
+    bench.unplug("Yeti");
+    assert!(state.record_start());
+    owner.step(now);
+
+    let yeti = BenchCall::Select("Yeti".to_string());
+    assert_eq!(
+        bench.asked(),
+        [
+            yeti.clone(),
+            open("Yeti"),
+            close("Yeti"),
+            yeti,
+            open(BUILT_IN)
+        ]
+    );
+    assert_eq!(state.missing_device().as_deref(), Some("Yeti"));
+    assert_eq!(state.mic(), Mic::Open);
+}
+
+// A headset's first callback came 163 ms after the build in measurement. A
+// stream that has not called back by the first tick is not dead yet.
+#[test]
+fn a_stream_that_has_not_called_back_by_the_first_tick_is_kept() {
+    let state = test_state();
+    let bench = Bench::with(&[BUILT_IN], Some(BUILT_IN));
+    let (mut owner, _) = owner_of(&state, &bench);
+    let now = Instant::now();
+    assert!(state.record_start());
+    owner.step(now);
+
+    owner.step(now + TICK);
+
+    assert_eq!(bench.asked(), [select(), open(BUILT_IN)]);
 }

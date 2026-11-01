@@ -87,16 +87,6 @@ fn a_model_change_with_no_listener_is_not_reported_as_taken() {
     assert!(!state.load_stt_model(turbo()));
 }
 
-#[test]
-fn the_model_reported_is_the_one_the_listener_loaded() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    assert_eq!(state.stt_model().map(|model| model.file), Some(PARAKEET));
-
-    state.set_stt_model(Some(turbo()));
-
-    assert_eq!(state.stt_model().map(|model| model.file), Some(TURBO));
-}
-
 // The off direction alone would pass a `set_history` that always stores
 // nothing, so this asks whether a reopened file is reached.
 #[test]
@@ -149,33 +139,156 @@ fn a_missing_listening_model_is_named_as_missing_and_fixed_by_setup() {
     );
 }
 
+fn parakeet() -> &'static banshee_common::listening::ListeningModel {
+    banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap()
+}
+
+fn dead() -> RecordingError {
+    RecordingError::Microphone("no device".to_string())
+}
+
+fn damaged() -> Listening {
+    Listening::Failed(parakeet(), "the file is damaged".to_string())
+}
+
+#[test]
+fn the_pipeline_is_read_from_the_microphone_first_and_the_listening_model_second() {
+    let damaged_load = RecordingError::Model("the file is damaged".to_string());
+    let not_downloaded = RecordingError::NoListeningModel(parakeet().id);
+    let refused = RecordingError::Provider("the server refused the key".to_string());
+    let table = [
+        (Mic::Starting, Listening::Remote, Pipeline::Opening),
+        (
+            Mic::Starting,
+            Listening::Available(parakeet()),
+            Pipeline::Opening,
+        ),
+        (
+            Mic::Starting,
+            Listening::Loaded(parakeet()),
+            Pipeline::Opening,
+        ),
+        (Mic::Starting, damaged(), Pipeline::Opening),
+        (
+            Mic::Starting,
+            Listening::Missing(parakeet()),
+            Pipeline::Opening,
+        ),
+        // Shut between uses is ready: the next use opens it
+        (Mic::Closed, Listening::Remote, Pipeline::Open),
+        (
+            Mic::Closed,
+            Listening::Available(parakeet()),
+            Pipeline::Open,
+        ),
+        (Mic::Closed, Listening::Loaded(parakeet()), Pipeline::Open),
+        // A use waits for the load, so a load is no fault
+        (Mic::Closed, Listening::Loading(parakeet()), Pipeline::Open),
+        (
+            Mic::Closed,
+            damaged(),
+            Pipeline::Broken(RecordingError::Model("the file is damaged".to_string())),
+        ),
+        (
+            Mic::Closed,
+            Listening::Missing(parakeet()),
+            Pipeline::Broken(RecordingError::NoListeningModel(parakeet().id)),
+        ),
+        (Mic::Open, Listening::Remote, Pipeline::Open),
+        (Mic::Open, Listening::Available(parakeet()), Pipeline::Open),
+        (Mic::Open, Listening::Loaded(parakeet()), Pipeline::Open),
+        (Mic::Open, Listening::Loading(parakeet()), Pipeline::Open),
+        (
+            Mic::Starting,
+            Listening::Loading(parakeet()),
+            Pipeline::Opening,
+        ),
+        (
+            Mic::Faulted(dead()),
+            Listening::Loading(parakeet()),
+            Pipeline::Broken(dead()),
+        ),
+        (Mic::Open, damaged(), Pipeline::Broken(damaged_load)),
+        (
+            Mic::Open,
+            Listening::Missing(parakeet()),
+            Pipeline::Broken(not_downloaded),
+        ),
+        (
+            Mic::Faulted(dead()),
+            Listening::Remote,
+            Pipeline::Broken(dead()),
+        ),
+        (
+            Mic::Faulted(dead()),
+            Listening::Available(parakeet()),
+            Pipeline::Broken(dead()),
+        ),
+        (
+            Mic::Faulted(dead()),
+            Listening::Loaded(parakeet()),
+            Pipeline::Broken(dead()),
+        ),
+        (Mic::Faulted(dead()), damaged(), Pipeline::Broken(dead())),
+        (
+            Mic::Faulted(dead()),
+            Listening::Missing(parakeet()),
+            Pipeline::Broken(dead()),
+        ),
+        (
+            Mic::Faulted(refused.clone()),
+            damaged(),
+            Pipeline::Broken(refused),
+        ),
+    ];
+    for (mic, listening, expected) in table {
+        assert_eq!(
+            pipeline(&mic, &listening),
+            expected,
+            "{mic:?} {listening:?}"
+        );
+    }
+}
+
+#[test]
+fn the_model_reported_is_the_one_the_listener_serves_or_waits_for() {
+    let state = test_state();
+    assert_eq!(state.stt_model(), Some(parakeet()));
+
+    state.listening_model_loaded(Some(turbo()));
+    assert_eq!(state.stt_model(), Some(turbo()));
+
+    state.await_listening_model(parakeet());
+    assert_eq!(state.stt_model(), Some(parakeet()));
+
+    state.listening_model_loaded(None);
+    assert_eq!(state.stt_model(), None, "a remote listener loads no file");
+}
+
 #[test]
 fn a_pipeline_waiting_for_its_listening_model_opens_once_the_model_loads() {
     let state = test_state();
-    let waiting = Pipeline::Broken(RecordingError::NoListeningModel(
-        banshee_common::listening::DEFAULT_MODEL,
-    ));
-    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
+    let waiting = Pipeline::Broken(RecordingError::NoListeningModel(parakeet().id));
+    state.await_listening_model(parakeet());
     assert_eq!(state.pipeline(), waiting);
-    state.capture_open();
+    state.set_mic(Mic::Open);
     assert_eq!(
         state.pipeline(),
         waiting,
         "a microphone that opens does not stand in for the model"
     );
-    state.listening_model_loaded();
+    state.listening_model_loaded(Some(parakeet()));
     assert_eq!(state.pipeline(), Pipeline::Open);
 }
 
 #[test]
 fn a_model_that_loads_under_a_dead_microphone_leaves_the_microphone_fault() {
     let state = test_state();
-    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
-    let dead = Pipeline::Broken(RecordingError::Microphone("no device".to_string()));
-    state.set_pipeline(dead.clone());
-    state.listening_model_loaded();
-    assert_eq!(state.pipeline(), dead);
-    state.capture_open();
+    state.await_listening_model(parakeet());
+    state.set_mic(Mic::Faulted(dead()));
+    state.listening_model_loaded(Some(parakeet()));
+    assert_eq!(state.pipeline(), Pipeline::Broken(dead()));
+    state.set_mic(Mic::Open);
     assert_eq!(
         state.pipeline(),
         Pipeline::Open,
@@ -184,14 +297,13 @@ fn a_model_that_loads_under_a_dead_microphone_leaves_the_microphone_fault() {
 }
 
 #[test]
-fn a_failed_load_under_a_dead_microphone_keeps_the_microphone_fault_until_capture_opens() {
+fn a_failed_load_outlasts_a_microphone_fault() {
     let state = test_state();
-    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
-    let dead = Pipeline::Broken(RecordingError::Microphone("no device".to_string()));
-    state.set_pipeline(dead.clone());
-    state.listening_model_failed("the file is damaged".to_string());
-    assert_eq!(state.pipeline(), dead);
-    state.capture_open();
+    state.await_listening_model(parakeet());
+    state.set_mic(Mic::Faulted(dead()));
+    state.listening_model_failed(parakeet(), "the file is damaged".to_string());
+    assert_eq!(state.pipeline(), Pipeline::Broken(dead()));
+    state.set_mic(Mic::Open);
     assert_eq!(
         state.pipeline(),
         Pipeline::Broken(RecordingError::Model("the file is damaged".to_string()))
@@ -199,46 +311,130 @@ fn a_failed_load_under_a_dead_microphone_keeps_the_microphone_fault_until_captur
 }
 
 #[test]
-fn a_failed_load_survives_the_microphone_opening_again() {
+fn a_failed_load_outlasts_the_microphone_opening_again() {
     let state = test_state();
-    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
-    state.listening_model_failed("the file is damaged".to_string());
+    state.await_listening_model(parakeet());
+    state.listening_model_failed(parakeet(), "the file is damaged".to_string());
     let failed = Pipeline::Broken(RecordingError::Model("the file is damaged".to_string()));
     assert_eq!(state.pipeline(), failed);
-    state.capture_open();
+    state.set_mic(Mic::Open);
     assert_eq!(
         state.pipeline(),
         failed,
         "no model listens, so nothing is ready"
     );
-    state.listening_model_loaded();
+    state.listening_model_loaded(Some(parakeet()));
     assert_eq!(state.pipeline(), Pipeline::Open);
-    state.capture_open();
+    state.set_mic(Mic::Open);
     assert_eq!(state.pipeline(), Pipeline::Open);
 }
 
 #[test]
-fn a_model_that_loads_before_capture_stands_leaves_the_pipeline_opening() {
+fn a_model_that_loads_before_the_pipeline_stands_leaves_it_opening() {
     let state = crate::test_support::daemon_state_before_the_pipeline();
-    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
-    state.listening_model_loaded();
+    state.await_listening_model(parakeet());
+    state.listening_model_loaded(Some(parakeet()));
     assert_eq!(
         state.pipeline(),
         Pipeline::Opening,
-        "no microphone exists yet"
+        "no consumer thread exists yet"
     );
-    state.capture_open();
+    state.set_mic(Mic::Closed);
     assert_eq!(state.pipeline(), Pipeline::Open);
 }
 
 #[test]
-fn a_reload_that_fails_with_nothing_awaited_leaves_the_pipeline() {
-    let state = test_state();
-    state.listening_model_failed("the file is damaged".to_string());
+fn a_model_is_seeded_as_on_disk_only_when_its_file_is_there() {
     assert_eq!(
-        state.pipeline(),
-        Pipeline::Open,
-        "the old model still listens"
+        state_with_parakeet_on_disk().listening(),
+        Listening::Available(parakeet())
+    );
+    let (absent, _requests) = state_on(crate::test_support::scratch_machine("state-absent"));
+    assert_eq!(absent.listening(), Listening::Missing(parakeet()));
+}
+
+#[test]
+fn a_reload_that_fails_while_a_model_serves_leaves_the_pipeline() {
+    for (state, served) in [
+        (
+            state_with_parakeet_on_disk(),
+            Listening::Available(parakeet()),
+        ),
+        (test_state(), Listening::Loaded(parakeet())),
+    ] {
+        assert_eq!(state.listening(), served);
+        state.listening_model_failed(turbo(), "the file is damaged".to_string());
+        assert_eq!(state.listening(), served, "the old model still listens");
+        assert_eq!(state.pipeline(), Pipeline::Open);
+    }
+}
+
+#[test]
+fn a_model_that_idles_out_reads_as_on_disk_and_its_reload_as_loading() {
+    let state = test_state();
+    state.listening_model_unloaded();
+    assert_eq!(state.listening(), Listening::Available(parakeet()));
+    assert!(state.listening_model_loading(), "the load is this caller's");
+    assert_eq!(state.listening(), Listening::Loading(parakeet()));
+    assert_eq!(state.stt_model(), Some(parakeet()), "status names it");
+    state.listening_model_read(true);
+    assert_eq!(state.listening(), Listening::Loaded(parakeet()));
+    assert_eq!(state.pipeline(), Pipeline::Open);
+}
+
+#[test]
+fn a_reload_on_demand_that_fails_leaves_the_model_to_the_next_use() {
+    let state = test_state();
+    state.listening_model_unloaded();
+    state.listening_model_loading();
+    state.listening_model_read(false);
+    assert_eq!(state.listening(), Listening::Available(parakeet()));
+    assert_eq!(state.pipeline(), Pipeline::Open);
+}
+
+#[test]
+fn a_claimed_load_is_left_to_its_own_reload() {
+    let state = test_state();
+    state.await_listening_model(parakeet());
+    state.claim_listening_model(parakeet(), true);
+
+    assert!(
+        !state.listening_model_loading(),
+        "a use finds the load already claimed"
+    );
+    state.listening_model_unloaded();
+    assert_eq!(state.listening(), Listening::Loading(parakeet()));
+}
+
+#[test]
+fn a_claimed_load_answers_a_second_claim_as_serving_and_its_failure_is_a_fault() {
+    let state = test_state();
+    state.await_listening_model(parakeet());
+
+    let first = state.claim_listening_model(parakeet(), true);
+    assert!(!first.serves(), "the first claim found nothing loading");
+    assert_eq!(state.listening(), Listening::Loading(parakeet()));
+    assert!(
+        state.claim_listening_model(parakeet(), true).serves(),
+        "the second claim finds the load in flight"
+    );
+
+    state.listening_model_failed(parakeet(), "the file is damaged".to_string());
+    assert_eq!(state.listening(), damaged());
+}
+
+#[test]
+fn the_idle_limit_starts_at_the_config_and_moves_live() {
+    let (state, requests) = state_on(crate::test_support::scratch_machine("state-idle"));
+    assert_eq!(state.unload_after(), Some(Duration::from_secs(300)));
+
+    state.set_unload_after(None);
+    assert_eq!(state.unload_after(), None);
+    assert!(
+        requests
+            .try_iter()
+            .any(|command| matches!(command, ConsumerCommand::UnloadAfter)),
+        "the consumer measures its wait again"
     );
 }
 
@@ -273,6 +469,14 @@ fn a_microphone_fix_names_the_restart_that_some_faults_need() {
 
 // Hands back the receiver: dropping it discards whatever record_stop queues
 fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<ConsumerCommand>) {
+    let (state, requests) = state_on(crate::test_support::scratch_machine("state-models"));
+    state.listening_model_loaded(Some(parakeet()));
+    (state, requests)
+}
+
+/// These stand for a daemon whose pipeline is up: the tests below record, arm
+/// and fault, none of which a daemon still opening its microphone does.
+fn state_on(machine: Machine) -> (DaemonState, std::sync::mpsc::Receiver<ConsumerCommand>) {
     let (commands, requests) = std::sync::mpsc::channel();
     let state = DaemonState::new(
         std::sync::Arc::new(Config::default()),
@@ -281,12 +485,17 @@ fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<Consume
         crate::text_to_speech::Speaker::Fallback,
         commands,
         crate::audio::cues::Cues::silent(),
-        crate::test_support::scratch_machine("state-models"),
+        machine,
     );
-    // These stand for a daemon whose pipeline is up: the tests below record,
-    // arm and fault, none of which a daemon still opening its microphone does.
-    state.set_pipeline(Pipeline::Open);
+    state.set_mic(Mic::Open);
     (state, requests)
+}
+
+/// A daemon whose listening model is on disk and has not loaded.
+fn state_with_parakeet_on_disk() -> DaemonState {
+    let machine = crate::test_support::scratch_machine("state-on-disk");
+    std::fs::write(machine.models.join(parakeet().file), b"").unwrap();
+    state_on(machine).0
 }
 
 fn test_state() -> DaemonState {
@@ -302,24 +511,30 @@ fn record_start_and_arming_are_refused_until_the_pipeline_is_open() {
     let cases = [
         (
             "the microphone is gone",
-            Pipeline::Broken(RecordingError::Microphone("no device".to_string())),
+            Mic::Faulted(dead()),
+            None,
             Some(RecordingError::Microphone(String::new())),
         ),
         (
-            "the model is missing",
-            Pipeline::Broken(RecordingError::Model("missing file".to_string())),
+            "the model did not load",
+            Mic::Open,
+            Some("the file is damaged"),
             Some(RecordingError::Model(String::new())),
         ),
-        ("the pipeline is still opening", Pipeline::Opening, None),
+        ("the pipeline is still opening", Mic::Starting, None, None),
     ];
 
-    for (name, pipeline, fault) in cases {
+    for (name, mic, load_failure, fault) in cases {
         let (state, transcribe_requests) = test_state_with_commands();
         assert!(state.pipeline().fault().is_none(), "{name}");
         assert!(state.arm_for_ask().is_some(), "{name}");
         state.set_recording_mode(RecordingMode::Idle);
 
-        state.set_pipeline(pipeline);
+        state.set_mic(mic);
+        if let Some(error) = load_failure {
+            state.await_listening_model(parakeet());
+            state.listening_model_failed(parakeet(), error.to_string());
+        }
         assert_eq!(
             state.pipeline().fault().map(std::mem::discriminant),
             fault.as_ref().map(std::mem::discriminant),
@@ -336,7 +551,8 @@ fn record_start_and_arming_are_refused_until_the_pipeline_is_open() {
         state.record_stop();
         assert_eq!(state.recording_mode(), RecordingMode::Idle, "{name}");
 
-        state.set_pipeline(Pipeline::Open);
+        state.set_mic(Mic::Open);
+        state.listening_model_loaded(Some(parakeet()));
         assert!(state.record_start(), "{name}");
     }
 }
@@ -402,7 +618,7 @@ fn the_wanted_device_survives_a_poisoned_lock() {
 fn a_rewritten_device_name_is_not_a_change() {
     let (state, _requests) = test_state_with_commands();
     let mut changes = state.device_changes();
-    assert_eq!(*changes.borrow_and_update(), 0);
+    let start = *changes.borrow_and_update();
 
     state.set_missing_device(Some("yeti".to_string()));
     state.set_missing_device(Some("yeti".to_string()));
@@ -411,7 +627,7 @@ fn a_rewritten_device_name_is_not_a_change() {
         changes.has_changed().unwrap(),
         "the first write went unheard"
     );
-    assert_eq!(*changes.borrow_and_update(), 1, "a rewrite counted");
+    assert_eq!(*changes.borrow_and_update(), start + 1, "a rewrite counted");
     assert!(!changes.has_changed().unwrap());
 
     state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
@@ -420,7 +636,7 @@ fn a_rewritten_device_name_is_not_a_change() {
         changes.has_changed().unwrap(),
         "the open device went unheard"
     );
-    assert_eq!(*changes.borrow_and_update(), 2, "a rewrite counted");
+    assert_eq!(*changes.borrow_and_update(), start + 2, "a rewrite counted");
 
     // One counter for the whole picture, so either field moving wakes the push
     state.set_missing_device(None);
@@ -428,22 +644,20 @@ fn a_rewritten_device_name_is_not_a_change() {
         changes.has_changed().unwrap(),
         "the device returning went unheard"
     );
-    assert_eq!(*changes.borrow_and_update(), 3);
+    assert_eq!(*changes.borrow_and_update(), start + 3);
 }
 
 #[test]
 fn recording_error_clears_when_capture_recovers() {
     let (state, _requests) = test_state_with_commands();
-    state.set_pipeline(Pipeline::Broken(RecordingError::Microphone(
-        "gone".to_string(),
-    )));
+    state.set_mic(Mic::Faulted(RecordingError::Microphone("gone".to_string())));
     assert!(state.pipeline().fault().is_some());
 
-    state.set_pipeline(Pipeline::Open);
+    state.set_mic(Mic::Open);
     assert!(state.pipeline().fault().is_none());
 
     // A second fault after a recovery must still report
-    state.set_pipeline(Pipeline::Broken(RecordingError::Microphone(
+    state.set_mic(Mic::Faulted(RecordingError::Microphone(
         "gone again".to_string(),
     )));
     assert!(matches!(
@@ -459,7 +673,10 @@ fn a_toggle_stops_the_session_a_toggle_started() {
 
     assert!(state.record_toggle(), "idle: starts");
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
-    assert!(matches!(requests.try_recv(), Ok(ConsumerCommand::Stream)));
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
 
     assert!(!state.record_toggle(), "in flight: stops");
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
@@ -482,7 +699,10 @@ fn cancel_discards_the_session_instead_of_routing_it() {
     assert!(state.record_start());
     state.record_cancel();
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
-    assert!(matches!(requests.try_recv(), Ok(ConsumerCommand::Stream)));
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
     assert!(matches!(requests.try_recv(), Ok(ConsumerCommand::Discard)));
     assert!(requests.try_recv().is_err(), "nothing may be transcribed");
 
@@ -508,6 +728,8 @@ fn a_cancelled_push_to_talk_emits_a_silent_signal() {
     let state = crate::test_support::daemon_state_with_cues(cues);
 
     assert!(state.record_start());
+    state.heard_sound();
+    state.announce_sound();
     heard.try_recv().expect("the start cue plays");
     signals.try_recv().expect("the start signal broadcasts");
 
@@ -530,7 +752,7 @@ fn watchdog_releases_a_push_to_talk_that_never_stopped() {
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
     assert!(matches!(
         transcribe_requests.try_recv(),
-        Ok(ConsumerCommand::Stream)
+        Ok(ConsumerCommand::Stream(_))
     ));
 
     // Nowhere near the ceiling yet: the mic stays open
@@ -866,7 +1088,8 @@ fn the_watchdog_does_not_expire_a_press_whose_start_is_still_running() {
         crate::audio::cues::Cues::silent(),
         crate::test_support::scratch_machine("state-press"),
     ));
-    state.set_pipeline(Pipeline::Open);
+    state.set_mic(Mic::Open);
+    state.listening_model_loaded(Some(parakeet()));
     std::sync::Arc::clone(state.speech())
         .speak("A reply.", false, None)
         .unwrap();
@@ -919,14 +1142,16 @@ fn the_answer_flag_opens_only_for_the_session_still_armed() {
     assert!(!state.is_answer_open());
 }
 
+// A refused press answers at once. An accepted one waits for its first sound,
+// which comes once capture has opened.
 #[test]
 fn the_arming_and_the_pipeline_decide_the_press_cue() {
     use crate::audio::cues::Cue;
 
     let cases = [
-        (true, true, Cue::RecordStart),
-        (false, true, Cue::RecordStart),
-        (true, false, Cue::Error),
+        (true, true, None),
+        (false, true, None),
+        (true, false, Some(Cue::Error)),
     ];
     for (armed, pipeline_open, expected) in cases {
         let (cues, heard) = crate::audio::cues::Cues::recording();
@@ -935,7 +1160,7 @@ fn the_arming_and_the_pipeline_decide_the_press_cue() {
             state.arm_for_ask().expect("an idle daemon arms");
         }
         if !pipeline_open {
-            state.set_pipeline(Pipeline::Opening);
+            state.set_mic(Mic::Starting);
         }
 
         assert_eq!(
@@ -945,9 +1170,14 @@ fn the_arming_and_the_pipeline_decide_the_press_cue() {
         );
         assert_eq!(
             heard.try_recv().ok(),
-            Some(expected),
+            expected,
             "armed {armed} open {pipeline_open}"
         );
+        if pipeline_open {
+            state.heard_sound();
+            state.announce_sound();
+            assert_eq!(heard.try_recv().ok(), Some(Cue::RecordStart));
+        }
     }
 }
 
@@ -961,7 +1191,7 @@ fn a_refused_press_names_the_press_or_the_answer_when_armed() {
         if armed {
             state.arm_for_ask().expect("an idle daemon arms");
         }
-        state.set_pipeline(Pipeline::Opening);
+        state.set_mic(Mic::Starting);
         assert!(!state.record_start());
         match signals.try_recv() {
             Ok(Signal::Error { target, reason }) => {
@@ -984,12 +1214,106 @@ fn an_answer_press_carries_the_answer_target() {
     let state = crate::test_support::daemon_state_with_cues(cues);
     state.arm_for_ask().expect("an idle daemon arms");
     assert!(state.record_start());
+    state.heard_sound();
+    state.announce_sound();
     assert_eq!(
         signals.try_recv().unwrap(),
         crate::audio::cues::Signal::RecordStart {
             target: crate::audio::cues::Target::Answer
         }
     );
+}
+
+#[test]
+fn capture_is_wanted_for_a_press_a_played_question_or_keep_open() {
+    let state = test_state();
+    assert!(!state.wants_mic(), "an idle daemon");
+
+    assert!(state.record_start());
+    assert!(state.wants_mic(), "a press");
+    state.record_cancel();
+    assert!(!state.wants_mic(), "a cancelled press");
+
+    let session = state.arm_for_ask().expect("an idle daemon arms");
+    assert!(!state.wants_mic(), "a question still playing");
+    assert!(state.record_start());
+    assert!(state.wants_mic(), "a hold to answer while it plays");
+    state.record_stop();
+    assert!(!state.wants_mic());
+    assert!(!state.hear_answer(session + 1), "another session");
+    assert!(!state.wants_mic());
+    assert!(state.hear_answer(session));
+    assert!(state.wants_mic(), "a question that has played");
+    state.disarm(session);
+    assert!(!state.wants_mic(), "the answer's end");
+    assert!(!state.hear_answer(session), "a session already over");
+
+    state.set_keep_open(true);
+    assert!(state.wants_mic(), "keep_open");
+}
+
+#[test]
+fn a_failed_open_ends_the_press_it_was_for() {
+    use crate::audio::cues::{Cues, Signal, Target};
+    let cases = [
+        ("a dictation", false, false, Some(Target::Dictate)),
+        ("a hold to answer", true, false, Some(Target::Answer)),
+        // The answer says why itself, so the hold adds no second error
+        ("a hold while the answer is heard", true, true, None),
+    ];
+    for (name, armed, answering, cue) in cases {
+        let (commands, requests) = std::sync::mpsc::channel();
+        let (cues, _sounds) = Cues::recording();
+        let mut signals = cues.subscribe_signals();
+        let state = crate::test_support::daemon_state_hearing(cues, commands);
+        if armed {
+            let session = state.arm_for_ask().expect("an idle daemon arms");
+            if answering {
+                assert!(state.hear_answer(session));
+            }
+        }
+        assert!(state.record_start(), "{name}");
+
+        state.capture_failed(RecordingError::Microphone(
+            "MacBook Pro Microphone: Host is down".to_string(),
+        ));
+
+        assert!(!state.wants_mic(), "{name}: nothing waits for capture now");
+        let expected_mode = if armed {
+            RecordingMode::Armed
+        } else {
+            RecordingMode::Idle
+        };
+        assert_eq!(state.recording_mode(), expected_mode, "{name}");
+        let error =
+            std::iter::from_fn(|| signals.try_recv().ok()).find_map(|signal| match signal {
+                Signal::Error { reason, target } => Some((reason, target)),
+                _ => None,
+            });
+        assert_eq!(
+            error.as_ref().and_then(|(_, target)| *target),
+            cue,
+            "{name}"
+        );
+        if let Some((reason, _)) = error {
+            assert!(
+                reason.text.contains("MacBook Pro Microphone"),
+                "{name}: {reason:?}"
+            );
+        }
+        let discarded = std::iter::from_fn(|| requests.try_recv().ok())
+            .any(|command| matches!(command, ConsumerCommand::Discard));
+        assert_eq!(
+            discarded, !armed,
+            "{name}: the dictation's consumer lets go"
+        );
+        assert!(
+            state
+                .last_error()
+                .is_some_and(|why| why.contains("MacBook Pro Microphone")),
+            "{name}"
+        );
+    }
 }
 
 #[test]

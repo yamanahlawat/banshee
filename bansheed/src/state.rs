@@ -7,6 +7,7 @@ use std::{
 };
 
 use banshee_common::DownloadProgress;
+use banshee_common::listening::ListeningModel;
 use tokio::sync::{broadcast, watch};
 
 use crate::audio::cues::{Cues, Reason, ReasonCode, Signal, Target, broken};
@@ -24,6 +25,18 @@ pub const MAX_PUSH_TO_TALK: Duration = Duration::from_secs(crate::audio::RING_SE
 // Capture is treated as dead after this long with no callback. Measured
 // healthy gaps are 11 ms to 18 ms, so this keeps 55 to 90 times headroom.
 pub const CAPTURE_SILENCE_LIMIT: Duration = Duration::from_secs(1);
+
+// The cue a use owes until capture's first sound, as an `AtomicU8`: the
+// capture callback moves it from waiting to heard, and that callback must not
+// lock. A press owes its start cue, and an answer its arm cue.
+const NO_START_CUE: u8 = 0;
+const DICTATE_WAITS: u8 = 1;
+const ANSWER_WAITS: u8 = 2;
+const DICTATE_HEARD: u8 = 3;
+const ANSWER_HEARD: u8 = 4;
+const ARM_WAITS: u8 = 5;
+const ARM_HEARD: u8 = 6;
+const ARM_PLAYED: u8 = 7;
 
 // EX_TEMPFAIL in sysexits.h. Any nonzero status restarts the daemon under
 // launchd's `SuccessfulExit=false` and systemd's `Restart=on-failure`.
@@ -48,9 +61,10 @@ pub struct AskCommand {
 }
 
 pub enum ConsumerCommand {
-    // A push-to-talk began. The consumer reads the ring while the key is held
-    // and ends on the `Transcribe` or `Discard` that follows.
-    Stream,
+    // A push-to-talk began, numbered so a refusal ends this press and no
+    // later one. The consumer reads the ring while the key is held and ends
+    // on the `Transcribe` or `Discard` that follows.
+    Stream(u64),
     Transcribe(RingClaim),
     // The consumer empties the ring, so a cancelled session does not feed
     // the next transcription
@@ -62,6 +76,8 @@ pub enum ConsumerCommand {
     Retune(Vec<String>),
     Speak(crate::speech_to_text::Speech),
     Reload(&'static banshee_common::listening::ListeningModel),
+    /// `models.unload_after` moved, so the idle wait is measured again.
+    UnloadAfter,
     Shutdown,
 }
 
@@ -94,11 +110,39 @@ impl RecordingMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecordingError {
     Microphone(String),
+    /// macOS refused the grant, read before any open was tried.
+    MicrophoneRefused(Refusal),
     Model(String),
     /// The id of a listening model whose file is not downloaded.
     NoListeningModel(&'static str),
     Provider(String),
     KeyFile(String),
+}
+
+/// Why macOS will not let capture open, read from the grant without opening.
+/// No other platform has a grant to read, so nothing builds one there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", test)), expect(dead_code))]
+pub enum Refusal {
+    Denied,
+    /// An administrator or a profile decides, so nobody on this Mac can allow it.
+    Restricted,
+}
+
+impl Refusal {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Refusal::Denied => "macOS does not allow Banshee to use it",
+            Refusal::Restricted => "this Mac restricts it",
+        }
+    }
+
+    pub const fn fix(self) -> &'static str {
+        match self {
+            Refusal::Denied => "allow Banshee in System Settings > Privacy & Security > Microphone",
+            Refusal::Restricted => "ask the administrator of this Mac for microphone access",
+        }
+    }
 }
 
 /// What the recording pipeline is. The daemon builds it on its own thread and
@@ -136,6 +180,9 @@ impl std::fmt::Display for RecordingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RecordingError::Microphone(e) => write!(f, "the microphone would not open: {e}"),
+            RecordingError::MicrophoneRefused(refusal) => {
+                write!(f, "the microphone would not open: {}", refusal.reason())
+            }
             RecordingError::Model(e) => write!(f, "a model would not load: {e}"),
             RecordingError::NoListeningModel(id) => {
                 write!(
@@ -167,7 +214,9 @@ impl RecordingError {
             RecordingError::KeyFile(_) => {
                 "dictation and ask_user do not work until the key file is fixed".to_string()
             }
-            RecordingError::Microphone(_) => self.to_string().trim_end_matches('.').to_string(),
+            RecordingError::Microphone(_) | RecordingError::MicrophoneRefused(_) => {
+                self.to_string().trim_end_matches('.').to_string()
+            }
         }
     }
 
@@ -178,20 +227,36 @@ impl RecordingError {
             | RecordingError::Model(_)
             | RecordingError::Provider(_) => Some("banshee start"),
             RecordingError::NoListeningModel(_) => Some("banshee setup"),
-            RecordingError::KeyFile(_) => None,
+            // A grant is a switch in System Settings, not a command.
+            RecordingError::KeyFile(_) | RecordingError::MicrophoneRefused(_) => None,
         }
+    }
+
+    /// What went wrong, then what to do, for a use whose microphone would not
+    /// open: `last_error` and an agent's reply carry both, since nothing else
+    /// names the fix. The next use opens again, so a device needs no restart.
+    pub fn failed_use(&self) -> String {
+        let fix = match self {
+            RecordingError::Microphone(_) => {
+                "Connect the microphone, or choose another in Listening. The next use tries again."
+                    .to_string()
+            }
+            other => format!("{}.", crate::audio::cues::capitalised(&other.fix())),
+        };
+        format!("{}. {fix}", self.to_string().trim_end_matches('.'))
     }
 
     pub fn fix(&self) -> String {
         match self {
-            // The watchdog rescans after a fault, so most microphones recover
-            // on their own. A capture that failed at startup has no watchdog.
+            // Capture held open rescans after a fault, and capture opened for a
+            // use tries the device again at the next use.
             RecordingError::Microphone(_) => {
                 "connect the microphone, grant it in Privacy & Security, or fix \
                  [audio] input_device. If recording does not recover on its own, \
                  restart: banshee start"
                     .to_string()
             }
+            RecordingError::MicrophoneRefused(refusal) => refusal.fix().to_string(),
             RecordingError::Model(_) => "restart it: banshee start".to_string(),
             RecordingError::NoListeningModel(_) => "download it: banshee setup".to_string(),
             RecordingError::Provider(_) => "set the key: banshee config set stt.remote.api_key, \
@@ -204,24 +269,83 @@ impl RecordingError {
     }
 }
 
-/// What the consumer holds of the listening model.
+/// The microphone, as recording sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Listening {
-    Loaded,
-    /// The id of a model whose file is still to download.
-    Awaited(&'static str),
-    /// Why the model whose file arrived did not load.
-    Failed(String),
+pub enum Mic {
+    /// The pipeline around capture is still being built.
+    Starting,
+    /// Shut between uses. The next use opens it, so it is ready.
+    Closed,
+    Open,
+    /// Capture failed, or the pipeline around it did not build.
+    Faulted(RecordingError),
+}
+
+/// What the listener has of its model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Listening {
+    /// A listener that loads no file.
+    Remote,
+    /// On disk and not in memory. It loads when used, so it is no fault.
+    Available(&'static ListeningModel),
+    /// Being read into memory. A use waits for it, so it is no fault either.
+    Loading(&'static ListeningModel),
+    Loaded(&'static ListeningModel),
+    /// The model whose file arrived and did not load, and why.
+    Failed(&'static ListeningModel, String),
+    /// The model whose file is still to download.
+    Missing(&'static ListeningModel),
 }
 
 impl Listening {
-    fn pipeline(&self) -> Pipeline {
+    /// `None` for a listener that loads no file.
+    pub fn model(&self) -> Option<&'static ListeningModel> {
         match self {
-            Listening::Loaded => Pipeline::Open,
-            Listening::Awaited(id) => Pipeline::Broken(RecordingError::NoListeningModel(id)),
-            Listening::Failed(error) => Pipeline::Broken(RecordingError::Model(error.clone())),
+            Listening::Remote => None,
+            Listening::Available(model)
+            | Listening::Loading(model)
+            | Listening::Loaded(model)
+            | Listening::Failed(model, _)
+            | Listening::Missing(model) => Some(model),
         }
     }
+
+    pub fn serves(&self) -> bool {
+        matches!(
+            self,
+            Listening::Remote
+                | Listening::Available(_)
+                | Listening::Loading(_)
+                | Listening::Loaded(_)
+        )
+    }
+}
+
+/// A microphone fault wins: it is the first thing to fix, since no model
+/// records without capture.
+pub fn pipeline(mic: &Mic, listening: &Listening) -> Pipeline {
+    match (mic, listening) {
+        (Mic::Faulted(error), _) => Pipeline::Broken(error.clone()),
+        (Mic::Starting, _) => Pipeline::Opening,
+        (Mic::Closed | Mic::Open, Listening::Failed(_, error)) => {
+            Pipeline::Broken(RecordingError::Model(error.clone()))
+        }
+        (Mic::Closed | Mic::Open, Listening::Missing(model)) => {
+            Pipeline::Broken(RecordingError::NoListeningModel(model.id))
+        }
+        (
+            Mic::Closed | Mic::Open,
+            Listening::Remote
+            | Listening::Available(_)
+            | Listening::Loading(_)
+            | Listening::Loaded(_),
+        ) => Pipeline::Open,
+    }
+}
+
+struct Facts {
+    mic: Mic,
+    listening: Listening,
 }
 
 /// The right to download, held for as long as one runs.
@@ -282,10 +406,6 @@ fn send_if_new<T: PartialEq>(channel: &watch::Sender<Option<T>>, value: Option<T
 
 pub struct DaemonState {
     version: &'static str,
-    // The model the listener has loaded, not the one the file names. The
-    // window reads the blockers built from this, so a model that was asked
-    // for and never loaded must not clear them.
-    stt_model: RwLock<Option<&'static banshee_common::listening::ListeningModel>>,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
     audio_device: RwLock<Option<String>>,
@@ -312,13 +432,15 @@ pub struct DaemonState {
     // Keys the daemon accepted and wrote but has not applied. A restart empties
     // it by nature; a live path clears its own key.
     pending: Mutex<std::collections::BTreeSet<String>>,
-    // Why recording is off, when it is. The watchdog clears the microphone
-    // half when it rebinds; a listening model clears the other half as it loads.
+    // Always `pipeline(mic, listening)` of `facts`, sent under its lock, so
+    // two writers cannot publish their changes out of order. The watchdog
+    // reopens capture on every rebind, and a value that has not moved wakes
+    // no subscriber.
     pipeline: watch::Sender<Pipeline>,
-    // Whether the consumer holds a listening model. Locked across each
-    // pipeline write it decides, so a microphone that opens cannot undo a load
-    // that just landed.
-    listening: Mutex<Listening>,
+    // `listening` names the model the listener serves, or the one it waits for
+    // while it serves none. A model the file names while another serves is not
+    // in it until that model loads.
+    facts: Mutex<Facts>,
     recording: AtomicU8,
     started_at: Instant,
     db_connection: Mutex<Option<rusqlite::Connection>>,
@@ -349,6 +471,8 @@ pub struct DaemonState {
     // The press's deadline. Start and stop can be separate RPC calls, so this
     // cannot live on a stack
     push_to_talk: Mutex<Instant>,
+    // The number of the latest press, moved under the push-to-talk lock.
+    presses: AtomicU64,
     armed_session: Mutex<u64>,
     ask_turn: tokio::sync::Mutex<()>,
     dictations_in_ring: Arc<watch::Sender<usize>>,
@@ -359,6 +483,19 @@ pub struct DaemonState {
     // Milliseconds since `started_at` at which the capture callback last ran.
     // Zero means it has never run, which reads as stalled.
     capture_tick: AtomicU64,
+    start_cue: AtomicU8,
+    keep_open: AtomicBool,
+    // The last read of the microphone grant. Every read goes through its
+    // setter, so a move reaches every client.
+    microphone_refusal: Mutex<Option<Refusal>>,
+    // A question has played and its answer is being listened for.
+    answering: AtomicBool,
+    // Woken whenever `wants_mic` may have changed, and when a press's first
+    // sound arrives.
+    mic_owner: std::sync::OnceLock<std::thread::Thread>,
+    unload_after: Mutex<Option<Duration>>,
+    // Woken when `unload_after` moves.
+    voice_keeper: std::sync::OnceLock<std::thread::Thread>,
     shutdown: tokio::sync::Notify,
     spoken: crate::turns::SpokenTurns,
     machine: Machine,
@@ -381,10 +518,23 @@ impl DaemonState {
         machine: Machine,
     ) -> Self {
         let wanted_downloads = crate::models::download::wanted(&config);
+        let keep_open = config.audio.keep_open;
+        let unload_after = config.models.unload_limit();
+        let facts = Facts {
+            mic: Mic::Starting,
+            listening: match crate::models::stt_model(&config) {
+                None => Listening::Remote,
+                Some(model)
+                    if crate::models::missing_in(&machine.models, &[model.file]).is_empty() =>
+                {
+                    Listening::Available(model)
+                }
+                Some(model) => Listening::Missing(model),
+            },
+        };
         Self {
             machine,
             version: env!("CARGO_PKG_VERSION"),
-            stt_model: RwLock::new(crate::models::stt_model(&config)),
             vad_model: crate::models::VAD_MODEL,
             vad_threshold: AtomicU32::new(config.stt.vad_threshold.to_bits()),
             audio_device: RwLock::new(None),
@@ -397,8 +547,8 @@ impl DaemonState {
             running_config: Arc::clone(&config),
             config: RwLock::new(config),
             pending: Mutex::new(std::collections::BTreeSet::new()),
-            pipeline: watch::channel(Pipeline::Opening).0,
-            listening: Mutex::new(Listening::Loaded),
+            pipeline: watch::channel(pipeline(&facts.mic, &facts.listening)).0,
+            facts: Mutex::new(facts),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
             db_connection: Mutex::new(db_connection),
@@ -415,11 +565,19 @@ impl DaemonState {
             commands,
             cues,
             push_to_talk: Mutex::new(Instant::now()),
+            presses: AtomicU64::new(0),
             armed_session: Mutex::new(0),
             ask_turn: tokio::sync::Mutex::new(()),
             dictations_in_ring: Arc::new(watch::channel(0).0),
             typing: AtomicBool::new(false),
             capture_tick: AtomicU64::new(0),
+            start_cue: AtomicU8::new(NO_START_CUE),
+            keep_open: AtomicBool::new(keep_open),
+            microphone_refusal: Mutex::new(None),
+            answering: AtomicBool::new(false),
+            mic_owner: std::sync::OnceLock::new(),
+            unload_after: Mutex::new(unload_after),
+            voice_keeper: std::sync::OnceLock::new(),
             shutdown: tokio::sync::Notify::new(),
             spoken: crate::turns::SpokenTurns::default(),
             peak: AtomicU32::new(0),
@@ -456,18 +614,14 @@ impl DaemonState {
             if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
-            self.cues.emit(Signal::RecordStart {
-                target: Target::Answer,
-            });
+            self.start_cue
+                .store(ANSWER_WAITS, std::sync::atomic::Ordering::Relaxed);
             true
         } else if self.start_push_to_talk() {
             // Silence the daemon's own voice before the mic opens
             if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
-            self.cues.emit(Signal::RecordStart {
-                target: Target::Dictate,
-            });
             log::info!("Recording started...");
             true
         } else {
@@ -478,9 +632,13 @@ impl DaemonState {
     // A stop with nothing in flight is a no-op, so release keybinds can fire
     // unconditionally.
     pub fn record_stop(&self) {
-        if !self.stop_push_to_talk(lock(&self.push_to_talk))
-            && self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed)
-        {
+        if self.stop_push_to_talk(lock(&self.push_to_talk)) {
+            return;
+        }
+        let session = lock(&self.push_to_talk);
+        let held = self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed);
+        drop(session);
+        if held {
             self.cues.emit(Signal::RecordStop {
                 target: Target::Answer,
             });
@@ -494,10 +652,16 @@ impl DaemonState {
         }
         // Discarded: a press starts from silence, not the last session's peak.
         self.take_peak();
+        self.start_cue
+            .store(DICTATE_WAITS, std::sync::atomic::Ordering::Relaxed);
         *deadline = Instant::now() + MAX_PUSH_TO_TALK;
+        let press = self
+            .presses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         // Under the push-to-talk lock, so it reaches the consumer before this
         // press's stop or cancel.
-        let _ = self.commands.send(ConsumerCommand::Stream);
+        let _ = self.commands.send(ConsumerCommand::Stream(press));
         true
     }
 
@@ -554,8 +718,9 @@ impl DaemonState {
             });
             let _ = self.commands.send(ConsumerCommand::Discard);
         } else {
+            let held = self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed);
             drop(session);
-            if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
+            if held {
                 // The armed session keeps its audio; only the manual hold ends.
                 // This cue answers the start cue the hold played.
                 self.cues.emit(Signal::RecordStop {
@@ -637,6 +802,183 @@ impl DaemonState {
     // written: another thread may have moved on, and subscribers want now.
     fn publish_recording(&self) {
         self.recording_active.send_replace(self.is_recording());
+        self.wake_mic();
+    }
+
+    /// Whether capture should be open now: for a press, for an answer being
+    /// listened for, or for good under `audio.keep_open`. A question that is
+    /// still playing does not need it.
+    pub fn wants_mic(&self) -> bool {
+        self.keep_open()
+            || self.answering.load(std::sync::atomic::Ordering::Relaxed)
+            || matches!(
+                self.recording_mode(),
+                RecordingMode::PushToTalk | RecordingMode::ArmedHold
+            )
+    }
+
+    pub fn keep_open(&self) -> bool {
+        self.keep_open.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_keep_open(&self, keep: bool) {
+        self.keep_open
+            .store(keep, std::sync::atomic::Ordering::Relaxed);
+        self.wake_mic();
+    }
+
+    pub fn set_mic_owner(&self, owner: std::thread::Thread) {
+        let _ = self.mic_owner.set(owner);
+    }
+
+    /// Called from the real time audio thread too: an unpark neither locks
+    /// nor allocates.
+    fn wake_mic(&self) {
+        if let Some(owner) = self.mic_owner.get() {
+            owner.unpark();
+        }
+    }
+
+    /// The question has played, so capture opens for its answer, and the arm
+    /// cue waits for capture's first sound. A hold already answering owes its
+    /// own start cue instead. False when `session` is no longer the one armed.
+    pub fn hear_answer(&self, session: u64) -> bool {
+        let current = lock(&self.armed_session);
+        let armed = *current == session && self.is_armed();
+        if armed {
+            if self.recording_mode() == RecordingMode::Armed {
+                self.start_cue
+                    .store(ARM_WAITS, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.answering
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.wake_mic();
+        }
+        armed
+    }
+
+    /// Whether the arm cue of the answer being listened for has played.
+    pub fn arm_cue_played(&self) -> bool {
+        self.start_cue.load(std::sync::atomic::Ordering::Relaxed) == ARM_PLAYED
+    }
+
+    /// The capture callback heard a sample that is not silence. Called from
+    /// the real time audio thread, so it must not lock or allocate.
+    pub fn heard_sound(&self) {
+        let (waits, heard) = match self.start_cue.load(std::sync::atomic::Ordering::Relaxed) {
+            DICTATE_WAITS => (DICTATE_WAITS, DICTATE_HEARD),
+            ANSWER_WAITS => (ANSWER_WAITS, ANSWER_HEARD),
+            ARM_WAITS => (ARM_WAITS, ARM_HEARD),
+            _ => return,
+        };
+        if self
+            .start_cue
+            .compare_exchange(
+                waits,
+                heard,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            self.wake_mic();
+        }
+    }
+
+    /// Plays the cue a use owes once its first sound has arrived, and only
+    /// while that use still holds capture: a press its start cue, an answer
+    /// its arm cue. Under the push-to-talk lock, as every stop and cancel of a
+    /// press or a hold is, so none can land between the check and the cue.
+    pub fn announce_sound(&self) {
+        let _session = lock(&self.push_to_talk);
+        let mode = self.recording_mode();
+        let heard = self.start_cue.load(std::sync::atomic::Ordering::Relaxed);
+        let (signal, holds, after) = match heard {
+            DICTATE_HEARD => (
+                Signal::RecordStart {
+                    target: Target::Dictate,
+                },
+                mode == RecordingMode::PushToTalk,
+                NO_START_CUE,
+            ),
+            ANSWER_HEARD => (
+                Signal::RecordStart {
+                    target: Target::Answer,
+                },
+                mode == RecordingMode::ArmedHold,
+                NO_START_CUE,
+            ),
+            ARM_HEARD => (
+                Signal::Arm,
+                mode == RecordingMode::Armed
+                    && self.answering.load(std::sync::atomic::Ordering::Relaxed),
+                ARM_PLAYED,
+            ),
+            _ => return,
+        };
+        let after = if holds { after } else { NO_START_CUE };
+        let taken = self
+            .start_cue
+            .compare_exchange(
+                heard,
+                after,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok();
+        if taken && holds {
+            self.cues.emit(signal);
+        }
+    }
+
+    /// The dictation `press` began, whose model would not load, is refused.
+    /// While that press is still held it ends, and its release finds nothing
+    /// to stop. Answers false when it is no longer held: every way a press
+    /// ends sends its `Transcribe` or `Discard`, which is on its way behind
+    /// its `Stream`, and a later press is left alone.
+    pub fn refuse_dictation(&self, press: u64, why: String) -> bool {
+        self.set_last_error(Some(why));
+        let session = lock(&self.push_to_talk);
+        let ended = self.presses.load(std::sync::atomic::Ordering::Relaxed) == press
+            && self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle);
+        drop(session);
+        self.cues.emit(Signal::Error {
+            reason: Reason::new(ReasonCode::TranscriptionFailed, None),
+            target: Some(Target::Dictate),
+        });
+        ended
+    }
+
+    /// The microphone would not open for the use in progress, so that use
+    /// fails with the reason. An answer learns it from the capture it reads.
+    pub fn capture_failed(&self, fault: RecordingError) {
+        self.set_last_error(Some(fault.failed_use()));
+        let answering = self
+            .answering
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        let session = lock(&self.push_to_talk);
+        let target = if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
+            let _ = self.commands.send(ConsumerCommand::Discard);
+            Some(Target::Dictate)
+        } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) && !answering
+        {
+            Some(Target::Answer)
+        } else {
+            None
+        };
+        drop(session);
+        if let Some(target) = target {
+            self.cues.emit(Signal::Error {
+                reason: broken(&fault),
+                target: Some(target),
+            });
+        }
+    }
+
+    /// The number of the latest press.
+    #[cfg(test)]
+    pub fn press(&self) -> u64 {
+        self.presses.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn subscribe_recording(&self) -> watch::Receiver<bool> {
@@ -750,7 +1092,8 @@ impl DaemonState {
         self.recording_mode() != RecordingMode::Idle
     }
 
-    /// True while the daemon holds the microphone open for a spoken answer.
+    /// True while a question waits for its spoken answer, from before it plays
+    /// until the answer ends.
     pub fn is_armed(&self) -> bool {
         matches!(
             self.recording_mode(),
@@ -778,19 +1121,8 @@ impl DaemonState {
         self.version
     }
 
-    pub fn stt_model(&self) -> Option<&'static banshee_common::listening::ListeningModel> {
-        *self
-            .stt_model
-            .read()
-            .unwrap_or_else(|poison| poison.into_inner())
-    }
-
-    /// `None` for a listener that loads no file.
-    pub fn set_stt_model(&self, model: Option<&'static banshee_common::listening::ListeningModel>) {
-        *self
-            .stt_model
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = model;
+    pub fn stt_model(&self) -> Option<&'static ListeningModel> {
+        self.listening().model()
     }
 
     pub fn vad_model(&self) -> &str {
@@ -854,58 +1186,151 @@ impl DaemonState {
         self.pipeline.borrow().clone()
     }
 
-    pub fn set_pipeline(&self, state: Pipeline) {
-        self.pipeline.send_replace(state);
-    }
-
-    /// The pipeline stands, and listens once `id`'s file arrives and loads.
-    pub fn await_listening_model(&self, id: &'static str) {
-        self.hold(&mut lock(&self.listening), Listening::Awaited(id));
-    }
-
-    /// Whether the consumer holds no listening model, so a model chosen now is
-    /// the one it waits for.
-    pub fn lacks_listening_model(&self) -> bool {
-        *lock(&self.listening) != Listening::Loaded
-    }
-
-    /// The listening model whose file is still to download.
-    pub fn awaited_listening_model(&self) -> Option<&'static str> {
-        match *lock(&self.listening) {
-            Listening::Awaited(id) => Some(id),
-            _ => None,
+    /// A client reports whether capture is open, and nothing else wakes its
+    /// push when only that moves, so a move counts as a device change.
+    pub fn set_mic(&self, mic: Mic) {
+        let mut moved = false;
+        self.update(|facts| {
+            moved = (facts.mic == Mic::Open) != (mic == Mic::Open);
+            facts.mic = mic;
+        });
+        if moved {
+            self.publish_device_change();
         }
     }
 
-    /// Capture is open. The pipeline is open unless no listening model is held.
-    pub fn capture_open(&self) {
-        self.set_pipeline(lock(&self.listening).pipeline());
-    }
-
-    pub fn listening_model_loaded(&self) {
-        self.hold(&mut lock(&self.listening), Listening::Loaded);
-    }
-
-    /// A listening model did not load. Without one held, the load is the
-    /// fault; otherwise the model already loaded listens on.
-    pub fn listening_model_failed(&self, error: String) {
-        let mut listening = lock(&self.listening);
-        if *listening != Listening::Loaded {
-            self.hold(&mut listening, Listening::Failed(error));
+    /// Pushed, so a tray tells a refused microphone from an idle one.
+    pub fn set_microphone_refusal(&self, refusal: Option<Refusal>) {
+        let moved = std::mem::replace(&mut *lock(&self.microphone_refusal), refusal) != refusal;
+        if moved {
+            self.publish_device_change();
         }
     }
 
-    /// A pipeline still opening, or one whose microphone failed, waits for
-    /// capture to open, which reads `now`.
-    fn hold(&self, listening: &mut Listening, now: Listening) {
-        *listening = now;
-        if matches!(
-            self.pipeline(),
-            Pipeline::Open
-                | Pipeline::Broken(RecordingError::NoListeningModel(_) | RecordingError::Model(_))
-        ) {
-            self.set_pipeline(listening.pipeline());
+    pub fn microphone_refusal(&self) -> Option<Refusal> {
+        *lock(&self.microphone_refusal)
+    }
+
+    pub fn microphone_open(&self) -> bool {
+        lock(&self.facts).mic == Mic::Open
+    }
+
+    #[cfg(test)]
+    pub fn mic(&self) -> Mic {
+        lock(&self.facts).mic.clone()
+    }
+
+    pub fn listening(&self) -> Listening {
+        lock(&self.facts).listening.clone()
+    }
+
+    /// The pipeline stands, and listens once `model`'s file arrives and loads.
+    pub fn await_listening_model(&self, model: &'static ListeningModel) {
+        self.update(|facts| facts.listening = Listening::Missing(model));
+    }
+
+    /// A listener that serves no model takes `model` from now on: loading
+    /// when `here` says its file is, and waiting for it otherwise. One that
+    /// serves keeps its model, and a load in flight serves, so a second caller
+    /// finds it and sends no second load. Answers what the listener had, read
+    /// under the same lock as the write.
+    pub fn claim_listening_model(&self, model: &'static ListeningModel, here: bool) -> Listening {
+        let mut had = Listening::Remote;
+        self.update(|facts| {
+            had = facts.listening.clone();
+            if !had.serves() {
+                facts.listening = if here {
+                    Listening::Loading(model)
+                } else {
+                    Listening::Missing(model)
+                };
+            }
+        });
+        had
+    }
+
+    /// `None` for a listener that loads no file.
+    pub fn listening_model_loaded(&self, model: Option<&'static ListeningModel>) {
+        self.update(|facts| {
+            facts.listening = model.map_or(Listening::Remote, Listening::Loaded);
+        });
+    }
+
+    /// A model that already serves listens on, so only a listener with none,
+    /// or one that is loading, takes the failure as its fault.
+    pub fn listening_model_failed(&self, model: &'static ListeningModel, error: String) {
+        self.update(|facts| {
+            if matches!(facts.listening, Listening::Loading(_)) || !facts.listening.serves() {
+                facts.listening = Listening::Failed(model, error);
+            }
+        });
+    }
+
+    /// The listener reads the model it idled out of back into memory.
+    /// Answers whether this caller owns the load; a load claimed for a file
+    /// that arrived ends with its own `Reload`.
+    pub fn listening_model_loading(&self) -> bool {
+        let mut ours = false;
+        self.update(|facts| {
+            if let Listening::Available(model) = facts.listening {
+                facts.listening = Listening::Loading(model);
+                ours = true;
+            }
+        });
+        ours
+    }
+
+    /// The load `listening_model_loading` gave this caller ended: the model is
+    /// in memory, or it stays on disk for the next use to try again.
+    pub fn listening_model_read(&self, loaded: bool) {
+        self.update(|facts| {
+            if let Listening::Loading(model) = facts.listening {
+                facts.listening = if loaded {
+                    Listening::Loaded(model)
+                } else {
+                    Listening::Available(model)
+                };
+            }
+        });
+    }
+
+    /// The model idled out of memory. The next use reads it again.
+    pub fn listening_model_unloaded(&self) {
+        self.update(|facts| {
+            if let Listening::Loaded(model) = facts.listening {
+                facts.listening = Listening::Available(model);
+            }
+        });
+    }
+
+    /// How long a local model stays loaded after its last use, or `None`
+    /// when it stays for good.
+    pub fn unload_after(&self) -> Option<Duration> {
+        *lock(&self.unload_after)
+    }
+
+    /// The listener and the voice each measure their idle wait again.
+    pub fn set_unload_after(&self, limit: Option<Duration>) {
+        *lock(&self.unload_after) = limit;
+        if let Some(keeper) = self.voice_keeper.get() {
+            keeper.unpark();
         }
+        let _ = self.commands.send(ConsumerCommand::UnloadAfter);
+    }
+
+    pub fn set_voice_keeper(&self, keeper: std::thread::Thread) {
+        let _ = self.voice_keeper.set(keeper);
+    }
+
+    fn update(&self, change: impl FnOnce(&mut Facts)) {
+        let mut facts = lock(&self.facts);
+        change(&mut facts);
+        let now = pipeline(&facts.mic, &facts.listening);
+        self.pipeline.send_if_modified(|held| {
+            let moved = *held != now;
+            *held = now;
+            moved
+        });
     }
 
     pub fn subscribe_pipeline(&self) -> watch::Receiver<Pipeline> {
@@ -987,6 +1412,17 @@ impl DaemonState {
     pub fn disarm(&self, session: u64) {
         let current = lock(&self.armed_session);
         if *current == session {
+            self.answering
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            for owed in [ARM_WAITS, ARM_HEARD, ARM_PLAYED] {
+                let _ = self.start_cue.compare_exchange(
+                    owed,
+                    NO_START_CUE,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            self.wake_mic();
             let _ = self.try_transition(RecordingMode::Armed, RecordingMode::Idle)
                 || self.try_transition(RecordingMode::ArmedHold, RecordingMode::Idle);
             self.set_answer_open(false);

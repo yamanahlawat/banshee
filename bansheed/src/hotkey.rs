@@ -1,5 +1,6 @@
-use ringbuf::HeapCons;
-use ringbuf::traits::Consumer;
+use ringbuf::traits::{Consumer, Observer, Split};
+use ringbuf::wrap::Wrap;
+use ringbuf::{HeapCons, HeapProd};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -13,7 +14,7 @@ use crate::audio::utils::{StreamingResampler, resample_audio};
 use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
 use crate::config::HotkeyMode;
 use crate::dictation::type_text;
-use crate::speech_to_text::vad::{VAD_CHUNK, VADEngine};
+use crate::speech_to_text::vad::{Detector, VAD_CHUNK};
 use crate::speech_to_text::{SAMPLE_RATE, Transcriber};
 use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode};
 use crate::text_to_speech::lock;
@@ -70,6 +71,15 @@ fn reason(error: &banshee_common::error::BansheeError) -> String {
     }
 }
 
+/// A load on demand that failed, then what to do. The model stays on disk,
+/// so the next use reads it again; a restart reports a model that never loads.
+fn failed_load(what: &str, error: &banshee_common::error::BansheeError) -> String {
+    format!(
+        "{what} would not load: {}. The next use tries again. If it fails every time, restart: banshee start",
+        reason(error).trim_end_matches('.')
+    )
+}
+
 /// They change together on a rebind, so they travel together.
 pub struct CaptureSource {
     pub consumer: HeapCons<f32>,
@@ -77,6 +87,16 @@ pub struct CaptureSource {
 }
 
 impl CaptureSource {
+    /// What capture reads before any device has opened. Its one slot is no
+    /// ring a device could reuse, since a ring holds `RING_SECS` at its rate.
+    pub fn unopened() -> Self {
+        let (_, consumer) = ringbuf::HeapRb::new(1).split();
+        Self {
+            consumer,
+            sample_rate: SAMPLE_RATE,
+        }
+    }
+
     fn pop_into(&mut self, batch: &mut Vec<f32>) {
         batch.extend(self.consumer.pop_iter());
     }
@@ -95,6 +115,8 @@ impl CaptureSource {
 pub struct Capture {
     source: Mutex<CaptureSource>,
     generation: AtomicU64,
+    /// Why the last open for a use failed, until a device opens again.
+    failure: Mutex<Option<String>>,
 }
 
 impl Capture {
@@ -102,6 +124,7 @@ impl Capture {
         Self {
             source: Mutex::new(source),
             generation: AtomicU64::new(0),
+            failure: Mutex::new(None),
         }
     }
 
@@ -113,12 +136,36 @@ impl Capture {
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A writer into the ring capture already holds, when that ring was built
+    /// for `rate` and no stream writes into it. Audio a released dictation
+    /// left unread then survives the next open.
+    pub fn reuse(&self, rate: u32) -> Option<HeapProd<f32>> {
+        let held = lock(&self.source);
+        let fits = held.sample_rate == rate
+            && held.consumer.capacity().get() == rate as usize * crate::audio::RING_SECS;
+        (fits && !held.consumer.write_is_held())
+            .then(|| HeapProd::new(Arc::clone(held.consumer.rb_ref())))
+    }
+
+    pub fn forget_failure(&self) {
+        *lock(&self.failure) = None;
+    }
+
+    pub fn fail(&self, reason: String) {
+        *lock(&self.failure) = Some(reason);
+    }
+
+    pub fn failure(&self) -> Option<String> {
+        lock(&self.failure).clone()
+    }
+
     /// Rises with every swap. A reader holding a resampler or a partial window
     /// built for the old device learns from this that both are stale.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub fn sample_rate(&self) -> u32 {
         lock(&self.source).sample_rate
     }
@@ -144,14 +191,17 @@ impl Capture {
     }
 }
 
-// Everything the audio consumer thread owns
+// Everything the audio consumer thread owns. The listening model and the
+// detector load and drop on this thread alone.
 pub struct Pipeline {
     pub source: Arc<Capture>,
     pub speech_to_text: Box<dyn Transcriber>,
-    pub vad: VADEngine,
+    pub vad: Detector,
     pub state: Arc<DaemonState>,
     pub cues: Cues,
     pub endpoint_silence_ms: u64,
+    /// When the models last served, which their idle unload counts from.
+    pub used: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +251,12 @@ fn onset(before: Phase, after: Phase) -> bool {
     )
 }
 
+/// What an answer's `timeout` leaves its listen once the wait for the arm cue
+/// has taken `waited`. One timeout covers the whole answer.
+fn listen_budget(timeout: Duration, waited: Duration) -> Duration {
+    timeout.saturating_sub(waited)
+}
+
 /// The resampler for a device at this rate. One place, because a question that
 /// outlives a device change builds a second one.
 fn resampler_for(rate: u32) -> Result<StreamingResampler, String> {
@@ -212,7 +268,7 @@ fn resampler_for(rate: u32) -> Result<StreamingResampler, String> {
 
 /// Drops what the VAD and the phase learned from audio that does not run on
 /// into what comes next: the daemon's own speech, or another device's.
-fn afresh(vad: &mut VADEngine, phase: &mut Phase) {
+fn afresh(vad: &mut Detector, phase: &mut Phase) {
     vad.reset_state();
     match phase {
         Phase::Waiting { speech_run } => *speech_run = 0,
@@ -229,6 +285,31 @@ pub fn hotkey_listener(
     thread::spawn(move || consume(pipeline, &commands, &type_text))
 }
 
+/// The next command. A command already waiting is served first, so a use
+/// that arrives as the models idle out finds them still loaded; otherwise the
+/// wait ends when they are due to unload, and they unload here, between jobs.
+fn next_command(
+    pipeline: &mut Pipeline,
+    commands: &mpsc::Receiver<ConsumerCommand>,
+) -> Option<ConsumerCommand> {
+    loop {
+        match commands.try_recv() {
+            Ok(command) => return Some(command),
+            Err(mpsc::TryRecvError::Disconnected) => return None,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let now = Instant::now();
+        let Some(due) = pipeline.unload_idle(now) else {
+            return commands.recv().ok();
+        };
+        match commands.recv_timeout(due.saturating_duration_since(now)) {
+            Ok(command) => return Some(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+
 fn consume(
     mut pipeline: Pipeline,
     commands: &mpsc::Receiver<ConsumerCommand>,
@@ -236,80 +317,121 @@ fn consume(
 ) {
     // Commands that arrived while a dictation streamed, in the order they came
     let mut deferred = VecDeque::new();
-    while let Some(command) = deferred.pop_front().or_else(|| commands.recv().ok()) {
-        let records = matches!(
-            command,
-            ConsumerCommand::Stream
-                | ConsumerCommand::Transcribe(_)
-                | ConsumerCommand::Discard
-                | ConsumerCommand::Ask(_)
-        );
-        match command {
-            ConsumerCommand::Stream => pipeline.dictate(commands, &mut deferred, type_words),
-            ConsumerCommand::Transcribe(ring) => pipeline.transcribe_utterance(ring, type_words),
-            ConsumerCommand::Discard => pipeline.discard(),
-            ConsumerCommand::Ask(ask) => pipeline.ask(ask),
-            ConsumerCommand::Retune(words) => pipeline.speech_to_text.set_vocabulary(&words),
-            ConsumerCommand::Speak(speech) => pipeline.speech_to_text.set_speech(speech),
-            // The load takes seconds and holds this thread. Nothing is lost:
-            // a press queues behind it and the ring still holds the audio.
-            ConsumerCommand::Reload(model) => {
-                let loading = Raised::on(&pipeline.state, DaemonState::set_loading_model);
-                match pipeline.speech_to_text.reload(model) {
-                    Ok(loaded) => {
-                        pipeline.state.set_stt_model(loaded);
-                        pipeline.state.listening_model_loaded();
-                    }
-                    Err(error) => {
-                        log::error!("the listening model did not load: {error}");
-                        pipeline.state.listening_model_failed(error.to_string());
-                    }
-                }
-                drop(loading);
-            }
-            ConsumerCommand::Shutdown => break,
-        }
-        // A recording's live words end with it, however it ended
-        if records {
-            pipeline.state.publish_words("");
+    while let Some(command) = deferred
+        .pop_front()
+        .or_else(|| next_command(&mut pipeline, commands))
+    {
+        if pipeline
+            .serve(command, commands, &mut deferred, type_words)
+            .is_break()
+        {
+            break;
         }
     }
 }
 
-/// Feeds the open stream each whole 160 ms of audio past `fed`, and shows each
-/// change to the committed words. `fed` is `None` while no stream is open, and
-/// a feed that fails ends the stream and the live words.
+/// Feeds the open stream the next whole 160 ms of audio past `fed`, and shows
+/// a change to the committed words. `fed` is `None` while no stream is open,
+/// and a feed that fails ends the stream and the live words. Answers whether
+/// another whole window waits, so a caller can look at its commands between
+/// feeds.
 fn feed_stream(
     speech_to_text: &mut dyn Transcriber,
     state: &DaemonState,
     audio: &[f32],
     fed: &mut Option<usize>,
-) {
-    let Some(at) = fed else { return };
-    while audio.len() - *at >= FEED {
-        match speech_to_text.feed(&audio[*at..*at + FEED]) {
-            Ok(words) => {
-                if let Some(words) = words {
-                    state.publish_words(&words);
-                }
-                *at += FEED;
+) -> bool {
+    let Some(at) = fed else { return false };
+    if audio.len() - *at < FEED {
+        return false;
+    }
+    match speech_to_text.feed(&audio[*at..*at + FEED]) {
+        Ok(words) => {
+            if let Some(words) = words {
+                state.publish_words(&words);
             }
-            Err(error) => {
-                log::warn!("the live words stopped: {}", reason(&error));
-                speech_to_text.cancel_stream();
-                *fed = None;
-                return;
-            }
+            *at += FEED;
+            audio.len() - *at >= FEED
         }
+        Err(error) => {
+            log::warn!("the live words stopped: {}", reason(&error));
+            speech_to_text.cancel_stream();
+            *fed = None;
+            false
+        }
+    }
+}
+
+/// Capture read at 16 kHz. The resampler is built for the rate the first audio
+/// comes at, and again after the device moves, since capture may open only
+/// after the reading starts.
+struct Resampled {
+    device: u64,
+    resampler: Option<StreamingResampler>,
+    batch: Vec<f32>,
+    /// Some audio came, so a new ring after it is another device mid-use and
+    /// not capture opening for this one.
+    heard: bool,
+}
+
+impl Resampled {
+    fn new(source: &Capture) -> Self {
+        Self {
+            device: source.generation(),
+            resampler: None,
+            batch: Vec::new(),
+            heard: false,
+        }
+    }
+
+    /// Appends what capture holds to `audio`, and answers whether the device
+    /// moved under audio already read.
+    fn read(&mut self, source: &Capture, audio: &mut Vec<f32>) -> Result<bool, String> {
+        self.batch.clear();
+        let (rate, device) = source.take(&mut self.batch);
+        let swapped = device != self.device;
+        if swapped {
+            self.device = device;
+            self.resampler = None;
+        }
+        let moved = swapped && self.heard;
+        if self.batch.is_empty() {
+            return Ok(moved);
+        }
+        self.heard = true;
+        let resampler = match self.resampler.take() {
+            Some(built) => self.resampler.insert(built),
+            None => self.resampler.insert(resampler_for(rate)?),
+        };
+        resampler.push(&self.batch, audio).map_err(|e| {
+            log::error!("resampling failed: {e}");
+            reason(&e)
+        })?;
+        Ok(moved)
+    }
+
+    /// Drops the partial window, so no spliced frame reaches the detector.
+    fn reset(&mut self) {
+        if let Some(resampler) = self.resampler.as_mut() {
+            resampler.reset();
+        }
+    }
+
+    /// The last partial window, so the full pass hears the audio to its end.
+    fn finish(&mut self, audio: &mut Vec<f32>) -> Result<(), String> {
+        let Some(resampler) = self.resampler.as_mut() else {
+            return Ok(());
+        };
+        resampler.finish(audio).map_err(|e| {
+            log::error!("resampling failed: {e}");
+            reason(&e)
+        })
     }
 }
 
 /// A held dictation, read off the ring while it is spoken.
 struct Dictation {
-    device: u64,
-    /// Built for the rate the first audio comes at, and again after a move.
-    resampler: Option<StreamingResampler>,
-    batch: Vec<f32>,
+    capture: Resampled,
     /// The whole clip at 16 kHz, which the voice check and the model read on release.
     audio: Vec<f32>,
     /// How far into `audio` the stream has heard, and `None` once a feed failed.
@@ -325,47 +447,24 @@ impl Dictation {
             source.discard();
             return;
         }
-        self.batch.clear();
-        let (rate, moved) = source.take(&mut self.batch);
-        if moved != self.device {
-            self.device = moved;
-            log::info!("the microphone moved while a dictation was held");
-            self.resampler = None;
-        }
-        if self.batch.is_empty() {
-            return;
-        }
-        let resampler = match self.resampler.take() {
-            Some(resampler) => self.resampler.insert(resampler),
-            None => match resampler_for(rate) {
-                Ok(resampler) => self.resampler.insert(resampler),
-                Err(why) => {
-                    self.broken = Some(why);
-                    return;
-                }
-            },
-        };
-        if let Err(e) = resampler.push(&self.batch, &mut self.audio) {
-            log::error!("resampling failed: {e}");
-            self.broken = Some(reason(&e));
+        match self.capture.read(source, &mut self.audio) {
+            Ok(true) => log::info!("the microphone moved while a dictation was held"),
+            Ok(false) => {}
+            Err(why) => self.broken = Some(why),
         }
     }
 
-    /// The last partial window, so the full pass hears the clip to its end.
     fn finish(&mut self) {
-        let Some(resampler) = self.resampler.as_mut().filter(|_| self.broken.is_none()) else {
-            return;
-        };
-        if let Err(e) = resampler.finish(&mut self.audio) {
-            log::error!("resampling failed: {e}");
-            self.broken = Some(reason(&e));
+        if self.broken.is_none()
+            && let Err(why) = self.capture.finish(&mut self.audio)
+        {
+            self.broken = Some(why);
         }
     }
 
-    fn feed(&mut self, speech_to_text: &mut dyn Transcriber, state: &DaemonState) {
-        if self.broken.is_none() {
-            feed_stream(speech_to_text, state, &self.audio, &mut self.fed);
-        }
+    /// Answers whether another whole window waits.
+    fn feed(&mut self, speech_to_text: &mut dyn Transcriber, state: &DaemonState) -> bool {
+        self.broken.is_none() && feed_stream(speech_to_text, state, &self.audio, &mut self.fed)
     }
 }
 
@@ -428,12 +527,8 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
             if key_state.is_typing() {
                 return;
             }
-            match tracker.on_event(&event.event_type) {
-                Some(HotkeyAction::Start) => owned = key_state.record_start(),
-                Some(HotkeyAction::Toggle) => owned = key_state.record_toggle(),
-                Some(HotkeyAction::Stop) => key_state.record_stop(),
-                Some(HotkeyAction::Cancel) if owned => key_state.record_cancel(),
-                Some(HotkeyAction::Cancel) | None => {}
+            if let Some(action) = tracker.on_event(&event.event_type) {
+                act(&key_state, action, &mut owned);
             }
         }) {
             // Names the capability that is gone, not just the error type
@@ -445,7 +540,117 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
     });
 }
 
+/// What one hotkey action does to the daemon. `owned` says whether this
+/// listener's own start opened the session in flight.
+pub(crate) fn act(state: &DaemonState, action: HotkeyAction, owned: &mut bool) {
+    match action {
+        HotkeyAction::Start => *owned = state.record_start(),
+        HotkeyAction::Toggle => *owned = state.record_toggle(),
+        HotkeyAction::Stop => state.record_stop(),
+        HotkeyAction::Cancel if *owned => state.record_cancel(),
+        HotkeyAction::Cancel => {}
+    }
+}
+
 impl Pipeline {
+    /// Runs one command. Breaks on the shutdown.
+    fn serve(
+        &mut self,
+        command: ConsumerCommand,
+        commands: &mpsc::Receiver<ConsumerCommand>,
+        deferred: &mut VecDeque<ConsumerCommand>,
+        type_words: &dyn Fn(&str) -> Result<(), BansheeError>,
+    ) -> std::ops::ControlFlow<()> {
+        let records = matches!(
+            command,
+            ConsumerCommand::Stream(_)
+                | ConsumerCommand::Transcribe(_)
+                | ConsumerCommand::Discard
+                | ConsumerCommand::Ask(_)
+        );
+        let uses_a_model = records || matches!(command, ConsumerCommand::Reload(_));
+        match command {
+            ConsumerCommand::Stream(press) => self.dictate(press, commands, deferred, type_words),
+            ConsumerCommand::Transcribe(ring) => self.transcribe_utterance(ring, type_words),
+            ConsumerCommand::Discard => self.discard(),
+            ConsumerCommand::Ask(ask) => self.ask(ask),
+            ConsumerCommand::Retune(words) => self.speech_to_text.set_vocabulary(&words),
+            ConsumerCommand::Speak(speech) => self.speech_to_text.set_speech(speech),
+            // The load takes seconds and holds this thread. Nothing is lost:
+            // a press queues behind it and the ring still holds the audio.
+            ConsumerCommand::Reload(model) => {
+                let _loading = Raised::on(&self.state, DaemonState::set_loading_model);
+                match self.speech_to_text.reload(model) {
+                    Ok(loaded) => self.state.listening_model_loaded(loaded),
+                    Err(error) => {
+                        log::error!("the listening model did not load: {error}");
+                        self.state.listening_model_failed(model, error.to_string());
+                    }
+                }
+            }
+            ConsumerCommand::UnloadAfter => {}
+            ConsumerCommand::Shutdown => return std::ops::ControlFlow::Break(()),
+        }
+        // A recording's live words end with it, however it ended
+        if records {
+            self.state.publish_words("");
+        }
+        if uses_a_model {
+            self.used = Instant::now();
+        }
+        std::ops::ControlFlow::Continue(())
+    }
+
+    /// Frees the listening model and the detector once they have idled past
+    /// `models.unload_after`, and answers when they are due. `None` once they
+    /// are freed, or when they stay loaded: only a use loads them again.
+    fn unload_idle(&mut self, now: Instant) -> Option<Instant> {
+        let due = crate::models::unload_due(self.used, self.state.unload_after())?;
+        if now < due {
+            return Some(due);
+        }
+        let listener = self.speech_to_text.unload();
+        if listener {
+            self.state.listening_model_unloaded();
+        }
+        let detector = self.vad.unload();
+        if detector || listener {
+            crate::models::return_freed_memory();
+            let freed = match (listener, detector) {
+                (true, true) => "listening model and voice detector",
+                (true, false) => "listening model",
+                _ => "voice detector",
+            };
+            log::info!("The {freed} unloaded after idling");
+        }
+        None
+    }
+
+    /// Loads what idled out before a use needs it: the detector, then the
+    /// listening model, which reads as loading until it is in memory. A load
+    /// that fails fails this use alone, and the next use tries again.
+    fn ready(&mut self) -> Result<(), String> {
+        if self.vad.resident() && self.speech_to_text.resident() {
+            return Ok(());
+        }
+        let _loading = Raised::on(&self.state, DaemonState::set_loading_model);
+        self.vad
+            .load()
+            .map_err(|error| failed_load("the voice detection model", &error))?;
+        if self.speech_to_text.resident() {
+            return Ok(());
+        }
+        let ours = self.state.listening_model_loading();
+        let loaded = self.speech_to_text.load();
+        if ours {
+            self.state.listening_model_read(loaded.is_ok());
+        }
+        loaded.map_err(|error| {
+            log::error!("the listening model did not load: {error}");
+            failed_load("the listening model", &error)
+        })
+    }
+
     // A session opened while this command sat in the queue owns the ring now:
     // the discard skips, the cancelled lead-in stays.
     fn discard(&self) {
@@ -472,14 +677,23 @@ impl Pipeline {
             Ok(data) => data,
             Err(e) => {
                 log::error!("resampling failed: {e}");
-                self.resampling_failed(reason(&e));
+                self.dictation_failed(reason(&e));
                 return;
             }
         };
-        self.deliver(&final_data, type_words);
+        match self.ready() {
+            Ok(()) => self.deliver(&final_data, type_words),
+            Err(why) => self.dictation_failed(why),
+        }
     }
 
-    fn resampling_failed(&self, why: String) {
+    /// The audio of a dictation already refused, dropped with its claim.
+    fn drop_refused(&mut self, ring: crate::state::RingClaim) {
+        self.source.discard();
+        drop(ring);
+    }
+
+    fn dictation_failed(&self, why: String) {
         self.state.set_last_error(Some(why));
         self.cues.emit(Signal::Error {
             reason: Reason::new(ReasonCode::TranscriptionFailed, None),
@@ -509,14 +723,24 @@ impl Pipeline {
     /// key is held; with no stream, the ring keeps the audio for the release.
     fn dictate(
         &mut self,
+        press: u64,
         commands: &mpsc::Receiver<ConsumerCommand>,
         deferred: &mut VecDeque<ConsumerCommand>,
         type_words: impl FnOnce(&str) -> Result<(), BansheeError>,
     ) {
-        let mut live = self.begin_live_words("dictation").then(|| Dictation {
-            device: self.source.generation(),
-            resampler: None,
-            batch: Vec::new(),
+        // At the press, so a model that idled out loads while the words are spoken
+        let refused = match self.ready() {
+            Ok(()) => false,
+            Err(why) => {
+                if self.state.refuse_dictation(press, why) {
+                    self.discard();
+                    return;
+                }
+                true
+            }
+        };
+        let mut live = (!refused && self.begin_live_words("dictation")).then(|| Dictation {
+            capture: Resampled::new(&self.source),
             audio: Vec::new(),
             fed: Some(0),
             broken: None,
@@ -530,14 +754,15 @@ impl Pipeline {
             };
             match command {
                 Ok(ConsumerCommand::Transcribe(ring)) => {
-                    match live {
-                        Some(mut dictation) => {
+                    match (live, refused) {
+                        (_, true) => self.drop_refused(ring),
+                        (Some(mut dictation), false) => {
                             dictation.read(&self.source);
                             drop(ring);
                             dictation.finish();
                             self.finish_dictation(dictation, type_words);
                         }
-                        None => self.transcribe_utterance(ring, type_words),
+                        (None, false) => self.transcribe_utterance(ring, type_words),
                     }
                     return;
                 }
@@ -556,8 +781,9 @@ impl Pipeline {
             }
             if let Some(dictation) = live.as_mut() {
                 dictation.read(&self.source);
-                dictation.feed(&mut *self.speech_to_text, &self.state);
-                thread::sleep(ARMED_POLL);
+                if !dictation.feed(&mut *self.speech_to_text, &self.state) {
+                    thread::sleep(ARMED_POLL);
+                }
             }
         }
     }
@@ -572,7 +798,7 @@ impl Pipeline {
         // The live words were the stream's; the typed text is one full pass
         self.speech_to_text.cancel_stream();
         if let Some(why) = dictation.broken.take() {
-            self.resampling_failed(why);
+            self.dictation_failed(why);
         } else {
             self.deliver(&dictation.audio, type_words);
         }
@@ -719,13 +945,22 @@ impl Pipeline {
     fn ask(&mut self, ask: AskCommand) {
         // The ring holds echo captured while the question played
         self.source.discard();
-        self.cues.emit(Signal::Arm);
-        // Let the arm cue leave the speaker before the VAD listens
-        thread::sleep(CUE_SETTLE);
-        self.source.discard();
-        self.state.open_answer(ask.session);
-
-        let listened = self.listen_for_answer(ask.timeout, ask.session);
+        // An earlier use's failure is not this answer's
+        self.source.forget_failure();
+        // Before capture opens: a load that outlasted the open and the arm
+        // cue's settle would drop the start of the answer with the cue.
+        let listened = self.ready().and_then(|()| {
+            self.state.hear_answer(ask.session);
+            let asked = Instant::now();
+            match self.await_arm_cue(asked + ask.timeout, ask.session)? {
+                None => {
+                    self.state.open_answer(ask.session);
+                    let left = listen_budget(ask.timeout, asked.elapsed());
+                    self.listen_for_answer(left, ask.session)
+                }
+                Some(ended) => Ok(ended),
+            }
+        });
 
         // Close the mic before the slow transcription; every exit disarms
         self.state.disarm(ask.session);
@@ -738,6 +973,35 @@ impl Pipeline {
             speech_to_text.transcribe(audio)
         });
         let _ = ask.reply.send(text);
+    }
+
+    /// Waits while capture opens for the answer, until its first sound plays
+    /// the arm cue, then lets the cue leave the speaker. Everything captured
+    /// until then is dropped at once, so the detector never hears the cue.
+    /// `None` when the answer is to be listened for: the cue has played, or a
+    /// hold took over. A mic that only ever delivers silence waits out
+    /// `deadline`.
+    fn await_arm_cue(&mut self, deadline: Instant, session: u64) -> Result<Option<Heard>, String> {
+        loop {
+            thread::sleep(ARMED_POLL);
+            match self.state.armed_mode(session) {
+                Some(RecordingMode::ArmedHold) => return Ok(None),
+                Some(RecordingMode::Armed) => {}
+                _ => return Ok(Some(Heard::Closed)),
+            }
+            if let Some(why) = self.source.failure() {
+                return Err(why);
+            }
+            if self.state.arm_cue_played() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Ok(Some(Heard::Silence));
+            }
+        }
+        thread::sleep(CUE_SETTLE);
+        self.source.discard();
+        Ok(None)
     }
 
     /// Opens the answer's stream at `start` in its audio, after any stream
@@ -756,10 +1020,9 @@ impl Pipeline {
     // 16 kHz. `Heard::Silence` and `Heard::Closed` are an answer that never
     // came; `Err` is a listen that broke.
     fn listen_for_answer(&mut self, timeout: Duration, session: u64) -> Result<Heard, String> {
-        // The device this answer started on. The watchdog may put another one
-        // under it at any moment, and the rate is not shared between devices.
-        let mut device = self.source.generation();
-        let mut resampler = resampler_for(self.source.sample_rate())?;
+        // The device under this answer may change at any moment, and the rate
+        // is not shared between devices.
+        let mut capture = Resampled::new(&self.source);
         self.vad.reset_state();
         let vad_threshold = self.state.vad_threshold();
         let endpoint_chunks = (self.endpoint_silence_ms / CHUNK_MS).max(1) as usize;
@@ -767,8 +1030,6 @@ impl Pipeline {
         let hard_deadline = deadline + MAX_ANSWER;
 
         let mut audio: Vec<f32> = Vec::new();
-        // Reused across polls so the loop allocates nothing in steady state
-        let mut batch: Vec<f32> = Vec::new();
         let mut processed = 0;
         let mut phase = Phase::Waiting { speech_run: 0 };
         let mut suppressed = false;
@@ -789,7 +1050,7 @@ impl Pipeline {
                 Some(RecordingMode::Armed) => {
                     if let Phase::Manual { start } = phase {
                         // The hotkey release ends the manual answer
-                        resampler.finish(&mut audio).map_err(|e| reason(&e))?;
+                        capture.finish(&mut audio)?;
                         audio.drain(..start);
                         return Ok(Heard::Audio(audio));
                     }
@@ -797,12 +1058,15 @@ impl Pipeline {
                 // The session was closed from outside
                 _ => return Ok(Heard::Closed),
             }
+            if let Some(why) = self.source.failure() {
+                return Err(why);
+            }
 
             // Checked before suppression so stuck speech cannot hang the session
             if Instant::now() >= hard_deadline {
                 return match phase {
                     Phase::InSpeech { start, .. } | Phase::Manual { start } => {
-                        resampler.finish(&mut audio).map_err(|e| reason(&e))?;
+                        capture.finish(&mut audio)?;
                         audio.drain(..start);
                         Ok(Heard::Audio(audio))
                     }
@@ -818,27 +1082,16 @@ impl Pipeline {
             }
             if suppressed {
                 suppressed = false;
-                // Drop the pre-gap partial window so no spliced frame reaches the VAD
-                resampler.reset();
+                capture.reset();
                 afresh(&mut self.vad, &mut phase);
             }
-
-            batch.clear();
-            let (rate, moved) = self.source.take(&mut batch);
 
             // The microphone moved under this answer. What was said already is
             // kept: it is resampled and belongs to the answer. What cannot be
-            // kept is a resampler built for the old rate, and a window holding
-            // the old device's audio.
-            if moved != device {
-                device = moved;
+            // kept is a window holding the old device's audio.
+            if capture.read(&self.source, &mut audio)? {
                 log::info!("the microphone moved while a question was listening");
-                resampler = resampler_for(rate)?;
                 afresh(&mut self.vad, &mut phase);
-            }
-            if let Err(e) = resampler.push(&batch, &mut audio) {
-                log::error!("Resampling failed: {e}");
-                return Err(reason(&e));
             }
 
             // Manual capture needs no VAD; the release is the endpoint
@@ -861,12 +1114,12 @@ impl Pipeline {
                 }
                 phase = next;
             }
-            feed_stream(&mut *self.speech_to_text, &self.state, &audio, &mut fed);
+            while feed_stream(&mut *self.speech_to_text, &self.state, &audio, &mut fed) {}
 
             if let Phase::InSpeech { silence_run, start } = phase
                 && silence_run >= endpoint_chunks
             {
-                resampler.finish(&mut audio).map_err(|e| reason(&e))?;
+                capture.finish(&mut audio)?;
                 audio.drain(..start);
                 return Ok(Heard::Audio(audio));
             }
@@ -1066,6 +1319,9 @@ mod utterance_tests {
     use ringbuf::traits::{Producer, Split};
     use std::sync::atomic::AtomicBool;
 
+    const FAILED_LOAD_FIX: &str =
+        ". The next use tries again. If it fails every time, restart: banshee start";
+
     /// Answers one fixed result, and notes whether the flag was up and a
     /// dictation still in the ring when asked. One that streams refuses a
     /// second stream while one is open, as the model's compute lease does.
@@ -1079,13 +1335,31 @@ mod utterance_tests {
         words: Option<String>,
         /// Told of every feed.
         fed: Option<mpsc::Sender<()>>,
+        /// Each feed waits here before it returns, until the sender goes.
+        gate: Option<mpsc::Receiver<()>>,
         /// Every feed fails.
         feed_fails: bool,
         /// Every reload fails.
         reload_fails: bool,
         open: bool,
         calls: Arc<Mutex<Vec<Call>>>,
+        /// The model is in memory.
+        resident: bool,
+        /// This many loads fail before one succeeds.
+        loads_fail: usize,
+        /// What the daemon reported while each load ran.
+        during_load: Arc<Mutex<Vec<DuringLoad>>>,
+        /// Told of every unload that freed the model.
+        unloaded: Option<mpsc::Sender<()>>,
+        /// Told of every load as it begins.
+        loading: Option<mpsc::Sender<()>>,
+        /// Each load waits here before it ends.
+        load_gate: Option<mpsc::Receiver<()>>,
     }
+
+    /// The loading flag, the listening fact, the live state and whether the
+    /// microphone was wanted, as a load saw them.
+    type DuringLoad = (bool, crate::state::Listening, serde_json::Value, bool);
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Call {
@@ -1095,6 +1369,8 @@ mod utterance_tests {
         /// With the words on show when the stream was cancelled.
         Cancel(String),
         Reload,
+        Load,
+        Unload,
     }
 
     impl Scripted {
@@ -1107,10 +1383,17 @@ mod utterance_tests {
                 streams: false,
                 words: None,
                 fed: None,
+                gate: None,
                 feed_fails: false,
                 reload_fails: false,
                 open: false,
                 calls: Arc::default(),
+                resident: true,
+                loads_fail: 0,
+                during_load: Arc::default(),
+                unloaded: None,
+                loading: None,
+                load_gate: None,
             }
         }
 
@@ -1146,6 +1429,9 @@ mod utterance_tests {
             if let Some(fed) = &self.fed {
                 let _ = fed.send(());
             }
+            if let Some(gate) = &self.gate {
+                let _ = gate.recv();
+            }
             if self.feed_fails {
                 return Err(BansheeError::Transcription("the stream broke".to_string()));
             }
@@ -1160,13 +1446,49 @@ mod utterance_tests {
         fn set_speech(&mut self, _speech: Speech) {}
         fn reload(
             &mut self,
-            _model: &'static ListeningModel,
+            model: &'static ListeningModel,
         ) -> Result<Option<&'static ListeningModel>, BansheeError> {
             self.note(Call::Reload);
             if self.reload_fails {
                 return Err(BansheeError::Other("the file is damaged".to_string()));
             }
-            Ok(None)
+            Ok(Some(model))
+        }
+        fn resident(&self) -> bool {
+            self.resident
+        }
+        fn load(&mut self) -> Result<(), BansheeError> {
+            self.note(Call::Load);
+            self.during_load.lock().unwrap().push((
+                self.state.is_loading_model(),
+                self.state.listening(),
+                crate::api::live_state(&self.state),
+                self.state.wants_mic(),
+            ));
+            if let Some(loading) = &self.loading {
+                let _ = loading.send(());
+            }
+            if let Some(gate) = &self.load_gate {
+                let _ = gate.recv_timeout(Duration::from_secs(5));
+            }
+            if self.loads_fail > 0 {
+                self.loads_fail -= 1;
+                return Err(BansheeError::Other(
+                    "the listening model did not load: the file is damaged".to_string(),
+                ));
+            }
+            self.resident = true;
+            Ok(())
+        }
+        fn unload(&mut self) -> bool {
+            if !std::mem::take(&mut self.resident) {
+                return false;
+            }
+            self.note(Call::Unload);
+            if let Some(unloaded) = &self.unloaded {
+                let _ = unloaded.send(());
+            }
+            true
         }
     }
 
@@ -1212,7 +1534,7 @@ mod utterance_tests {
         assert!(state.record_start());
         state.record_stop();
         assert!(
-            matches!(requests.try_recv(), Ok(ConsumerCommand::Stream)),
+            matches!(requests.try_recv(), Ok(ConsumerCommand::Stream(_))),
             "the press streams first"
         );
         let Ok(ConsumerCommand::Transcribe(ring)) = requests.try_recv() else {
@@ -1242,19 +1564,33 @@ mod utterance_tests {
         cues: Cues,
         speech_to_text: Scripted,
     ) -> Pipeline {
-        let (mut producer, consumer) = ringbuf::HeapRb::<f32>::new(audio.len()).split();
+        let (pipeline, mut producer) = fillable(audio.len(), state, cues, speech_to_text);
         producer.push_slice(audio);
-        Pipeline {
+        pipeline
+    }
+
+    /// A pipeline whose capture holds up to `room` samples, and the end the
+    /// test fills it from.
+    fn fillable(
+        room: usize,
+        state: &Arc<DaemonState>,
+        cues: Cues,
+        speech_to_text: Scripted,
+    ) -> (Pipeline, HeapProd<f32>) {
+        let (producer, consumer) = ringbuf::HeapRb::<f32>::new(room).split();
+        let pipeline = Pipeline {
             source: Arc::new(Capture::new(CaptureSource {
                 consumer,
                 sample_rate: SAMPLE_RATE,
             })),
             speech_to_text: Box::new(speech_to_text),
-            vad: VADEngine::open(&crate::test_support::silero()).unwrap(),
+            vad: Detector::open(crate::test_support::silero()).unwrap(),
             state: Arc::clone(state),
             cues,
             endpoint_silence_ms: 800,
-        }
+            used: Instant::now(),
+        };
+        (pipeline, producer)
     }
 
     /// Listens once for the answer to an armed question whose capture holds
@@ -1518,7 +1854,7 @@ mod utterance_tests {
             },
             &spoken_then_quiet(),
             |state, commands| {
-                commands.send(ConsumerCommand::Stream).unwrap();
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
                 fed_before_release = feeding.recv_timeout(Duration::from_secs(5)).is_ok();
                 commands
                     .send(ConsumerCommand::Transcribe(state.claim_ring()))
@@ -1544,7 +1880,7 @@ mod utterance_tests {
             |state| streaming(state, "typed whole"),
             &spoken_then_quiet(),
             |state, commands| {
-                commands.send(ConsumerCommand::Stream).unwrap();
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
                     .send(ConsumerCommand::Transcribe(state.claim_ring()))
                     .unwrap();
@@ -1579,7 +1915,7 @@ mod utterance_tests {
             },
             &spoken_then_quiet(),
             |state, commands| {
-                commands.send(ConsumerCommand::Stream).unwrap();
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
                 feeding
                     .recv_timeout(Duration::from_secs(5))
                     .expect("the dictation streams");
@@ -1603,13 +1939,357 @@ mod utterance_tests {
         assert_eq!(done.calls.last(), Some(&Call::Transcribe));
     }
 
+    // The stream falls behind when the model is slow to take a window. A
+    // release that lands while it catches up ends the dictation at the next
+    // window, not after the whole backlog.
+    #[test]
+    fn a_release_during_a_backlog_lands_between_two_feeds() {
+        let (fed, feeding) = mpsc::channel();
+        let (opens, gate) = mpsc::channel::<()>();
+        let audio = spoken_then_quiet();
+        assert!(audio.len() / FEED > 2, "a backlog of several windows");
+        let done = consumed(
+            |state| Scripted {
+                fed: Some(fed),
+                gate: Some(gate),
+                ..streaming(state, "words")
+            },
+            &audio,
+            |state, commands| {
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
+                feeding
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the first window is fed");
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .unwrap();
+                drop(opens);
+            },
+        );
+        let feeds = done
+            .calls
+            .iter()
+            .filter(|call| matches!(call, Call::Feed(_)))
+            .count();
+        assert_eq!(feeds, 1, "{:?}", done.calls);
+        assert_eq!(done.typed, ["words"]);
+    }
+
+    // Capture opens for an answer while the arm cue plays, so the listen can
+    // begin on a capture no device has filled yet.
+    #[test]
+    fn a_listen_that_begins_before_capture_opens_waits_for_its_audio() {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        let session = state.arm_for_ask().unwrap();
+        let mut pipeline = holding(&[0.0], &state, cues, Scripted::new(&state, Ok("")));
+        // No resampler can be built for the rate an unopened capture reads at
+        let (_, silent) = ringbuf::HeapRb::<f32>::new(1).split();
+        pipeline.source = Arc::new(Capture::new(CaptureSource {
+            consumer: silent,
+            sample_rate: 0,
+        }));
+
+        let heard = pipeline.listen_for_answer(Duration::from_millis(300), session);
+
+        assert!(matches!(heard, Ok(Heard::Silence)), "{heard:?}");
+    }
+
+    #[test]
+    fn the_answer_reader_builds_its_resampler_for_the_first_audio() {
+        let (_, silent) = ringbuf::HeapRb::<f32>::new(1).split();
+        let capture = Capture::new(CaptureSource {
+            consumer: silent,
+            sample_rate: 0,
+        });
+        let mut reader = Resampled::new(&capture);
+        let mut audio = Vec::new();
+        assert_eq!(reader.read(&capture, &mut audio), Ok(false));
+
+        let (mut producer, consumer) = ringbuf::HeapRb::<f32>::new(4800).split();
+        producer.push_slice(&[0.25; 4800]);
+        capture.swap(CaptureSource {
+            consumer,
+            sample_rate: 48000,
+        });
+        assert_eq!(
+            reader.read(&capture, &mut audio),
+            Ok(false),
+            "capture opened under a reader that had heard nothing"
+        );
+        let (mut producer, consumer) = ringbuf::HeapRb::<f32>::new(160).split();
+        producer.push_slice(&[0.25; 160]);
+        capture.swap(CaptureSource {
+            consumer,
+            sample_rate: 48000,
+        });
+        assert_eq!(
+            reader.read(&capture, &mut audio),
+            Ok(true),
+            "a new ring under audio already read is another device"
+        );
+        reader.finish(&mut audio).unwrap();
+
+        assert!(
+            audio.len() < 4800 / 2,
+            "48 kHz read at 16 kHz keeps about a third: {}",
+            audio.len()
+        );
+    }
+
+    const BUILT_IN: &str = "MacBook Pro Microphone";
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// A question whose answer is listened for on its own thread, over a
+    /// bench, with the thread that owns capture running.
+    struct Asking {
+        state: Arc<DaemonState>,
+        bench: crate::test_support::Bench,
+        owner: crate::audio::watchdog::Handle,
+        told: mpsc::Receiver<crate::test_support::BenchCall>,
+        signals: tokio::sync::broadcast::Receiver<Signal>,
+        sounds: mpsc::Receiver<crate::audio::cues::Cue>,
+        session: u64,
+        answer: thread::JoinHandle<Result<String, String>>,
+    }
+
+    impl Asking {
+        fn start(bench: crate::test_support::Bench, timeout: Duration) -> Self {
+            let (cues, sounds) = Cues::recording();
+            let signals = cues.subscribe_signals();
+            let state = crate::test_support::daemon_state_with_cues(cues.clone());
+            let told = bench.tell();
+            let mut pipeline = holding(&[0.0], &state, cues, Scripted::new(&state, Ok("")));
+            let owner = crate::audio::watchdog::spawn(
+                Arc::clone(&state),
+                Arc::clone(&pipeline.source),
+                bench.clone(),
+            );
+            assert_eq!(told.recv_timeout(WAIT), Ok(select()), "the seed");
+            let session = state.arm_for_ask().unwrap();
+            let answer = thread::spawn(move || {
+                let (reply, answer) = tokio::sync::oneshot::channel();
+                pipeline.ask(AskCommand {
+                    reply,
+                    timeout,
+                    session,
+                });
+                answer.blocking_recv().expect("every ask replies")
+            });
+            Self {
+                state,
+                bench,
+                owner,
+                told,
+                signals,
+                sounds,
+                session,
+                answer,
+            }
+        }
+
+        fn opened(&self) {
+            assert_eq!(self.told.recv_timeout(WAIT), Ok(select()));
+            assert_eq!(
+                self.told.recv_timeout(WAIT),
+                Ok(crate::test_support::BenchCall::Open(BUILT_IN.to_string()))
+            );
+        }
+
+        /// The reply, and every signal sent until it came.
+        fn end(mut self) -> (Result<String, String>, Vec<Signal>) {
+            let answered = self.answer.join().unwrap();
+            let signals = std::iter::from_fn(|| self.signals.try_recv().ok()).collect();
+            self.owner.stop();
+            (answered, signals)
+        }
+    }
+
+    fn select() -> crate::test_support::BenchCall {
+        crate::test_support::BenchCall::Select("default".to_string())
+    }
+
+    fn arms(signals: &[Signal]) -> usize {
+        signals
+            .iter()
+            .filter(|signal| matches!(signal, Signal::Arm))
+            .count()
+    }
+
+    #[test]
+    fn an_answer_closed_while_capture_opens_closes_capture() {
+        let asking = Asking::start(
+            crate::test_support::Bench::with(&[BUILT_IN], Some(BUILT_IN)),
+            WAIT,
+        );
+        asking.opened();
+
+        // A client that goes away ends the session from outside
+        asking.state.disarm(asking.session);
+
+        assert_eq!(
+            asking.told.recv_timeout(WAIT),
+            Ok(crate::test_support::BenchCall::Close(BUILT_IN.to_string()))
+        );
+        let (answered, signals) = asking.end();
+        assert_eq!(answered, Ok(String::new()));
+        assert_eq!(arms(&signals), 0, "no sound came: {signals:?}");
+        assert!(signals.contains(&Signal::Disarm), "{signals:?}");
+    }
+
+    #[test]
+    fn the_first_sound_plays_the_arm_cue() {
+        let asking = Asking::start(
+            crate::test_support::Bench::with(&[BUILT_IN], Some(BUILT_IN)),
+            WAIT,
+        );
+        asking.opened();
+        asking.bench.play(&[0.0; 1600]);
+        asking.bench.play(&[0.25; 160]);
+        assert_eq!(
+            asking.sounds.recv_timeout(WAIT),
+            Ok(crate::audio::cues::Cue::Arm)
+        );
+        asking.state.disarm(asking.session);
+
+        let (answered, signals) = asking.end();
+        assert_eq!(answered, Ok(String::new()));
+        assert_eq!(arms(&signals), 1, "{signals:?}");
+    }
+
+    // What capture held when the cue played, and what came while it left the
+    // speaker, is the question's tail and the cue's echo, never the answer.
+    #[test]
+    fn what_capture_holds_once_the_arm_cue_has_played_is_dropped() {
+        let (cues, sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        let session = state.arm_for_ask().unwrap();
+        assert!(state.hear_answer(session));
+        state.heard_sound();
+        state.announce_sound();
+        assert_eq!(sounds.try_recv().ok(), Some(crate::audio::cues::Cue::Arm));
+        let mut pipeline = holding(
+            &spoken_then_quiet(),
+            &state,
+            cues,
+            Scripted::new(&state, Ok("")),
+        );
+
+        let waited = pipeline.await_arm_cue(Instant::now() + WAIT, session);
+
+        assert!(matches!(waited, Ok(None)), "{waited:?}");
+        assert!(
+            pipeline.source.drain().is_empty(),
+            "the listen starts empty"
+        );
+    }
+
+    #[test]
+    fn an_answer_waits_for_its_arm_cue_until_the_deadline() {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        let session = state.arm_for_ask().unwrap();
+        assert!(state.hear_answer(session));
+        let mut pipeline = holding(&[0.0], &state, cues, Scripted::new(&state, Ok("")));
+
+        let waited = pipeline.await_arm_cue(Instant::now() + Duration::from_millis(100), session);
+
+        assert!(matches!(waited, Ok(Some(Heard::Silence))), "{waited:?}");
+    }
+
+    #[test]
+    fn the_listen_has_what_the_wait_for_the_arm_cue_left_of_the_timeout() {
+        let timeout = Duration::from_secs(5);
+        assert_eq!(
+            listen_budget(timeout, Duration::from_secs(2)),
+            Duration::from_secs(3)
+        );
+        assert_eq!(listen_budget(timeout, Duration::ZERO), timeout);
+        assert_eq!(
+            listen_budget(timeout, Duration::from_secs(6)),
+            Duration::ZERO,
+            "a wait that took it all leaves nothing"
+        );
+    }
+
+    #[test]
+    fn a_microphone_that_delivers_only_silence_plays_no_arm_cue() {
+        let asking = Asking::start(
+            crate::test_support::Bench::with(&[BUILT_IN], Some(BUILT_IN)),
+            Duration::from_millis(300),
+        );
+        asking.opened();
+        asking.bench.play(&[0.0; 1600]);
+
+        let (answered, signals) = asking.end();
+        assert_eq!(answered, Ok(String::new()));
+        assert_eq!(arms(&signals), 0, "{signals:?}");
+        assert!(
+            signals
+                .iter()
+                .any(failed(ReasonCode::Silence, Target::Answer)),
+            "the answer deadline ends the wait: {signals:?}"
+        );
+    }
+
+    #[test]
+    fn a_hold_while_capture_opens_plays_only_its_own_cue() {
+        let asking = Asking::start(
+            crate::test_support::Bench::with(&[BUILT_IN], Some(BUILT_IN)),
+            WAIT,
+        );
+        asking.opened();
+        assert!(asking.state.record_start(), "the hold answers");
+        asking.bench.play(&[0.25; 160]);
+        assert_eq!(
+            asking.sounds.recv_timeout(WAIT),
+            Ok(crate::audio::cues::Cue::RecordStart)
+        );
+        asking.state.disarm(asking.session);
+
+        let (_, signals) = asking.end();
+        assert_eq!(arms(&signals), 0, "{signals:?}");
+        assert_eq!(
+            signals
+                .iter()
+                .filter(|signal| matches!(signal, Signal::RecordStart { .. }))
+                .collect::<Vec<_>>(),
+            [&Signal::RecordStart {
+                target: Target::Answer
+            }]
+        );
+    }
+
+    #[test]
+    fn an_answer_whose_microphone_will_not_open_fails_with_its_name() {
+        let bench = crate::test_support::Bench::with(&[BUILT_IN], Some(BUILT_IN));
+        bench.refuse(Some(BUILT_IN));
+        let asking = Asking::start(bench, WAIT);
+        let state = Arc::clone(&asking.state);
+
+        let (answered, signals) = asking.end();
+
+        assert!(
+            matches!(&answered, Err(why) if why.contains(BUILT_IN)),
+            "{answered:?}"
+        );
+        assert!(
+            signals
+                .iter()
+                .any(failed(ReasonCode::ListenFailed, Target::Answer)),
+            "the listen says it failed: {signals:?}"
+        );
+        assert_eq!(arms(&signals), 0, "{signals:?}");
+        assert!(!state.wants_mic());
+    }
+
     #[test]
     fn a_command_that_arrives_mid_hold_waits_for_a_model_that_does_not_stream() {
         let done = consumed(
             |state| Scripted::new(state, Ok("words")),
             &spoken_then_quiet(),
             |state, commands| {
-                commands.send(ConsumerCommand::Stream).unwrap();
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
                     .send(ConsumerCommand::Reload(
                         banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL)
@@ -1646,7 +2326,7 @@ mod utterance_tests {
         let capture = Arc::clone(&pipeline.source);
         let (sender, receiver) = mpsc::channel();
         let consumer = thread::spawn(move || consume(pipeline, &receiver, &|_: &str| Ok(())));
-        sender.send(ConsumerCommand::Stream).unwrap();
+        sender.send(ConsumerCommand::Stream(0)).unwrap();
         thread::sleep(ARMED_POLL * 4);
         let audio = spoken_then_quiet();
         let (mut producer, consumer_end) = ringbuf::HeapRb::<f32>::new(audio.len()).split();
@@ -1676,7 +2356,7 @@ mod utterance_tests {
         let state = crate::test_support::daemon_state(commands);
         let parakeet =
             banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
-        state.await_listening_model(parakeet.id);
+        state.await_listening_model(parakeet);
         assert_eq!(
             state.pipeline(),
             crate::state::Pipeline::Broken(crate::state::RecordingError::NoListeningModel(
@@ -1716,13 +2396,603 @@ mod utterance_tests {
         assert!(why.contains("the file is damaged"), "{why}");
     }
 
+    fn parakeet() -> &'static ListeningModel {
+        banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap()
+    }
+
+    const LIMIT: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn the_models_unload_once_they_idle_past_the_limit_and_not_before() {
+        let state = crate::test_support::daemon_state_with_cues(Cues::silent());
+        let scripted = Scripted::new(&state, Ok(""));
+        let calls = Arc::clone(&scripted.calls);
+        let mut pipeline = holding(&[0.0], &state, Cues::silent(), scripted);
+        state.set_unload_after(Some(LIMIT));
+        let used = pipeline.used;
+        let returns = crate::models::returns_on_this_thread();
+
+        let early = used + LIMIT - Duration::from_secs(1);
+        assert_eq!(pipeline.unload_idle(early), Some(used + LIMIT));
+        assert!(calls.lock().unwrap().is_empty(), "a second early");
+        assert!(pipeline.vad.resident());
+        assert_eq!(crate::models::returns_on_this_thread(), returns);
+
+        assert_eq!(pipeline.unload_idle(used + LIMIT), None);
+        assert_eq!(*calls.lock().unwrap(), [Call::Unload]);
+        assert!(!pipeline.vad.resident(), "the detector goes with it");
+        assert_eq!(
+            crate::models::returns_on_this_thread(),
+            returns + 1,
+            "the freed memory goes back to the system"
+        );
+        assert_eq!(
+            state.listening(),
+            crate::state::Listening::Available(parakeet())
+        );
+        assert_eq!(state.pipeline(), crate::state::Pipeline::Open);
+    }
+
+    #[test]
+    fn the_idle_wait_counts_from_the_last_use() {
+        let state = crate::test_support::daemon_state_with_cues(Cues::silent());
+        let scripted = Scripted::new(&state, Ok("used"));
+        let calls = Arc::clone(&scripted.calls);
+        let mut pipeline = holding(&spoken_then_quiet(), &state, Cues::silent(), scripted);
+        state.set_unload_after(Some(LIMIT));
+        let (_commands, receiver) = mpsc::channel();
+        let before = Instant::now();
+
+        let served = pipeline.serve(
+            ConsumerCommand::Transcribe(state.claim_ring()),
+            &receiver,
+            &mut VecDeque::new(),
+            &|_: &str| Ok(()),
+        );
+
+        assert!(served.is_continue());
+        assert!(pipeline.unload_idle(before + LIMIT).is_some());
+        assert_eq!(*calls.lock().unwrap(), [Call::Transcribe], "not yet due");
+    }
+
+    #[test]
+    fn zero_keeps_the_models_loaded() {
+        let state = crate::test_support::daemon_state_with_cues(Cues::silent());
+        let scripted = Scripted::new(&state, Ok(""));
+        let calls = Arc::clone(&scripted.calls);
+        let mut pipeline = holding(&[0.0], &state, Cues::silent(), scripted);
+        state.set_unload_after(None);
+        let returns = crate::models::returns_on_this_thread();
+
+        let a_year = Duration::from_secs(365 * 24 * 60 * 60);
+        assert_eq!(pipeline.unload_idle(pipeline.used + a_year), None);
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(pipeline.vad.resident());
+        assert_eq!(crate::models::returns_on_this_thread(), returns);
+    }
+
+    #[test]
+    fn a_use_after_the_models_idled_out_reads_them_again_and_shows_loading_meanwhile() {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        let scripted = Scripted::new(&state, Ok("back again"));
+        let (calls, during) = (
+            Arc::clone(&scripted.calls),
+            Arc::clone(&scripted.during_load),
+        );
+        let mut pipeline = holding(&spoken_then_quiet(), &state, cues, scripted);
+        state.set_unload_after(Some(LIMIT));
+        pipeline.unload_idle(pipeline.used + LIMIT);
+
+        let mut typed = Vec::new();
+        pipeline.transcribe_utterance(state.claim_ring(), |words| {
+            typed.push(words.to_string());
+            Ok(())
+        });
+
+        assert_eq!(typed, ["back again"]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [Call::Unload, Call::Load, Call::Transcribe]
+        );
+        let during = during.lock().unwrap();
+        let (flag, listening, live, _) = &during[0];
+        assert!(flag, "the loading flag is up while the model reads");
+        assert_eq!(*listening, crate::state::Listening::Loading(parakeet()));
+        assert_eq!(live["loading_model"], true, "status says so");
+        assert_eq!(live["activity"], "busy", "the chip shows it working");
+        assert_eq!(live["pipeline"], "open", "a press still queues");
+        assert!(!state.is_loading_model());
+        assert_eq!(
+            state.listening(),
+            crate::state::Listening::Loaded(parakeet())
+        );
+        assert!(pipeline.vad.resident(), "the detector is read again too");
+    }
+
+    #[test]
+    fn a_model_that_will_not_load_fails_the_use_with_its_cause_and_the_next_use_tries_again() {
+        let (cues, _sounds) = Cues::recording();
+        let mut signals = cues.subscribe_signals();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        state.listening_model_unloaded();
+        let scripted = Scripted {
+            resident: false,
+            loads_fail: 1,
+            ..Scripted::new(&state, Ok("second time"))
+        };
+        let calls = Arc::clone(&scripted.calls);
+        let speech = spoken_then_quiet();
+        let (mut pipeline, mut producer) = fillable(speech.len(), &state, cues, scripted);
+
+        producer.push_slice(&speech);
+        pipeline.transcribe_utterance(state.claim_ring(), |_| panic!("nothing is typed"));
+
+        assert_eq!(*calls.lock().unwrap(), [Call::Load]);
+        let why = state.last_error().expect("the cause is kept for status");
+        assert!(why.contains("the file is damaged"), "{why}");
+        assert!(
+            why.starts_with("the listening model would not load: ")
+                && why.ends_with(FAILED_LOAD_FIX),
+            "status shows the cause, then the fix: {why}"
+        );
+        assert_eq!(
+            crate::api::live_state(&state)["last_error"].as_str(),
+            Some(why.as_str())
+        );
+        assert!(matches!(
+            signals.try_recv(),
+            Ok(Signal::Error { reason, target: Some(Target::Dictate) })
+                if reason.code == ReasonCode::TranscriptionFailed
+        ));
+        assert_eq!(
+            state.pipeline(),
+            crate::state::Pipeline::Open,
+            "the next press is not refused"
+        );
+        assert_eq!(
+            state.listening(),
+            crate::state::Listening::Available(parakeet())
+        );
+
+        producer.push_slice(&speech);
+        let mut typed = Vec::new();
+        pipeline.transcribe_utterance(state.claim_ring(), |words| {
+            typed.push(words.to_string());
+            Ok(())
+        });
+        assert_eq!(typed, ["second time"]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [Call::Load, Call::Load, Call::Transcribe]
+        );
+    }
+
+    #[test]
+    fn a_detector_that_will_not_load_fails_the_use_with_its_cause() {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        let scripted = Scripted::new(&state, Ok("never typed"));
+        let calls = Arc::clone(&scripted.calls);
+        let mut pipeline = holding(&spoken_then_quiet(), &state, cues, scripted);
+        let model = crate::test_support::unique_scratch("vad").join("silero_vad.onnx");
+        std::fs::copy(crate::test_support::silero(), &model).unwrap();
+        pipeline.vad = Detector::open(model.clone()).unwrap();
+        pipeline.vad.unload();
+        std::fs::remove_file(&model).unwrap();
+
+        pipeline.transcribe_utterance(state.claim_ring(), |_| panic!("nothing is typed"));
+
+        assert!(calls.lock().unwrap().is_empty());
+        let why = state.last_error().expect("the cause is kept for status");
+        assert!(why.contains("silero_vad.onnx"), "{why}");
+        assert!(
+            why.starts_with("the voice detection model would not load: ")
+                && why.ends_with(FAILED_LOAD_FIX),
+            "{why}"
+        );
+        assert!(!state.is_loading_model());
+    }
+
+    #[test]
+    fn a_dictation_released_before_its_model_fails_is_dropped_without_a_second_try() {
+        let mut kept = None;
+        let done = consumed_queued(
+            |state| {
+                kept = Some(Arc::clone(state));
+                state.listening_model_unloaded();
+                Scripted {
+                    resident: false,
+                    loads_fail: 2,
+                    ..streaming(state, "never typed")
+                }
+            },
+            &spoken_then_quiet(),
+            |state, commands| {
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .unwrap();
+            },
+        );
+        assert_eq!(done.calls, [Call::Load], "loaded once, at the press");
+        assert!(done.typed.is_empty());
+        let state = kept.unwrap();
+        assert!(state.last_error().unwrap().contains("the file is damaged"));
+        assert!(!state.dictation_in_ring());
+    }
+
+    /// A pipeline whose listening model idled out, with what a test reads.
+    struct Failing {
+        pipeline: Pipeline,
+        state: Arc<DaemonState>,
+        calls: Arc<Mutex<Vec<Call>>>,
+        during: Arc<Mutex<Vec<DuringLoad>>>,
+        signals: tokio::sync::broadcast::Receiver<Signal>,
+    }
+
+    /// The model fails its next `fails` loads.
+    fn failing_loads(fails: usize, audio: &[f32]) -> Failing {
+        let (cues, _sounds) = Cues::recording();
+        let signals = cues.subscribe_signals();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        state.listening_model_unloaded();
+        let scripted = Scripted {
+            resident: false,
+            loads_fail: fails,
+            ..Scripted::new(&state, Ok("heard"))
+        };
+        let (calls, during) = (
+            Arc::clone(&scripted.calls),
+            Arc::clone(&scripted.during_load),
+        );
+        let pipeline = holding(audio, &state, cues, scripted);
+        Failing {
+            pipeline,
+            state,
+            calls,
+            during,
+            signals,
+        }
+    }
+
+    fn failures(
+        signals: &mut tokio::sync::broadcast::Receiver<Signal>,
+    ) -> Vec<(ReasonCode, Target)> {
+        std::iter::from_fn(|| signals.try_recv().ok())
+            .filter_map(|signal| match signal {
+                Signal::Error {
+                    reason,
+                    target: Some(target),
+                } => Some((reason.code, target)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn asked(pipeline: &mut Pipeline, state: &DaemonState) -> Result<String, String> {
+        let session = state.arm_for_ask().unwrap();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        pipeline.ask(AskCommand {
+            reply,
+            timeout: Duration::from_millis(100),
+            session,
+        });
+        answer.blocking_recv().expect("every ask replies")
+    }
+
+    #[test]
+    fn an_answer_whose_model_will_not_load_fails_with_its_cause_and_the_next_retries() {
+        let Failing {
+            mut pipeline,
+            state,
+            calls,
+            during,
+            mut signals,
+        } = failing_loads(1, &[0.0]);
+
+        let first = asked(&mut pipeline, &state);
+
+        let why = first.expect_err("the load failed");
+        assert!(why.contains("the file is damaged"), "{why}");
+        assert_eq!(state.last_error().as_deref(), Some(why.as_str()));
+        assert_eq!(
+            failures(&mut signals),
+            [(ReasonCode::ListenFailed, Target::Answer)]
+        );
+        assert_eq!(state.pipeline(), crate::state::Pipeline::Open);
+
+        assert_eq!(
+            asked(&mut pipeline, &state),
+            Ok(String::new()),
+            "the retry loads, and the answer then waits out its timeout"
+        );
+        assert_eq!(*calls.lock().unwrap(), [Call::Load, Call::Load]);
+        assert!(
+            during.lock().unwrap().iter().all(|(.., wanted)| !wanted),
+            "capture opens only once the model is in memory"
+        );
+    }
+
+    #[test]
+    fn a_dictation_whose_model_will_not_load_is_refused_at_its_press() {
+        let Failing {
+            mut pipeline,
+            state,
+            calls,
+            mut signals,
+            ..
+        } = failing_loads(1, &spoken_then_quiet());
+        assert!(state.record_start());
+        // No release ever comes, so only the refusal ends the press
+        let (_, receiver) = mpsc::channel();
+
+        pipeline.dictate(state.press(), &receiver, &mut VecDeque::new(), |_| {
+            panic!("nothing is typed")
+        });
+
+        assert_eq!(*calls.lock().unwrap(), [Call::Load]);
+        assert!(state.last_error().unwrap().contains("the file is damaged"));
+        assert_eq!(
+            failures(&mut signals),
+            [(ReasonCode::TranscriptionFailed, Target::Dictate)]
+        );
+        assert_eq!(
+            state.recording_mode(),
+            RecordingMode::Idle,
+            "the press ended with the refusal"
+        );
+        assert!(!state.wants_mic());
+        state.record_stop();
+        assert!(
+            !state.dictation_in_ring(),
+            "the release finds nothing to stop"
+        );
+    }
+
+    #[test]
+    fn a_dictation_whose_key_is_up_before_its_model_fails_says_so_once() {
+        for cancelled in [false, true] {
+            let Failing {
+                mut pipeline,
+                state,
+                calls,
+                mut signals,
+                ..
+            } = failing_loads(1, &spoken_then_quiet());
+            assert!(state.record_start());
+            let (commands, receiver) = mpsc::channel();
+            if cancelled {
+                state.record_cancel();
+                commands.send(ConsumerCommand::Discard).unwrap();
+            } else {
+                state.record_stop();
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .unwrap();
+            }
+
+            pipeline.dictate(state.press(), &receiver, &mut VecDeque::new(), |_| {
+                panic!("nothing is typed")
+            });
+
+            assert_eq!(*calls.lock().unwrap(), [Call::Load], "{cancelled}");
+            assert!(
+                state.last_error().unwrap().contains("the file is damaged"),
+                "{cancelled}"
+            );
+            assert_eq!(
+                failures(&mut signals),
+                [(ReasonCode::TranscriptionFailed, Target::Dictate)],
+                "{cancelled}"
+            );
+            assert!(!state.dictation_in_ring(), "{cancelled}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_of_one_press_never_ends_the_next() {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        state.listening_model_unloaded();
+        let (loading_to, loading) = mpsc::channel();
+        let (opens, gate) = mpsc::channel();
+        let scripted = Scripted {
+            resident: false,
+            loads_fail: 1,
+            loading: Some(loading_to),
+            load_gate: Some(gate),
+            ..Scripted::new(&state, Ok("the second press"))
+        };
+        let calls = Arc::clone(&scripted.calls);
+        let speech = spoken_then_quiet();
+        let (pipeline, mut producer) = fillable(speech.len(), &state, cues, scripted);
+        let (commands, receiver) = mpsc::channel();
+        assert!(state.record_start());
+        commands
+            .send(ConsumerCommand::Stream(state.press()))
+            .unwrap();
+        state.record_stop();
+        commands
+            .send(ConsumerCommand::Transcribe(state.claim_ring()))
+            .unwrap();
+        assert!(state.record_start());
+        commands
+            .send(ConsumerCommand::Stream(state.press()))
+            .unwrap();
+        let typed = Arc::new(Mutex::new(Vec::new()));
+        let typing = Arc::clone(&typed);
+        let consumer = thread::spawn(move || {
+            consume(pipeline, &receiver, &move |words: &str| {
+                typing.lock().unwrap().push(words.to_string());
+                Ok(())
+            })
+        });
+
+        loading
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first press loads");
+        opens.send(()).unwrap();
+        loading
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the second press loads once the first is refused");
+        assert_eq!(
+            state.recording_mode(),
+            RecordingMode::PushToTalk,
+            "the first press's refusal left the second held"
+        );
+        opens.send(()).unwrap();
+        producer.push_slice(&speech);
+        state.record_stop();
+        commands
+            .send(ConsumerCommand::Transcribe(state.claim_ring()))
+            .unwrap();
+        commands.send(ConsumerCommand::Shutdown).unwrap();
+        consumer.join().unwrap();
+
+        assert_eq!(*typed.lock().unwrap(), ["the second press"]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [Call::Load, Call::Load, Call::Transcribe]
+        );
+    }
+
+    #[test]
+    fn a_use_that_finds_a_claimed_load_leaves_it_to_its_reload() {
+        let Failing {
+            mut pipeline,
+            state,
+            ..
+        } = failing_loads(1, &[0.0]);
+        state.await_listening_model(parakeet());
+        state.claim_listening_model(parakeet(), true);
+
+        assert!(pipeline.ready().is_err());
+
+        assert_eq!(
+            state.listening(),
+            crate::state::Listening::Loading(parakeet()),
+            "the claim ends with its own reload"
+        );
+    }
+
+    #[test]
+    fn a_use_waiting_as_the_models_fall_due_is_served_before_they_unload() {
+        let done = consumed_queued(
+            |state| {
+                state.set_unload_after(Some(Duration::from_nanos(1)));
+                Scripted::new(state, Ok("still here"))
+            },
+            &spoken_then_quiet(),
+            |state, commands| {
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .unwrap();
+            },
+        );
+        assert_eq!(done.calls, [Call::Transcribe]);
+        assert_eq!(done.typed, ["still here"]);
+    }
+
+    #[test]
+    fn a_use_after_the_models_unloaded_waits_for_them_to_load() {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        state.set_unload_after(Some(Duration::from_nanos(1)));
+        state.listening_model_unloaded();
+        let (unloaded_to, unloaded) = mpsc::channel();
+        let scripted = Scripted {
+            resident: false,
+            unloaded: Some(unloaded_to),
+            ..Scripted::new(&state, Ok("again"))
+        };
+        let calls = Arc::clone(&scripted.calls);
+        let speech = spoken_then_quiet();
+        let (pipeline, mut producer) = fillable(speech.len(), &state, cues, scripted);
+        let typed = Arc::new(Mutex::new(Vec::new()));
+        let typing = Arc::clone(&typed);
+        let (commands, receiver) = mpsc::channel();
+        let consumer = thread::spawn(move || {
+            consume(pipeline, &receiver, &move |words: &str| {
+                typing.lock().unwrap().push(words.to_string());
+                Ok(())
+            })
+        });
+        let dictate = |producer: &mut HeapProd<f32>| {
+            producer.push_slice(&speech);
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+        };
+
+        dictate(&mut producer);
+        unloaded
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the models idled out after the first use");
+        dictate(&mut producer);
+        commands.send(ConsumerCommand::Shutdown).unwrap();
+        consumer.join().unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert!(
+            calls.starts_with(&[
+                Call::Load,
+                Call::Transcribe,
+                Call::Unload,
+                Call::Load,
+                Call::Transcribe
+            ]),
+            "{calls:?}"
+        );
+        assert_eq!(*typed.lock().unwrap(), ["again", "again"]);
+    }
+
+    #[test]
+    fn the_models_never_unload_inside_a_dictation_however_long_it_is_held() {
+        let (fed, feeding) = mpsc::channel();
+        let done = consumed(
+            |state| {
+                state.set_unload_after(Some(Duration::from_nanos(1)));
+                state.listening_model_unloaded();
+                Scripted {
+                    resident: false,
+                    fed: Some(fed),
+                    ..streaming(state, "held long")
+                }
+            },
+            &spoken_then_quiet(),
+            |state, commands| {
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
+                feeding
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the dictation is fed while it is held");
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .unwrap();
+            },
+        );
+        let transcribed = done
+            .calls
+            .iter()
+            .position(|call| *call == Call::Transcribe)
+            .expect("the dictation is transcribed");
+        assert!(
+            !done.calls[..transcribed].contains(&Call::Unload),
+            "{:?}",
+            done.calls
+        );
+        assert_eq!(done.typed, ["held long"]);
+    }
+
     #[test]
     fn a_short_dictation_types_the_final_text() {
         let done = consumed_queued(
             |state| streaming(state, "yes"),
             &spoken_then_quiet(),
             |state, commands| {
-                commands.send(ConsumerCommand::Stream).unwrap();
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
                     .send(ConsumerCommand::Transcribe(state.claim_ring()))
                     .unwrap();
@@ -1742,7 +3012,7 @@ mod utterance_tests {
             |state| Scripted::new(state, Ok("typed whole")),
             &spoken_then_quiet(),
             |state, commands| {
-                commands.send(ConsumerCommand::Stream).unwrap();
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
                     .send(ConsumerCommand::Transcribe(state.claim_ring()))
                     .unwrap();
@@ -1760,7 +3030,7 @@ mod utterance_tests {
                 |state| streaming(state, "first"),
                 &spoken_then_quiet(),
                 |state, commands| {
-                    commands.send(ConsumerCommand::Stream).unwrap();
+                    commands.send(ConsumerCommand::Stream(0)).unwrap();
                     let first = if end {
                         ConsumerCommand::Transcribe(state.claim_ring())
                     } else {
@@ -1769,7 +3039,7 @@ mod utterance_tests {
                     commands.send(first).unwrap();
                     // The ring is empty now, so neither of these hears speech
                     for _ in 0..2 {
-                        commands.send(ConsumerCommand::Stream).unwrap();
+                        commands.send(ConsumerCommand::Stream(0)).unwrap();
                         commands
                             .send(ConsumerCommand::Transcribe(state.claim_ring()))
                             .unwrap();
@@ -1800,7 +3070,7 @@ mod utterance_tests {
             &spoken_then_quiet(),
             |state, commands| {
                 state.publish_words("stale");
-                commands.send(ConsumerCommand::Stream).unwrap();
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
             },
         );
         assert_eq!(
@@ -1858,7 +3128,7 @@ mod utterance_tests {
             |state| streaming(state, "words"),
             &spoken_then_quiet(),
             |state, commands| {
-                commands.send(ConsumerCommand::Stream).unwrap();
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
                     .send(ConsumerCommand::Reload(
                         banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL)
@@ -1897,7 +3167,7 @@ mod utterance_tests {
         let capture = Arc::clone(&pipeline.source);
         let (sender, receiver) = mpsc::channel();
         let consumer = thread::spawn(move || consume(pipeline, &receiver, &|_: &str| Ok(())));
-        sender.send(ConsumerCommand::Stream).unwrap();
+        sender.send(ConsumerCommand::Stream(0)).unwrap();
         feeding
             .recv_timeout(Duration::from_secs(5))
             .expect("the dictation streams");

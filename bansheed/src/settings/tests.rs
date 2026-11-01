@@ -221,6 +221,82 @@ fn a_barge_in_write_reaches_the_running_daemon() {
     assert!(outcome.restart_required.is_empty());
 }
 
+// The thread that owns capture is woken by the write and opens or closes at
+// once.
+#[test]
+fn keep_open_reaches_the_running_daemon_both_ways() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    assert!(!state.keep_open(), "capture opens for each use by default");
+
+    for keep in [true, false] {
+        let outcome = configure_in_scratch(
+            Some(&state),
+            assignments(&[("audio.keep_open", keep.into())]),
+            false,
+        )
+        .expect("a known key and a legal value must apply");
+        assert_eq!(state.keep_open(), keep);
+        assert_eq!(state.wants_mic(), keep);
+        assert_eq!(outcome.applied, vec!["audio.keep_open".to_string()]);
+        assert!(outcome.restart_required.is_empty());
+    }
+}
+
+#[test]
+fn a_keep_open_that_is_not_true_or_false_is_refused_by_name() {
+    let error = configure_in_scratch(
+        None,
+        assignments(&[("audio.keep_open", "yes".into())]),
+        false,
+    )
+    .expect_err("keep_open is a switch");
+    assert!(error.to_string().contains("keep_open"), "{error}");
+}
+
+#[test]
+fn unload_after_reaches_the_running_daemon_and_zero_keeps_the_models() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    assert_eq!(
+        state.unload_after(),
+        Some(std::time::Duration::from_secs(300)),
+        "five idle minutes by default"
+    );
+
+    for (minutes, limit) in [(1, Some(std::time::Duration::from_secs(60))), (0, None)] {
+        let outcome = configure_in_scratch(
+            Some(&state),
+            assignments(&[("models.unload_after", minutes.into())]),
+            false,
+        )
+        .expect("a whole number of minutes is a legal value");
+        assert_eq!(state.unload_after(), limit, "{minutes}");
+        assert_eq!(outcome.applied, vec!["models.unload_after".to_string()]);
+        assert!(
+            taken
+                .try_iter()
+                .any(|command| matches!(command, crate::state::ConsumerCommand::UnloadAfter)),
+            "{minutes}: the listener measures its idle wait again"
+        );
+    }
+}
+
+#[test]
+fn an_unload_after_that_is_not_whole_minutes_is_refused_by_name() {
+    for wrong in [serde_json::Value::from("five"), (-1).into(), 1.5.into()] {
+        let error = configure_in_scratch(
+            None,
+            assignments(&[("models.unload_after", wrong.clone())]),
+            false,
+        )
+        .expect_err("unload_after is whole minutes");
+        assert!(
+            error.to_string().contains("unload_after"),
+            "{wrong}: {error}"
+        );
+    }
+}
+
 #[test]
 fn a_feedback_write_reaches_the_running_daemon() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
@@ -466,7 +542,7 @@ fn a_listening_model_that_arrives_is_loaded_into_the_waiting_pipeline() {
     super::reapply_pending(&state);
     assert!(taken.try_recv().is_err(), "nothing waits for a model");
 
-    state.await_listening_model(parakeet.id);
+    state.await_listening_model(parakeet);
     super::reapply_pending(&state);
     assert!(taken.try_recv().is_err(), "the file is not here yet");
 
@@ -479,12 +555,147 @@ fn a_listening_model_that_arrives_is_loaded_into_the_waiting_pipeline() {
 }
 
 #[test]
+fn a_second_download_that_ends_while_the_model_loads_queues_no_second_load() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    let parakeet =
+        banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
+    state.await_listening_model(parakeet);
+    pretend_downloaded(&state, parakeet.file);
+
+    super::reapply_pending(&state);
+    super::reapply_pending(&state);
+
+    assert_eq!(reloads(&taken), vec![parakeet], "one file, one load");
+    assert_eq!(
+        state.listening(),
+        crate::state::Listening::Loading(parakeet)
+    );
+    assert_eq!(
+        state.pipeline(),
+        crate::state::Pipeline::Open,
+        "a press waits for the load"
+    );
+}
+
+#[test]
+fn a_transcription_server_chosen_while_the_model_downloads_leaves_the_local_listener_to_load_it() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    let parakeet =
+        banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
+    state.await_listening_model(parakeet);
+
+    let outcome = configure_in_scratch(
+        Some(&state),
+        assignments(&[("stt.provider", "remote".into())]),
+        true,
+    )
+    .expect("a transcription server is a legal choice");
+    assert_eq!(outcome.restart_required, vec!["stt.provider".to_string()]);
+
+    pretend_downloaded(&state, parakeet.file);
+    super::reapply_pending(&state);
+
+    assert_eq!(
+        reloads(&taken),
+        vec![parakeet],
+        "the local listener runs until the restart, and its model is here"
+    );
+    assert_eq!(state.pipeline(), crate::state::Pipeline::Open);
+}
+
+#[test]
+fn a_listening_model_that_arrived_while_the_daemon_started_is_loaded() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    let parakeet =
+        banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
+    state.await_listening_model(parakeet);
+    pretend_downloaded(&state, parakeet.file);
+
+    super::reconcile_listening(&state);
+
+    match taken.try_recv() {
+        Ok(crate::state::ConsumerCommand::Reload(model)) => assert_eq!(model, parakeet),
+        _ => panic!("the model whose file is here is loaded"),
+    }
+}
+
+#[test]
+fn a_failed_load_is_tried_again_by_a_write_of_the_same_model() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    let parakeet =
+        banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
+    state.await_listening_model(parakeet);
+    pretend_downloaded(&state, parakeet.file);
+    state.listening_model_failed(parakeet, "the file is damaged".to_string());
+
+    assert!(super::reconcile(&state, &Config::default()));
+
+    match taken.try_recv() {
+        Ok(crate::state::ConsumerCommand::Reload(model)) => assert_eq!(model, parakeet),
+        _ => panic!("nothing listens, so the model loads again"),
+    }
+}
+
+fn reloads(
+    taken: &std::sync::mpsc::Receiver<crate::state::ConsumerCommand>,
+) -> Vec<&'static banshee_common::listening::ListeningModel> {
+    taken
+        .try_iter()
+        .filter_map(|command| match command {
+            crate::state::ConsumerCommand::Reload(model) => Some(model),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_downloaded_model_picked_while_another_serves_loads_once_whatever_downloads_end() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    pretend_downloaded(&state, turbo().file);
+
+    let outcome = configure_in_scratch(
+        Some(&state),
+        assignments(&[("stt.model", TURBO.into())]),
+        true,
+    )
+    .expect("a known model is a legal write");
+    assert_eq!(outcome.applied, vec!["stt.model".to_string()]);
+    super::reapply_pending(&state);
+    super::reconcile_listening(&state);
+
+    assert_eq!(reloads(&taken), vec![turbo()], "one pick, one load");
+}
+
+#[test]
+fn a_download_that_ends_while_a_model_serves_loads_nothing() {
+    let (commands, taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    let mut moved = Config::default();
+    moved.stt.model = TURBO.to_string();
+    state.set_config(std::sync::Arc::new(moved));
+    pretend_downloaded(&state, turbo().file);
+    state.listening_model_failed(turbo(), "the file is damaged".to_string());
+
+    super::reapply_pending(&state);
+
+    assert!(
+        reloads(&taken).is_empty(),
+        "the serving model listens on, and no write asked for turbo again"
+    );
+}
+
+#[test]
 fn a_model_the_config_no_longer_names_is_not_loaded_when_it_arrives() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
     let parakeet =
         banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
-    state.await_listening_model(parakeet.id);
+    state.await_listening_model(parakeet);
     let mut moved = Config::default();
     moved.stt.model = TURBO.to_string();
     state.set_config(std::sync::Arc::new(moved));
@@ -501,8 +712,10 @@ fn a_model_the_config_no_longer_names_is_not_loaded_when_it_arrives() {
 fn a_model_chosen_while_none_listens_is_the_one_awaited() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
-    state.await_listening_model(banshee_common::listening::DEFAULT_MODEL);
-    state.listening_model_failed("the file is damaged".to_string());
+    let parakeet =
+        banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
+    state.await_listening_model(parakeet);
+    state.listening_model_failed(parakeet, "the file is damaged".to_string());
 
     let outcome = configure_in_scratch(
         Some(&state),
@@ -520,14 +733,11 @@ fn a_model_chosen_while_none_listens_is_the_one_awaited() {
 
     pretend_downloaded(&state, turbo().file);
     super::reapply_pending(&state);
-    let reloads: Vec<_> = taken
-        .try_iter()
-        .filter_map(|command| match command {
-            crate::state::ConsumerCommand::Reload(model) => Some(model),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(reloads, vec![turbo()], "turbo loads once when it arrives");
+    assert_eq!(
+        reloads(&taken),
+        vec![turbo()],
+        "turbo loads once when it arrives"
+    );
 }
 
 /// Puts an empty stand-in for `name` in the state's model directory, so the
@@ -543,7 +753,7 @@ fn turbo() -> &'static banshee_common::listening::ListeningModel {
     banshee_common::listening::find(TURBO).unwrap()
 }
 
-// These ask `apply_model` directly, against the model directory the state
+// These ask `reconcile` directly, against the model directory the state
 // holds, which starts empty.
 #[test]
 fn a_model_write_reaches_the_listener_that_holds_the_engine() {
@@ -553,7 +763,7 @@ fn a_model_write_reaches_the_listener_that_holds_the_engine() {
     wanted.stt.model = TURBO.to_string();
     pretend_downloaded(&state, turbo().file);
 
-    let applied = super::apply_model(&state, &wanted);
+    let applied = super::reconcile(&state, &wanted);
 
     assert!(applied, "a downloaded model loads live");
     match taken.try_recv() {
@@ -568,11 +778,11 @@ fn a_model_write_reaches_the_listener_that_holds_the_engine() {
 fn a_model_already_behind_the_engine_loads_nothing() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
-    state.set_stt_model(Some(turbo()));
+    state.listening_model_loaded(Some(turbo()));
     let mut file = Config::default();
     file.stt.model = TURBO.to_string();
 
-    assert!(super::apply_model(&state, &file));
+    assert!(super::reconcile(&state, &file));
     assert!(taken.try_recv().is_err(), "the model was already loaded");
 }
 
@@ -584,7 +794,7 @@ fn a_model_write_under_a_remote_listener_is_applied_and_loads_nothing() {
     file.stt.provider = crate::config::Provider::Remote;
     file.stt.model = TURBO.to_string();
 
-    assert!(super::apply_model(&state, &file));
+    assert!(super::reconcile(&state, &file));
     assert!(
         taken.try_recv().is_err(),
         "nothing is loaded for a remote listener"
@@ -602,7 +812,7 @@ fn a_model_written_for_a_listener_that_is_not_running_yet_loads_nothing() {
     let mut file = Config::default();
     file.stt.model = TURBO.to_string();
 
-    let applied = super::apply_model(&state, &file);
+    let applied = super::reconcile(&state, &file);
 
     assert!(
         taken.try_recv().is_err(),
@@ -1189,4 +1399,21 @@ fn off_macos_a_new_install_keeps_the_absent_key() {
     .unwrap();
     assert_eq!(chosen, None);
     assert!(!path.exists(), "nothing is written");
+}
+
+#[test]
+fn removing_the_last_key_of_a_section_leaves_no_header() {
+    let dir = crate::test_support::unique_scratch("settings");
+    let path = dir.join("config.toml");
+    for value in [serde_json::Value::from(3), serde_json::Value::Null] {
+        super::configure_at(
+            &path,
+            None,
+            assignments(&[("models.unload_after", value)]),
+            true,
+        )
+        .unwrap();
+    }
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(!written.contains("[models]"), "{written}");
 }

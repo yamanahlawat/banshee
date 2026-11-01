@@ -234,6 +234,11 @@ impl TtsBackend for RemoteSpeechBackend {
         }
     }
 
+    /// The server holds no voice here, so only the fallback has one to free.
+    fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
+        self.fallback.as_ref()?.unload()
+    }
+
     fn start(
         &self,
         text: &str,
@@ -459,7 +464,7 @@ mod tests {
     use super::{READ_TIMEOUT, RemoteSpeechBackend, lock};
     use crate::config::{RemoteTtsConfig, SpeechFormat};
     use crate::test_support::{
-        Asked, Listening, companion_models, companion_models_with, ignored_faults, on_first_use,
+        Asked, Listening, companion_models, companion_models_with, ignored_faults, on_demand,
         read_request,
     };
     use crate::text_to_speech::output::Output;
@@ -1169,10 +1174,10 @@ mod tests {
 
     /// A local voice built on first use, counting its builds and naming the
     /// voice each was asked for.
-    fn counted_on_first_use(said: &Asked, builds: &Arc<Mutex<Vec<String>>>) -> Arc<dyn TtsBackend> {
+    fn counted_on_demand(said: &Asked, builds: &Arc<Mutex<Vec<String>>>) -> Arc<dyn TtsBackend> {
         let said = Arc::clone(said);
         let builds = Arc::clone(builds);
-        Arc::new(on_first_use(
+        Arc::new(on_demand(
             &companion_models_with(&["am_adam"]),
             move |voice: &str| {
                 lock(&builds).push(voice.to_string());
@@ -1185,7 +1190,7 @@ mod tests {
     #[test]
     fn a_failed_reply_is_spoken_by_the_local_voice() {
         let (said, builds) = (Arc::default(), Arc::default());
-        let fallback = Some(counted_on_first_use(&said, &builds));
+        let fallback = Some(counted_on_demand(&said, &builds));
         assert!(
             lock(&builds).is_empty(),
             "a remote speaker that works never loads it"
@@ -1213,7 +1218,7 @@ mod tests {
     #[test]
     fn a_voice_write_reaches_the_local_fallback() {
         let (said, builds) = (Arc::default(), Arc::default());
-        let built = build_with(counted_on_first_use(&said, &builds));
+        let built = build_with(counted_on_demand(&said, &builds));
         let tts = crate::config::TTSConfig {
             voice: "am_adam".to_string(),
             ..Default::default()
@@ -1232,8 +1237,25 @@ mod tests {
     }
 
     #[test]
+    fn the_fallback_voice_is_freed_when_idle_and_read_again_when_next_needed() {
+        let (said, builds) = (Arc::default(), Arc::default());
+        let built = build_with(counted_on_demand(&said, &builds));
+        assert!(
+            built.0.unload().is_none(),
+            "a server that works loads nothing"
+        );
+        let fallback = Arc::clone(built.0.fallback.as_ref().unwrap());
+
+        fallback.start("One.", None).unwrap();
+        wait_until("the fallback loads", || lock(&builds).len() == 1);
+        wait_until("the fallback is kept", || built.0.unload().is_some());
+        fallback.start("Two.", None).unwrap();
+        wait_until("the fallback loads again", || lock(&builds).len() == 2);
+    }
+
+    #[test]
     fn a_fallback_that_will_not_load_is_one_fault_with_both_reasons() {
-        let fallback: Arc<dyn TtsBackend> = Arc::new(on_first_use(
+        let fallback: Arc<dyn TtsBackend> = Arc::new(on_demand(
             &companion_models(),
             |_voice: &str| Err(BansheeError::Other("the model will not load".into())),
             ignored_faults(),

@@ -9,15 +9,12 @@ use cpal::{
     FromSample, Sample, SizedSample, Stream,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
-use ringbuf::{
-    HeapCons, HeapProd, HeapRb,
-    traits::{Producer, Split},
-};
+use ringbuf::{HeapProd, traits::Producer};
 
 use crate::state::DaemonState;
 
-/// Also the longest push-to-talk. At 48 kHz of `f32` this holds 23 MB for the
-/// daemon's life.
+/// Also the longest push-to-talk. At 48 kHz of `f32` this holds 23 MB, kept
+/// between uses so a dictation still unread survives the next open.
 pub const RING_SECS: usize = 120;
 
 // The name [audio] input_device carries to mean "whatever the OS is set to"
@@ -158,15 +155,15 @@ fn choose(wanted: &str, present: &[String], default: Option<&str>) -> Target {
     }
 }
 
-pub struct Selection {
-    pub device: cpal::Device,
+pub struct Selection<D = cpal::Device> {
+    pub device: D,
     pub open: String,
     pub missing: Option<String>,
 }
 
 /// Where in the list the choice lands, so no caller resolves the name a second
 /// time.
-fn pick(
+pub(crate) fn pick(
     names: &[String],
     wanted: &str,
     default: Option<&str>,
@@ -207,16 +204,24 @@ pub fn already_serving(target: &str, open_device: Option<&str>, stalled: bool) -
     !stalled && open_device == Some(target)
 }
 
-struct CaptureSink {
+pub struct CaptureSink {
     state: Arc<DaemonState>,
     producer: HeapProd<f32>,
     channels: usize,
 }
 
 impl CaptureSink {
+    pub fn new(state: Arc<DaemonState>, producer: HeapProd<f32>, channels: usize) -> Self {
+        Self {
+            state,
+            producer,
+            channels,
+        }
+    }
+
     // Runs on the real-time audio thread, so it must not allocate: downmixing
     // through an iterator keeps the mono copy out of the heap
-    fn take<T: Sample>(&mut self, data: &[T])
+    pub fn take<T: Sample>(&mut self, data: &[T])
     where
         f32: FromSample<T>,
     {
@@ -227,6 +232,10 @@ impl CaptureSink {
                 downmix(data, self.channels).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
             self.producer.push_iter(downmix(data, self.channels));
             self.state.note_peak(peak);
+            // Digital silence is exact zeros, as a headset's first buffers are
+            if peak > 0.0 {
+                self.state.heard_sound();
+            }
         }
     }
 }
@@ -320,63 +329,109 @@ pub fn probe_input_device(input_device: &str) -> Result<(String, Option<String>)
     Ok((selection.open, selection.missing))
 }
 
-pub struct Capture {
-    pub stream: Stream,
-    pub consumer: HeapCons<f32>,
-    pub sample_rate: u32,
-}
+/// The machine's own microphones, through cpal.
+pub struct Cpal;
 
-/// Opens the device `select` resolved. It takes the whole selection, so the
-/// device that records and the name that is reported cannot disagree.
-pub fn open_capture(
-    daemon_state: Arc<DaemonState>,
-    selection: &Selection,
-) -> Result<Capture, BansheeError> {
-    let device = &selection.device;
-    let config = device
-        .default_input_config()
-        .map_err(|e| BansheeError::Other(open_failure(&selection.open, e)))?;
+impl watchdog::Devices for Cpal {
+    type Device = cpal::Device;
+    type Stream = Stream;
 
-    let sample_rate = config.sample_rate();
-    let ring_capacity = sample_rate as usize * RING_SECS;
-    let (producer, consumer) = HeapRb::<f32>::new(ring_capacity).split();
+    fn select(&mut self, wanted: &str) -> Result<Selection, String> {
+        select(wanted)
+    }
 
-    let sink = CaptureSink {
-        state: Arc::clone(&daemon_state),
-        producer,
-        channels: config.channels() as usize,
-    };
-    let stream = build_and_play(device, config, Some(sink))
-        .map_err(|e| BansheeError::Other(open_failure(&selection.open, e)))?;
+    fn open(
+        &mut self,
+        selection: &Selection,
+        sink: &mut dyn FnMut(u32, usize) -> CaptureSink,
+    ) -> Result<Stream, String> {
+        let config = selection
+            .device
+            .default_input_config()
+            .map_err(|e| open_failure(&selection.open, e))?;
+        let sink = sink(config.sample_rate(), config.channels() as usize);
+        build_and_play(&selection.device, config, Some(sink))
+            .map_err(|e| open_failure(&selection.open, e))
+    }
 
-    // Set after play() succeeds, so status never names a mic that failed to open
-    daemon_state.set_audio_device(Some(selection.open.clone()));
+    fn default_name(&mut self) -> Option<String> {
+        default_input_name()
+    }
 
-    Ok(Capture {
-        stream,
-        consumer,
-        sample_rate,
-    })
+    #[cfg(target_os = "macos")]
+    fn refusal(&mut self) -> Option<crate::state::Refusal> {
+        crate::permissions::microphone_access()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn refusal(&mut self) -> Option<crate::state::Refusal> {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use ringbuf::{HeapRb, traits::Split};
+
     #[test]
     fn the_peak_reads_the_frames_a_full_ring_refuses() {
         let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
         assert!(state.record_start());
         let (producer, _consumer) = HeapRb::<f32>::new(1).split();
-        let mut sink = CaptureSink {
-            state: Arc::clone(&state),
-            producer,
-            channels: 2,
-        };
+        let mut sink = CaptureSink::new(Arc::clone(&state), producer, 2);
 
         sink.take(&[0.25f32, 0.25, 0.5, 0.25]);
 
         assert_eq!(state.take_peak(), 0.375, "the peak of the mono downmix");
+    }
+
+    // A headset's first buffers after an open are silence, and real sound
+    // follows about 300 ms later. A cue on the press promises a microphone
+    // that is not listening yet.
+    #[test]
+    fn the_start_cue_waits_for_the_first_sample_that_is_not_silence() {
+        use crate::audio::cues::{Cue, Cues};
+        let (cues, sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues);
+        assert!(state.record_start());
+        assert!(sounds.try_recv().is_err(), "the press itself plays nothing");
+        let (producer, _consumer) = HeapRb::<f32>::new(4096).split();
+        let mut sink = CaptureSink::new(Arc::clone(&state), producer, 1);
+
+        for _ in 0..3 {
+            sink.take(&[0.0f32; 480]);
+            state.announce_sound();
+        }
+        assert!(sounds.try_recv().is_err(), "silence plays no start cue");
+
+        sink.take(&[0.0f32, 0.0, 0.01, 0.0]);
+        state.announce_sound();
+        assert_eq!(sounds.try_recv().ok(), Some(Cue::RecordStart));
+
+        sink.take(&[0.5f32; 4]);
+        state.announce_sound();
+        assert!(sounds.try_recv().is_err(), "one start cue per press");
+    }
+
+    #[test]
+    fn a_press_cancelled_before_its_cue_plays_gets_none() {
+        use crate::audio::cues::{Cue, Cues};
+        let (cues, sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues);
+        assert!(state.record_start());
+        let (producer, _consumer) = HeapRb::<f32>::new(4096).split();
+        let mut sink = CaptureSink::new(Arc::clone(&state), producer, 1);
+        sink.take(&[0.5f32; 4]);
+        state.record_cancel();
+
+        state.announce_sound();
+
+        assert!(
+            !sounds.try_iter().any(|cue| cue == Cue::RecordStart),
+            "the cue would announce a press that is gone"
+        );
     }
 
     fn devices(names: &[&str]) -> Vec<String> {

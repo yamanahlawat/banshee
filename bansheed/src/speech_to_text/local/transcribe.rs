@@ -294,6 +294,24 @@ impl Transcriber for TranscribeEngine {
     fn slow_advice(&self) -> Option<&'static str> {
         slow_advice_for(self.model.id)
     }
+
+    fn resident(&self) -> bool {
+        self.session.is_some() || self.streaming.is_some()
+    }
+
+    fn load(&mut self) -> Result<(), BansheeError> {
+        if !self.resident() {
+            self.session = Some(open(&self.models_dir, self.model)?);
+        }
+        Ok(())
+    }
+
+    fn unload(&mut self) -> bool {
+        let held = self.resident();
+        self.streaming = None;
+        self.session = None;
+        held
+    }
 }
 
 #[cfg(test)]
@@ -454,8 +472,10 @@ mod tests {
             "{text:?}"
         );
 
-        engine.session = None;
-        assert_eq!(engine.transcribe(&audio).unwrap(), text, "after a drop");
+        assert!(engine.unload());
+        assert!(!engine.resident());
+        engine.load().unwrap();
+        assert_eq!(engine.transcribe(&audio).unwrap(), text, "after an unload");
     }
 
     /// Run with `BANSHEE_TCPP_MODELS` naming a folder that holds the Whisper

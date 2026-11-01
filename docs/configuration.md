@@ -41,6 +41,10 @@ input_device = "default"  # "default" = follow the OS; otherwise match a device 
 hotkey = "RightOption" # F1-F12, a lone modifier, or a chord like "Ctrl+Alt+D"
 hotkey_mode = "hold"   # hold = record while the hotkey is down | toggle = tap to start, tap to stop
 barge_in = "stop"      # stop = the record hotkey cuts off whatever Banshee is saying | none
+keep_open = false      # true = hold the microphone open between uses
+
+[models]
+unload_after = 5       # idle minutes before local models unload; 0 = never
 
 [feedback]
 mode = "both"          # visual | sound | both | none
@@ -69,7 +73,8 @@ $ banshee devices
 
 - **`"default"` follows the OS while Banshee runs.**
 - Connect a headset, macOS makes it the system default, and Banshee moves
-  capture to it within about five seconds.
+  capture to it within about five seconds while the microphone is open. A device
+  plugged in between uses is picked at the next use.
 - **A device you name is not treated this way.**
 - Banshee opens the device you named, and the system default never takes its
   place while it is present.
@@ -80,10 +85,36 @@ $ banshee devices
   for.
 - **The tray, `banshee status` and `banshee watch --waybar`** all show
   `MacBook Pro Microphone (waiting for "yeti")`.
-- **Reconnect the headset** and Banshee takes it back within about five seconds.
-  Nothing needs a restart.
+- **Reconnect the headset** and Banshee takes it back at the next use, or within
+  about five seconds while the microphone is open. Nothing needs a restart.
 - **Banshee never picks a different microphone in silence.** If it cannot open
   any device at all, it says so and refuses to record.
+
+## The microphone and idle models
+
+- **The microphone opens for a use and closes right after it.** A use is a
+  hotkey press, or an agent's question after it has played. The orange dot is off
+  in between, and a Bluetooth headset keeps its stereo output.
+- **An idle microphone shows `<device>, opens when you speak`.** That is not a fault.
+- **`audio.keep_open = true` holds the microphone open between uses.**
+  - A press then starts with no open delay.
+  - The orange dot stays on, and a Bluetooth headset stays in its telephony profile.
+- **A Bluetooth headset gives its first sound about 300 ms after the open.** That
+  was measured on one headset. The start cue waits for that sound, so it plays late
+  on a headset.
+- **`models.unload_after` is the idle minutes before local models unload.**
+  - It covers the listening model, the voice detector and the voice.
+  - `0` never unloads. The default is 5.
+  - On macOS the process keeps the freed memory for reuse and gives it back when
+    the system runs short. On Linux it goes back at once.
+  - The next use loads them again. The first reply after idle pays a voice load,
+    195 to 320 ms measured.
+- **The listener, the detector and the voice load when the daemon starts.** The
+  idle count starts after that.
+- **The fallback voice behind a voice server loads only when a reply needs it.**
+- **A microphone or a model that fails to open fails that use.** Status names the
+  cause and the fix, and the next use tries again.
+- **Both settings apply at once.** The window shows them under Listening, More.
 
 ## Changing a setting without an editor
 
@@ -106,7 +137,8 @@ banshee config set feedback.mode none
 - **The command works** whether or not the daemon runs.
 - **Most settings take effect at once:**
   - `stt.vad_threshold`, `stt.vocabulary`, `stt.model`, `stt.translate`
-  - `audio.input_device`, `audio.barge_in`, `feedback.mode`
+  - `audio.input_device`, `audio.barge_in`, `audio.keep_open`, `feedback.mode`
+  - `models.unload_after`
   - `tts.voice`, `daemon.save_history`
 - **The rest are read when the daemon starts,** so the command tells you to
   restart. Among them:

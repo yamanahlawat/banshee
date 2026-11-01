@@ -20,7 +20,7 @@ fn a_download_line_names_the_file_and_its_place_in_the_run() {
 
 #[test]
 fn a_waybar_line_is_one_parseable_object() {
-    let line = waybar_line("recording", Some("Blue Yeti"), None);
+    let line = waybar_line("recording", Some("Blue Yeti"), None, true, false);
     assert!(
         !line.contains('\n'),
         "Waybar reads one object per line: {line}"
@@ -40,7 +40,7 @@ fn a_waybar_line_is_one_parseable_object() {
 // escaped rather than pasted into the line
 #[test]
 fn a_quote_in_the_device_name_does_not_break_the_line() {
-    let line = waybar_line("idle", Some("Bob\"s \\ Mic"), None);
+    let line = waybar_line("idle", Some("Bob\"s \\ Mic"), None, false, false);
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
     assert!(
         parsed["tooltip"]
@@ -52,7 +52,7 @@ fn a_quote_in_the_device_name_does_not_break_the_line() {
 
 #[test]
 fn an_unknown_device_is_left_out_rather_than_named_empty() {
-    let line = waybar_line("idle", None, None);
+    let line = waybar_line("idle", None, None, false, false);
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
     let tooltip = parsed["tooltip"].as_str().unwrap();
     assert!(
@@ -66,39 +66,71 @@ fn an_unknown_device_is_left_out_rather_than_named_empty() {
 // the bar names a device that is gone
 #[test]
 fn a_waybar_tooltip_names_what_the_config_still_waits_for() {
-    let line = waybar_line("idle", None, Some("Yeti Nano"));
-    let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
-    let tooltip = parsed["tooltip"].as_str().unwrap();
-    assert!(tooltip.contains("Not open"), "{tooltip}");
-    assert!(
-        !tooltip.contains("No microphone"),
-        "a closed stream is not an absent device: {tooltip}"
+    let line = waybar_line(
+        "idle",
+        Some("MacBook Pro Microphone"),
+        Some("Yeti Nano"),
+        false,
+        false,
     );
-    assert!(tooltip.contains("\"Yeti Nano\""), "{tooltip}");
+    let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    assert_eq!(
+        parsed["tooltip"],
+        "Banshee is idle. Microphone: MacBook Pro Microphone (waiting for \"Yeti Nano\"), opens when you speak"
+    );
+}
+
+// A closed microphone between uses is the idle daemon's normal state, and an
+// open one under `audio.keep_open` is too, so the tooltip says which.
+#[test]
+fn a_waybar_tooltip_says_whether_the_microphone_is_open() {
+    let tooltip = |open, refused| {
+        let line = waybar_line("idle", Some("MacBook Pro Microphone"), None, open, refused);
+        serde_json::from_str::<serde_json::Value>(&line).expect("valid JSON")["tooltip"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        tooltip(false, false),
+        "Banshee is idle. Microphone: MacBook Pro Microphone, opens when you speak"
+    );
+    assert_eq!(
+        tooltip(true, false),
+        "Banshee is idle. Microphone: MacBook Pro Microphone, open"
+    );
+    assert_eq!(
+        tooltip(false, true),
+        "Banshee is idle. Microphone: MacBook Pro Microphone, not allowed by macOS"
+    );
 }
 
 // The reader sees the line, so the dedupe compares lines. A plain reader
 // cannot see the device, so the same word twice would be noise.
 #[test]
 fn a_device_change_alone_moves_the_line_only_where_the_device_shows() {
-    let plain_bound = watch_line(false, "idle", Some("Yeti Nano"), None);
+    let plain_bound = watch_line(false, "idle", Some("Yeti Nano"), None, false, false);
     let plain_substituted = watch_line(
         false,
         "idle",
         Some("MacBook Pro Microphone"),
         Some("Yeti Nano"),
+        false,
+        false,
     );
     assert_eq!(
         plain_bound, plain_substituted,
         "plain mode prints the word alone"
     );
 
-    let waybar_bound = watch_line(true, "idle", Some("Yeti Nano"), None);
+    let waybar_bound = watch_line(true, "idle", Some("Yeti Nano"), None, false, false);
     let waybar_substituted = watch_line(
         true,
         "idle",
         Some("MacBook Pro Microphone"),
         Some("Yeti Nano"),
+        false,
+        false,
     );
     assert_ne!(
         waybar_bound, waybar_substituted,

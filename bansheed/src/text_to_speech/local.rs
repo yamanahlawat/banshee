@@ -98,16 +98,16 @@ pub fn local_backend(
     }))
 }
 
-/// The local voice `voice` names, loaded by the first utterance it speaks.
-pub fn local_on_first_use(
+/// The local voice `voice` names, loaded by the first utterance that needs it.
+pub fn local_on_demand(
     models: &Path,
     voice: &str,
     output: Arc<Output>,
     faults: Faults,
-) -> OnFirstUse {
+) -> OnDemand {
     let loaded = models.to_path_buf();
     let (engine_output, loads) = (Arc::clone(&output), faults.clone());
-    OnFirstUse::new(
+    OnDemand::new(
         models,
         voice,
         move |voice: &str| local_backend(&loaded, voice, Arc::clone(&engine_output), loads.clone()),
@@ -196,12 +196,13 @@ impl TtsBackend for LocalBackend {
 type Load = Arc<dyn Fn(&str) -> Result<Box<dyn TtsBackend>, BansheeError> + Send + Sync>;
 type Slot = Arc<Mutex<Option<Arc<dyn TtsBackend>>>>;
 
-/// A local voice loaded by the first utterance it has to speak, and kept from
-/// then on. A voice whose files are missing is refused at once; a load that
-/// fails is a fault and is tried again by the next utterance. A request that
-/// names another voice loads that voice alone for its one utterance, whether
-/// or not this voice's files are here.
-pub struct OnFirstUse {
+/// A local voice loaded by the utterance that needs it, and kept until an
+/// unload frees it for the next utterance to load again. A voice whose files
+/// are missing is refused at once; a load that fails is a fault and is tried
+/// again by the next utterance. A request that names another voice loads that
+/// voice alone for its one utterance, whether or not this voice's files are
+/// here.
+pub struct OnDemand {
     models: PathBuf,
     voice: Arc<Mutex<String>>,
     load: Load,
@@ -210,7 +211,7 @@ pub struct OnFirstUse {
     faults: Faults,
 }
 
-impl OnFirstUse {
+impl OnDemand {
     #[cfg(test)]
     pub(crate) fn faults(&self) -> &Faults {
         &self.faults
@@ -231,6 +232,12 @@ impl OnFirstUse {
             output,
             faults,
         }
+    }
+
+    /// Keeps `backend`, already loaded for this voice.
+    pub fn holding(self, backend: Box<dyn TtsBackend>) -> Self {
+        *lock(&self.loaded) = Some(Arc::from(backend));
+        self
     }
 
     /// Starts the utterance on the voice already kept, or on a voice the
@@ -282,7 +289,7 @@ fn not_loaded(name: &str, error: BansheeError) -> BansheeError {
     BansheeError::Other(format!("the voice {name} did not load: {error}"))
 }
 
-impl TtsBackend for OnFirstUse {
+impl TtsBackend for OnDemand {
     fn start(
         &self,
         text: &str,
@@ -328,15 +335,23 @@ impl TtsBackend for OnFirstUse {
         .start(text, voice)
     }
 
+    /// The voice taken is the one the next load reads, so a voice written
+    /// while one is kept outlives its unload.
     fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
         let slot = lock(&self.loaded);
         if let Some(backend) = slot.clone() {
             drop(slot);
-            return backend.reconfigure(tts);
+            let taken = backend.reconfigure(tts)?;
+            *lock(&self.voice) = taken.clone();
+            return Some(taken);
         }
         check_files(&self.models, &tts.voice).ok()?;
         *lock(&self.voice) = tts.voice.clone();
         Some(tts.voice.clone())
+    }
+
+    fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
+        lock(&self.loaded).take()
     }
 }
 

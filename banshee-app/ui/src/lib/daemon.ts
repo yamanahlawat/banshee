@@ -87,8 +87,15 @@ export type Live = {
   /// A listening model being read off disk. The listener answers on the model
   /// it still holds while this runs, so it is work and not a stop.
   loading_model: boolean;
+  /// The device the next use opens while the microphone is closed, and the
+  /// one recording while it is open.
   audio_device: string | null;
   missing_device: string | null;
+  /// Whether capture is open now: for a use, or for good under
+  /// `audio.keep_open`.
+  microphone_open: boolean;
+  /// macOS refuses Banshee the microphone. Always false elsewhere.
+  microphone_refused: boolean;
   last_error: string | null;
   last_speech_error: string | null;
 };
@@ -131,6 +138,8 @@ export function empty(): Daemon {
       loading_model: false,
       audio_device: null,
       missing_device: null,
+      microphone_open: false,
+      microphone_refused: false,
       last_error: null,
       last_speech_error: null,
     },
@@ -333,6 +342,14 @@ type Side = {
 
 export type Listening = Side & {
   device: string | null;
+  /// Capture is open now. Closed is no fault: the next use opens `device`.
+  open: boolean;
+  /// `audio.keep_open` holds the microphone open between uses.
+  keepOpen: boolean;
+  /// The listening model is being read into memory.
+  loading: boolean;
+  /// macOS refuses Banshee the microphone.
+  refused: boolean;
   /// The kind of the first blocker that stops the listener, or null when none
   /// stops it.
   stoppedBy: BlockerKind | null;
@@ -360,6 +377,7 @@ function table(config: Record<string, unknown>): Record<string, unknown> {
 
 export function listeningFacts(state: Daemon, waits: Set<string>): Listening {
   const stt = (state.status?.config?.stt ?? {}) as Record<string, unknown>;
+  const blockers = state.status?.blockers ?? [];
   return {
     live: !isDown(state),
     remote: state.status?.remote?.stt?.remote === true,
@@ -368,8 +386,11 @@ export function listeningFacts(state: Daemon, waits: Set<string>): Listening {
     host: inForce(state.status?.remote?.stt?.host),
     willUse: hostOf(String(table(stt).base_url ?? '')),
     device: state.live.audio_device,
-    stoppedBy:
-      (state.status?.blockers ?? []).find((one) => one.id === 'recording_pipeline')?.kind ?? null,
+    open: state.live.microphone_open,
+    keepOpen: state.status?.config?.audio?.keep_open === true,
+    loading: state.live.loading_model,
+    refused: state.live.microphone_refused,
+    stoppedBy: blockers.find((one) => one.id === 'recording_pipeline')?.kind ?? null,
   };
 }
 

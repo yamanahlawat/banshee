@@ -14,7 +14,20 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   installed build re-registered them, and launchd then failed every spawn with exit 78
   (`EX_CONFIG`), 6 tries for the daemon and 13 for the tray. No Banshee code exits 78. The
   binaries ran from a terminal and the bundle signature verified. A second `banshee start` and
-  `banshee tray`, about a minute later, brought both up. The cause is not known.
+  `banshee tray`, about a minute later, brought both up. Seen on 2026-10-31: launchd kept
+  respawning the login items while the bundle was being replaced. That is the likely cause,
+  not proven. Every `make install` over a running build can hit it.
+- The first sound from a Bluetooth headset arrives about 300 ms after the microphone opens.
+  That is measured on one headset only. Other headsets are not checked.
+- Whether macOS needs a restart of Banshee after the microphone grant is not verified.
+- A restricted microphone (a managed Mac) still offers "Open System Settings", which cannot
+  lift the restriction.
+- A grant changed in System Settings reaches the tray only at the next status or press.
+- An agent's question loads the listening model only after it has played, so the first answer
+  after an idle unload waits for the load. Dictation overlaps its load with the press. The
+  wait is not measured.
+- Each use walks every input device before it opens one. The added press latency is not
+  measured.
 - Nothing has tested a logout and login with the login items. CI registers, restarts, stops
   and removes them on a runner, but cannot log in again.
 
@@ -29,10 +42,6 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   answer.
 - A listening model download that fails for a reason other than a licence reaches the window
   with no reason.
-- A second download that finishes while a model loads queues a duplicate Reload. It costs a
-  redundant load.
-- Choosing a remote listener while the local model file is missing leaves listening broken.
-- The answer path builds its resampler when listening starts.
 - The aarch64 Linux release targets plain armv8-a. Whether a dotprod floor is faster is not
   measured.
 - Banshee downloads the Silero VAD model from the `master` branch with no pinned commit and no

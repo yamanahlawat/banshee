@@ -1,4 +1,4 @@
-use banshee_common::{SileroVADConfig, error::BansheeError};
+use banshee_common::error::BansheeError;
 use ort::session::Session;
 
 // Silero v5 expects each 512-sample chunk prefixed with the previous chunk's
@@ -19,10 +19,6 @@ pub struct VADEngine {
 }
 
 impl VADEngine {
-    pub fn new(vad_config: SileroVADConfig) -> Result<Self, BansheeError> {
-        Self::open(&crate::models::model_path(&vad_config.model_name)?)
-    }
-
     pub fn open(model: &std::path::Path) -> Result<Self, BansheeError> {
         let session = crate::models::onnx_session(model, crate::models::VAD_THREADS, &[])?;
 
@@ -97,6 +93,55 @@ impl VADEngine {
     }
 }
 
+/// The detector, in memory until it idles out and read again by the next use.
+pub struct Detector {
+    model: std::path::PathBuf,
+    engine: Option<VADEngine>,
+}
+
+impl Detector {
+    /// Loads the detector at `model` now.
+    pub fn open(model: std::path::PathBuf) -> Result<Self, BansheeError> {
+        let mut detector = Self {
+            model,
+            engine: None,
+        };
+        detector.load()?;
+        Ok(detector)
+    }
+
+    pub fn resident(&self) -> bool {
+        self.engine.is_some()
+    }
+
+    pub fn load(&mut self) -> Result<&mut VADEngine, BansheeError> {
+        match self.engine {
+            Some(ref mut engine) => Ok(engine),
+            None => Ok(self.engine.insert(VADEngine::open(&self.model)?)),
+        }
+    }
+
+    /// Answers whether the detector was in memory.
+    pub fn unload(&mut self) -> bool {
+        self.engine.take().is_some()
+    }
+
+    /// Loads nothing: a use loads the detector before it listens.
+    pub fn check_speech(&mut self, audio: &[f32], rate: u32) -> Result<f32, BansheeError> {
+        self.engine
+            .as_mut()
+            .ok_or_else(|| BansheeError::Other("the detector is not loaded".to_string()))?
+            .check_speech(audio, rate)
+    }
+
+    /// A detector read afresh holds no state to reset.
+    pub fn reset_state(&mut self) {
+        if let Some(engine) = self.engine.as_mut() {
+            engine.reset_state();
+        }
+    }
+}
+
 /// 3.2s of 16kHz mono speech, embedded so tests need no external files.
 #[cfg(test)]
 pub fn test_speech() -> Vec<f32> {
@@ -150,6 +195,21 @@ mod tests {
             error.to_string().contains(&VAD_CHUNK.to_string()),
             "the refusal names the size the model needs, got: {error}"
         );
+    }
+
+    #[test]
+    fn an_unloaded_detector_checks_nothing_until_it_is_loaded_again() {
+        let mut detector = Detector::open(crate::test_support::silero()).unwrap();
+        assert!(detector.unload());
+        assert!(!detector.resident());
+        assert!(!detector.unload(), "nothing is left to free");
+
+        let speech = test_speech();
+        let refused = detector.check_speech(&speech[..VAD_CHUNK], 16000);
+        assert!(refused.is_err(), "a chunk loads nothing");
+        assert!(!detector.resident());
+        detector.load().unwrap();
+        detector.check_speech(&speech[..VAD_CHUNK], 16000).unwrap();
     }
 
     #[test]

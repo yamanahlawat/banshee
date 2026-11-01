@@ -1,8 +1,7 @@
 use banshee_common::utils::{banshee_dir, socket_path};
 use banshee_common::{
     BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED,
-    BANSHEE_SUBSCRIBE, BANSHEE_WORDS, JsonRpcNotification, JsonRpcRequest, SileroVADConfig,
-    error::BansheeError,
+    BANSHEE_SUBSCRIBE, BANSHEE_WORDS, JsonRpcNotification, JsonRpcRequest, error::BansheeError,
 };
 use std::fs;
 use std::io;
@@ -18,7 +17,7 @@ use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::api::{dispatch, live_state};
 use crate::config::Config;
-use crate::speech_to_text::vad::VADEngine;
+use crate::speech_to_text::vad::Detector;
 use crate::state::{ConsumerCommand, DaemonState, RecordingError};
 use crate::{audio, history, hotkey, models, permissions, text_to_speech};
 
@@ -42,85 +41,57 @@ pub fn claim() -> Result<(std::path::PathBuf, UnixListener, fs::File), BansheeEr
     Ok((socket_path, listener, lock))
 }
 
-/// `open_capture` writes the device name once `play()` succeeds, so a name left
-/// behind after a failure shows a microphone nothing holds.
-pub(crate) fn drop_device_name(daemon_state: &DaemonState) {
-    daemon_state.set_audio_device(None);
-}
-
-/// What startup built and resolved. `open` and `missing` seed the watchdog, so
-/// its binding never reads them back out of `DaemonState`.
+/// What startup built: the thread that turns audio into text, and the capture
+/// it reads, which the thread that owns capture fills.
 struct Recording {
-    stream: cpal::Stream,
     thread: std::thread::JoinHandle<()>,
     capture: Arc<hotkey::Capture>,
-    open: String,
-    missing: Option<String>,
-    /// The listening model whose file is still to download.
-    awaiting: Option<&'static str>,
 }
 
-/// Capture, the models, and the thread that turns audio into text. All of it or
-/// none: with any piece missing the daemon cannot transcribe, so they share one
+/// The models and the thread that turns audio into text. All of it or none:
+/// with any piece missing the daemon cannot transcribe, so they share one
 /// error path and one reason for `banshee status` to report. A listening model
 /// still to download is the exception: the rest stands, and the model loads
-/// when its file arrives.
+/// when its file arrives. The microphone is not part of it: it opens for each
+/// use.
 fn start_recording(
     daemon_state: &Arc<DaemonState>,
     config: &Config,
     command_receiver: std::sync::mpsc::Receiver<ConsumerCommand>,
     cues: audio::cues::Cues,
 ) -> Result<Recording, RecordingError> {
-    // Startup selects through the same function the watchdog tick uses, so a
-    // device that is absent at boot falls back rather than leaving capture dead
-    let selection =
-        audio::select(&config.audio.input_device).map_err(RecordingError::Microphone)?;
-    // Both failures stringify to BansheeError::Other, so the stage that failed
-    // is only knowable here, at the call
-    let capture = audio::open_capture(Arc::clone(daemon_state), &selection)
-        .map_err(|e| RecordingError::Microphone(e.to_string()))?;
-    match &selection.missing {
-        Some(name) => log::info!(
-            "Capture opened {}, still waiting for {name}",
-            selection.open
-        ),
-        None => log::info!("Capture opened {}", selection.open),
+    let listener = crate::speech_to_text::select_transcriber(&config.stt)?;
+    let vad = models::model_path(models::VAD_MODEL)
+        .and_then(Detector::open)
+        .map_err(|e| RecordingError::Model(e.to_string()))?;
+    // Before the consumer exists, so a load a write queued meanwhile lands
+    // after this and is not overwritten by it.
+    match listener.awaiting {
+        Some(model) => {
+            log::warn!(
+                "Recording waits for the listening model {}: run banshee setup",
+                model.id
+            );
+            daemon_state.await_listening_model(model);
+        }
+        None => daemon_state.listening_model_loaded(models::stt_model(config)),
     }
-    let listener = crate::speech_to_text::select_transcriber(&config.stt).inspect_err(|_| {
-        drop_device_name(daemon_state);
-    })?;
-    let vad = VADEngine::new(SileroVADConfig::new(models::VAD_MODEL)).map_err(|e| {
-        drop_device_name(daemon_state);
-        RecordingError::Model(e.to_string())
-    })?;
-    // One capture, held by the consumer thread and by the watchdog that
-    // replaces it. A question that is already listening reads it too.
-    let shared_capture = Arc::new(hotkey::Capture::new(hotkey::CaptureSource {
-        consumer: capture.consumer,
-        sample_rate: capture.sample_rate,
-    }));
+    // One capture, read by the consumer thread and filled by the thread that
+    // owns the stream. A question that is already listening reads it too.
+    let capture = Arc::new(hotkey::Capture::new(hotkey::CaptureSource::unopened()));
     let thread = hotkey::hotkey_listener(
         hotkey::Pipeline {
-            source: Arc::clone(&shared_capture),
+            source: Arc::clone(&capture),
             speech_to_text: listener.engine,
             vad,
             state: Arc::clone(daemon_state),
             cues,
             endpoint_silence_ms: config.stt.endpoint_silence_ms,
+            used: std::time::Instant::now(),
         },
         command_receiver,
     );
-    // Written once the whole pipeline stands. A model failure drops capture, and
-    // a substitution recorded with nothing open contradicts the accessor.
-    daemon_state.set_missing_device(selection.missing.clone());
-    Ok(Recording {
-        stream: capture.stream,
-        thread,
-        capture: shared_capture,
-        open: selection.open,
-        missing: selection.missing,
-        awaiting: listener.awaiting.map(|model| model.id),
-    })
+    Ok(Recording { thread, capture })
 }
 
 /// Returns the status the process exits with.
@@ -167,6 +138,8 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
         },
     ));
     tokio::spawn(crate::level::sample(Arc::clone(&daemon_state)));
+    let voice_keeper = text_to_speech::unload_when_idle(Arc::clone(&daemon_state));
+    daemon_state.set_voice_keeper(voice_keeper.thread().clone());
 
     if let Some(reason) = speech.fault {
         daemon_state.set_last_speech_error(Some(reason));
@@ -191,35 +164,25 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
     });
 
     // Off this thread, because the socket is already bound and `run` below is
-    // what answers it. The device walk enters Core Audio, which stalls for
-    // minutes on a virtual device whose plugin stops answering, and a stall
-    // here leaves every client connected to a daemon that says nothing.
+    // what answers it, and loading the models takes seconds.
     let building = {
         let state = Arc::clone(&daemon_state);
         let config = Arc::clone(&config);
         std::thread::spawn(move || {
-            // The watchdog owns the stream past daemon::run: stopping it stops
-            // capture, and the thread is the only thing left to join
             match start_recording(&state, &config, command_receiver, cues) {
                 Ok(started) => {
-                    if let Some(id) = started.awaiting {
-                        log::warn!(
-                            "Recording waits for the listening model {id}: run banshee setup"
-                        );
-                        state.await_listening_model(id);
-                    }
-                    let watchdog = audio::watchdog::spawn(
-                        Arc::clone(&state),
-                        started.stream,
-                        started.capture,
-                        started.open,
-                        started.missing,
-                    );
-                    state.capture_open();
+                    // Before the owner starts, which may open at once and
+                    // must not have its open overwritten
+                    state.set_mic(crate::state::Mic::Closed);
+                    let watchdog =
+                        audio::watchdog::spawn(Arc::clone(&state), started.capture, audio::Cpal);
+                    // A download that ended while the listener was built
+                    // found no listener waiting for it.
+                    crate::settings::reconcile_listening(&state);
                     Some((watchdog, started.thread))
                 }
-                // A missing mic or model leaves the daemon useful rather than
-                // exiting, which the supervisor reads as a crash and retries
+                // A missing model or listener leaves the daemon useful rather
+                // than exiting, which the supervisor reads as a crash and retries
                 Err(error) => {
                     log::error!("Recording is unavailable: {error}");
                     log::info!(
@@ -227,7 +190,7 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
                              Recording, dictation, and ask_user do not."
                     );
                     log::info!("Run `banshee status` for the fix.");
-                    state.set_pipeline(crate::state::Pipeline::Broken(error));
+                    state.set_mic(crate::state::Mic::Faulted(error));
                     None
                 }
             }
@@ -241,8 +204,10 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
         config.audio.hotkey_mode,
     );
     let result = run(&daemon_state, socket_path, listener).await;
-    // A build still parked in Core Audio cannot be woken, so the process leaves
-    // without it rather than never leaving at all.
+    // A build still loading a model cannot be woken, so the process leaves
+    // without it rather than never leaving at all. Core Audio, which stalls
+    // for minutes on a virtual device whose plugin stops answering, can park
+    // only the thread that owns capture, and `watchdog.stop` below joins it.
     if building.is_finished()
         && let Ok(Some((watchdog, consumer_thread))) = building.join()
     {

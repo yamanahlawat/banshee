@@ -219,15 +219,44 @@ pub fn pipeline(status: &Value) -> Option<&str> {
     status.get("pipeline").and_then(Value::as_str)
 }
 
-/// The sentence every surface shows for these two fields. Each client adds its
-/// own lead-in and nothing else, so all of them spell the absent case alike.
-/// Nothing open is not an absent device: a model that fails to load closes capture.
-pub fn microphone_label(open: Option<&str>, missing: Option<&str>) -> String {
-    let open = open.unwrap_or("Not open");
-    match missing {
+/// Whether capture is open now: for a use, or for good under
+/// `audio.keep_open`. False between uses, when `audio_device` names the
+/// device the next use opens.
+pub fn microphone_open(status: &Value) -> bool {
+    flag(status, "microphone_open")
+}
+
+/// Whether macOS refuses Banshee the microphone, read from its grant. Always
+/// false elsewhere.
+pub fn microphone_refused(status: &Value) -> bool {
+    flag(status, "microphone_refused")
+}
+
+/// The device and the one the config waits for, as one name. `None` when no
+/// device is known.
+pub fn microphone_name(device: Option<&str>, missing: Option<&str>) -> Option<String> {
+    let device = device?;
+    Some(match missing {
         // The quotes keep two multi-word names apart
-        Some(missing) => format!("{open} (waiting for \"{missing}\")"),
-        None => open.to_string(),
+        Some(missing) => format!("{device} (waiting for \"{missing}\")"),
+        None => device.to_string(),
+    })
+}
+
+/// The sentence every surface shows for the microphone. Each client adds its
+/// own lead-in and nothing else, so all of them spell each case alike. A
+/// closed microphone is no fault: the next use opens the device named.
+pub fn microphone_label(
+    device: Option<&str>,
+    missing: Option<&str>,
+    open: bool,
+    refused: bool,
+) -> String {
+    match microphone_name(device, missing) {
+        None => "not available".to_string(),
+        Some(name) if refused => format!("{name}, not allowed by macOS"),
+        Some(name) if open => format!("{name}, open"),
+        Some(name) => format!("{name}, opens when you speak"),
     }
 }
 
@@ -690,28 +719,56 @@ mod wire_tests {
 
 #[cfg(test)]
 mod label_tests {
-    use super::microphone_label;
+    use super::{microphone_label, microphone_open, microphone_refused};
 
     // The tray, `banshee status` and `banshee watch --waybar` all show this
     // sentence, so it is spelled once and tested once
     #[test]
-    fn the_microphone_label_covers_both_fields() {
-        for (open, missing, expected) in [
+    fn the_microphone_label_names_the_device_and_whether_it_is_open() {
+        for (device, missing, open, expected) in [
             (
                 Some("MacBook Pro Microphone"),
-                Some("yeti"),
-                "MacBook Pro Microphone (waiting for \"yeti\")",
+                None,
+                false,
+                "MacBook Pro Microphone, opens when you speak",
             ),
             (
                 Some("MacBook Pro Microphone"),
                 None,
-                "MacBook Pro Microphone",
+                true,
+                "MacBook Pro Microphone, open",
             ),
-            (None, Some("yeti"), "Not open (waiting for \"yeti\")"),
-            (None, None, "Not open"),
+            (
+                Some("MacBook Pro Microphone"),
+                Some("yeti"),
+                false,
+                "MacBook Pro Microphone (waiting for \"yeti\"), opens when you speak",
+            ),
+            (None, Some("yeti"), false, "not available"),
+            (None, None, true, "not available"),
         ] {
-            assert_eq!(microphone_label(open, missing), expected);
+            assert_eq!(microphone_label(device, missing, open, false), expected);
         }
+        assert_eq!(
+            microphone_label(Some("MacBook Pro Microphone"), None, false, true),
+            "MacBook Pro Microphone, not allowed by macOS"
+        );
+        assert_eq!(microphone_label(None, None, false, true), "not available");
+    }
+
+    #[test]
+    fn the_microphone_reads_as_open_only_where_the_reply_says_so() {
+        assert!(microphone_open(
+            &serde_json::json!({ "microphone_open": true })
+        ));
+        assert!(!microphone_open(
+            &serde_json::json!({ "microphone_open": false })
+        ));
+        assert!(!microphone_open(&serde_json::json!({})));
+        assert!(microphone_refused(
+            &serde_json::json!({ "microphone_refused": true })
+        ));
+        assert!(!microphone_refused(&serde_json::json!({})));
     }
 }
 

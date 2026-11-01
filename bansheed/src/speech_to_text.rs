@@ -87,6 +87,19 @@ pub trait Transcriber: Send {
     fn slow_advice(&self) -> Option<&'static str> {
         None
     }
+    /// The model is in memory. A listener that loads no file is always ready.
+    fn resident(&self) -> bool {
+        true
+    }
+    /// Reads the model into memory when it is not there.
+    fn load(&mut self) -> Result<(), BansheeError> {
+        Ok(())
+    }
+    /// Frees the model, abandoning any open stream. Answers whether a model
+    /// was in memory.
+    fn unload(&mut self) -> bool {
+        false
+    }
 }
 
 /// A listener, and the listening model it waits for when that file is still
