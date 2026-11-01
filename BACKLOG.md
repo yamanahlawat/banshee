@@ -14,9 +14,19 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   installed build re-registered them, and launchd then failed every spawn with exit 78
   (`EX_CONFIG`), 6 tries for the daemon and 13 for the tray. No Banshee code exits 78. The
   binaries ran from a terminal and the bundle signature verified. A second `banshee start` and
-  `banshee tray`, about a minute later, brought both up. Seen on 2026-10-31: launchd kept
+  `banshee tray`, about a minute later, brought both up. ~~Seen on 2026-10-31: launchd kept
   respawning the login items while the bundle was being replaced. That is the likely cause,
-  not proven. Every `make install` over a running build can hit it.
+  not proven.~~ launchd's log shows `Launch Constraint Violation` on the first launch after
+  `banshee start` re-registers a new build, and macOS rebuilt its record about 10 s later. A
+  second start then worked. That happened on 3 of 3 installs over a running build, and a
+  re-register of a build that had already run worked 4 of 4. That the record pins something
+  per build, because the self-signed build has no Team ID, is inferred and not measured.
+  `banshee start` and `banshee tray` now retry once. Still open: a cask or tarball upgrade
+  followed by a login, with no `banshee start`, is not measured and not covered. The window
+  reopens the tray through its own unregister and register (`keep_the_tray_running` in
+  `banshee-app/src/login_items.rs`), and that waits for nothing.
+- The window's Start button runs `banshee start` and shows nothing while it waits, up to about
+  50 s after a refused launch.
 - The first sound from a Bluetooth headset arrives about 300 ms after the microphone opens.
   That is measured on one headset only. Other headsets are not checked.
 - Whether macOS needs a restart of Banshee after the microphone grant is not verified.
@@ -95,3 +105,6 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - Nothing tests the window and the daemon together.
 - No `rust-version` is declared.
 - `rdev` pulls crates the compiler reports as future-incompatible, and has no newer release.
+- RUSTSEC-2024-0429 flags glib 0.18, which comes with Tauri's GTK 3 stack. It affects the Linux
+  window only. No Banshee or stack code calls `VariantStrIter` (checked with grep). It moves with
+  Tauri's GTK 4 work, tauri-apps/tauri#12562.

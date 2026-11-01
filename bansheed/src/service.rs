@@ -43,10 +43,12 @@ mod login_items {
 
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::time::{Duration, Instant};
 
     use banshee_common::error::BansheeError;
     use banshee_common::utils::{
-        DAEMON_AGENT, LEGACY_AGENTS, Registration, TRAY_AGENT, launchd_target, log_path, sibling,
+        DAEMON_AGENT, LEGACY_AGENTS, Registration, TRAY_AGENT, daemon_runs, launchd_target,
+        log_path, sibling, tray_runs,
     };
 
     use super::{Agent, home_dir};
@@ -118,15 +120,26 @@ mod login_items {
         })
     }
 
-    pub fn awaits_approval(agent: Agent) -> String {
-        let command = match agent {
+    fn command(agent: Agent) -> &'static str {
+        match agent {
             Agent::Daemon => "banshee start",
             Agent::Tray => "banshee tray",
-        };
+        }
+    }
+
+    fn what(agent: Agent) -> &'static str {
+        match agent {
+            Agent::Daemon => "Banshee",
+            Agent::Tray => "the menu bar icon",
+        }
+    }
+
+    pub fn awaits_approval(agent: Agent) -> String {
         format!(
             "macOS has Banshee's {} switched off. Switch Banshee on in System Settings > \
-             General > Login Items, then run {command} again.",
-            agent.name()
+             General > Login Items, then run {} again.",
+            agent.name(),
+            command(agent)
         )
     }
 
@@ -210,15 +223,137 @@ mod login_items {
         }
     }
 
-    /// Registers the agent, unregistering it first when macOS has it enabled.
-    /// `SMAppService` has no call that starts a stopped agent, and Apple's
-    /// header asks for both calls after the executable changes.
-    pub fn start(agent: Agent) -> Result<String, BansheeError> {
-        let app = ready_to_register(&home_dir()?, the_app, bootout_legacy)?;
-        if login_items(&app, "status", agent)? == Registration::Enabled {
-            unregister(&app, agent)?;
+    /// launchd's default `ThrottleInterval`: a job that exits is not respawned sooner.
+    pub(super) const THROTTLE: Duration = Duration::from_secs(10);
+    /// Two throttles, above the 10 s macOS took to rebuild its record of the agent.
+    pub(super) const START_WAIT: Duration = Duration::from_secs(THROTTLE.as_secs() * 2);
+
+    pub(super) struct Steps<'a> {
+        pub enabled: bool,
+        pub unregister: &'a dyn Fn() -> Result<(), BansheeError>,
+        pub register: &'a dyn Fn() -> Result<String, BansheeError>,
+        pub runs: &'a dyn Fn() -> bool,
+        pub wait: &'a dyn Fn(&dyn Fn() -> bool, Duration) -> bool,
+        pub say: &'a dyn Fn(&str),
+        /// launchd's own line on why the agent died, read only on the final failure.
+        pub reason: &'a dyn Fn() -> Option<String>,
+    }
+
+    pub(super) fn bring_up(agent: Agent, steps: Steps) -> Result<String, BansheeError> {
+        if steps.enabled {
+            (steps.unregister)()?;
+            if !(steps.wait)(&|| !(steps.runs)(), THROTTLE) {
+                return Err(BansheeError::Other(format!(
+                    "macOS did not stop {} when it was asked to. Run: {}",
+                    what(agent),
+                    command(agent)
+                )));
+            }
         }
-        register(&app, agent)
+        let follow = (steps.register)()?;
+        if (steps.wait)(steps.runs, START_WAIT) {
+            return Ok(follow);
+        }
+        // macOS rebuilds a stale record of the agent by itself, so a second
+        // registration starts it. One that fails again has another cause.
+        (steps.say)(&format!(
+            "macOS did not start {}; registering it once more.",
+            what(agent)
+        ));
+        (steps.unregister)()?;
+        (steps.register)()?;
+        if (steps.wait)(steps.runs, START_WAIT) {
+            return Ok(follow);
+        }
+        let mut lines = vec![format!(
+            "macOS registered {}, but it did not start.",
+            what(agent)
+        )];
+        lines.extend((steps.reason)());
+        lines.push(format!("Run: {}", command(agent)));
+        Err(BansheeError::Other(lines.join("\n")))
+    }
+
+    fn poll(until: &dyn Fn() -> bool, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if until() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    pub(super) fn reason_in(stdout: &str) -> Option<String> {
+        let last = stdout.lines().rfind(|line| !line.trim().is_empty())?;
+        let (_, reason) = last.split_once("]:] ")?;
+        Some(reason.trim().to_string())
+    }
+
+    /// launchd puts the agent's label in the log's `subsystem` field.
+    fn launchd_reason(label: &str) -> Option<String> {
+        let predicate = format!(
+            "process == \"launchd\" AND subsystem CONTAINS \"{label}\" AND \
+             (eventMessage BEGINSWITH \"xpcproxy exited\" OR eventMessage BEGINSWITH \"Could not\")"
+        );
+        let output = Command::new("/usr/bin/log")
+            .args([
+                "show",
+                "--last",
+                "2m",
+                "--style",
+                "compact",
+                "--predicate",
+                &predicate,
+            ])
+            .output()
+            .ok()?;
+        reason_in(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    /// `SMAppService` has no call that starts a stopped agent, and Apple's header asks
+    /// for both calls after the executable changes. A registration that reads enabled
+    /// can still fail to launch: after an upgrade macOS can refuse the first launch,
+    /// and rebuilds its record of the agent about 10 s later.
+    pub fn start(agent: Agent) -> Result<String, BansheeError> {
+        unless_blind(agent, daemon_runs, || {
+            let app = ready_to_register(&home_dir()?, the_app, bootout_legacy)?;
+            let runs: fn() -> bool = match agent {
+                // `unless_blind` saw the socket, so an error here is a daemon going away.
+                Agent::Daemon => || daemon_runs().unwrap_or(false),
+                Agent::Tray => tray_runs,
+            };
+            bring_up(
+                agent,
+                Steps {
+                    enabled: login_items(&app, "status", agent)? == Registration::Enabled,
+                    unregister: &|| unregister(&app, agent),
+                    register: &|| register(&app, agent),
+                    runs: &runs,
+                    wait: &poll,
+                    say: &|line| eprintln!("{line}"),
+                    reason: &|| launchd_reason(label(agent)),
+                },
+            )
+        })
+    }
+
+    pub(super) fn unless_blind(
+        agent: Agent,
+        daemon_runs: impl FnOnce() -> std::io::Result<bool>,
+        then: impl FnOnce() -> Result<String, BansheeError>,
+    ) -> Result<String, BansheeError> {
+        if agent == Agent::Daemon && daemon_runs().is_err() {
+            return Err(BansheeError::Other(
+                "This shell cannot reach Banshee's socket, so banshee start cannot tell whether \
+                 Banshee runs.\nRun banshee start from a terminal outside the sandbox."
+                    .into(),
+            ));
+        }
+        then()
     }
 }
 
@@ -455,8 +590,10 @@ mod tool_tests {
 
 #[cfg(all(test, target_os = "macos"))]
 mod login_item_tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use banshee_common::utils::{LEGACY_AGENTS, Registration};
 
@@ -464,8 +601,253 @@ mod login_item_tests {
 
     use super::Agent;
     use super::login_items::{
-        awaits_approval, migrate_legacy, outcome, ready_to_register, registration_in,
+        START_WAIT, Steps, THROTTLE, awaits_approval, bring_up, migrate_legacy, outcome,
+        ready_to_register, reason_in, registration_in, unless_blind,
     };
+
+    const FOLLOW: &str = "tail -f banshee.log";
+
+    struct Fake {
+        runs: RefCell<VecDeque<bool>>,
+        unregisters: Cell<u32>,
+        registers: Cell<u32>,
+        waits: RefCell<Vec<Duration>>,
+        said: RefCell<Vec<String>>,
+        reason: Option<&'static str>,
+    }
+
+    impl Fake {
+        fn new(runs: &[bool]) -> Self {
+            Fake {
+                runs: RefCell::new(runs.iter().copied().collect()),
+                unregisters: Cell::new(0),
+                registers: Cell::new(0),
+                waits: RefCell::new(Vec::new()),
+                said: RefCell::new(Vec::new()),
+                reason: None,
+            }
+        }
+
+        fn bring_up(
+            &self,
+            agent: Agent,
+            enabled: bool,
+            refusal: Option<String>,
+        ) -> Result<String, BansheeError> {
+            bring_up(
+                agent,
+                Steps {
+                    enabled,
+                    unregister: &|| {
+                        self.unregisters.set(self.unregisters.get() + 1);
+                        Ok(())
+                    },
+                    register: &|| {
+                        self.registers.set(self.registers.get() + 1);
+                        match &refusal {
+                            Some(message) => Err(BansheeError::Other(message.clone())),
+                            None => Ok(FOLLOW.to_string()),
+                        }
+                    },
+                    runs: &|| {
+                        self.runs
+                            .borrow_mut()
+                            .pop_front()
+                            .expect("bring_up asked more often than the script answers")
+                    },
+                    wait: &|until, limit| {
+                        self.waits.borrow_mut().push(limit);
+                        until()
+                    },
+                    say: &|line| self.said.borrow_mut().push(line.to_string()),
+                    reason: &|| self.reason.map(str::to_string),
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn a_daemon_socket_this_shell_cannot_see_stops_start_before_any_unregister() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
+            let fake = Fake::new(&[]);
+
+            let error = unless_blind(
+                Agent::Daemon,
+                || Err(kind.into()),
+                || fake.bring_up(Agent::Daemon, true, None),
+            )
+            .expect_err("start cannot tell whether Banshee runs");
+
+            assert_eq!(
+                error.to_string(),
+                "This shell cannot reach Banshee's socket, so banshee start cannot tell whether \
+                 Banshee runs.\nRun banshee start from a terminal outside the sandbox.",
+                "{kind:?}"
+            );
+            assert_eq!(fake.unregisters.get(), 0, "{kind:?}");
+            assert_eq!(fake.registers.get(), 0, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_daemon_socket_that_answers_or_is_absent_lets_start_go_on() {
+        for seen in [true, false] {
+            let fake = Fake::new(&[false, true]);
+
+            unless_blind(
+                Agent::Daemon,
+                || Ok(seen),
+                || fake.bring_up(Agent::Daemon, true, None),
+            )
+            .expect("it runs");
+
+            assert_eq!(fake.registers.get(), 1, "{seen}");
+        }
+    }
+
+    #[test]
+    fn the_tray_does_not_depend_on_the_daemon_socket() {
+        let fake = Fake::new(&[false, true]);
+
+        unless_blind(
+            Agent::Tray,
+            || Err(std::io::ErrorKind::PermissionDenied.into()),
+            || fake.bring_up(Agent::Tray, true, None),
+        )
+        .expect("the tray runs");
+
+        assert_eq!(fake.registers.get(), 1);
+    }
+
+    #[test]
+    fn a_running_agent_restarts_without_a_retry() {
+        let fake = Fake::new(&[false, true]);
+
+        let follow = fake.bring_up(Agent::Daemon, true, None).expect("it runs");
+
+        assert_eq!(follow, FOLLOW);
+        assert_eq!(fake.unregisters.get(), 1);
+        assert_eq!(fake.registers.get(), 1);
+        assert!(fake.said.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_dead_job_is_registered_once_more() {
+        let fake = Fake::new(&[false, false, true]);
+
+        let follow = fake
+            .bring_up(Agent::Daemon, true, None)
+            .expect("the second registration runs");
+
+        assert_eq!(follow, FOLLOW);
+        assert_eq!(fake.unregisters.get(), 2);
+        assert_eq!(fake.registers.get(), 2);
+        assert_eq!(*fake.waits.borrow(), [THROTTLE, START_WAIT, START_WAIT]);
+        let said = fake.said.borrow();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("registering it once more"), "{said:?}");
+    }
+
+    #[test]
+    fn a_second_failure_ends_on_the_command() {
+        let mut fake = Fake::new(&[false, false, false]);
+        fake.reason = Some("xpcproxy exited due to exit(78)");
+
+        let error = fake
+            .bring_up(Agent::Daemon, true, None)
+            .expect_err("it never runs");
+
+        let message = error.to_string();
+        let lines: Vec<&str> = message.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "macOS registered Banshee, but it did not start.",
+                "xpcproxy exited due to exit(78)",
+                "Run: banshee start",
+            ]
+        );
+        assert_eq!(fake.registers.get(), 2, "one retry, never a third");
+    }
+
+    #[test]
+    fn a_failure_with_no_launchd_line_is_two_lines() {
+        let fake = Fake::new(&[false, false]);
+
+        let error = fake
+            .bring_up(Agent::Tray, false, None)
+            .expect_err("it never runs");
+
+        assert_eq!(
+            error.to_string(),
+            "macOS registered the menu bar icon, but it did not start.\nRun: banshee tray"
+        );
+    }
+
+    #[test]
+    fn a_switched_off_agent_waits_for_nothing() {
+        let fake = Fake::new(&[]);
+
+        let error = fake
+            .bring_up(Agent::Daemon, false, Some(awaits_approval(Agent::Daemon)))
+            .expect_err("macOS has it switched off");
+
+        assert_eq!(error.to_string(), awaits_approval(Agent::Daemon));
+        assert!(fake.waits.borrow().is_empty());
+        assert!(fake.said.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_agent_that_does_not_leave_is_an_error() {
+        let fake = Fake::new(&[true]);
+
+        let error = fake
+            .bring_up(Agent::Daemon, true, None)
+            .expect_err("the old daemon stays");
+
+        assert!(error.to_string().contains("did not stop"), "{error}");
+        assert_eq!(fake.registers.get(), 0);
+    }
+
+    #[test]
+    fn a_first_registration_skips_the_leave_wait() {
+        let fake = Fake::new(&[true]);
+
+        fake.bring_up(Agent::Daemon, false, None).expect("it runs");
+
+        assert_eq!(fake.unregisters.get(), 0);
+        assert_eq!(fake.registers.get(), 1);
+    }
+
+    #[test]
+    fn a_tray_up_by_hand_counts_as_running() {
+        let fake = Fake::new(&[true]);
+
+        fake.bring_up(Agent::Tray, false, None)
+            .expect("the tray holds its lock");
+    }
+
+    #[test]
+    fn the_reason_is_launchds_last_line() {
+        let stdout = "\
+Timestamp               Ty Process[PID:TID]
+2026-10-31 17:55:30.791 Df launchd[1:efe345] [gui/505/com.banshee.app.daemon [50738]:] xpcproxy exited due to OS_REASON_CODESIGNING | Launch Constraint Violation, error info: c[5]p[1]m[1]e[0], (Constraint not matched) launch type 0, failure proc [vc: 10]: /Applications/Banshee.app/Contents/MacOS/banshee
+2026-10-31 17:55:40.872 Df launchd[1:efe484] [gui/505/com.banshee.app.daemon [51234]:] xpcproxy exited due to exit(78)
+";
+
+        assert_eq!(
+            reason_in(stdout).as_deref(),
+            Some("xpcproxy exited due to exit(78)")
+        );
+        assert_eq!(reason_in(""), None);
+        assert_eq!(
+            reason_in("Timestamp               Ty Process[PID:TID]\n"),
+            None
+        );
+    }
 
     struct TempHome(PathBuf);
     impl Drop for TempHome {

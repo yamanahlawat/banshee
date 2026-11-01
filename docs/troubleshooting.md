@@ -99,6 +99,12 @@ This page lists what breaks, and the fix.
     `banshee config remote`.
 - **Banshee.app does not open, and the `banshee` command dies with no
   message.** Run the `xattr` line in [install.md](install.md).
+- **Banshee and the menu bar icon are gone after an upgrade.** Run `banshee start`,
+  then `banshee tray`.
+  - macOS can refuse the first launch of a new build. A second start of each, run by hand
+    14 to 44 s after the first, worked on 3 of 3 installs over a running build.
+  - `banshee start` and `banshee tray` register once more by themselves. On one real
+    upgrade, that retry brought up both the daemon and the menu bar icon.
 
 ## Binding an F-key on a Mac
 

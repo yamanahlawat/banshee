@@ -180,6 +180,38 @@ pub fn tray_lock_path() -> Option<PathBuf> {
     Some(banshee_dir()?.join("tray.lock"))
 }
 
+/// A tray claiming the lock in the instant this holds it exits 1, and launchd relaunches it.
+fn lock_held(lock: &Path) -> bool {
+    std::fs::File::open(lock)
+        .is_ok_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+}
+
+pub fn tray_runs() -> bool {
+    tray_lock_path().is_some_and(|lock| lock_held(&lock))
+}
+
+/// A socket file nobody listens on refuses the connection, so a stale file reads as false.
+/// The connect is std's blocking one: tokio's nonblocking connect on macOS reports success against a dead socket.
+/// Any other error, such as a sandbox denying the connect, cannot prove nobody listens.
+pub fn listens(socket: &Path) -> std::io::Result<bool> {
+    match std::os::unix::net::UnixStream::connect(socket) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn daemon_runs() -> std::io::Result<bool> {
+    socket_path().map_or(Ok(false), |socket| listens(&socket))
+}
+
 pub fn models_path() -> Option<PathBuf> {
     Some(banshee_dir()?.join("models"))
 }
@@ -304,6 +336,73 @@ fn decode(response: &str) -> Result<Value, BansheeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_another_file_holds_reads_as_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("tray.lock");
+        let holder = std::fs::File::create(&lock).unwrap();
+        holder.lock().unwrap();
+        assert!(lock_held(&lock));
+        drop(holder);
+        assert!(
+            !lock_held(&lock),
+            "the lock goes with the file that held it"
+        );
+    }
+
+    #[test]
+    fn an_unlocked_lock_file_is_not_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("tray.lock");
+        std::fs::File::create(&lock).unwrap();
+        assert!(!lock_held(&lock));
+    }
+
+    #[test]
+    fn a_missing_lock_is_not_held() {
+        assert!(!lock_held(Path::new("/nonexistent/tray.lock")));
+    }
+
+    #[test]
+    fn a_bound_socket_listens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("banshee.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(listens(&path).unwrap());
+        drop(listener);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!listens(&path).unwrap());
+    }
+
+    #[test]
+    fn a_stale_socket_file_does_not_listen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("banshee.sock");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        assert!(!listens(&path).unwrap());
+    }
+
+    #[test]
+    fn a_socket_this_process_cannot_reach_is_not_read_as_absent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let hidden = dir.path().join("hidden");
+        std::fs::create_dir(&hidden).unwrap();
+        let path = hidden.join("banshee.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let probe = listens(&path);
+
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            probe.map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::PermissionDenied)
+        );
+    }
 
     #[test]
     fn a_connection_that_closes_without_a_reply_is_not_a_parse_failure() {
