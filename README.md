@@ -181,3 +181,5 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 ## License
 
 [MIT](LICENSE)
+
+<sub>Made with the help of AI: Claude Opus 5.5 and Claude Fable 5.1 in Claude Code, working to [plumbline](https://github.com/yamanahlawat/plumbline) and [superpowers](https://github.com/obra/superpowers).</sub>
