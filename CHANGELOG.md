@@ -138,6 +138,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   know by letter names instead. If you installed `espeak-ng` for Banshee, you
   can remove it. No config key changes.
 
+### Fixed
+
+- **`banshee start` and `banshee tray` wait until Banshee runs.** After an upgrade,
+  macOS can refuse the first launch of the new build. They now register it once
+  more, and say so when it still does not start. Before, they said Banshee was
+  running when it was not.
+
 ### Security
 
 - **A remote server out on the internet needs `https`.** Plain `http` used to

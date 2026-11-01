@@ -561,10 +561,8 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
     }
 }
 
-// Probe with std's blocking connect: tokio's nonblocking UDS connect on
-// macOS reports success against a dead socket
 pub fn socket_answers(socket_path: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+    banshee_common::utils::listens(socket_path).unwrap_or(false)
 }
 
 /// `banshee start`, the tray and a config write can create the directory

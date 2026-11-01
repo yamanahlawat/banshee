@@ -165,7 +165,7 @@ fn tray_step(now: Registration, running: bool) -> TrayStep {
 }
 
 pub fn keep_the_tray_running() -> Result<(), String> {
-    let running = banshee_common::utils::tray_lock_path().is_some_and(|lock| held(&lock));
+    let running = banshee_common::utils::tray_runs();
     match tray_step(registration(TRAY_AGENT)?, running) {
         TrayStep::Leave => Ok(()),
         TrayStep::Reregister => {
@@ -174,13 +174,6 @@ pub fn keep_the_tray_running() -> Result<(), String> {
         }
         TrayStep::Register => register(TRAY_AGENT),
     }
-}
-
-/// Whether another open file holds an exclusive `flock` on `lock`.
-/// A tray claiming the lock in the instant this holds it exits 1, and launchd relaunches it.
-fn held(lock: &std::path::Path) -> bool {
-    std::fs::File::open(lock)
-        .is_ok_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
 #[cfg(test)]
@@ -241,20 +234,6 @@ mod tests {
         for now in [Enabled, RequiresApproval, NotRegistered, NotFound] {
             assert!(!needs_the_api(Action::Status, now), "status on {now:?}");
         }
-    }
-
-    #[test]
-    fn a_lock_reads_as_held_only_while_another_file_holds_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let lock = dir.path().join("tray.lock");
-        assert!(!held(&lock), "a missing lock is nobody's");
-
-        let holder = std::fs::File::create(&lock).unwrap();
-        assert!(!held(&lock), "a lock file nobody locked is free");
-        holder.lock().unwrap();
-        assert!(held(&lock));
-        drop(holder);
-        assert!(!held(&lock), "the lock goes with the file that held it");
     }
 
     #[test]
