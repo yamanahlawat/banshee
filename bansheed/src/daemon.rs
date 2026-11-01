@@ -155,6 +155,14 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
             move || state.leave_to_restart()
         },
     );
+    // Before the speak task, so a refusal already there is part of its
+    // baseline and is not spoken.
+    #[cfg(target_os = "macos")]
+    permissions::read_microphone(&daemon_state);
+    tokio::spawn(speak_new_problems(
+        Arc::clone(&daemon_state),
+        StateWatches::of(&daemon_state),
+    ));
 
     // After the state, which the drain writes
     let draining_state = Arc::clone(&daemon_state);
@@ -377,6 +385,38 @@ struct StateWatches {
     feedback: watch::Receiver<crate::config::FeedbackMode>,
 }
 
+impl StateWatches {
+    fn of(state: &DaemonState) -> Self {
+        Self {
+            recording: state.subscribe_recording(),
+            playing: state.speech().subscribe_playing(),
+            transcribing: state.subscribe_transcribing(),
+            loading_model: state.subscribe_loading_model(),
+            devices: state.device_changes(),
+            pipeline: state.subscribe_pipeline(),
+            last_error: state.subscribe_last_error(),
+            last_speech_error: state.subscribe_last_speech_error(),
+            feedback: state.subscribe_feedback(),
+        }
+    }
+
+    /// Only wakes the caller, which reads the state fresh. An error is the
+    /// daemon going away.
+    async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        tokio::select! {
+            woken = self.recording.changed() => woken,
+            woken = self.playing.changed() => woken,
+            woken = self.transcribing.changed() => woken,
+            woken = self.loading_model.changed() => woken,
+            woken = self.devices.changed() => woken,
+            woken = self.pipeline.changed() => woken,
+            woken = self.last_error.changed() => woken,
+            woken = self.last_speech_error.changed() => woken,
+            woken = self.feedback.changed() => woken,
+        }
+    }
+}
+
 /// Sends one connection its state changes, until the daemon stops or the client
 /// does. `told` is the state that client already has, which a push is judged
 /// against: an unchanged one is not worth a line.
@@ -386,22 +426,7 @@ async fn push_changes(
     mut watches: StateWatches,
     mut told: serde_json::Value,
 ) {
-    loop {
-        // Every arm only wakes the task; the state is read fresh below
-        let woken = tokio::select! {
-            woken = watches.recording.changed() => woken,
-            woken = watches.playing.changed() => woken,
-            woken = watches.transcribing.changed() => woken,
-            woken = watches.loading_model.changed() => woken,
-            woken = watches.devices.changed() => woken,
-            woken = watches.pipeline.changed() => woken,
-            woken = watches.last_error.changed() => woken,
-            woken = watches.last_speech_error.changed() => woken,
-            woken = watches.feedback.changed() => woken,
-        };
-        if woken.is_err() {
-            break;
-        }
+    while watches.changed().await.is_ok() {
         let now = live_state(&state);
         if now == told {
             continue;
@@ -415,6 +440,48 @@ async fn push_changes(
         }
         told = notification.params;
     }
+}
+
+/// Says the first problem that was absent a moment before. What stands once
+/// the daemon has started is the baseline, so a start or a login says nothing.
+async fn speak_new_problems(state: Arc<DaemonState>, mut watches: StateWatches) {
+    if watches
+        .pipeline
+        .wait_for(|pipeline| !matches!(pipeline, crate::state::Pipeline::Opening))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut before = ids_of(&problems(&state));
+    while watches.changed().await.is_ok() {
+        let blockers = problems(&state);
+        if state.speaks_problems()
+            && let Some(blocker) = blockers.iter().find(|b| !before.contains(&b.id))
+            && let Err(error) = state.speech().speak(&spoken_problem(blocker), false, None)
+        {
+            log::warn!("Failed to say the problem {}: {error}", blocker.id);
+        }
+        before = ids_of(&blockers);
+    }
+}
+
+/// Kokoro drops `>`, so a menu path is read as steps.
+fn spoken_problem(blocker: &banshee_common::Blocker) -> String {
+    let fix = blocker.fix.replace(" > ", ", then ");
+    format!(
+        "{}. {}.",
+        blocker.name,
+        crate::audio::cues::capitalised(&fix)
+    )
+}
+
+fn problems(state: &DaemonState) -> Vec<banshee_common::Blocker> {
+    crate::readiness::blockers_as_read(state, &state.pipeline())
+}
+
+fn ids_of(blockers: &[banshee_common::Blocker]) -> Vec<String> {
+    blockers.iter().map(|blocker| blocker.id.clone()).collect()
 }
 
 /// The subscription lives and dies with the connection.
@@ -465,22 +532,8 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         } else {
             Events::default()
         };
-        let opening_state = (asked.state && pushing_state.is_none()).then(|| {
-            (
-                StateWatches {
-                    recording: state.subscribe_recording(),
-                    playing: state.speech().subscribe_playing(),
-                    transcribing: state.subscribe_transcribing(),
-                    loading_model: state.subscribe_loading_model(),
-                    devices: state.device_changes(),
-                    pipeline: state.subscribe_pipeline(),
-                    last_error: state.subscribe_last_error(),
-                    last_speech_error: state.subscribe_last_speech_error(),
-                    feedback: state.subscribe_feedback(),
-                },
-                live_state(&state),
-            )
-        });
+        let opening_state = (asked.state && pushing_state.is_none())
+            .then(|| (StateWatches::of(&state), live_state(&state)));
         let opening_downloads =
             (asked.downloads && pushing_downloads.is_none()).then(|| state.subscribe_downloads());
         let opening_cues =

@@ -436,10 +436,7 @@ fn check_grants(daemon: &Daemon) -> bool {
 
     let mut healthy = true;
     for (name, consequence, fix) in denied {
-        healthy &= fail(
-            &format!("{name} not granted to the daemon: {consequence}"),
-            fix,
-        );
+        healthy &= fail(&format!("{name} for the daemon: {consequence}"), fix);
     }
     healthy
 }

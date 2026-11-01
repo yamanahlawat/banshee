@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The menu bar icon shows a lasting problem, and Banshee says it once.** The idle
+  figure gets an exclamation badge while a permission or model is missing. The first
+  menu row says what is wrong, for example `Accessibility is not granted`, and opens
+  Banshee. When Banshee is not running, that row reads `Start Banshee` and runs
+  `banshee start`. When Banshee started without Accessibility, the daemon
+  restarts as that grant lands, and the badge clears. A microphone grant or
+  refusal reaches Banshee at its next start: run `banshee start`, or click the
+  window's restart button after a grant. A problem that appears after the daemon
+  starts is spoken once, and never at login.
+  A model file that goes missing shows at the next use.
+  `feedback.speak_problems = false` turns the speech off.
+
 ### Changed
 
 - **The microphone opens for a use and closes right after it.** It opens for a
@@ -29,12 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Status shows it, and the next use tries again.
 - **An idle microphone reads `<device>, opens when you speak`.** It is not a
   fault. When macOS refuses the microphone, every screen reads "not allowed by
-  macOS" and names the grant "Microphone access".
+  macOS" and names the problem "Microphone access is not allowed".
 - **The window has a More section under Listening.** It holds the two new settings.
 - **Breaking: `preset` and `language` are gone from `[stt]`.** Delete both from
   `config.toml`, or the daemon won't start. One error names every removed key.
   `banshee config set stt.preset null` removes a key. The window shows why the
-  daemon refused to start. The tray points at `banshee start`, which prints it.
+  daemon refused to start. The tray's first row runs `banshee start`, and the
+  window shows the reason.
 - **Breaking: a config that names no model moves to Parakeet Unified.** Listening
   stays silent until `banshee setup` fetches its 731 MB. The daemon stays up,
   and `banshee status` says why. Listening loads by itself when the file lands.

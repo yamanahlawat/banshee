@@ -485,6 +485,7 @@ pub struct DaemonState {
     capture_tick: AtomicU64,
     start_cue: AtomicU8,
     keep_open: AtomicBool,
+    speak_problems: AtomicBool,
     // The last read of the microphone grant. Every read goes through its
     // setter, so a move reaches every client.
     microphone_refusal: Mutex<Option<Refusal>>,
@@ -519,6 +520,7 @@ impl DaemonState {
     ) -> Self {
         let wanted_downloads = crate::models::download::wanted(&config);
         let keep_open = config.audio.keep_open;
+        let speak_problems = config.speak_problems();
         let unload_after = config.models.unload_limit();
         let facts = Facts {
             mic: Mic::Starting,
@@ -573,6 +575,7 @@ impl DaemonState {
             capture_tick: AtomicU64::new(0),
             start_cue: AtomicU8::new(NO_START_CUE),
             keep_open: AtomicBool::new(keep_open),
+            speak_problems: AtomicBool::new(speak_problems),
             microphone_refusal: Mutex::new(None),
             answering: AtomicBool::new(false),
             mic_owner: std::sync::OnceLock::new(),
@@ -1534,6 +1537,16 @@ impl DaemonState {
 
     pub fn subscribe_feedback(&self) -> watch::Receiver<FeedbackMode> {
         self.cues.subscribe_mode()
+    }
+
+    pub fn speaks_problems(&self) -> bool {
+        self.speak_problems
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_speak_problems(&self, speak: bool) {
+        self.speak_problems
+            .store(speak, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn barge_in(&self) -> BargeInMode {

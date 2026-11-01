@@ -900,6 +900,26 @@ fn a_pushed_change_agrees_with_what_status_reports() {
     }
 }
 
+// The tray takes its problem off the push, so the push ranks the list the
+// status reply does.
+#[test]
+fn the_state_push_carries_the_blockers() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.await_listening_model(
+        banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap(),
+    );
+
+    let status = status_payload(&state);
+    let live = live_state(&state);
+
+    assert!(
+        status["blockers"][0]["id"].is_string(),
+        "the fixture must discriminate"
+    );
+    assert_eq!(live["blockers"][0]["id"], status["blockers"][0]["id"]);
+    assert_eq!(live["blockers"], status["blockers"]);
+}
+
 // Between uses the device stays named, so only this says whether it is open.
 // No client could tell a use from `audio.keep_open` by the other flags.
 #[test]
@@ -931,9 +951,9 @@ fn every_push_says_whether_the_microphone_is_open_and_a_move_wakes_it() {
     );
 }
 
-// A refusal changes what the microphone does, and blockers are never pushed,
-// so the push carries it. Each read goes through the setter, and status reads
-// on every reply, so only a move may wake the push.
+// A refusal changes what the microphone does, so the push carries it. Each
+// read goes through the setter, and status reads on every reply, so only a
+// move may wake the push.
 #[test]
 fn a_refused_microphone_is_pushed_and_only_a_move_wakes_it() {
     let state = test_state(std::sync::mpsc::channel().0);
@@ -1923,7 +1943,7 @@ fn anything_that_stops_banshee_working_is_not_ready() {
         role: None,
         remedy: None,
         id: "accessibility".to_string(),
-        name: "Accessibility".to_string(),
+        name: "Accessibility is not granted".to_string(),
         consequence: "dictation cannot type".to_string(),
         fix: "grant it".to_string(),
         command: None,

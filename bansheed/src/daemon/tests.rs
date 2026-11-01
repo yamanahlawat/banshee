@@ -531,6 +531,117 @@ async fn a_rewritten_device_name_pushes_nothing() {
     );
 }
 
+/// On the test's single thread, one yield runs the woken task through its turn.
+async fn let_the_task_look() {
+    tokio::task::yield_now().await;
+}
+
+async fn watch_problems(state: &Arc<DaemonState>) {
+    tokio::spawn(speak_new_problems(
+        Arc::clone(state),
+        StateWatches::of(state),
+    ));
+    let_the_task_look().await;
+}
+
+async fn set_mic_and_look(state: &DaemonState, mic: crate::state::Mic) {
+    state.set_mic(mic);
+    let_the_task_look().await;
+}
+
+fn no_device() -> crate::state::Mic {
+    crate::state::Mic::Faulted(crate::state::RecordingError::Microphone(
+        "no device".to_string(),
+    ))
+}
+
+fn spoken_lines(spoken: &crate::test_support::SpokenLines, count: usize) -> Vec<String> {
+    let deadline = std::time::Instant::now() + ARRIVES;
+    while spoken.lock().unwrap().len() < count {
+        assert!(std::time::Instant::now() < deadline, "nothing was spoken");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    spoken.lock().unwrap().clone()
+}
+
+fn unreachable_listener() -> crate::state::RecordingError {
+    crate::state::RecordingError::Provider("connection refused".to_string())
+}
+
+/// What the voice is handed, after the player reads symbols out as words.
+fn said_for(error: crate::state::RecordingError) -> String {
+    crate::text_to_speech::pronunciation::normalize(&format!(
+        "The remote listener is not reachable. {}.",
+        crate::audio::cues::capitalised(&error.fix())
+    ))
+}
+
+// A pipeline that breaks as the daemon starts is part of the start, so the
+// line spoken is the later problem's, and only that.
+#[tokio::test]
+async fn a_blocker_present_at_start_is_not_spoken() {
+    let (state, spoken) = crate::test_support::daemon_state_before_the_pipeline_recording_speech();
+    watch_problems(&state).await;
+
+    set_mic_and_look(&state, no_device()).await;
+    set_mic_and_look(&state, crate::state::Mic::Closed).await;
+    set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
+
+    assert_eq!(spoken_lines(&spoken, 1), [said_for(unreachable_listener())]);
+}
+
+#[tokio::test]
+async fn a_blocker_that_clears_and_returns_is_spoken_again() {
+    let (state, spoken) =
+        crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
+    watch_problems(&state).await;
+
+    set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
+    set_mic_and_look(&state, crate::state::Mic::Closed).await;
+    set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
+
+    let said = said_for(unreachable_listener());
+    assert_eq!(spoken_lines(&spoken, 2), [said.clone(), said]);
+}
+
+// Grants rank before the pipeline, and only macOS has a microphone grant to
+// refuse.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn two_problems_at_once_speak_only_the_higher_ranked() {
+    let (state, spoken) =
+        crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
+    watch_problems(&state).await;
+
+    state.set_mic(crate::state::Mic::Faulted(unreachable_listener()));
+    state.set_microphone_refusal(Some(crate::state::Refusal::Denied));
+    let_the_task_look().await;
+
+    let lines = spoken_lines(&spoken, 1);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].starts_with("Microphone access is not allowed."),
+        "{lines:?}"
+    );
+    assert_eq!(spoken.lock().unwrap().len(), 1, "a second line was spoken");
+}
+
+#[tokio::test]
+async fn a_problem_is_not_spoken_while_speak_problems_is_off() {
+    let (state, spoken) =
+        crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
+    watch_problems(&state).await;
+
+    state.set_speak_problems(false);
+    set_mic_and_look(&state, no_device()).await;
+    state.set_speak_problems(true);
+    set_mic_and_look(&state, crate::state::Mic::Closed).await;
+    set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
+
+    assert_eq!(spoken_lines(&spoken, 1), [said_for(unreachable_listener())]);
+}
+
 fn test_socket_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("banshee-{name}-{}.sock", std::process::id()))
 }
@@ -730,4 +841,30 @@ async fn a_stale_socket_is_left_to_the_claim_that_holds_the_lock() {
     assert!(path.exists());
     let _ = fs::remove_file(&path);
     let _ = fs::remove_file(path.with_extension("lock"));
+}
+
+#[test]
+fn the_microphone_line_reads_its_menu_path_as_steps() {
+    let blocker = banshee_common::Blocker {
+        kind: banshee_common::BlockerKind::Permission,
+        id: "microphone".to_string(),
+        name: "Microphone access is not allowed".to_string(),
+        role: None,
+        remedy: Some(banshee_common::Remedy::Grant),
+        consequence: "dictation and spoken answers fail".to_string(),
+        fix: crate::state::Refusal::Denied.fix().to_string(),
+        command: None,
+    };
+
+    let line = spoken_problem(&blocker);
+
+    assert!(
+        line.starts_with(
+            "Microphone access is not allowed. Allow Banshee in System Settings, then "
+        ),
+        "{line}"
+    );
+    assert!(line.contains(", then "), "{line}");
+    assert!(!line.contains('>'), "the voice drops '>': {line}");
+    assert!(line.ends_with('.'), "{line}");
 }

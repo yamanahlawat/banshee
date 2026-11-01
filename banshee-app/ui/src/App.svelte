@@ -551,7 +551,10 @@
         }
       }),
       listen<Down>('daemon:down', (e) => daemon.update((s) => ({ ...s, down: e.payload.reason }))),
-      listen('app:reopened', () => readDaemon()),
+      listen('app:reopened', () => {
+        if (job !== null) openJob(null);
+        return readDaemon();
+      }),
     ]);
     // The foot needs neither, so it does not queue behind the whole-table read.
     await Promise.all([readDaemon(), readTheRest()]);

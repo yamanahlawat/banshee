@@ -515,7 +515,7 @@ mod wire_tests {
             role: None,
             remedy: None,
             id: "accessibility".to_string(),
-            name: "Accessibility".to_string(),
+            name: "Accessibility is not granted".to_string(),
             consequence: "dictation cannot type".to_string(),
             fix: "grant it in System Settings".to_string(),
             command: None,
@@ -526,7 +526,7 @@ mod wire_tests {
             serde_json::json!({
                 "kind": "permission",
                 "id": "accessibility",
-                "name": "Accessibility",
+                "name": "Accessibility is not granted",
                 "consequence": "dictation cannot type",
                 "fix": "grant it in System Settings",
             })

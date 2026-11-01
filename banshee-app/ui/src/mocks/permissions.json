@@ -165,7 +165,7 @@
     {
       "kind": "permission",
       "id": "accessibility",
-      "name": "Accessibility",
+      "name": "Accessibility is not granted",
       "remedy": "grant",
       "consequence": "dictation cannot type and the hotkey stays inert",
       "fix": "grant it in System Settings > Privacy & Security > Accessibility"
@@ -186,7 +186,8 @@
       }
     },
     "feedback": {
-      "mode": "both"
+      "mode": "both",
+      "speak_problems": true
     },
     "stt": {
       "provider": "local",

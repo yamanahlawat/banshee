@@ -151,9 +151,9 @@ fn decoded<T: serde::de::DeserializeOwned>(reply: &serde_json::Value, key: &str)
 
 // One object per line, as Waybar requires. The same word lands in three keys
 // because Waybar splits them: `text` shows, `alt` picks a format-icon, `class`
-// picks CSS. Readiness is left out: blockers are answered once and never
-// pushed, so a bar would show them stale. A refused microphone is pushed, so
-// the tooltip carries that one.
+// picks CSS. Readiness is left out until the Linux capsule item gives the bar
+// a place for a problem. A refused microphone has its own flag, so the
+// tooltip carries that one.
 fn waybar_line(
     word: &str,
     device: Option<&str>,

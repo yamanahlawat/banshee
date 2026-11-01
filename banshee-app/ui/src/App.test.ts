@@ -125,6 +125,24 @@ it('says what a blocker stops and offers the pane that clears it', async () => {
   expect(vi.mocked(openPermissionPane)).toHaveBeenCalled();
 });
 
+it('a_reopen_closes_an_open_job', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...permissions,
+    blockers: permissions.blockers as Blocker[],
+  });
+  render(App);
+  await screen.findAllByRole('button', { name: /^Open System Settings for / });
+  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
+  await waitFor(() => expect(panel('Microphone')).toBeTruthy());
+
+  pushes.get('app:reopened')?.({ payload: null });
+
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Microphone' })).toBeNull());
+  expect(
+    screen.getAllByRole('button', { name: /^Open System Settings for / }).length,
+  ).toBeGreaterThan(0);
+});
+
 it('shows that an agent is waiting, without claiming to know the question', async () => {
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
@@ -1044,7 +1062,7 @@ it('keeps a permission reachable while a download runs', async () => {
       {
         kind: 'permission',
         id: 'accessibility',
-        name: 'Accessibility',
+        name: 'Accessibility is not granted',
         consequence: 'dictation cannot type and the hotkey stays inert',
         fix: 'grant it in System Settings',
       },

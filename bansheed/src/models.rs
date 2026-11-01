@@ -1,6 +1,8 @@
 pub mod download;
 pub mod licences;
-use banshee_common::{Blocker, BlockerKind, error::BansheeError, listening::ListeningModel};
+use banshee_common::{
+    Blocker, BlockerKind, FileRole, error::BansheeError, listening::ListeningModel,
+};
 
 use crate::config::{Config, Provider};
 
@@ -208,17 +210,24 @@ pub fn blockers(names: &[&str]) -> Vec<Blocker> {
 pub fn blockers_in(dir: &std::path::Path, names: &[&str]) -> Vec<Blocker> {
     missing_in(dir, names)
         .into_iter()
-        .map(|name| Blocker {
-            kind: BlockerKind::Model,
-            // A client cannot tell the speech model from the detector by filename without
-            // re-deriving the daemon's rule
-            role: Some(crate::models::download::role(&name)),
-            remedy: Some(banshee_common::Remedy::Download),
-            name: crate::audio::cues::capitalised(&name_of(&name)),
-            id: name,
-            consequence: "recording, dictation, and ask_user do not work".to_string(),
-            fix: "run: banshee setup".to_string(),
-            command: Some("banshee setup".to_string()),
+        .map(|name| {
+            let role = download::role(&name);
+            let named = match role {
+                FileRole::Speech => name_of(&name),
+                _ => format!("the {}", download::label(&name).to_lowercase()),
+            };
+            Blocker {
+                kind: BlockerKind::Model,
+                // A client cannot tell the speech model from the detector by filename without
+                // re-deriving the daemon's rule
+                role: Some(role),
+                remedy: Some(banshee_common::Remedy::Download),
+                name: format!("{} is missing", crate::audio::cues::capitalised(&named)),
+                id: name,
+                consequence: "recording, dictation, and ask_user do not work".to_string(),
+                fix: "run: banshee setup".to_string(),
+                command: Some("banshee setup".to_string()),
+            }
         })
         .collect()
 }
@@ -340,7 +349,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
         assert_eq!(
             blockers[0].name,
-            "The listening model parakeet-unified-en-0.6b"
+            "The listening model parakeet-unified-en-0.6b is missing"
         );
         assert_eq!(blockers[0].id, file);
 
@@ -353,6 +362,14 @@ mod tests {
                 .contains("listening model parakeet-unified-en-0.6b"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_missing_detector_is_named_the_way_a_person_says_it() {
+        let empty = crate::test_support::unique_scratch("blockers-in-detector");
+        let blockers = super::blockers_in(&empty, &[super::VAD_MODEL]);
+        let _ = std::fs::remove_dir_all(&empty);
+        assert_eq!(blockers[0].name, "The voice detection model is missing");
     }
 
     /// A client routes on `command`, so the literal is a wire contract and not

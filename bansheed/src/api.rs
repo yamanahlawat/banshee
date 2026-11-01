@@ -248,7 +248,7 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     let credentials = crate::credentials::Credentials::load().ok();
     // The same call the `banshee.state_changed` push answers with, so a reply
     // and a push cannot spell one fact two ways.
-    let mut payload = live_state_at(daemon_state, &pipeline);
+    let mut payload = live_state_at(daemon_state, &pipeline, &blockers);
     let facts = crate::speech_to_text::ModelFacts::of(daemon_state.stt_model());
     let rest = serde_json::json!({
         "running": true,
@@ -295,7 +295,6 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "bindable_modifiers": crate::binding::bindable_modifiers(),
         // Stated, so no client invents a narrower definition of ready
         "ready": ready(&blockers, &pipeline),
-        "blockers": blockers,
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
         // The providers are read at startup, so the running config answers,
@@ -408,15 +407,20 @@ fn with_key_press_access(payload: serde_json::Value) -> serde_json::Value {
 
 /// The `banshee.state_changed` params: what moves without a client touching it.
 /// The device fields and the pipeline move on their own, because capture opens
-/// and closes for each use and rebinds while it is open. `vad_threshold` moves at runtime too, but only when a
-/// `configure` call asks it to, and that call already answers.
+/// and closes for each use and rebinds while it is open. The blockers move with
+/// the pipeline and with each read of the microphone grant. `vad_threshold`
+/// moves at runtime too, but only when a `configure` call asks it to, and that
+/// call already answers.
 pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
-    live_state_at(daemon_state, &daemon_state.pipeline())
+    let pipeline = daemon_state.pipeline();
+    let blockers = readiness::blockers_as_read(daemon_state, &pipeline);
+    live_state_at(daemon_state, &pipeline, &blockers)
 }
 
 fn live_state_at(
     daemon_state: &DaemonState,
     pipeline: &crate::state::Pipeline,
+    blockers: &[banshee_common::Blocker],
 ) -> serde_json::Value {
     let mut live = serde_json::json!({
         "recording": daemon_state.is_recording(),
@@ -432,6 +436,7 @@ fn live_state_at(
         "last_speech_error": daemon_state.last_speech_error(),
         "pipeline": pipeline.as_str(),
         "feedback": daemon_state.cues().mode().word(),
+        "blockers": blockers,
     });
     // Ranked once, in banshee-common, so no client ranks the flags itself.
     live["activity"] = banshee_common::Activity::of(&live).word().into();

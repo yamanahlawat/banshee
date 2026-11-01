@@ -40,7 +40,8 @@
       }
     },
     "feedback": {
-      "mode": "both"
+      "mode": "both",
+      "speak_problems": true
     },
     "stt": {
       "provider": "local",
