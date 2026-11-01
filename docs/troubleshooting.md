@@ -40,12 +40,22 @@ This page lists what breaks, and the fix.
   - A previous push-to-talk never got its `stop`.
   - Run `banshee record stop`, or wait two minutes for the daemon to
     release the mic on its own.
-- **Audio sounds muffled on Bluetooth earbuds while Banshee runs.**
+- **Audio sounds muffled on Bluetooth earbuds while Banshee listens.**
   - macOS switches earbuds to their telephony profile while any app holds
-    the mic.
-  - In **System Settings > Sound**, set _Input_ to the built-in microphone.
-  - Leave _Output_ on the earbuds; the built-in mic transcribes better
-    anyway.
+    the mic. Banshee holds it only for a use, so the sound returns to stereo
+    right after.
+  - If it stays muffled, check `audio.keep_open`. When true, the mic stays open.
+    Run `banshee config set audio.keep_open false`.
+  - To avoid the switch during a use, set _Input_ to the built-in microphone in
+    **System Settings > Sound**, and leave _Output_ on the earbuds.
+- **The start cue comes late on a Bluetooth headset.**
+  - The cue waits for the first sound. The headset gives it about 300 ms after
+    the open, measured on one headset.
+- **The first reply after a quiet spell starts a little late.**
+  - Banshee unloaded the voice after 5 idle minutes and loads it again, 195 to
+    320 ms measured. Raise `models.unload_after`, or set 0, to keep it loaded.
+  - On macOS the process keeps the freed memory for reuse and gives it back when
+    the system runs short. On Linux it goes back at once.
 - **The window shows an agent as not installed, but your shell finds it.**
   - The daemon takes its PATH from a shell it starts itself, not from your
     terminal. A service manager gives that shell almost no PATH to begin with.

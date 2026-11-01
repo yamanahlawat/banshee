@@ -27,6 +27,40 @@ pub fn onnx_session(
     builder.commit_from_file(path).map_err(fault)
 }
 
+/// When a local model last used at `used` unloads under `limit`, or `None`
+/// when it stays loaded.
+pub fn unload_due(
+    used: std::time::Instant,
+    limit: Option<std::time::Duration>,
+) -> Option<std::time::Instant> {
+    limit.and_then(|limit| used.checked_add(limit))
+}
+
+/// Hands the pages an unloaded model freed back to the system. A trim walks
+/// the heap, so it runs on the thread that unloaded, never the audio callback.
+pub fn return_freed_memory() {
+    #[cfg(test)]
+    RETURNS.with(|returns| returns.set(returns.get() + 1));
+    // glibc keeps freed heap pages until asked. macOS has no call that empties
+    // its large-allocation cache, so the daemon's launch agent turns it off.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: malloc_trim takes no pointer and releases only free pages.
+        unsafe { libc::malloc_trim(0) };
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static RETURNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How often this thread has handed freed memory back.
+#[cfg(test)]
+pub fn returns_on_this_thread() -> usize {
+    RETURNS.with(std::cell::Cell::get)
+}
+
 /// Measured flat from 1 to 16 threads: a 512-sample chunk is too small for
 /// threading to reach.
 pub const VAD_THREADS: usize = 1;

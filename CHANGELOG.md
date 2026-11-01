@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The microphone opens for a use and closes right after it.** It opens for a
+  hotkey press, or after an agent's question has played, so the orange dot is off
+  between uses. A Bluetooth headset keeps stereo sound between uses. Set
+  `audio.keep_open = true` to keep the old always-open microphone. It applies at once.
+- **Local models unload after 5 idle minutes.** The listening model, the voice
+  detector and the voice free their memory, and the next use loads them again.
+  `models.unload_after` sets the minutes, and 0 never unloads. It applies at once.
+  On macOS the process keeps the freed memory for reuse and gives it back when the
+  system runs short. On Linux it goes back at once.
+  The first reply after an idle spell pays a voice load, 195 to 320 ms measured.
+- **The listener, the detector and the voice still load at start.** The idle
+  unload applies after that. The fallback voice behind a voice server loads only
+  when a failed reply needs it.
+- **The start cue plays when sound first arrives,** and so does an agent
+  question's cue. A Bluetooth headset gives its first sound about 300 ms after
+  the open, measured on one headset, so the cue follows it.
+- **A microphone or a model that fails to open fails that use with its cause and fix.**
+  Status shows it, and the next use tries again.
+- **An idle microphone reads `<device>, opens when you speak`.** It is not a
+  fault. When macOS refuses the microphone, every screen reads "not allowed by
+  macOS" and names the grant "Microphone access".
+- **The window has a More section under Listening.** It holds the two new settings.
 - **Breaking: `preset` and `language` are gone from `[stt]`.** Delete both from
   `config.toml`, or the daemon won't start. One error names every removed key.
   `banshee config set stt.preset null` removes a key. The window shows why the

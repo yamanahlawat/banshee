@@ -8,7 +8,7 @@ use toml_edit::DocumentMut;
 use crate::config::{Config, FeedbackMode};
 use crate::credentials::RemoteKey;
 use crate::models::download::Download;
-use crate::state::DaemonState;
+use crate::state::{DaemonState, Listening};
 
 /// Dotted `section.field` keys, spelled as `config.toml` spells them.
 pub type Assignments = BTreeMap<String, serde_json::Value>;
@@ -29,12 +29,14 @@ enum Live {
     VadThreshold,
     InputDevice,
     BargeIn,
+    KeepOpen,
     Feedback,
     SaveHistory,
     Tts,
     Vocabulary,
     Model,
     Speech,
+    UnloadAfter,
 }
 
 fn live(key: &str) -> Option<Live> {
@@ -42,6 +44,7 @@ fn live(key: &str) -> Option<Live> {
         "stt.vad_threshold" => Some(Live::VadThreshold),
         "audio.input_device" => Some(Live::InputDevice),
         "audio.barge_in" => Some(Live::BargeIn),
+        "audio.keep_open" => Some(Live::KeepOpen),
         "feedback.mode" | "audio.cues.enabled" => Some(Live::Feedback),
         "daemon.save_history" => Some(Live::SaveHistory),
         // `tts.fallback` is not here: it decides what speaks when the remote
@@ -51,6 +54,7 @@ fn live(key: &str) -> Option<Live> {
         // Read per utterance, so it moves no model.
         "stt.translate" => Some(Live::Speech),
         "stt.model" => Some(Live::Model),
+        "models.unload_after" => Some(Live::UnloadAfter),
         _ => None,
     }
 }
@@ -64,7 +68,8 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
             state.set_vad_threshold(config.stt.vad_threshold);
             true
         }
-        // The watchdog reads this on its next tick and rebinds capture
+        // Open capture rebinds on its next tick, and closed capture opens it
+        // at the next use
         Live::InputDevice => {
             state.set_wanted_device(config.audio.input_device.clone());
             true
@@ -72,6 +77,11 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
         // Read at every record start, so the next dictation obeys it
         Live::BargeIn => {
             state.set_barge_in(config.audio.barge_in);
+            true
+        }
+        // The thread that owns capture opens or closes it at once
+        Live::KeepOpen => {
+            state.set_keep_open(config.audio.keep_open);
             true
         }
         // The next cue reads this, so the next dictation obeys it
@@ -97,41 +107,83 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
         // A listener that has gone leaves the words unread, so say so rather
         // than report a prompt nothing holds
         Live::Vocabulary => state.set_vocabulary(config.stt.vocabulary.clone()),
-        Live::Model => apply_model(state, config),
+        Live::Model => reconcile(state, config),
         Live::Speech => state.set_speech((&config.stt).into()),
+        Live::UnloadAfter => {
+            state.set_unload_after(config.models.unload_limit());
+            true
+        }
     }
 }
 
-/// Nothing loads when the model is already behind the engine or still to download; a download is
-/// minutes, so the key stays unapplied. A remote listener loads no file, so nothing has to load.
-fn apply_model(state: &DaemonState, config: &Config) -> bool {
-    let Some(model) = crate::models::stt_model(config) else {
+/// Loads the listening model `config` names when the listener serves another
+/// and the file is here, and answers whether the setting is in effect. A
+/// download is minutes, so a model still to download leaves the key waiting.
+/// A listener that serves no model waits for the one named now.
+fn reconcile(state: &DaemonState, config: &Config) -> bool {
+    let Some(wanted) = crate::models::stt_model(config) else {
         return true;
     };
-    if state.lacks_listening_model() {
-        state.await_listening_model(model.id);
-        if !crate::models::missing_in(state.models_dir(), &[model.file]).is_empty() {
-            return false;
-        }
-        return state.load_stt_model(model);
-    }
-    if state.stt_model() == Some(model) {
+    let here = is_here(state, wanted);
+    let had = state.claim_listening_model(wanted, here);
+    if matches!(
+        had,
+        Listening::Available(model) | Listening::Loading(model) | Listening::Loaded(model)
+            if model == wanted
+    ) {
         return true;
     }
-    let absent = crate::models::missing_in(state.models_dir(), &[model.file]);
-    if !absent.is_empty() {
-        log::warn!(
-            "the listening model {} is not downloaded yet, so the model is unchanged",
-            model.id
-        );
+    if !here {
+        if had.serves() {
+            log::warn!(
+                "the listening model {} is not downloaded yet, so the model is unchanged",
+                wanted.id
+            );
+        }
         return false;
     }
     // The engine that loads this starts on the pending restart, and a listener
     // that holds no file holds no engine to load into.
-    if state.stt_model().is_none() {
+    if had == Listening::Remote {
         return true;
     }
-    state.load_stt_model(model)
+    state.load_stt_model(wanted)
+}
+
+/// `reconcile` for a download that ended or a start, which change no setting.
+/// A listener that serves keeps its model: the write that picked another one
+/// already sent its load, or left its key waiting.
+fn reconcile_waiting(state: &DaemonState, config: &Config) {
+    let Some(wanted) = waited_for(state, config) else {
+        return;
+    };
+    let here = is_here(state, wanted);
+    if !state.claim_listening_model(wanted, here).serves() && here {
+        state.load_stt_model(wanted);
+    }
+}
+
+/// The listening model `config` names. A file that chose a transcription
+/// server runs it from the next start, so until then the local listener
+/// still waits for the model it started without.
+fn waited_for(
+    state: &DaemonState,
+    config: &Config,
+) -> Option<&'static banshee_common::listening::ListeningModel> {
+    crate::models::stt_model(config).or_else(|| match state.listening() {
+        Listening::Missing(model) | Listening::Failed(model, _) => Some(model),
+        _ => None,
+    })
+}
+
+fn is_here(state: &DaemonState, model: &banshee_common::listening::ListeningModel) -> bool {
+    crate::models::missing_in(state.models_dir(), &[model.file]).is_empty()
+}
+
+/// `reconcile_waiting` under the lock a write holds, for the start.
+pub fn reconcile_listening(state: &DaemonState) {
+    let _writing = writing();
+    reconcile_waiting(state, &state.config());
 }
 
 fn history_for(config: &Config) -> Result<Option<rusqlite::Connection>, BansheeError> {
@@ -144,6 +196,12 @@ fn history_for(config: &Config) -> Result<Option<rusqlite::Connection>, BansheeE
 /// The daemon serves a task per connection, so two calls can otherwise read
 /// the same file before either writes and one setting is lost.
 static WRITING: Mutex<()> = Mutex::new(());
+
+fn writing() -> std::sync::MutexGuard<'static, ()> {
+    WRITING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Default, Debug)]
 pub struct Outcome {
@@ -188,6 +246,9 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
             }
             if let Some(section) = table_along(document.as_table_mut(), path)? {
                 section.remove(field);
+                if section.is_empty() {
+                    section.set_implicit(true);
+                }
             }
             continue;
         }
@@ -296,9 +357,7 @@ pub fn reapply_pending(state: &DaemonState) {
     // `record_outcome` would be applied from the older config and struck off,
     // leaving the daemon on the old setting with nothing marked waiting. A
     // download runs on its own task, so this is never re-entrant.
-    let _writing = WRITING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _writing = writing();
 
     let config = state.config();
     let waiting: Vec<String> = state.pending();
@@ -306,23 +365,9 @@ pub fn reapply_pending(state: &DaemonState) {
     // A key that still refuses is left where it was, not moved or cleared, and
     // a key with no live apply is not this function's to answer for.
     state.record_outcome(&outcome.applied, &[]);
-    // A waiting `stt.model` loaded its model above, if the file is here
+    // A waiting `stt.model` reconciled above
     if !waiting.iter().any(|key| key == "stt.model") {
-        load_awaited_model(state, &config);
-    }
-}
-
-/// Only while the config still names the awaited model: one that moved on
-/// waits as a pending `stt.model`.
-fn load_awaited_model(state: &DaemonState, config: &Config) {
-    let Some(id) = state.awaited_listening_model() else {
-        return;
-    };
-    let Some(model) = crate::models::stt_model(config).filter(|model| model.id == id) else {
-        return;
-    };
-    if crate::models::missing_in(state.models_dir(), &[model.file]).is_empty() {
-        state.load_stt_model(model);
+        reconcile_waiting(state, &config);
     }
 }
 
@@ -427,9 +472,7 @@ fn configure_at(
 
     let api_keys = take_api_keys(&mut assignments)?;
 
-    let writing = WRITING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let writing = writing();
     let existing = Config::read(path)?;
     write_locked(
         &writing,
@@ -567,9 +610,7 @@ pub fn write_first_feedback(
     } else {
         FeedbackMode::Visual
     };
-    let writing = WRITING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let writing = writing();
     let existing = Config::read(path)?;
     if chose_feedback(&existing)? {
         return Ok(None);

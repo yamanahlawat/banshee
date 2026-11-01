@@ -437,7 +437,7 @@ fn check_grants(daemon: &Daemon) -> bool {
     let mut healthy = true;
     for (name, consequence, fix) in denied {
         healthy &= fail(
-            &format!("{name} missing for the daemon: {consequence}"),
+            &format!("{name} not granted to the daemon: {consequence}"),
             fix,
         );
     }
@@ -480,23 +480,13 @@ const MICROPHONE_FIX: &str = "check Microphone is allowed in System Settings > \
 #[cfg(not(target_os = "macos"))]
 const MICROPHONE_FIX: &str = "connect a microphone, or fix [audio] input_device in config.toml";
 
-// One line for both paths, so a substitution reads the same whether the daemon
-// reports it or the checklist opens the device itself.
-fn microphone_line(lead: &str, open: Option<&str>, missing: Option<&str>) -> String {
-    format!(
-        "{lead}: {}",
-        banshee_common::microphone_label(open, missing)
-    )
-}
-
 // Split out so the decision is testable without a microphone: a substitute
 // records, so it passes, and only a device that will not open fails.
 fn report_probe(probed: Result<(String, Option<String>), String>) -> bool {
     match probed {
-        Ok((open, missing)) => pass(&microphone_line(
-            "microphone opens for capture",
-            Some(&open),
-            missing.as_deref(),
+        Ok((open, missing)) => pass(&format!(
+            "microphone opens for capture: {}",
+            banshee_common::microphone_name(Some(&open), missing.as_deref()).unwrap_or(open)
         )),
         Err(e) => fail(&format!("microphone will not open: {e}"), MICROPHONE_FIX),
     }
@@ -533,31 +523,94 @@ fn shared_device(open: &str, speaker: Option<(String, u32)>) -> Option<String> {
     })
 }
 
-fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
-    match banshee_common::audio_device(status) {
-        Some(open) => {
-            let held = pass(&microphone_line(
-                "daemon has the microphone",
-                Some(open),
-                banshee_common::missing_device(status),
-            ));
-            // After the line it annotates, or it reads as a note on the check
-            // above it.
-            if let Some(cost) = shared_device(open, crate::audio::default_output()) {
-                note(&cost);
-            }
-            held
-        }
-        None => fail("the daemon has no microphone open", open_fix(blockers)),
-    }
+/// One checklist line, so a test reads what would print.
+#[derive(Debug, PartialEq, Eq)]
+enum Line {
+    Pass(String),
+    Note(String),
+    Fail(String, String),
 }
 
-/// A daemon still building its pipeline has no device to name and no fault to
-/// report. `None` once it is open or broken, which the lines below answer for.
-/// The word is the daemon's own, so the two sides cannot spell it differently.
+fn say(lines: Vec<Line>) -> bool {
+    lines.into_iter().fold(true, |healthy, line| {
+        healthy
+            & match line {
+                Line::Pass(text) => pass(&text),
+                Line::Note(text) => {
+                    note(&text);
+                    true
+                }
+                Line::Fail(text, fix) => fail(&text, &fix),
+            }
+    })
+}
+
+fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
+    say(microphone_lines(
+        status,
+        blockers,
+        crate::audio::default_output(),
+    ))
+}
+
+/// The microphone of a daemon that can record. A closed one is no fault: the
+/// next use opens the device named, so naming it is the whole check.
+fn microphone_lines(
+    status: &serde_json::Value,
+    blockers: &[Blocker],
+    speaker: Option<(String, u32)>,
+) -> Vec<Line> {
+    let device = banshee_common::audio_device(status);
+    let missing = banshee_common::missing_device(status);
+    let open = banshee_common::microphone_open(status);
+    let refused = banshee_common::microphone_refused(status);
+    let line = format!(
+        "microphone: {}",
+        banshee_common::microphone_label(device, missing, open, refused)
+    );
+    let mut lines = Vec::new();
+    lines.push(match device {
+        None => Line::Fail(
+            "no microphone is available to open".to_string(),
+            open_fix(blockers).to_string(),
+        ),
+        // The grant check below fails with the fix, so this line only says
+        // what the device waits on.
+        Some(_) if refused => Line::Note(line),
+        Some(_) => Line::Pass(line),
+    });
+    // After the line it annotates, or it reads as a note on the check above it.
+    if let Some(cost) = device
+        .filter(|_| open)
+        .and_then(|name| shared_device(name, speaker))
+    {
+        lines.push(Line::Note(cost));
+    }
+    if open && status["config"]["audio"]["keep_open"].as_bool() == Some(true) {
+        lines.push(Line::Note(
+            "audio.keep_open is on, so the microphone stays open between uses".to_string(),
+        ));
+    }
+    // A remote listener loads no model of its own, only the detector.
+    if banshee_common::flag(status, "loading_model") {
+        lines.push(Line::Note(
+            if status["remote"]["stt"]["remote"].as_bool() == Some(true) {
+                "loading the voice detection model"
+            } else {
+                "loading the listening model"
+            }
+            .to_string(),
+        ));
+    }
+    lines
+}
+
+/// A daemon still building its pipeline has no fault to report yet. `None`
+/// once it is open or broken, which the lines below answer for. The word is
+/// the daemon's own, so the two sides cannot spell it differently.
 fn still_opening(status: &serde_json::Value) -> Option<&'static str> {
     (banshee_common::pipeline(status) == Some(crate::state::Pipeline::Opening.as_str()))
-        .then_some("the microphone is still opening")
+        .then_some("the daemon is still starting")
 }
 
 // Opening a second stream fails on backends that allow only one, which would

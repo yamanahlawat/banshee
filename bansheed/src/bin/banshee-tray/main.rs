@@ -223,15 +223,19 @@ mod tray {
 
     #[derive(Debug, Default, PartialEq, Eq)]
     struct Device {
-        open: Option<String>,
+        name: Option<String>,
         missing: Option<String>,
+        open: bool,
+        refused: bool,
     }
 
     impl Device {
         fn of(state: &Value) -> Self {
             Self {
-                open: banshee_common::audio_device(state).map(str::to_string),
+                name: banshee_common::audio_device(state).map(str::to_string),
                 missing: banshee_common::missing_device(state).map(str::to_string),
+                open: banshee_common::microphone_open(state),
+                refused: banshee_common::microphone_refused(state),
             }
         }
     }
@@ -305,14 +309,16 @@ mod tray {
         if indicator == Indicator::NotRunning {
             return "Start with: banshee start".to_string();
         }
-        let label =
-            banshee_common::microphone_label(device.open.as_deref(), device.missing.as_deref());
-        // This menu carries no caption, and "Not open" alone names nothing.
-        if device.open.is_some() {
-            label
-        } else {
-            format!("Microphone: {label}")
-        }
+        // This menu carries no caption, so the line names what it is about.
+        format!(
+            "Microphone: {}",
+            banshee_common::microphone_label(
+                device.name.as_deref(),
+                device.missing.as_deref(),
+                device.open,
+                device.refused
+            )
+        )
     }
 
     enum Row {
@@ -1038,22 +1044,47 @@ mod tray {
             );
         }
 
-        fn device(open: Option<&str>, missing: Option<&str>) -> Device {
+        fn device(name: Option<&str>, missing: Option<&str>) -> Device {
             Device {
-                open: open.map(str::to_string),
+                name: name.map(str::to_string),
                 missing: missing.map(str::to_string),
+                open: false,
+                refused: false,
             }
         }
 
+        // An idle daemon has the microphone closed and nothing wrong, so the
+        // line names the device the next use opens.
         #[test]
-        fn a_closed_stream_names_the_microphone_and_an_open_one_does_not() {
-            assert_eq!(
-                device_line(Indicator::Idle, &device(None, None)),
-                "Microphone: Not open"
-            );
+        fn the_microphone_line_names_the_device_and_whether_it_is_open() {
             assert_eq!(
                 device_line(Indicator::Idle, &device(Some("Yeti Nano"), None)),
-                "Yeti Nano"
+                "Microphone: Yeti Nano, opens when you speak"
+            );
+            assert_eq!(
+                device_line(
+                    Indicator::Recording,
+                    &Device {
+                        open: true,
+                        ..device(Some("Yeti Nano"), None)
+                    }
+                ),
+                "Microphone: Yeti Nano, open"
+            );
+            assert_eq!(
+                device_line(Indicator::Idle, &device(None, None)),
+                "Microphone: not available"
+            );
+            assert_eq!(
+                device_line(
+                    Indicator::Idle,
+                    &Device {
+                        refused: true,
+                        ..device(Some("Yeti Nano"), None)
+                    }
+                ),
+                "Microphone: Yeti Nano, not allowed by macOS",
+                "a refused microphone never reads as one that opens"
             );
         }
 
@@ -1069,7 +1100,7 @@ mod tray {
                 labels,
                 vec![
                     "Idle",
-                    "MacBook Pro Microphone",
+                    "Microphone: MacBook Pro Microphone, opens when you speak",
                     "Audio and text stay on this machine",
                     "---",
                     "Copy last dictation",
@@ -1237,16 +1268,22 @@ mod tray {
         }
 
         #[test]
-        fn a_pushed_update_carries_both_device_fields() {
+        fn a_pushed_update_carries_every_microphone_field() {
             let pushed = serde_json::json!({
-                "recording": false,
+                "recording": true,
                 "speaking": false,
                 "audio_device": "MacBook Pro Microphone",
                 "missing_device": "yeti",
+                "microphone_open": true,
+                "microphone_refused": true,
             });
             assert_eq!(
                 Device::of(&pushed),
-                device(Some("MacBook Pro Microphone"), Some("yeti"))
+                Device {
+                    open: true,
+                    refused: true,
+                    ..device(Some("MacBook Pro Microphone"), Some("yeti"))
+                }
             );
         }
 

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use crate::config::Config;
 use crate::history::TranscriptionHistory;
 use crate::state::{ConsumerCommand, DaemonState};
-use crate::text_to_speech::local::OnFirstUse;
+use crate::text_to_speech::local::OnDemand;
 use crate::text_to_speech::output::Output;
 use crate::text_to_speech::{ActiveUtterance, Faults, Speaker, SpeechPlayer, TtsBackend};
 
@@ -150,15 +150,15 @@ pub fn ignored_faults() -> Faults {
 }
 
 /// The companion on `models`, loaded by `load` on its first utterance.
-pub fn on_first_use(
+pub fn on_demand(
     models: &Path,
     load: impl Fn(&str) -> Result<Box<dyn TtsBackend>, banshee_common::error::BansheeError>
     + Send
     + Sync
     + 'static,
     faults: Faults,
-) -> OnFirstUse {
-    OnFirstUse::new(
+) -> OnDemand {
+    OnDemand::new(
         models,
         banshee_common::COMPANION_VOICE,
         load,
@@ -283,7 +283,7 @@ pub fn daemon_state_holding_speech(
 }
 
 /// The voice each live `[tts]` write handed the backend.
-pub type RecordedTts = Arc<std::sync::Mutex<Vec<String>>>;
+pub type RecordedTts = Arc<Mutex<Vec<String>>>;
 
 struct RecordingBackend(RecordedTts);
 
@@ -303,7 +303,7 @@ impl TtsBackend for RecordingBackend {
 }
 
 /// The lines the speech player was asked to say.
-pub type SpokenLines = Arc<std::sync::Mutex<Vec<String>>>;
+pub type SpokenLines = Arc<Mutex<Vec<String>>>;
 
 struct SpeakingBackend(SpokenLines);
 
@@ -327,6 +327,11 @@ pub fn daemon_state_recording_speech_for(
     let spoken: SpokenLines = Arc::default();
     let speech = SpeechPlayer::new(Box::new(SpeakingBackend(spoken.clone())));
     (state(None, speech, commands), spoken)
+}
+
+/// A running daemon that speaks through `speech`.
+pub fn daemon_state_speaking_through(speech: SpeechPlayer) -> Arc<DaemonState> {
+    state(None, speech, std::sync::mpsc::channel().0)
 }
 
 /// A daemon state whose backend keeps what it was last told to speak in.
@@ -366,13 +371,28 @@ fn state_running(
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
 ) -> Arc<DaemonState> {
     let state = fresh(config, history, speech, speaker, commands);
-    state.set_pipeline(crate::state::Pipeline::Open);
+    state.set_mic(crate::state::Mic::Closed);
     state
 }
 
 pub fn daemon_state_with_cues(cues: crate::audio::cues::Cues) -> Arc<DaemonState> {
-    let state = daemon_state_before_the_pipeline_with_cues(cues);
-    state.set_pipeline(crate::state::Pipeline::Open);
+    daemon_state_hearing(cues, std::sync::mpsc::channel().0)
+}
+
+/// A running daemon whose cues and consumer commands the test reads.
+pub fn daemon_state_hearing(
+    cues: crate::audio::cues::Cues,
+    commands: std::sync::mpsc::Sender<ConsumerCommand>,
+) -> Arc<DaemonState> {
+    let state = built(
+        Config::default(),
+        None,
+        SpeechPlayer::new(Box::new(NullBackend)),
+        Speaker::Fallback,
+        commands,
+        cues,
+    );
+    state.set_mic(crate::state::Mic::Closed);
     state
 }
 
@@ -414,7 +434,8 @@ fn built(
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
     cues: crate::audio::cues::Cues,
 ) -> Arc<DaemonState> {
-    Arc::new(DaemonState::new(
+    let listener = crate::models::stt_model(&config);
+    let state = Arc::new(DaemonState::new(
         Arc::new(config),
         history,
         speech,
@@ -422,7 +443,11 @@ fn built(
         commands,
         cues,
         scratch_machine("models"),
-    ))
+    ));
+    // As a start does once the listener is built, whatever the scratch
+    // directory holds.
+    state.listening_model_loaded(listener);
+    state
 }
 
 /// A daemon state that started with `config`, so its restart-only keys run those values.
@@ -471,4 +496,153 @@ pub fn seeded_history(rows: &[&str]) -> rusqlite::Connection {
         TranscriptionHistory::insert(&connection, text).unwrap();
     }
     connection
+}
+
+/// What a bench of microphones was asked, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BenchCall {
+    Select(String),
+    Open(String),
+    Close(String),
+    DefaultName,
+}
+
+type Slot = Arc<Mutex<Option<crate::audio::CaptureSink>>>;
+
+/// Microphones a test sets out. A stream plays nothing until the test plays
+/// audio into it, and dropping the stream drops its sink, as cpal does.
+#[derive(Clone, Default)]
+pub struct Bench {
+    present: Arc<Mutex<Vec<String>>>,
+    default: Arc<Mutex<Option<String>>>,
+    refuses: Arc<Mutex<Option<String>>>,
+    // What the grant answers. Not noted as a call: a read is not an open.
+    access: Arc<Mutex<Option<crate::state::Refusal>>>,
+    asked: Arc<Mutex<Vec<BenchCall>>>,
+    told: Arc<Mutex<Option<std::sync::mpsc::Sender<BenchCall>>>>,
+    streams: Arc<Mutex<Vec<Slot>>>,
+}
+
+pub struct BenchStream {
+    name: String,
+    sink: Slot,
+    bench: Bench,
+}
+
+impl Drop for BenchStream {
+    fn drop(&mut self) {
+        *self.sink.lock().unwrap() = None;
+        self.bench.note(BenchCall::Close(self.name.clone()));
+    }
+}
+
+impl Bench {
+    pub fn with(present: &[&str], default: Option<&str>) -> Self {
+        let bench = Self::default();
+        *bench.present.lock().unwrap() = present.iter().map(|name| name.to_string()).collect();
+        bench.set_default(default);
+        bench
+    }
+
+    pub fn unplug(&self, name: &str) {
+        self.present
+            .lock()
+            .unwrap()
+            .retain(|present| present != name);
+    }
+
+    pub fn set_default(&self, default: Option<&str>) {
+        *self.default.lock().unwrap() = default.map(str::to_string);
+    }
+
+    /// What the grant answers.
+    pub fn refuse_access(&self, refusal: Option<crate::state::Refusal>) {
+        *self.access.lock().unwrap() = refusal;
+    }
+
+    /// The device of this name lists itself and will not open.
+    pub fn refuse(&self, name: Option<&str>) {
+        *self.refuses.lock().unwrap() = name.map(str::to_string);
+    }
+
+    pub fn asked(&self) -> Vec<BenchCall> {
+        self.asked.lock().unwrap().clone()
+    }
+
+    /// Every later question is sent here as well.
+    pub fn tell(&self) -> std::sync::mpsc::Receiver<BenchCall> {
+        let (told, telling) = std::sync::mpsc::channel();
+        *self.told.lock().unwrap() = Some(told);
+        telling
+    }
+
+    /// Plays `samples` through the stream opened last, as its callback would.
+    pub fn play(&self, samples: &[f32]) {
+        let slot = Arc::clone(
+            self.streams
+                .lock()
+                .unwrap()
+                .last()
+                .expect("a stream opened"),
+        );
+        slot.lock()
+            .unwrap()
+            .as_mut()
+            .expect("the stream still plays")
+            .take(samples);
+    }
+
+    fn note(&self, asked: BenchCall) {
+        self.asked.lock().unwrap().push(asked.clone());
+        if let Some(told) = self.told.lock().unwrap().as_ref() {
+            let _ = told.send(asked);
+        }
+    }
+}
+
+impl crate::audio::watchdog::Devices for Bench {
+    type Device = ();
+    type Stream = BenchStream;
+
+    fn select(&mut self, wanted: &str) -> Result<crate::audio::Selection<()>, String> {
+        self.note(BenchCall::Select(wanted.to_string()));
+        let present = self.present.lock().unwrap().clone();
+        let default = self.default.lock().unwrap().clone();
+        let (index, missing) = crate::audio::pick(&present, wanted, default.as_deref())?;
+        Ok(crate::audio::Selection {
+            device: (),
+            open: present[index].clone(),
+            missing,
+        })
+    }
+
+    fn open(
+        &mut self,
+        selection: &crate::audio::Selection<()>,
+        sink: &mut dyn FnMut(u32, usize) -> crate::audio::CaptureSink,
+    ) -> Result<BenchStream, String> {
+        if self.refuses.lock().unwrap().as_deref() == Some(selection.open.as_str()) {
+            return Err(crate::audio::open_failure(&selection.open, "Host is down"));
+        }
+        let slot: Slot = Arc::new(Mutex::new(Some(sink(
+            crate::speech_to_text::SAMPLE_RATE,
+            1,
+        ))));
+        self.streams.lock().unwrap().push(Arc::clone(&slot));
+        self.note(BenchCall::Open(selection.open.clone()));
+        Ok(BenchStream {
+            name: selection.open.clone(),
+            sink: slot,
+            bench: self.clone(),
+        })
+    }
+
+    fn default_name(&mut self) -> Option<String> {
+        self.note(BenchCall::DefaultName);
+        self.default.lock().unwrap().clone()
+    }
+
+    fn refusal(&mut self) -> Option<crate::state::Refusal> {
+        *self.access.lock().unwrap()
+    }
 }

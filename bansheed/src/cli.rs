@@ -152,14 +152,21 @@ fn decoded<T: serde::de::DeserializeOwned>(reply: &serde_json::Value, key: &str)
 // One object per line, as Waybar requires. The same word lands in three keys
 // because Waybar splits them: `text` shows, `alt` picks a format-icon, `class`
 // picks CSS. Readiness is left out: blockers are answered once and never
-// pushed, so a bar would show them stale.
-fn waybar_line(word: &str, device: Option<&str>, missing: Option<&str>) -> String {
-    let tooltip = match (device, missing) {
+// pushed, so a bar would show them stale. A refused microphone is pushed, so
+// the tooltip carries that one.
+fn waybar_line(
+    word: &str,
+    device: Option<&str>,
+    missing: Option<&str>,
+    open: bool,
+    refused: bool,
+) -> String {
+    let tooltip = match device {
         // Nothing to say about the microphone, so the word stands alone
-        (None, None) => format!("Banshee is {word}"),
-        _ => format!(
+        None => format!("Banshee is {word}"),
+        Some(_) => format!(
             "Banshee is {word}. Microphone: {}",
-            banshee_common::microphone_label(device, missing)
+            banshee_common::microphone_label(device, missing, open, refused)
         ),
     };
     serde_json::json!({
@@ -171,9 +178,16 @@ fn waybar_line(word: &str, device: Option<&str>, missing: Option<&str>) -> Strin
     .to_string()
 }
 
-fn watch_line(waybar: bool, word: &str, device: Option<&str>, missing: Option<&str>) -> String {
+fn watch_line(
+    waybar: bool,
+    word: &str,
+    device: Option<&str>,
+    missing: Option<&str>,
+    open: bool,
+    refused: bool,
+) -> String {
     if waybar {
-        waybar_line(word, device, missing)
+        waybar_line(word, device, missing, open, refused)
     } else {
         word.to_string()
     }
@@ -410,6 +424,8 @@ pub async fn watch(waybar: bool, events: Vec<String>) -> Result<(), BansheeError
             state_word(&state),
             banshee_common::audio_device(&state),
             banshee_common::missing_device(&state),
+            banshee_common::microphone_open(&state),
+            banshee_common::microphone_refused(&state),
         );
         // The reader sees the line, so the line is what has to differ
         if line != shown {

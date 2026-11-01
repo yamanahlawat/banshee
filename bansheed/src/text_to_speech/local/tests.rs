@@ -5,7 +5,7 @@ use banshee_common::{COMPANION_VOICE, KOKORO_MODEL};
 
 use super::*;
 use crate::test_support::{
-    Asked, Listening, companion_models, companion_models_with, ignored_faults, on_first_use,
+    Asked, Listening, companion_models, companion_models_with, ignored_faults, on_demand,
     write_empty,
 };
 use crate::text_to_speech::output::Output;
@@ -155,7 +155,7 @@ fn the_fallback_builds_once_and_keeps_what_it_built() {
     let builds = Arc::new(Mutex::new(0));
     let asked = Asked::default();
     let (counted, heard) = (Arc::clone(&builds), Arc::clone(&asked));
-    let fallback = on_first_use(
+    let fallback = on_demand(
         &companion_models(),
         move |_voice: &str| {
             *lock(&counted) += 1;
@@ -172,12 +172,78 @@ fn the_fallback_builds_once_and_keeps_what_it_built() {
 }
 
 #[test]
+fn an_unloaded_voice_is_read_again_by_the_next_utterance() {
+    let builds = Arc::new(Mutex::new(0));
+    let counted = Arc::clone(&builds);
+    let voice = on_demand(
+        &companion_models(),
+        move |_voice: &str| {
+            *lock(&counted) += 1;
+            listening()
+        },
+        ignored_faults(),
+    );
+    assert!(voice.unload().is_none(), "nothing is loaded yet");
+
+    until_finished(voice.start("One.", None).unwrap());
+    assert!(voice.unload().is_some(), "the kept voice is handed over");
+    assert!(voice.unload().is_none());
+    until_finished(voice.start("Two.", None).unwrap());
+
+    assert_eq!(*lock(&builds), 2);
+}
+
+/// Takes every voice written live, as an engine that speaks them all does.
+struct Taking;
+
+impl TtsBackend for Taking {
+    fn start(
+        &self,
+        _text: &str,
+        _voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+        Ok(Box::new(crate::test_support::Done))
+    }
+
+    fn reconfigure(&self, tts: &crate::config::TTSConfig) -> Option<String> {
+        Some(tts.voice.clone())
+    }
+}
+
+#[test]
+fn a_voice_written_while_one_is_kept_is_the_one_read_after_an_unload() {
+    let loads: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = Arc::clone(&loads);
+    let voice = on_demand(
+        &companion_models_with(&["am_adam"]),
+        move |voice: &str| {
+            lock(&seen).push(voice.to_string());
+            Ok(Box::new(Taking) as Box<dyn TtsBackend>)
+        },
+        ignored_faults(),
+    );
+    until_finished(voice.start("One.", None).unwrap());
+
+    assert_eq!(
+        voice.reconfigure(&write("am_adam")).as_deref(),
+        Some("am_adam")
+    );
+    voice.unload();
+    until_finished(voice.start("Two.", None).unwrap());
+
+    assert_eq!(
+        lock(&loads).as_slice(),
+        [COMPANION_VOICE.to_string(), "am_adam".to_string()]
+    );
+}
+
+#[test]
 fn a_load_that_fails_once_speaks_on_the_next_utterance() {
     let tries = Arc::new(Mutex::new(0));
     let asked = Asked::default();
     let (counted, heard) = (Arc::clone(&tries), Arc::clone(&asked));
     let (faults, reported) = std::sync::mpsc::channel();
-    let voice = on_first_use(
+    let voice = on_demand(
         &companion_models(),
         move |_voice: &str| {
             *lock(&counted) += 1;
@@ -201,7 +267,7 @@ fn a_load_that_fails_once_speaks_on_the_next_utterance() {
 #[test]
 fn a_voice_write_before_the_first_load_needs_its_files() {
     let models = companion_models();
-    let voice = on_first_use(&models, |_voice: &str| listening(), ignored_faults());
+    let voice = on_demand(&models, |_voice: &str| listening(), ignored_faults());
 
     assert_eq!(voice.reconfigure(&write("am_adam")), None);
     write_empty(&models, &[KOKORO_MODEL, "am_adam.bin"]);
@@ -218,7 +284,7 @@ fn a_voice_written_during_the_first_load_is_the_one_kept() {
     let (entered_to, entered) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel::<()>();
     let (seen, released) = (Arc::clone(&loads), Mutex::new(released));
-    let voice = on_first_use(
+    let voice = on_demand(
         &models,
         move |voice: &str| {
             lock(&seen).push(voice.to_string());
@@ -252,7 +318,7 @@ fn a_voice_written_during_the_first_load_is_the_one_kept() {
 fn an_unknown_per_request_voice_is_refused_before_the_first_load() {
     let loads = Arc::new(Mutex::new(0));
     let counted = Arc::clone(&loads);
-    let voice = on_first_use(
+    let voice = on_demand(
         &companion_models(),
         move |_voice: &str| {
             *lock(&counted) += 1;
@@ -320,7 +386,7 @@ fn a_per_request_voice_plays_while_the_configured_voice_is_missing() {
     let loads = Arc::new(Mutex::new(0));
     let counted = Arc::clone(&loads);
     let (faults, reported) = std::sync::mpsc::channel();
-    let voice = on_first_use(
+    let voice = on_demand(
         &models,
         move |_voice: &str| {
             *lock(&counted) += 1;
@@ -346,7 +412,7 @@ fn a_per_request_voice_plays_while_the_configured_voice_is_missing() {
 #[test]
 fn the_configured_voice_kept_on_its_first_load_reports_itself_loaded() {
     let (faults, reported) = std::sync::mpsc::channel();
-    let voice = on_first_use(
+    let voice = on_demand(
         &companion_models(),
         |_voice: &str| listening(),
         Faults::new(faults),
@@ -372,7 +438,7 @@ fn the_configured_voice_kept_on_its_first_load_reports_itself_loaded() {
 #[test]
 fn a_voice_standing_in_for_the_remote_speaker_reports_no_load() {
     let (faults, reported) = std::sync::mpsc::channel();
-    let voice = on_first_use(
+    let voice = on_demand(
         &companion_models(),
         |_voice: &str| listening(),
         Faults::new(faults).standing_in(),

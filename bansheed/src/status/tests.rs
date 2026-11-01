@@ -1,57 +1,150 @@
-use super::{check_remote_side, microphone_line, report_probe};
+use super::{Line, check_remote_side, microphone_lines, report_probe};
 use crate::credentials::{Credentials, RemoteKey};
 
-const DAEMON_HOLDS: &str = "daemon has the microphone";
+const BUILT_IN: &str = "MacBook Pro Microphone";
 
+fn microphone(status: serde_json::Value, blockers: &[banshee_common::Blocker]) -> Vec<Line> {
+    microphone_lines(&status, blockers, None)
+}
+
+fn pass(text: &str) -> Line {
+    Line::Pass(text.to_string())
+}
+
+fn note(text: &str) -> Line {
+    Line::Note(text.to_string())
+}
+
+// An idle daemon has nothing open and nothing wrong: the next use opens the
+// device it names.
 #[test]
-fn the_microphone_line_leads_with_who_holds_the_device() {
+fn an_idle_microphone_passes_naming_the_device_the_next_use_opens() {
     assert_eq!(
-        microphone_line(DAEMON_HOLDS, Some("MacBook Pro Microphone"), Some("yeti")),
-        "daemon has the microphone: MacBook Pro Microphone (waiting for \"yeti\")"
+        microphone(
+            serde_json::json!({ "audio_device": BUILT_IN, "microphone_open": false }),
+            &[]
+        ),
+        [pass(
+            "microphone: MacBook Pro Microphone, opens when you speak"
+        )]
+    );
+    assert_eq!(
+        microphone(
+            serde_json::json!({
+                "audio_device": BUILT_IN,
+                "missing_device": "yeti",
+                "microphone_open": false,
+            }),
+            &[]
+        ),
+        [pass(
+            "microphone: MacBook Pro Microphone (waiting for \"yeti\"), opens when you speak"
+        )]
     );
 }
 
 #[test]
-fn the_open_check_passes_only_with_a_device_and_names_the_fix_otherwise() {
-    let models = crate::models::blockers(&["no-such-model-9f3a.bin"]);
-    let cases = [
-        (
-            "no stream and a missing model",
-            serde_json::json!({ "audio_device": null }),
-            models.as_slice(),
-            Some("run: banshee setup"),
-        ),
-        (
-            "no stream and no model blocker",
-            serde_json::json!({ "audio_device": null }),
-            &[][..],
-            Some(super::MICROPHONE_FIX),
-        ),
-        (
-            "a named device",
-            serde_json::json!({ "audio_device": "MacBook Pro Microphone" }),
-            &[][..],
-            None,
-        ),
-    ];
+fn an_open_microphone_says_so_and_keep_open_says_why_it_stays() {
+    let open = |keep_open: bool| {
+        microphone(
+            serde_json::json!({
+                "audio_device": BUILT_IN,
+                "microphone_open": true,
+                "config": { "audio": { "keep_open": keep_open } },
+            }),
+            &[],
+        )
+    };
+    assert_eq!(
+        open(false),
+        [pass("microphone: MacBook Pro Microphone, open")]
+    );
+    assert_eq!(
+        open(true),
+        [
+            pass("microphone: MacBook Pro Microphone, open"),
+            note("audio.keep_open is on, so the microphone stays open between uses"),
+        ]
+    );
+}
 
-    for (name, status, blockers, fix) in cases {
-        assert_eq!(
-            super::report_open(&status, blockers),
-            fix.is_none(),
-            "{name}"
-        );
-        if let Some(fix) = fix {
-            assert_eq!(super::open_fix(blockers), fix, "{name}");
-        }
-    }
+#[test]
+fn a_model_loading_is_named_beside_the_microphone() {
+    assert_eq!(
+        microphone(
+            serde_json::json!({
+                "audio_device": BUILT_IN,
+                "microphone_open": false,
+                "loading_model": true,
+            }),
+            &[]
+        ),
+        [
+            pass("microphone: MacBook Pro Microphone, opens when you speak"),
+            note("loading the listening model"),
+        ]
+    );
+}
+
+#[test]
+fn a_remote_listener_loading_names_the_detector_it_loads() {
+    assert_eq!(
+        microphone(
+            serde_json::json!({
+                "audio_device": BUILT_IN,
+                "microphone_open": false,
+                "loading_model": true,
+                "remote": { "stt": { "remote": true } },
+            }),
+            &[]
+        )[1],
+        note("loading the voice detection model")
+    );
+}
+
+#[test]
+fn no_device_to_open_fails_with_the_fix_and_borrows_a_model_blockers() {
+    let models = crate::models::blockers(&["no-such-model-9f3a.bin"]);
+    assert_eq!(
+        microphone(serde_json::json!({ "audio_device": null }), &[]),
+        [Line::Fail(
+            "no microphone is available to open".to_string(),
+            super::MICROPHONE_FIX.to_string()
+        )]
+    );
+    assert_eq!(
+        microphone(serde_json::json!({ "audio_device": null }), &models),
+        [Line::Fail(
+            "no microphone is available to open".to_string(),
+            "run: banshee setup".to_string()
+        )]
+    );
+}
+
+// The grant check fails with the fix, so the microphone line says only what
+// the device waits on, and never that it opens when you speak.
+#[test]
+fn a_refused_microphone_is_not_reported_as_one_that_opens() {
+    assert_eq!(
+        microphone(
+            serde_json::json!({
+                "audio_device": BUILT_IN,
+                "microphone_open": false,
+                "microphone_refused": true,
+            }),
+            &[]
+        ),
+        [note(
+            "microphone: MacBook Pro Microphone, not allowed by macOS"
+        )]
+    );
 }
 
 #[test]
 fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
     let (commands, _drain) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
-    state.set_pipeline(crate::state::Pipeline::Broken(
+    state.set_mic(crate::state::Mic::Faulted(
         crate::state::RecordingError::Model("missing file.".to_string()),
     ));
 
@@ -68,7 +161,7 @@ fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
 fn an_unreadable_key_file_is_a_recording_fault_the_checklist_names() {
     let (commands, _drain) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
-    state.set_pipeline(crate::state::Pipeline::Broken(
+    state.set_mic(crate::state::Mic::Faulted(
         crate::state::RecordingError::KeyFile("credentials.toml does not parse".to_string()),
     ));
 
@@ -415,4 +508,16 @@ fn plain_http_to_the_internet_fails_its_side() {
     let side = |base_url| check_remote_side(RemoteKey::Stt, base_url, Ok(&credentials), None);
     assert!(!side("http://api.example.com/v1"));
     assert!(side("https://api.example.com/v1"));
+}
+
+#[test]
+fn a_closed_microphone_gets_no_speaker_note() {
+    let status = serde_json::json!({ "audio_device": BUILT_IN, "microphone_open": false });
+    let lines = microphone_lines(&status, &[], Some((BUILT_IN.to_string(), 16_000)));
+    assert_eq!(
+        lines,
+        [pass(
+            "microphone: MacBook Pro Microphone, opens when you speak"
+        )]
+    );
 }

@@ -378,7 +378,7 @@ async fn a_subscriber_hears_the_pipeline_open() {
     let (mut lines, _writer, reply) = subscribed(&state).await;
     assert_eq!(reply["result"]["pipeline"], "opening");
 
-    state.set_pipeline(crate::state::Pipeline::Open);
+    state.set_mic(crate::state::Mic::Open);
 
     let pushed = next_message(&mut lines).await;
     assert_eq!(pushed["method"], BANSHEE_STATE_CHANGED);

@@ -476,6 +476,31 @@ describe('the facts each side reports', () => {
     expect(ungranted.status?.blockers).toHaveLength(1);
     expect(listeningFacts(ungranted, NO_KEYS).stoppedBy).toBeNull();
   });
+
+  it('reads whether the microphone is open, held open, or loading off the daemon', () => {
+    const idle = running();
+    expect(listeningFacts(idle, NO_KEYS).open).toBe(false);
+    expect(listeningFacts(idle, NO_KEYS).keepOpen).toBe(false);
+    expect(listeningFacts(idle, NO_KEYS).loading).toBe(false);
+
+    const using = reduceLive(idle, { microphone_open: true, loading_model: true });
+    expect(listeningFacts(using, NO_KEYS).open).toBe(true);
+    expect(listeningFacts(using, NO_KEYS).loading).toBe(true);
+
+    const kept = reduceStatus(empty(), {
+      ...(remote as unknown as Status),
+      config: { ...remote.config, audio: { ...remote.config.audio, keep_open: true } },
+    });
+    expect(listeningFacts(kept, NO_KEYS).keepOpen).toBe(true);
+  });
+
+  // The refusal is pushed, so the window hears a grant move without reading
+  // status again.
+  it('reads a refused microphone off the pushed flag', () => {
+    expect(listeningFacts(running(), NO_KEYS).refused).toBe(false);
+    const refused = reduceLive(running(), { microphone_refused: true });
+    expect(listeningFacts(refused, NO_KEYS).refused).toBe(true);
+  });
 });
 
 // A window with no answer yet must not tell a macOS or X11 user that their

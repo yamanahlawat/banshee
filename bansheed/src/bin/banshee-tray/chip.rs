@@ -1256,6 +1256,36 @@ mod tests {
         );
     }
 
+    // The arm cue waits for the microphone's first sound, so an answer that
+    // ends before any sound came disarms with no arm before it.
+    #[test]
+    fn an_answer_that_ends_before_its_arm_cue_shows_how_it_ended() {
+        for (code, show) in [
+            (
+                ReasonCode::Silence,
+                Show::NothingHeard("No answer heard".to_string()),
+            ),
+            (
+                ReasonCode::Closed,
+                Show::NothingHeard("The question was closed".to_string()),
+            ),
+            (
+                ReasonCode::ListenFailed,
+                Show::Broken("Could not listen".to_string()),
+            ),
+        ] {
+            let clock = Clock::new();
+            let mut chip = Chip::default();
+            fed(
+                &mut chip,
+                clock.at(0),
+                [Signal::Disarm, error_of(code, Target::Answer)],
+            );
+            assert_eq!(shown(&chip), Some(show), "{code:?}");
+            assert_eq!(chip.question, None, "{code:?}");
+        }
+    }
+
     #[test]
     fn onset_opens_the_answer_under_the_same_question() {
         let clock = Clock::new();

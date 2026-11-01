@@ -51,6 +51,10 @@ const HEARD: Listening = {
   host: 'api.openai.com',
   willUse: 'api.groq.com',
   device: 'MacBook Pro Microphone',
+  open: true,
+  keepOpen: false,
+  loading: false,
+  refused: false,
   stoppedBy: null,
 };
 
@@ -98,9 +102,29 @@ const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
     'Banshee will send what you say to a transcription server when it restarts.',
   ],
   [
-    'a local listener names its device',
+    'a local listener names the device it is listening through',
     { remote: false },
     'Banshee is listening through the MacBook Pro Microphone.',
+  ],
+  [
+    'an idle microphone names the device the next use opens',
+    { remote: false, open: false },
+    'Banshee opens the MacBook Pro Microphone when you speak.',
+  ],
+  [
+    'keep_open holds the microphone open between uses',
+    { remote: false, keepOpen: true },
+    'Banshee keeps the MacBook Pro Microphone open.',
+  ],
+  [
+    'the listening model is loading',
+    { remote: false, open: false, loading: true },
+    'Banshee is loading the listening model.',
+  ],
+  [
+    'macOS refuses the microphone before any press',
+    { remote: false, open: false, refused: true },
+    'macOS does not allow Banshee to use the microphone.',
   ],
   [
     'a device that opened outranks a broken pipeline',
@@ -116,6 +140,11 @@ const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
     'no device and nothing broken',
     { remote: false, device: null },
     'Banshee is not listening yet.',
+  ],
+  [
+    'a remote listener names the detector it loads, never a listening model',
+    { loading: true },
+    'Banshee is loading the voice detection model.',
   ],
   [
     'a remote listener that never started',

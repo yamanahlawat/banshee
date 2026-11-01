@@ -10,15 +10,19 @@ pub fn blockers(state: &DaemonState, pipeline: &Pipeline) -> Vec<Blocker> {
         models::stt_model(&state.config()).map(|model| model.file),
         state.vad_model(),
     );
-    assemble(permissions::blockers(), models::blockers(&names), pipeline)
+    assemble(
+        permissions::blockers(state),
+        models::blockers(&names),
+        pipeline,
+    )
 }
 
 // A blocker says the daemon does not work, so this answers for the listener
 // that is running and never for a model just picked: dictation carries on
 // while a heavier model is still a download away.
 //
-// `stt_model` is seeded from the config at startup and corrected only by a load
-// that succeeds, so outside an open pipeline it names a file nothing holds.
+// Outside an open pipeline the start may have failed before any listener was
+// built, so this checks the model the file names, which the next start loads.
 fn must_be_on_disk<'a>(
     pipeline: &Pipeline,
     loaded: Option<&'a str>,
@@ -57,7 +61,9 @@ fn assemble(
                 RecordingError::Model(_) | RecordingError::NoListeningModel(_) => {
                     BlockerKind::Model
                 }
-                RecordingError::Microphone(_) => BlockerKind::Pipeline,
+                RecordingError::Microphone(_) | RecordingError::MicrophoneRefused(_) => {
+                    BlockerKind::Pipeline
+                }
                 RecordingError::Provider(_) => BlockerKind::Provider,
                 RecordingError::KeyFile(_) => BlockerKind::KeyFile,
             },
@@ -72,7 +78,9 @@ fn assemble(
             name: match error {
                 RecordingError::Model(_) => "Banshee needs a restart",
                 RecordingError::NoListeningModel(_) => "The listening model is missing",
-                RecordingError::Microphone(_) => "The microphone is not working",
+                RecordingError::Microphone(_) | RecordingError::MicrophoneRefused(_) => {
+                    "The microphone is not working"
+                }
                 RecordingError::Provider(_) => "The remote listener is not reachable",
                 RecordingError::KeyFile(_) => "The remote listener's key file is unreadable",
             }

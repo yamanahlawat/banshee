@@ -468,6 +468,7 @@ dependencies = [
  "enigo",
  "hound",
  "json5",
+ "libc",
  "log",
  "misaki-rs",
  "ndarray",

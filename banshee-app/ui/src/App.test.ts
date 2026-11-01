@@ -338,11 +338,13 @@ it('stops naming a microphone once the daemon has stopped', async () => {
 
   daemon.update((s) => ({
     ...s,
-    live: { ...s.live, audio_device: 'MacBook Pro Microphone' },
+    live: { ...s.live, audio_device: 'MacBook Pro Microphone', microphone_open: false },
   }));
   await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
   await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toContain('listening through'),
+    expect(panelHeading('Microphone').textContent).toBe(
+      'Banshee opens the MacBook Pro Microphone when you speak.',
+    ),
   );
 
   daemon.update((s) => ({ ...s, down: 'not running' }));

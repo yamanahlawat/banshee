@@ -93,13 +93,22 @@ export function listeningLead(facts: Listening): string {
     const host = facts.host ?? A_TRANSCRIPTION_SERVER;
     if (facts.stoppedBy === 'keyfile') return `Banshee cannot read the key file for ${host}.`;
     if (facts.stoppedBy !== null) return `Banshee cannot reach ${host} to hear you.`;
+    // A remote listener loads no model of its own, only the detector.
+    if (facts.loading) return 'Banshee is loading the voice detection model.';
     if (facts.pending) return `Banshee sends what you say to ${host} until it restarts.`;
     return `Banshee sends what you say to ${host} to be heard.`;
   }
   if (facts.pending) {
     return `Banshee will send what you say to ${facts.willUse ?? A_TRANSCRIPTION_SERVER} when it restarts.`;
   }
-  if (facts.device) return `Banshee is listening through the ${facts.device}.`;
+  if (facts.refused) return 'macOS does not allow Banshee to use the microphone.';
+  if (facts.loading) return 'Banshee is loading the listening model.';
+  if (facts.device) {
+    if (!facts.open) return `Banshee opens the ${facts.device} when you speak.`;
+    return facts.keepOpen
+      ? `Banshee keeps the ${facts.device} open.`
+      : `Banshee is listening through the ${facts.device}.`;
+  }
   return facts.stoppedBy !== null
     ? 'Banshee cannot open a microphone.'
     : 'Banshee is not listening yet.';

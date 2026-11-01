@@ -63,6 +63,8 @@ pub struct AudioConfig {
     pub hotkey: crate::binding::Hotkey,
     pub hotkey_mode: HotkeyMode,
     pub barge_in: BargeInMode,
+    /// Holds capture open for the daemon's life instead of for each use.
+    pub keep_open: bool,
     pub cues: AudioCuesConfig,
 }
 
@@ -73,6 +75,7 @@ impl Default for AudioConfig {
             hotkey: crate::binding::Hotkey::default(),
             hotkey_mode: HotkeyMode::Hold,
             barge_in: BargeInMode::Stop,
+            keep_open: false,
             cues: AudioCuesConfig::default(),
         }
     }
@@ -503,6 +506,27 @@ impl Default for TTSConfig {
     }
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelsConfig {
+    /// Minutes a local model stays loaded after its last use. 0 keeps it.
+    pub unload_after: u64,
+}
+
+impl Default for ModelsConfig {
+    fn default() -> Self {
+        Self { unload_after: 5 }
+    }
+}
+
+impl ModelsConfig {
+    /// `None` keeps every local model loaded.
+    pub fn unload_limit(&self) -> Option<std::time::Duration> {
+        (self.unload_after > 0)
+            .then(|| std::time::Duration::from_secs(self.unload_after.saturating_mul(60)))
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -511,6 +535,7 @@ pub struct Config {
     pub feedback: FeedbackConfig,
     pub stt: STTConfig,
     pub tts: TTSConfig,
+    pub models: ModelsConfig,
 }
 
 impl Config {
@@ -1037,6 +1062,16 @@ mod tests {
     fn the_default_words_to_know_are_empty() {
         assert!(Config::default().stt.vocabulary.is_empty());
         assert!(Config::parse("").unwrap().stt.vocabulary.is_empty());
+    }
+
+    #[test]
+    fn a_local_model_unloads_after_five_idle_minutes_unless_zero_keeps_it() {
+        assert_eq!(
+            Config::default().models.unload_limit(),
+            Some(std::time::Duration::from_secs(300))
+        );
+        let kept = Config::parse("[models]\nunload_after = 0\n").unwrap();
+        assert_eq!(kept.models.unload_limit(), None);
     }
 
     #[test]

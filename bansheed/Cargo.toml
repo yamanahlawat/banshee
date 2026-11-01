@@ -90,6 +90,10 @@ features = ["wayland-data-control"]
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 enigo = "0.6.1"
 
+# malloc_trim, which hands an unloaded model's freed pages back to the system.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2.189"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # The menu bar indicator's loop. winit runs it because tray-icon tests against
 # it and it commits to no toolkit. KSNI runs its own thread everywhere else.

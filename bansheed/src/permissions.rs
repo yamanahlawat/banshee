@@ -4,6 +4,10 @@
 use banshee_common::error::BansheeError;
 use banshee_common::{Blocker, BlockerKind};
 
+use crate::state::DaemonState;
+#[cfg(target_os = "macos")]
+use crate::state::Refusal;
+
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 pub enum Access {
@@ -54,6 +58,60 @@ pub const ACCESSIBILITY: Grant = Grant {
     fix: "grant it in System Settings > Privacy & Security > Accessibility. \
 If Banshee is already listed and switched on, remove it with the minus button and add it back",
 };
+
+/// Recording asks for this one at its first open, through macOS's own prompt,
+/// so only a refusal is a blocker. The fix is a denied grant's; a restricted
+/// one carries its own.
+#[cfg(target_os = "macos")]
+pub const MICROPHONE: Grant = Grant {
+    id: "microphone",
+    name: "Microphone access",
+    anchor: "Privacy_Microphone",
+    consequence: "dictation and spoken answers fail",
+    fix: Refusal::Denied.fix(),
+};
+
+/// What macOS refuses about the microphone, read without opening it. `None`
+/// when it allows it or has yet to ask. A read from the CLI answers for the
+/// terminal, as `accessibility_granted` does.
+#[cfg(target_os = "macos")]
+pub fn microphone_access() -> Option<Refusal> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    #[link(name = "AVFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static AVMediaTypeAudio: &'static AnyObject;
+    }
+    let device = AnyClass::get(c"AVCaptureDevice")?;
+    // The daemon's threads run no run loop to drain anything the call
+    // autoreleases.
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: a class method that takes the framework's own media type
+        // constant, which lives for the process, and returns an NSInteger.
+        let status: isize =
+            unsafe { msg_send![device, authorizationStatusForMediaType: AVMediaTypeAudio] };
+        refusal_of(status)
+    })
+}
+
+/// AVAuthorizationStatus, in header order.
+#[cfg(target_os = "macos")]
+fn refusal_of(status: isize) -> Option<Refusal> {
+    match status {
+        1 => Some(Refusal::Restricted),
+        2 => Some(Refusal::Denied),
+        _ => None,
+    }
+}
+
+/// Reads the grant into the state, so a move reaches every client.
+#[cfg(target_os = "macos")]
+pub fn read_microphone(state: &DaemonState) -> Option<Refusal> {
+    let refusal = microphone_access();
+    state.set_microphone_refusal(refusal);
+    refusal
+}
 
 /// TCC credits this read to the process macOS holds responsible, so from a CLI
 /// arm it answers for the terminal. Every caller runs inside the daemon, and
@@ -121,16 +179,12 @@ pub fn key_presses_reach_us() -> Access {
     }
 }
 
-/// The microphone has a pane but no `Grant`: recording reports its own failure.
 #[cfg(target_os = "macos")]
 pub fn pane_anchor(id: &str) -> Option<&'static str> {
-    if id == ACCESSIBILITY.id {
-        return Some(ACCESSIBILITY.anchor);
-    }
-    if id == "microphone" {
-        return Some("Privacy_Microphone");
-    }
-    None
+    [ACCESSIBILITY, MICROPHONE]
+        .into_iter()
+        .find(|grant| grant.id == id)
+        .map(|grant| grant.anchor)
 }
 
 #[cfg(target_os = "macos")]
@@ -167,11 +221,24 @@ pub fn open_pane(id: &str) -> Result<(), BansheeError> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn blockers() -> Vec<Blocker> {
-    if accessibility_granted() {
-        return Vec::new();
+pub fn blockers(state: &DaemonState) -> Vec<Blocker> {
+    grant_blockers(accessibility_granted(), read_microphone(state))
+}
+
+/// Split from the live reads, which answer only on the machine they run on.
+#[cfg(target_os = "macos")]
+fn grant_blockers(accessibility: bool, microphone: Option<Refusal>) -> Vec<Blocker> {
+    let mut missing = Vec::new();
+    if !accessibility {
+        missing.push(blocker(&ACCESSIBILITY));
     }
-    vec![blocker(&ACCESSIBILITY)]
+    if let Some(refusal) = microphone {
+        missing.push(Blocker {
+            fix: refusal.fix().to_string(),
+            ..blocker(&MICROPHONE)
+        });
+    }
+    missing
 }
 
 /// Split from the live read, which answers only on the machine it runs on.
@@ -192,7 +259,7 @@ fn blocker(grant: &Grant) -> Blocker {
 
 // X11 types through enigo directly, so only a Wayland session needs a typer.
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn blockers() -> Vec<Blocker> {
+pub fn blockers(_: &DaemonState) -> Vec<Blocker> {
     let path = crate::connect::resolved_path();
     blockers_for(
         crate::dictation::is_wayland(),
@@ -203,7 +270,7 @@ pub fn blockers() -> Vec<Blocker> {
 // Neither macOS nor a Wayland-capable unix: no client of this build ever sees
 // a typer blocker.
 #[cfg(not(any(target_os = "macos", unix)))]
-pub fn blockers() -> Vec<Blocker> {
+pub fn blockers(_: &DaemonState) -> Vec<Blocker> {
     Vec::new()
 }
 
@@ -333,6 +400,53 @@ mod tests {
             );
         }
         assert_eq!(Access::from_wire("moonbeam").map(Access::as_str), None);
+    }
+
+    // Before any press: macOS prompts at the first open, so only a refusal
+    // stops anything, and status names it with what lifts it.
+    #[test]
+    fn a_refused_microphone_is_a_grant_blocker_and_an_unasked_one_is_not() {
+        let ids = |accessibility, microphone| {
+            grant_blockers(accessibility, microphone)
+                .into_iter()
+                .map(|blocker| blocker.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(true, None), Vec::<String>::new());
+        assert_eq!(ids(true, Some(Refusal::Denied)), ["microphone"]);
+        assert_eq!(
+            ids(false, Some(Refusal::Denied)),
+            ["accessibility", "microphone"]
+        );
+
+        let [refused] = &grant_blockers(true, Some(Refusal::Denied))[..] else {
+            panic!("one blocker");
+        };
+        assert_eq!(refused.kind, BlockerKind::Permission);
+        assert_eq!(refused.name, "Microphone access");
+        assert_eq!(refused.consequence, "dictation and spoken answers fail");
+        assert_eq!(refused.remedy, Some(banshee_common::Remedy::Grant));
+        assert_eq!(
+            refused.fix,
+            "allow Banshee in System Settings > Privacy & Security > Microphone"
+        );
+    }
+
+    // Nobody on the Mac can allow a restricted microphone, so its fix names
+    // who can.
+    #[test]
+    fn a_restricted_microphone_names_the_administrator_rather_than_a_switch() {
+        assert_eq!(refusal_of(0), None);
+        assert_eq!(refusal_of(1), Some(Refusal::Restricted));
+        assert_eq!(refusal_of(2), Some(Refusal::Denied));
+        assert_eq!(refusal_of(3), None);
+        let [restricted] = &grant_blockers(true, Some(Refusal::Restricted))[..] else {
+            panic!("one blocker");
+        };
+        assert_eq!(
+            restricted.fix,
+            "ask the administrator of this Mac for microphone access"
+        );
     }
 
     #[test]

@@ -544,7 +544,7 @@ async fn an_ask_waits_until_the_dictation_leaves_the_ring() {
     let consumer = std::thread::spawn({
         let state = Arc::clone(&state);
         move || {
-            let Ok(ConsumerCommand::Stream) =
+            let Ok(ConsumerCommand::Stream(_)) =
                 command_receiver.recv_timeout(std::time::Duration::from_secs(5))
             else {
                 panic!("the press never reached the consumer");
@@ -647,36 +647,36 @@ async fn a_restart_replies_then_asks_to_exit_with_failure() {
 // codes must not collapse into one another.
 #[tokio::test]
 async fn recording_rpcs_report_the_cause_not_a_busy_mic() {
-    use crate::state::Pipeline;
+    use crate::state::Mic;
 
     let causes = [
         (
-            Pipeline::Broken(RecordingError::Microphone("no device".to_string())),
+            Mic::Faulted(RecordingError::Microphone("no device".to_string())),
             -32000,
             None,
         ),
         (
-            Pipeline::Broken(RecordingError::Model("missing file".to_string())),
+            Mic::Faulted(RecordingError::Model("missing file".to_string())),
             -32002,
             None,
         ),
         (
-            Pipeline::Broken(RecordingError::KeyFile("it does not parse".to_string())),
+            Mic::Faulted(RecordingError::KeyFile("it does not parse".to_string())),
             -32008,
             None,
         ),
         (
-            Pipeline::Broken(RecordingError::Provider(
+            Mic::Faulted(RecordingError::Provider(
                 "the remote listener refused the key".to_string(),
             )),
             rpc_code::PROVIDER,
             Some(("remote listener", "the message names the failing side")),
         ),
         (
-            Pipeline::Opening,
+            Mic::Starting,
             rpc_code::MICROPHONE,
             Some((
-                "still opening",
+                "still starting",
                 "the reason must say it is not broken, only late",
             )),
         ),
@@ -690,21 +690,21 @@ async fn recording_rpcs_report_the_cause_not_a_busy_mic() {
         ),
     ];
 
-    for (pipeline, expected, says) in causes {
+    for (mic, expected, says) in causes {
         for (method, params) in &methods {
             let state = test_state(std::sync::mpsc::channel().0);
-            state.set_pipeline(pipeline.clone());
+            state.set_mic(mic.clone());
 
             let JsonRpcResponse::Error { error, .. } =
                 dispatch(request(method, params.clone()), &state).await
             else {
-                panic!("{method} on {pipeline:?} must be refused");
+                panic!("{method} on {mic:?} must be refused");
             };
-            assert_eq!(error.code, expected, "{method} on {pipeline:?}");
+            assert_eq!(error.code, expected, "{method} on {mic:?}");
             if let Some((says, why)) = says {
                 assert!(
                     error.message.contains(says),
-                    "{method} on {pipeline:?}: {why}: {}",
+                    "{method} on {mic:?}: {why}: {}",
                     error.message
                 );
             }
@@ -741,7 +741,7 @@ async fn record_start_and_stop_drive_push_to_talk() {
         panic!("expected success response");
     };
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
-    let Ok(ConsumerCommand::Stream) = command_receiver.try_recv() else {
+    let Ok(ConsumerCommand::Stream(_)) = command_receiver.try_recv() else {
         panic!("expected the start to stream");
     };
     let Ok(ConsumerCommand::Transcribe(_)) = command_receiver.try_recv() else {
@@ -749,8 +749,8 @@ async fn record_start_and_stop_drive_push_to_talk() {
     };
 }
 
-/// Starts a recording over the socket with `params`, stops it, and gives back
-/// every signal the pair sent.
+/// Starts a recording over the socket with `params`, lets its first sound
+/// arrive, stops it, and gives back every signal the pair sent.
 async fn recorded_with(params: Option<serde_json::Value>) -> Vec<crate::audio::cues::Signal> {
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let state = test_state(commands);
@@ -760,11 +760,13 @@ async fn recorded_with(params: Option<serde_json::Value>) -> Vec<crate::audio::c
     let JsonRpcResponse::Success { .. } = dispatch(start, &state).await else {
         panic!("the start must be accepted");
     };
+    state.heard_sound();
+    state.announce_sound();
     let stop = request(BANSHEE_RECORD_STOP, None);
     let JsonRpcResponse::Success { .. } = dispatch(stop, &state).await else {
         panic!("the stop must be accepted");
     };
-    let Ok(ConsumerCommand::Stream) = command_receiver.try_recv() else {
+    let Ok(ConsumerCommand::Stream(_)) = command_receiver.try_recv() else {
         panic!("the start must stream");
     };
     let Ok(ConsumerCommand::Transcribe(..)) = command_receiver.try_recv() else {
@@ -820,7 +822,7 @@ async fn record_toggle_starts_then_stops_and_says_which() {
     };
     assert_eq!(result["recording"], serde_json::Value::Bool(false));
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
-    let Ok(ConsumerCommand::Stream) = command_receiver.try_recv() else {
+    let Ok(ConsumerCommand::Stream(_)) = command_receiver.try_recv() else {
         panic!("expected the start to stream");
     };
     let Ok(ConsumerCommand::Transcribe(_)) = command_receiver.try_recv() else {
@@ -884,16 +886,78 @@ fn a_pushed_change_agrees_with_what_status_reports() {
     // Both device fields carry a value, or `null == null` passes for them
     state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
     state.set_missing_device(Some("Yeti Nano".to_string()));
+    state.set_mic(crate::state::Mic::Open);
 
     let status = status_payload(&state);
     let live = live_state(&state);
 
     assert_eq!(live["recording"], true, "the fixture must discriminate");
+    assert_eq!(live["microphone_open"], true);
     assert_eq!(live["audio_device"], "MacBook Pro Microphone");
     assert_eq!(live["missing_device"], "Yeti Nano");
     for key in live.as_object().expect("live_state is an object").keys() {
         assert_eq!(live[key], status[key], "'{key}' disagrees with status");
     }
+}
+
+// Between uses the device stays named, so only this says whether it is open.
+// No client could tell a use from `audio.keep_open` by the other flags.
+#[test]
+fn every_push_says_whether_the_microphone_is_open_and_a_move_wakes_it() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
+    let mut devices = state.device_changes();
+    devices.mark_unchanged();
+
+    state.set_mic(crate::state::Mic::Closed);
+    assert_eq!(live_state(&state)["microphone_open"], false);
+    assert!(
+        !devices.has_changed().unwrap(),
+        "closed to closed is no move"
+    );
+
+    state.set_mic(crate::state::Mic::Open);
+    assert_eq!(live_state(&state)["microphone_open"], true);
+    assert!(devices.has_changed().unwrap(), "the open wakes every push");
+    devices.mark_unchanged();
+
+    state.set_mic(crate::state::Mic::Closed);
+    assert_eq!(live_state(&state)["microphone_open"], false);
+    assert!(devices.has_changed().unwrap(), "and so does the close");
+    assert_eq!(
+        live_state(&state)["audio_device"],
+        "MacBook Pro Microphone",
+        "the device the next use opens stays named"
+    );
+}
+
+// A refusal changes what the microphone does, and blockers are never pushed,
+// so the push carries it. Each read goes through the setter, and status reads
+// on every reply, so only a move may wake the push.
+#[test]
+fn a_refused_microphone_is_pushed_and_only_a_move_wakes_it() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let mut devices = state.device_changes();
+    devices.mark_unchanged();
+    assert_eq!(live_state(&state)["microphone_refused"], false);
+
+    state.set_microphone_refusal(None);
+    assert!(!devices.has_changed().unwrap(), "a repeat read is no move");
+
+    state.set_microphone_refusal(Some(crate::state::Refusal::Denied));
+    assert_eq!(live_state(&state)["microphone_refused"], true);
+    assert!(
+        devices.has_changed().unwrap(),
+        "the refusal wakes every push"
+    );
+    devices.mark_unchanged();
+
+    state.set_microphone_refusal(Some(crate::state::Refusal::Denied));
+    assert!(!devices.has_changed().unwrap(), "a repeat read is no move");
+
+    state.set_microphone_refusal(None);
+    assert_eq!(live_state(&state)["microphone_refused"], false);
+    assert!(devices.has_changed().unwrap(), "and so does the grant");
 }
 
 #[test]
@@ -952,7 +1016,7 @@ fn translates_follows_the_listener_in_use() {
         "the window reads languages"
     );
 
-    state.set_stt_model(banshee_common::listening::find("Breeze-ASR-25"));
+    state.listening_model_loaded(banshee_common::listening::find("Breeze-ASR-25"));
     assert_eq!(status_payload(&state)["stt_translates"], true);
 }
 
@@ -1840,7 +1904,7 @@ async fn status_says_the_pipeline_is_opening_until_it_stands() {
     };
     assert_eq!(result["pipeline"], "opening");
 
-    state.set_pipeline(crate::state::Pipeline::Open);
+    state.set_mic(crate::state::Mic::Open);
     let open = dispatch(request(BANSHEE_STATUS, None), &state).await;
     let JsonRpcResponse::Success { result, .. } = open else {
         panic!("status answers");
@@ -1986,7 +2050,7 @@ async fn break_the_microphone_for(
     state: &DaemonState,
     waiting: tokio::task::JoinHandle<JsonRpcResponse>,
 ) {
-    state.set_pipeline(crate::state::Pipeline::Broken(RecordingError::Microphone(
+    state.set_mic(crate::state::Mic::Faulted(RecordingError::Microphone(
         "no device".to_string(),
     )));
     let response = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
@@ -2083,9 +2147,9 @@ async fn a_speech_from_an_agent_counts_for_that_agent_only() {
 }
 
 #[tokio::test]
-async fn a_question_refused_for_a_closed_microphone_still_counts() {
+async fn a_question_refused_before_the_pipeline_stands_still_counts() {
     let state = test_state(std::sync::mpsc::channel().0);
-    state.set_pipeline(crate::state::Pipeline::Opening);
+    state.set_mic(crate::state::Mic::Starting);
     let response = dispatch(
         request(
             BANSHEE_ASK_USER,

@@ -189,7 +189,9 @@ fn count_speech(
 // client can prompt for a microphone or re-run setup instead of retrying.
 fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpcResponse {
     let code = match error {
-        RecordingError::Microphone(_) => rpc_code::MICROPHONE,
+        RecordingError::Microphone(_) | RecordingError::MicrophoneRefused(_) => {
+            rpc_code::MICROPHONE
+        }
         RecordingError::Model(_) | RecordingError::NoListeningModel(_) => rpc_code::MODEL,
         RecordingError::Provider(_) => rpc_code::PROVIDER,
         RecordingError::KeyFile(_) => rpc_code::KEY_FILE,
@@ -222,7 +224,7 @@ fn not_recording(
         crate::state::Pipeline::Opening => Some(Box::new(JsonRpcResponse::error(
             id,
             rpc_code::MICROPHONE,
-            "Recording is unavailable: the microphone is still opening",
+            "Recording is unavailable: Banshee is still starting",
         ))),
         crate::state::Pipeline::Broken(error) => Some(Box::new(unavailable(id, error))),
     }
@@ -405,8 +407,8 @@ fn with_key_press_access(payload: serde_json::Value) -> serde_json::Value {
 }
 
 /// The `banshee.state_changed` params: what moves without a client touching it.
-/// The two device fields and the pipeline move on their own, because the
-/// watchdog rebinds while the daemon idles. `vad_threshold` moves at runtime too, but only when a
+/// The device fields and the pipeline move on their own, because capture opens
+/// and closes for each use and rebinds while it is open. `vad_threshold` moves at runtime too, but only when a
 /// `configure` call asks it to, and that call already answers.
 pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
     live_state_at(daemon_state, &daemon_state.pipeline())
@@ -424,6 +426,8 @@ fn live_state_at(
         "speaking": daemon_state.speech().is_speaking(),
         "audio_device": daemon_state.audio_device(),
         "missing_device": daemon_state.missing_device(),
+        "microphone_open": daemon_state.microphone_open(),
+        "microphone_refused": daemon_state.microphone_refusal().is_some(),
         "last_error": daemon_state.last_error(),
         "last_speech_error": daemon_state.last_speech_error(),
         "pipeline": pipeline.as_str(),
