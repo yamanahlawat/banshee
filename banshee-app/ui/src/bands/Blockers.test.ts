@@ -43,12 +43,24 @@ it('shows every percent and says only the quarters', async () => {
   expect(said()).not.toBe(first);
 });
 
-it('names the pane the System Settings button opens', () => {
+it.each([
+  ['accessibility', 'Accessibility is not granted', 'Accessibility'],
+  ['microphone', 'Microphone access is not allowed', 'Microphone'],
+])('names the System Settings pane for the %s grant', (id, name, pane) => {
   const { getByRole } = render(Blockers, {
-    blockers: permissions.blockers as Blocker[],
+    blockers: [
+      {
+        kind: 'permission',
+        id,
+        name,
+        remedy: 'grant',
+        consequence: 'dictation cannot type',
+        fix: 'grant it in System Settings',
+      },
+    ],
     restart: () => {},
   });
-  expect(getByRole('button', { name: /Open System Settings for Accessibility/ })).toBeTruthy();
+  expect(getByRole('button', { name: `Open System Settings for ${pane}` })).toBeTruthy();
 });
 
 // The title of a blocker is the most important line on the surface when one is
@@ -61,7 +73,7 @@ it('titles a blocker with a heading', () => {
   // One thing to do carries no count: "1 of 1" sends the reader looking for a
   // second box that is not there.
   expect(getAllByRole('heading').map((h) => h.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-    'Accessibility',
+    'Accessibility is not granted',
   ]);
 });
 
@@ -75,7 +87,7 @@ it('offers the restart that makes a granted permission real', async () => {
   });
   expect(queryByRole('button', { name: /I granted it/ })).toBeNull();
 
-  await fireEvent.click(getByRole('button', { name: /Open System Settings for Accessibility/ }));
+  await fireEvent.click(getByRole('button', { name: 'Open System Settings for Accessibility' }));
   await fireEvent.click(getByRole('button', { name: /I granted it/ }));
   expect(restarted).toBe(1);
 });
@@ -91,7 +103,7 @@ it('numbers each thing it still needs', () => {
   });
   const heads = getAllByRole('heading').map((h) => h.textContent?.replace(/\s+/g, ' ').trim());
   expect(heads[0]).toMatch(/^1 of 2 · Getting Banshee's models/);
-  expect(heads[1]).toMatch(/^2 of 2 · Accessibility/);
+  expect(heads[1]).toBe('2 of 2 · Accessibility is not granted');
 });
 
 // A model arriving repairs a model, so that box may stand down for the run. It
@@ -251,7 +263,7 @@ it.each(OPENING)(
         {
           kind: 'permission',
           id: 'accessibility',
-          name: 'Accessibility',
+          name: 'Accessibility is not granted',
           consequence: 'dictation cannot type',
           fix: 'grant it in System Settings',
         },

@@ -12,5 +12,6 @@
   "last_speech_error": null,
   "pipeline": "open",
   "feedback": "both",
+  "blockers": [],
   "activity": "speaking"
 }

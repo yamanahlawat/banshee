@@ -24,7 +24,9 @@ This page lists what breaks, and the fix.
 - **The daemon will not start and names `stt.preset` or `stt.language`.**
   - Those keys are gone. Run `banshee config set stt.preset null`, and the same for
     `stt.language`.
-  - The window shows the reason too. The tray points at `banshee start`, which prints it.
+  - The window shows the reason too. The tray's first row runs `banshee start`
+    and reads `Starting Banshee` while it runs. If it fails, the row reads
+    `Start failed. Open Banshee` and the window's Start shows the reason.
 - **`banshee status` fails the microphone check on a fresh install.**
   - Capture closes when a model cannot load, so the check fails until
     `banshee setup` finishes.
@@ -83,6 +85,10 @@ This page lists what breaks, and the fix.
     the fresh prompt.
 - **Permissions granted, but Banshee keeps asking.** Grants only apply to
   newly started processes. Restart the daemon with `banshee start`.
+- **You switched the microphone off for Banshee, and nothing shows it.**
+  - The running daemon keeps the microphone permission it read at its start.
+    Recordings come back empty, and the tray shows no badge.
+  - Run `banshee start`. The new daemon shows the problem.
 - **Dictation on Wayland says there is no typer on `PATH`.**
   - A Wayland session needs a helper to type into the focused window.
   - Install `wtype`, or `ydotool` where GNOME denies `wtype` the

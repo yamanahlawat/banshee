@@ -29,10 +29,26 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   50 s after a refused launch.
 - The first sound from a Bluetooth headset arrives about 300 ms after the microphone opens.
   That is measured on one headset only. Other headsets are not checked.
-- Whether macOS needs a restart of Banshee after the microphone grant is not verified.
 - A restricted microphone (a managed Mac) still offers "Open System Settings", which cannot
   lift the restriction.
-- A grant changed in System Settings reaches the tray only at the next status or press.
+- The daemon's microphone permission read does not change while it runs, in either direction.
+  A grant or a refusal shows only after a restart. Until then a refused microphone records
+  silence, with no badge.
+- macOS's Quit & Reopen prompt after a microphone change relaunches the window and the tray
+  only. The daemon keeps running with its old read.
+- The roadmap item "Banshee follows a microphone permission change without a restart" makes
+  both directions automatic.
+- An Accessibility grant revoked while Banshee runs reaches the tray, the window and the spoken
+  line only at the next state change. That is inferred from the code and not measured.
+- The voice files and the remote key are not blockers, so no surface shows them.
+- The tray's socket `call` has no timeout. That is inferred from the code and not measured.
+- A `banshee start` that hangs keeps the tray's first row on `Starting Banshee`.
+- When the tray brings the window forward with a panel open, focus lands on the button that
+  opened the panel. The problem sits above it.
+- A model file removed while Banshee is idle shows in the tray at the next use.
+- Every recording pipeline fault shares one id. When one fault turns into another without
+  clearing, Banshee does not say the new one.
+- Waybar shows no problem until the Linux capsule item lands.
 - An agent's question loads the listening model only after it has played, so the first answer
   after an idle unload waits for the load. Dictation overlaps its load with the press. The
   wait is not measured.

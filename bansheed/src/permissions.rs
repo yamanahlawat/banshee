@@ -52,7 +52,7 @@ pub struct Grant {
 #[cfg(target_os = "macos")]
 pub const ACCESSIBILITY: Grant = Grant {
     id: "accessibility",
-    name: "Accessibility",
+    name: "Accessibility is not granted",
     anchor: "Privacy_Accessibility",
     consequence: "dictation cannot type and the hotkey stays inert",
     fix: "grant it in System Settings > Privacy & Security > Accessibility. \
@@ -65,7 +65,7 @@ If Banshee is already listed and switched on, remove it with the minus button an
 #[cfg(target_os = "macos")]
 pub const MICROPHONE: Grant = Grant {
     id: "microphone",
-    name: "Microphone access",
+    name: "Microphone access is not allowed",
     anchor: "Privacy_Microphone",
     consequence: "dictation and spoken answers fail",
     fix: Refusal::Denied.fix(),
@@ -225,6 +225,17 @@ pub fn blockers(state: &DaemonState) -> Vec<Blocker> {
     grant_blockers(accessibility_granted(), read_microphone(state))
 }
 
+#[cfg(target_os = "macos")]
+pub fn blockers_as_read(state: &DaemonState) -> Vec<Blocker> {
+    grant_blockers(accessibility_granted(), state.microphone_refusal())
+}
+
+// Nothing here is a grant read into the state, so a read writes nothing.
+#[cfg(not(target_os = "macos"))]
+pub fn blockers_as_read(state: &DaemonState) -> Vec<Blocker> {
+    blockers(state)
+}
+
 /// Split from the live reads, which answer only on the machine they run on.
 #[cfg(target_os = "macos")]
 fn grant_blockers(accessibility: bool, microphone: Option<Refusal>) -> Vec<Blocker> {
@@ -294,7 +305,7 @@ fn wayland_typer_blocker() -> Blocker {
         remedy: None,
         kind: BlockerKind::Pipeline,
         id: "wayland_typer".to_string(),
-        name: "Typing tool".to_string(),
+        name: "No typing tool is installed".to_string(),
         consequence: "dictation cannot type anywhere".to_string(),
         fix: "install 'wtype' (or 'ydotool')".to_string(),
         command: None,
@@ -310,8 +321,8 @@ pub fn grant_note() {
     {
         println!();
         println!(
-            "{} is the one grant Banshee needs: without it, {}.",
-            ACCESSIBILITY.name, ACCESSIBILITY.consequence
+            "Accessibility is the one grant Banshee needs: without it, {}.",
+            ACCESSIBILITY.consequence
         );
         println!(
             "If macOS asks for it, approve the prompt and the daemon restarts itself as it lands. \
@@ -423,7 +434,7 @@ mod tests {
             panic!("one blocker");
         };
         assert_eq!(refused.kind, BlockerKind::Permission);
-        assert_eq!(refused.name, "Microphone access");
+        assert_eq!(refused.name, "Microphone access is not allowed");
         assert_eq!(refused.consequence, "dictation and spoken answers fail");
         assert_eq!(refused.remedy, Some(banshee_common::Remedy::Grant));
         assert_eq!(
@@ -477,7 +488,7 @@ mod tests {
         assert_eq!(blocker.remedy, Some(banshee_common::Remedy::Grant));
         assert_eq!(blocker.command, None);
         assert_eq!(pane_anchor(&blocker.id), Some(ACCESSIBILITY.anchor));
-        assert_eq!(blocker.name, "Accessibility");
+        assert_eq!(blocker.name, "Accessibility is not granted");
         assert!(
             blocker.consequence.contains("hotkey"),
             "the consequence says what breaks: {}",
@@ -501,6 +512,7 @@ mod wayland_typer_tests {
         assert_eq!(found.len(), 1, "a missing typer on wayland must block");
         assert_eq!(found[0].kind, BlockerKind::Pipeline);
         assert_eq!(found[0].id, "wayland_typer");
+        assert_eq!(found[0].name, "No typing tool is installed");
         assert_eq!(found[0].command, None);
         assert!(
             found[0].fix.contains("wtype") && found[0].fix.contains("ydotool"),

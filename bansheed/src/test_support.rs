@@ -329,6 +329,21 @@ pub fn daemon_state_recording_speech_for(
     (state(None, speech, commands), spoken)
 }
 
+/// A daemon caught before its pipeline stands that keeps every line it was
+/// asked to speak.
+pub fn daemon_state_before_the_pipeline_recording_speech() -> (Arc<DaemonState>, SpokenLines) {
+    let spoken: SpokenLines = Arc::default();
+    let state = built(
+        Config::default(),
+        None,
+        SpeechPlayer::new(Box::new(SpeakingBackend(spoken.clone()))),
+        Speaker::Fallback,
+        std::sync::mpsc::channel().0,
+        crate::audio::cues::Cues::silent(),
+    );
+    (state, spoken)
+}
+
 /// A running daemon that speaks through `speech`.
 pub fn daemon_state_speaking_through(speech: SpeechPlayer) -> Arc<DaemonState> {
     state(None, speech, std::sync::mpsc::channel().0)

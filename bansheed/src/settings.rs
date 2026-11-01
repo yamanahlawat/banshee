@@ -31,6 +31,7 @@ enum Live {
     BargeIn,
     KeepOpen,
     Feedback,
+    SpeakProblems,
     SaveHistory,
     Tts,
     Vocabulary,
@@ -46,6 +47,7 @@ fn live(key: &str) -> Option<Live> {
         "audio.barge_in" => Some(Live::BargeIn),
         "audio.keep_open" => Some(Live::KeepOpen),
         "feedback.mode" | "audio.cues.enabled" => Some(Live::Feedback),
+        "feedback.speak_problems" => Some(Live::SpeakProblems),
         "daemon.save_history" => Some(Live::SaveHistory),
         // `tts.fallback` is not here: it decides what speaks when the remote
         // speaker does not start, which is settled once, at startup.
@@ -87,6 +89,11 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
         // The next cue reads this, so the next dictation obeys it
         Live::Feedback => {
             state.set_feedback_mode(config.feedback_mode());
+            true
+        }
+        // Read when the next problem appears
+        Live::SpeakProblems => {
+            state.set_speak_problems(config.speak_problems());
             true
         }
         // Opening the file is the whole of the setting, so a failure to open

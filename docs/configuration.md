@@ -48,10 +48,19 @@ unload_after = 5       # idle minutes before local models unload; 0 = never
 
 [feedback]
 mode = "both"          # visual | sound | both | none
+speak_problems = true  # false = never say a new problem aloud
 ```
 
 - **A new install on macOS starts on `visual`.** Its first model download writes
   `visual`, or `both` when VoiceOver is on. Elsewhere the absent key means both.
+- **`speak_problems` says a new problem aloud once.** Banshee says the problem's
+  name and its fix, after anything already queued. A model file that goes missing
+  is spoken at the next use. So is a fault in a microphone held open by
+  `audio.keep_open`. A problem present when the daemon starts is not spoken. A
+  problem that clears and comes back is spoken again. Of two that appear
+  together, only the first is spoken. A microphone grant or refusal reaches the
+  daemon only at its next start, so it is never spoken. Turn it off with
+  `banshee config set feedback.speak_problems false`.
 - **`audio.cues.enabled` is replaced by `feedback.mode`.** A file that still
   sets it to false reads as none, until it sets `feedback.mode`.
 - **`visual` draws a small Banshee figure above the Dock on macOS.** The menu
@@ -137,7 +146,8 @@ banshee config set feedback.mode none
 - **The command works** whether or not the daemon runs.
 - **Most settings take effect at once:**
   - `stt.vad_threshold`, `stt.vocabulary`, `stt.model`, `stt.translate`
-  - `audio.input_device`, `audio.barge_in`, `audio.keep_open`, `feedback.mode`
+  - `audio.input_device`, `audio.barge_in`, `audio.keep_open`
+  - `feedback.mode`, `feedback.speak_problems`
   - `models.unload_after`
   - `tts.voice`, `daemon.save_history`
 - **The rest are read when the daemon starts,** so the command tells you to

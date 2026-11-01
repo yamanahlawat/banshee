@@ -87,6 +87,11 @@
     keyfile: 'Restart anyway',
   };
 
+  const PANES: Record<string, string> = {
+    accessibility: 'Accessibility',
+    microphone: 'Microphone',
+  };
+
   function decide(group: Blocker[]) {
     const first = group[0];
     switch (remedyOf(first)) {
@@ -95,7 +100,7 @@
           title: first.name,
           label: 'Open System Settings',
           // Heard on its own, "Open System Settings" is any pane in the list.
-          pane: first.name,
+          pane: PANES[first.id] ?? '',
           confirmsWithRestart: true,
           run: () => openPermissionPane(first.id),
           // The download brings no grant, so this keeps its place beside one.

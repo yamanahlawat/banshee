@@ -49,11 +49,13 @@ impl Default for AudioCuesConfig {
 
 pub use banshee_common::feedback::FeedbackMode;
 
-// `None` is a file that never chose, and `Config::feedback_mode` resolves it.
+// `None` is a file that never chose, and `Config::feedback_mode` and
+// `Config::speak_problems` resolve it.
 #[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct FeedbackConfig {
     pub mode: Option<FeedbackMode>,
+    pub speak_problems: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -567,9 +569,10 @@ impl Config {
                 error.into()
             }
         })?;
-        // The window reads the mode from the status reply, so a parsed config carries the
-        // resolved mode.
+        // The window reads the status reply, so a parsed config carries the
+        // resolved values.
         config.feedback.mode = Some(config.feedback_mode());
+        config.feedback.speak_problems = Some(config.speak_problems());
         Ok(config)
     }
 
@@ -579,6 +582,10 @@ impl Config {
         } else {
             FeedbackMode::Off
         })
+    }
+
+    pub fn speak_problems(&self) -> bool {
+        self.feedback.speak_problems.unwrap_or(true)
     }
 
     pub fn load() -> Result<Self, BansheeError> {
@@ -706,10 +713,27 @@ mod tests {
     }
 
     #[test]
+    fn speak_problems_defaults_on() {
+        assert!(Config::parse("").unwrap().speak_problems());
+    }
+
+    #[test]
+    fn speak_problems_false_parses() {
+        let config = Config::parse("[feedback]\nspeak_problems = false\n").unwrap();
+        assert!(!config.speak_problems());
+    }
+
+    #[test]
     fn a_parsed_config_serializes_the_resolved_mode() {
         let config = Config::parse("[audio.cues]\nenabled = false\n").unwrap();
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(json["feedback"]["mode"], "none");
+    }
+
+    #[test]
+    fn a_parsed_config_serializes_speak_problems_resolved() {
+        let json = serde_json::to_value(Config::parse("").unwrap()).unwrap();
+        assert_eq!(json["feedback"]["speak_problems"], true);
     }
 
     // A removed key is refused by name, the way every other removed key is.

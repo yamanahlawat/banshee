@@ -4,17 +4,23 @@ use crate::state::{DaemonState, Pipeline, RecordingError};
 use crate::{models, permissions};
 
 pub fn blockers(state: &DaemonState, pipeline: &Pipeline) -> Vec<Blocker> {
+    ranked(state, pipeline, permissions::blockers(state))
+}
+
+/// For a push, which reads the state and never writes it: the microphone
+/// grant as last read, by the start, a status call or a use.
+pub fn blockers_as_read(state: &DaemonState, pipeline: &Pipeline) -> Vec<Blocker> {
+    ranked(state, pipeline, permissions::blockers_as_read(state))
+}
+
+fn ranked(state: &DaemonState, pipeline: &Pipeline, grants: Vec<Blocker>) -> Vec<Blocker> {
     let names = must_be_on_disk(
         pipeline,
         state.stt_model().map(|model| model.file),
         models::stt_model(&state.config()).map(|model| model.file),
         state.vad_model(),
     );
-    assemble(
-        permissions::blockers(state),
-        models::blockers(&names),
-        pipeline,
-    )
+    assemble(grants, models::blockers(&names), pipeline)
 }
 
 // A blocker says the daemon does not work, so this answers for the listener

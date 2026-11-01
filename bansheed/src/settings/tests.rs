@@ -315,6 +315,23 @@ fn a_feedback_write_reaches_the_running_daemon() {
 }
 
 #[test]
+fn a_speak_problems_write_reaches_the_running_daemon() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    assert!(state.speaks_problems(), "the fixture must start elsewhere");
+
+    let outcome = configure_in_scratch(
+        Some(&state),
+        assignments(&[("feedback.speak_problems", false.into())]),
+        false,
+    )
+    .expect("a known key and a legal value must apply");
+
+    assert!(!state.speaks_problems());
+    assert_eq!(outcome.applied, vec!["feedback.speak_problems".to_string()]);
+    assert!(outcome.restart_required.is_empty());
+}
+
+#[test]
 fn the_old_cue_switch_is_refused_and_names_its_replacement() {
     let refused = configure_in_scratch(
         None,
