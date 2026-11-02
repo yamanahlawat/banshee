@@ -140,7 +140,7 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 <p align="center"><img src="assets/window.png" width="360" alt="The Banshee window: the last dictation in large type with a copy button, the day's earlier dictations beneath it, and a footer naming the microphone, hotkey, voice and connected agents."></p>
 
 - The menu bar icon answers one question: can I speak right now.
-- A lasting problem puts an exclamation badge on the idle figure. The first menu row says what is wrong, for example `Accessibility is not granted` or `Microphone access is not allowed`, and opens Banshee. When Banshee started without Accessibility, the daemon restarts as that grant lands, and the badge clears. A microphone grant or refusal reaches Banshee at its next start: run `banshee start`, or click the window's restart button after a grant.
+- A lasting problem puts an exclamation badge on the idle figure. The first menu row says what is wrong, for example `Accessibility is not granted` or `Microphone access is not allowed`, and opens Banshee. When Banshee started without Accessibility, the daemon restarts as that grant lands, and the badge clears. On macOS 14 and later, a microphone grant or refusal reaches Banshee at its next use, with no restart.
 - When Banshee is not running, the first row reads `Start Banshee` and runs `banshee start`. It reads `Starting Banshee` while that runs, and `Start failed. Open Banshee` if it fails. The tooltip reads `Banshee is not running`.
 - The badge shows only at rest. The recording, speaking, waiting and busy marks keep their shape.
 - Banshee also says a new problem aloud once after it starts, never at login. `feedback.speak_problems = false` turns that off. [Feedback](docs/configuration.md)

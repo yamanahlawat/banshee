@@ -86,9 +86,10 @@ This page lists what breaks, and the fix.
 - **Permissions granted, but Banshee keeps asking.** Grants only apply to
   newly started processes. Restart the daemon with `banshee start`.
 - **You switched the microphone off for Banshee, and nothing shows it.**
-  - The running daemon keeps the microphone permission it read at its start.
-    Recordings come back empty, and the tray shows no badge.
-  - Run `banshee start`. The new daemon shows the problem.
+  - On macOS 13, the running daemon keeps the microphone permission it read at
+    its start. Run `banshee start`, and the new daemon shows the problem.
+  - With `audio.keep_open = true`, a refusal shows at the next status read or
+    window focus. Recordings come back empty until then.
 - **Dictation on Wayland says there is no typer on `PATH`.**
   - A Wayland session needs a helper to type into the focused window.
   - Install `wtype`, or `ydotool` where GNOME denies `wtype` the

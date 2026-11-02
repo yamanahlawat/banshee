@@ -133,6 +133,17 @@ describe('readiness', () => {
   it('is not stale before any status was read', () => {
     expect(readinessIsStale(empty(), { pipeline: 'open' })).toBe(false);
   });
+  it('is stale when a push flips the microphone refusal either way', () => {
+    expect(readinessIsStale(opening, { microphone_refused: true })).toBe(true);
+    const refused = reduceLive(opening, { microphone_refused: true });
+    expect(readinessIsStale(refused, { microphone_refused: false })).toBe(true);
+  });
+  it('is not stale when the microphone refusal is absent or unchanged', () => {
+    expect(readinessIsStale(opening, { microphone_refused: false })).toBe(false);
+    const refused = reduceLive(opening, { microphone_refused: true });
+    expect(readinessIsStale(refused, { microphone_refused: true })).toBe(false);
+    expect(readinessIsStale(refused, {})).toBe(false);
+  });
 });
 
 describe('pending', () => {

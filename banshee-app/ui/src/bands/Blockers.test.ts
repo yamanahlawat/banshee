@@ -92,6 +92,26 @@ it('offers the restart that makes a granted permission real', async () => {
   expect(restarted).toBe(1);
 });
 
+it('offers no restart after sending someone to grant the microphone', async () => {
+  const { getByRole, queryByRole, queryByText } = render(Blockers, {
+    blockers: [
+      {
+        kind: 'permission',
+        id: 'microphone',
+        name: 'Microphone access is not allowed',
+        remedy: 'grant',
+        consequence: 'dictation cannot hear you',
+        fix: 'grant it in System Settings',
+      },
+    ],
+    restart: () => {},
+  });
+  await fireEvent.click(getByRole('button', { name: 'Open System Settings for Microphone' }));
+  expect(queryByRole('button', { name: /I granted it/ })).toBeNull();
+  expect(queryByText(/only reaches Banshee if it starts afterwards/)).toBeNull();
+  expect(getByRole('button', { name: 'Open System Settings for Microphone' })).toBeTruthy();
+});
+
 // Two boxes with no count leave the reader holding "which one did I do" across
 // an app switch. A first run holds this pair: the models arrive while the grant
 // is still outstanding.
