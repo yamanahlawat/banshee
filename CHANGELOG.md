@@ -14,10 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   menu row says what is wrong, for example `Accessibility is not granted`, and opens
   Banshee. When Banshee is not running, that row reads `Start Banshee` and runs
   `banshee start`. When Banshee started without Accessibility, the daemon
-  restarts as that grant lands, and the badge clears. A microphone grant or
-  refusal reaches Banshee at its next start: run `banshee start`, or click the
-  window's restart button after a grant. A problem that appears after the daemon
-  starts is spoken once, and never at login.
+  restarts as that grant lands, and the badge clears. On macOS 14 and later, a
+  microphone grant or refusal reaches Banshee at its next use, with no restart,
+  except while `audio.keep_open` holds the microphone. A problem that appears
+  after the daemon starts is spoken once, and never at login.
   A model file that goes missing shows at the next use.
   `feedback.speak_problems = false` turns the speech off.
 

@@ -188,10 +188,18 @@ export function isReady(state: Daemon): boolean {
   return state.status?.ready !== false;
 }
 // `ready` comes only with the full status, but a push carries the pipeline it
-// was judged against.
-export function readinessIsStale(state: Daemon, pushed: { pipeline?: string }): boolean {
-  if (state.status === null || pushed.pipeline === undefined) return false;
-  return pushed.pipeline !== state.status.pipeline;
+// was judged against. The blockers come only with it too, and a pushed
+// microphone refusal that differs from the one held says they are out of date.
+export function readinessIsStale(
+  state: Daemon,
+  pushed: { pipeline?: string; microphone_refused?: boolean },
+): boolean {
+  if (state.status === null) return false;
+  if (pushed.pipeline !== undefined && pushed.pipeline !== state.status.pipeline) return true;
+  return (
+    pushed.microphone_refused !== undefined &&
+    pushed.microphone_refused !== state.live.microphone_refused
+  );
 }
 export function isDown(state: Daemon): boolean {
   return state.down !== null || state.status?.running === false;

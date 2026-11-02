@@ -1,5 +1,5 @@
-// A TCC grant applies only to processes started after it lands, so the daemon
-// has to restart to pick one up. No equivalent outside macOS.
+// Accessibility reaches only a process started after the grant lands, so the
+// daemon restarts to pick it up. No equivalent outside macOS.
 
 use banshee_common::error::BansheeError;
 use banshee_common::{Blocker, BlockerKind};
@@ -78,6 +78,7 @@ pub const MICROPHONE: Grant = Grant {
 pub fn microphone_access() -> Option<Refusal> {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_avf_audio::{AVAudioApplication, AVAudioApplicationRecordPermission};
 
     #[link(name = "AVFoundation", kind = "framework")]
     unsafe extern "C" {
@@ -91,8 +92,46 @@ pub fn microphone_access() -> Option<Refusal> {
         // constant, which lives for the process, and returns an NSInteger.
         let status: isize =
             unsafe { msg_send![device, authorizationStatusForMediaType: AVMediaTypeAudio] };
-        refusal_of(status)
+        // The class does not exist before macOS 14.
+        let record = if objc2::available!(macos = 14.0) {
+            // SAFETY: plain getters on a class that exists on this macOS.
+            let permission = unsafe { AVAudioApplication::sharedInstance().recordPermission() };
+            match permission {
+                AVAudioApplicationRecordPermission::Undetermined => Some(Record::Undetermined),
+                AVAudioApplicationRecordPermission::Denied => Some(Record::Denied),
+                AVAudioApplicationRecordPermission::Granted => Some(Record::Granted),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        refusal_from(record, status)
     })
+}
+
+/// AVAudioApplication's record permission. It follows the System Settings
+/// switch while the process runs; `authorizationStatus` does not.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum Record {
+    Undetermined,
+    Denied,
+    Granted,
+}
+
+/// The live record permission decides, and the old status only names a
+/// restriction, as the live read has no restricted value. Without a live read
+/// (macOS 13) the status stands alone.
+#[cfg(target_os = "macos")]
+fn refusal_from(record: Option<Record>, status: isize) -> Option<Refusal> {
+    let old = refusal_of(status);
+    match record {
+        Some(Record::Granted) => None,
+        _ if old == Some(Refusal::Restricted) => old,
+        Some(Record::Denied) => Some(Refusal::Denied),
+        Some(Record::Undetermined) => None,
+        None => old,
+    }
 }
 
 /// AVAuthorizationStatus, in header order.
@@ -458,6 +497,29 @@ mod tests {
             restricted.fix,
             "ask the administrator of this Mac for microphone access"
         );
+    }
+
+    #[test]
+    fn the_live_read_wins_and_the_old_one_only_names_a_restriction() {
+        // daemon started granted, then revoked
+        assert_eq!(refusal_from(Some(Record::Denied), 3), Some(Refusal::Denied));
+        // daemon started denied, then granted
+        assert_eq!(refusal_from(Some(Record::Granted), 2), None);
+        // permission reset while running
+        assert_eq!(refusal_from(Some(Record::Undetermined), 2), None);
+        assert_eq!(
+            refusal_from(Some(Record::Denied), 1),
+            Some(Refusal::Restricted)
+        );
+        assert_eq!(refusal_from(Some(Record::Granted), 1), None);
+        assert_eq!(
+            refusal_from(Some(Record::Undetermined), 1),
+            Some(Refusal::Restricted)
+        );
+        // macOS 13: no live read
+        assert_eq!(refusal_from(None, 1), Some(Refusal::Restricted));
+        assert_eq!(refusal_from(None, 2), Some(Refusal::Denied));
+        assert_eq!(refusal_from(None, 3), None);
     }
 
     #[test]

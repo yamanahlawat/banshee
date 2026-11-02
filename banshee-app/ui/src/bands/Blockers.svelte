@@ -47,8 +47,9 @@
   $: leaves =
     clauses.length > 0 ? `${clauses.join(', and ')}.` : 'nothing you say leaves this machine.';
 
-  /// A grant reaches only a process started after it lands, and the window cannot see it, so after
-  /// sending someone to System Settings it offers the restart.
+  /// An Accessibility grant reaches only a process started after it lands, and the window cannot
+  /// see it, so after sending someone to System Settings it offers the restart. The daemon follows
+  /// a microphone grant live on macOS 14 and later.
   let asked: Record<string, boolean> = {};
 
   $: suggestions = models.filter((one) => one.suggested);
@@ -101,7 +102,7 @@
           label: 'Open System Settings',
           // Heard on its own, "Open System Settings" is any pane in the list.
           pane: PANES[first.id] ?? '',
-          confirmsWithRestart: true,
+          confirmsWithRestart: first.id !== 'microphone',
           run: () => openPermissionPane(first.id),
           // The download brings no grant, so this keeps its place beside one.
           settledByADownload: false,

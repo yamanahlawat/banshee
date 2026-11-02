@@ -31,13 +31,13 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   That is measured on one headset only. Other headsets are not checked.
 - A restricted microphone (a managed Mac) still offers "Open System Settings", which cannot
   lift the restriction.
-- The daemon's microphone permission read does not change while it runs, in either direction.
-  A grant or a refusal shows only after a restart. Until then a refused microphone records
-  silence, with no badge.
-- macOS's Quit & Reopen prompt after a microphone change relaunches the window and the tray
-  only. The daemon keeps running with its old read.
-- The roadmap item "Banshee follows a microphone permission change without a restart" makes
-  both directions automatic.
+- On macOS 13 the daemon's microphone permission read does not change while it runs, and
+  the window offers no restart after a microphone grant, so `banshee start` applies it. Not
+  measured on a macOS 13 machine.
+- The live microphone read is measured on macOS 26 only; macOS 14 and 15 are not measured.
+- With `audio.keep_open = true`, or during one long open such as an `ask_user` answer, a
+  microphone refusal shows only at the next open or status read. Until then recordings come
+  back empty.
 - An Accessibility grant revoked while Banshee runs reaches the tray, the window and the spoken
   line only at the next state change. That is inferred from the code and not measured.
 - The voice files and the remote key are not blockers, so no surface shows them.

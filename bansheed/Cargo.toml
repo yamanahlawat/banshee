@@ -98,6 +98,8 @@ libc = "0.2.189"
 # The menu bar indicator's loop. winit runs it because tray-icon tests against
 # it and it commits to no toolkit. KSNI runs its own thread everywhere else.
 winit = "0.30.13"
+# The microphone permission read that follows System Settings while the daemon runs.
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "AVAudioApplication"] }
 # The options dictionary AXIsProcessTrustedWithOptions takes; see permissions.rs.
 core-foundation = "0.10"
 # Posts the paste keystroke with its modifier as a flag; see dictation.rs.

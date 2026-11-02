@@ -58,8 +58,8 @@ speak_problems = true  # false = never say a new problem aloud
   is spoken at the next use. So is a fault in a microphone held open by
   `audio.keep_open`. A problem present when the daemon starts is not spoken. A
   problem that clears and comes back is spoken again. Of two that appear
-  together, only the first is spoken. A microphone grant or refusal reaches the
-  daemon only at its next start, so it is never spoken. Turn it off with
+  together, only the first is spoken. A microphone refusal is spoken at the use
+  that finds it. Turn it off with
   `banshee config set feedback.speak_problems false`.
 - **`audio.cues.enabled` is replaced by `feedback.mode`.** A file that still
   sets it to false reads as none, until it sets `feedback.mode`.
