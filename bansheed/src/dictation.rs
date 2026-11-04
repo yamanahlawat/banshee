@@ -9,8 +9,7 @@ use std::{thread, time::Duration};
 
 const PASTE_SETTLE: Duration = Duration::from_millis(50);
 
-// enigo pastes through X11, so wayland shells out instead. Checked at call
-// time: a session manager may set neither variable until later.
+// enigo pastes through X11, so wayland shells out instead.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn is_wayland() -> bool {
     std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
