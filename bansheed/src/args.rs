@@ -117,7 +117,7 @@ pub enum CompositorName {
 pub enum ConfigAction {
     /// Write one setting, as in: banshee config set stt.model whisper-large-v3-turbo, then banshee setup
     Set {
-        /// A section and a field from config.toml, as in stt.vad_threshold
+        /// A section and a field from config.toml, as in stt.vad_threshold. A key that is no setting is refused
         key: String,
         /// Left out for stt.remote.api_key or tts.remote.api_key, which is then read without echo
         value: Option<String>,

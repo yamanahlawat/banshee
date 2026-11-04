@@ -324,11 +324,11 @@ export function endsTheRun(progress: Progress): boolean {
 }
 
 /// A key that refuses for want of a file is answered by the download that
-/// brings it, and the daemon asks it again as the run ends, so naming a restart
-/// while one is arriving is advice that cannot work.
-const WAITS_ON_A_FILE = new Set(['stt.model', 'tts.voice']);
+/// brings it, and the daemon asks it again as the run ends, so the download
+/// speaks for it while one is arriving.
+export const WAITS_ON_A_FILE = new Set(['stt.model', 'tts.voice']);
 
-export const waitsOnARestart = derived(daemon, (state) => {
+export const waiting = derived(daemon, (state) => {
   const fetching =
     state.download !== null ||
     (state.status?.blockers ?? []).some((blocker) => blocker.remedy === 'download');
@@ -338,14 +338,12 @@ export const waitsOnARestart = derived(daemon, (state) => {
 
 // What one side of the pipeline is doing, read once so the panel that
 // configures it and the line that reports it cannot state a different truth.
-// `host` is the side in force and `willUse` is the side the config asks for.
+// `host` is the side in force.
 type Side = {
   live: boolean;
   remote: boolean;
   keyPresent: boolean;
-  pending: boolean;
   host: string | null;
-  willUse: string | null;
 };
 
 export type Listening = Side & {
@@ -365,14 +363,6 @@ export type Listening = Side & {
 
 export type Speech = Side & { started: boolean; voiceName: string; voiceDownloaded: boolean };
 
-function hostOf(url: string): string | null {
-  try {
-    return new URL(url).hostname || null;
-  } catch {
-    return null;
-  }
-}
-
 // The daemon answers an empty host, not null, when the address the side runs on
 // is no URL, so one absence reaches every reader.
 function inForce(host: string | null | undefined): string | null {
@@ -383,16 +373,13 @@ function table(config: Record<string, unknown>): Record<string, unknown> {
   return (config.remote ?? {}) as Record<string, unknown>;
 }
 
-export function listeningFacts(state: Daemon, waits: Set<string>): Listening {
-  const stt = (state.status?.config?.stt ?? {}) as Record<string, unknown>;
+export function listeningFacts(state: Daemon): Listening {
   const blockers = state.status?.blockers ?? [];
   return {
     live: !isDown(state),
     remote: state.status?.remote?.stt?.remote === true,
     keyPresent: state.status?.remote?.stt?.key_present === true,
-    pending: waits.has('stt.provider'),
     host: inForce(state.status?.remote?.stt?.host),
-    willUse: hostOf(String(table(stt).base_url ?? '')),
     device: state.live.audio_device,
     open: state.live.microphone_open,
     keepOpen: state.status?.config?.audio?.keep_open === true,
@@ -404,7 +391,6 @@ export function listeningFacts(state: Daemon, waits: Set<string>): Listening {
 
 export function speechFacts(
   state: Daemon,
-  waits: Set<string>,
   voices: { id: string; name: string; downloaded?: boolean }[],
 ): Speech {
   const tts = (state.status?.config?.tts ?? {}) as Record<string, unknown>;
@@ -416,9 +402,7 @@ export function speechFacts(
     remote,
     started: state.status?.remote?.tts?.speaker_started === true,
     keyPresent: state.status?.remote?.tts?.key_present === true,
-    pending: waits.has('tts.provider'),
     host: inForce(state.status?.remote?.tts?.host),
-    willUse: hostOf(String(table(tts).base_url ?? '')),
     // The config leads, as it does for every value the window shows. A remote
     // speaker names its voice in its own table, and Kokoro's list holds no
     // entry for it, so there is no name to look up.

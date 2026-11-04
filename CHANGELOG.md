@@ -23,6 +23,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **banshee config set knows every setting.** It refuses a key that is no setting.
+  A text setting keeps digits as text, so `'"12"'` is no longer needed. It says
+  `Banshee uses it now.` when the daemon took the change.
+- **Settings apply at once, with no restart.** The quiet length after an agent's
+  question applies to the next answer. The answer already open keeps its length.
+  The hotkey and its press behaviour apply at the next press. A key held at the
+  change keeps working until its release. On Wayland, `config set audio.hotkey`
+  names `banshee bind hyprland`. A new or removed listener key is in use at the
+  next dictation. A remote listener with no key no longer stops the daemon's
+  pipeline from building. A switch to or from a transcription server takes the
+  next dictation. Turning the server off, or removing its key, stops a recording
+  on its way there and transcribes it here. Without the local model, that
+  dictation fails and says why. A switch to or from a voice server takes the
+  next reply. The reply already speaking finishes in its voice. Turning the
+  server off, or removing its key, stops the reply, and the local voice speaks
+  it from the start. A dictation recorded for one server goes to another if you
+  switch to it before the release. One started on this machine stays here. A
+  dictation or reply already on its way to one server finishes there when you
+  switch to another. The window no longer offers
+  "Restart to apply", and `banshee config set` no longer asks for a restart.
 - **The microphone opens for a use and closes right after it.** It opens for a
   hotkey press, or after an agent's question has played, so the orange dot is off
   between uses. A Bluetooth headset keeps stereo sound between uses. Set

@@ -11,7 +11,7 @@ beforeEach(() => {
   vi.mocked(status).mockResolvedValue({ running: true, config: {} });
 });
 
-it('marks a setting pending when the daemon says it needs a restart', async () => {
+it('marks a setting pending when the daemon says it could not use it yet', async () => {
   vi.mocked(setSetting).mockResolvedValue(['feedback.mode']);
   // The daemon keeps the pending set itself, and its status carries it.
   vi.mocked(status).mockResolvedValue({ running: true, pending: ['feedback.mode'] });

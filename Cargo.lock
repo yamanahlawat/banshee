@@ -458,6 +458,7 @@ dependencies = [
  "audioadapter-buffers",
  "banshee-common",
  "block2 0.6.2",
+ "bytes",
  "chrono",
  "clap",
  "core-foundation 0.10.1",

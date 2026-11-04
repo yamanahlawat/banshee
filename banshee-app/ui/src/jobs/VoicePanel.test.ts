@@ -5,16 +5,17 @@ import { get } from 'svelte/store';
 vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTauri());
 
 import { copyText, downloadModels, setSetting, status, type Voices } from '../lib/tauri';
+import { daemon, empty, reduceStatus, speechFacts, type Status } from '../lib/daemon';
 import {
-  daemon,
-  empty,
-  reduceStatus,
-  speechFacts,
-  waitsOnARestart,
-  type Status,
-} from '../lib/daemon';
-import { announcement, forgetCopy, speechNote, PENDING_SAYS } from '../lib/copy';
+  announcement,
+  forgetCopy,
+  speechNote,
+  WAITING_SAYS,
+  WAITS_FOR_ITS_FILE,
+} from '../lib/copy';
 import { forgetTheAsk } from '../lib/downloads';
+import { table } from '../lib/settings';
+import { commonTable } from '../lib/tauri.mock';
 import VoicePanel from './VoicePanel.svelte';
 
 const VOICES: Voices = {
@@ -75,6 +76,7 @@ function keyField(): HTMLInputElement | null {
 }
 
 beforeEach(() => {
+  table.set(commonTable);
   daemon.set(empty());
   forgetCopy();
   forgetTheAsk();
@@ -168,7 +170,7 @@ it('describes the choice by the sentence that says where text goes', () => {
     .getByRole('radiogroup', { name: 'Speaking' })
     .getAttribute('aria-describedby');
   expect(document.getElementById(described ?? '')?.textContent).toBe(
-    speechNote(speechFacts(get(daemon), get(waitsOnARestart), VOICES.voices)),
+    speechNote(speechFacts(get(daemon), VOICES.voices)),
   );
 });
 
@@ -183,34 +185,23 @@ it('says nothing is spoken while the daemon is down', () => {
 // The daemon refuses a voice whose file has not landed, and a refusal is
 // exactly when the reader is left with a mark they did not move and no
 // sentence. The line belongs at the voices, not at the group above them.
-it('says the voice waits on a restart, beside the voices', () => {
+it('says the voice waits for its file, beside the voices', () => {
   daemon.set(reduceStatus(empty(), { ...LOCAL, pending: ['tts.voice'] }));
   const { container } = render(VoicePanel, { voices: VOICES });
   const pending = container.querySelectorAll('.note.pending');
   expect(pending).toHaveLength(1);
-  expect(pending[0].textContent).toBe(PENDING_SAYS);
+  expect(pending[0].textContent).toBe(WAITS_FOR_ITS_FILE);
   expect(screen.getByRole('radio', { name: /Sky/ }).closest('.part')?.contains(pending[0])).toBe(
     true,
   );
 });
 
-it('says the remote server waits on a restart', () => {
+it('says the remote server is set but not in use yet', () => {
   daemon.set(reduceStatus(empty(), { ...remoteStatus, pending: ['tts.remote.base_url'] }));
   const { container } = render(VoicePanel, { voices: VOICES });
   const pending = container.querySelectorAll('.note.pending');
   expect(pending).toHaveLength(1);
-  expect(pending[0].textContent).toBe(PENDING_SAYS);
-});
-
-// The group says the restart in its own sentence, so the pending line every
-// other row draws would state it a second time.
-it('states the restart in the sentence, and draws no pending line for it', () => {
-  daemon.set(reduceStatus(empty(), { ...remoteStatus, pending: ['tts.provider'] }));
-  const { container } = render(VoicePanel, { voices: VOICES });
-  expect(
-    screen.getByText(speechNote(speechFacts(get(daemon), get(waitsOnARestart), VOICES.voices))),
-  ).toBeTruthy();
-  expect(container.querySelectorAll('.note.pending')).toHaveLength(0);
+  expect(pending[0].textContent).toBe(WAITING_SAYS);
 });
 
 it('names the last spoken failure inside the group that caused it', () => {
@@ -259,14 +250,12 @@ it('reads the group with the failure standing under it', () => {
   );
 });
 
-it('removes a stored key and says the restart it needs', async () => {
+it('removes a stored key and says so', async () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
   render(VoicePanel, { voices: VOICES });
   await fireEvent.click(screen.getByRole('button', { name: 'Remove the key' }));
   await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.remote.api_key', ''));
-  await waitFor(() =>
-    expect(get(announcement)).toBe('The key is removed. It takes effect when Banshee restarts.'),
-  );
+  await waitFor(() => expect(get(announcement)).toBe('The key is removed.'));
 });
 
 it('fetches nothing when the daemon refuses the voice', async () => {

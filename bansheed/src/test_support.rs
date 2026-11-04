@@ -6,7 +6,9 @@ use crate::history::TranscriptionHistory;
 use crate::state::{ConsumerCommand, DaemonState};
 use crate::text_to_speech::local::OnDemand;
 use crate::text_to_speech::output::Output;
-use crate::text_to_speech::{ActiveUtterance, Faults, Speaker, SpeechPlayer, TtsBackend};
+use crate::text_to_speech::{
+    ActiveUtterance, BuildSpeaker, Faults, Selection, Speaker, SpeechPlayer, TtsBackend,
+};
 
 pub fn silero() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/silero_vad.onnx")
@@ -54,8 +56,36 @@ pub fn unique_scratch(prefix: &str) -> PathBuf {
     scratch(&format!("{prefix}-{serial}"))
 }
 
-/// A models folder and a config path inside a fresh temp directory, and
-/// VoiceOver off, so no test reads or writes the machine that runs it.
+/// A key file holding `text`, under a fresh temp directory.
+pub fn key_file(text: &str) -> PathBuf {
+    let path = unique_scratch("keys").join("credentials.toml");
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// A key file holding `key` for `side`, under a fresh temp directory.
+pub fn key_file_holding(side: crate::credentials::RemoteKey, key: &str) -> PathBuf {
+    let path = unique_scratch("keys").join("credentials.toml");
+    write_key(&path, side, key);
+    path
+}
+
+/// `key` for `side` written to the key file at `path`. An empty key removes it.
+pub fn write_key(path: &Path, side: crate::credentials::RemoteKey, key: &str) {
+    crate::credentials::Credentials::set_many_at(path, &[(side, key)]).unwrap();
+}
+
+/// A remote listener on the default server.
+pub fn remote_stt_default() -> crate::config::STTConfig {
+    crate::config::STTConfig {
+        provider: crate::config::Provider::Remote,
+        ..Default::default()
+    }
+}
+
+/// A models folder, a config path and a key file path inside a fresh temp
+/// directory, and VoiceOver off, so no test reads or writes the machine that
+/// runs it.
 pub fn scratch_machine(prefix: &str) -> crate::state::Machine {
     let dir = unique_scratch(prefix);
     let models = dir.join("models");
@@ -63,6 +93,7 @@ pub fn scratch_machine(prefix: &str) -> crate::state::Machine {
     crate::state::Machine {
         models,
         config: dir.join("config.toml"),
+        credentials: dir.join("credentials.toml"),
         voiceover: || false,
     }
 }
@@ -240,6 +271,7 @@ struct HoldingBackend {
     hold: std::time::Duration,
     cut_short: Arc<std::sync::atomic::AtomicBool>,
     spoken: SpokenLines,
+    sends_to: Option<String>,
 }
 
 impl TtsBackend for HoldingBackend {
@@ -254,6 +286,10 @@ impl TtsBackend for HoldingBackend {
             cut_short: Arc::clone(&self.cut_short),
         }))
     }
+
+    fn sends_to(&self) -> Option<&str> {
+        self.sends_to.as_deref()
+    }
 }
 
 /// Speech held for `hold` per line, and what each line said. The flag goes
@@ -264,9 +300,35 @@ pub struct HoldingSpeech {
     pub spoken: SpokenLines,
 }
 
+/// Its lines go to a server.
 pub fn daemon_state_holding_speech(
     hold: std::time::Duration,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
+) -> HoldingSpeech {
+    holding_speech(hold, Some(HELD_SERVER.to_string()), |speech| {
+        state(None, speech, commands)
+    })
+}
+
+const HELD_SERVER: &str = "https://held.example.test/v1";
+
+/// Speech held for `hold` per line, on a daemon that started on `config` and
+/// built `speaker`, which sends its lines to `sends_to`.
+pub fn daemon_state_holding_speech_under(
+    config: Config,
+    speaker: Speaker,
+    hold: std::time::Duration,
+    sends_to: Option<String>,
+) -> HoldingSpeech {
+    holding_speech(hold, sends_to, |speech| {
+        state_running(config, None, speech, speaker, std::sync::mpsc::channel().0)
+    })
+}
+
+fn holding_speech(
+    hold: std::time::Duration,
+    sends_to: Option<String>,
+    state: impl FnOnce(SpeechPlayer) -> Arc<DaemonState>,
 ) -> HoldingSpeech {
     let cut_short: Arc<std::sync::atomic::AtomicBool> = Arc::default();
     let spoken: SpokenLines = Arc::default();
@@ -274,9 +336,10 @@ pub fn daemon_state_holding_speech(
         hold,
         cut_short: Arc::clone(&cut_short),
         spoken: Arc::clone(&spoken),
+        sends_to,
     }));
     HoldingSpeech {
-        state: state(None, speech, commands),
+        state: state(speech),
         cut_short,
         spoken,
     }
@@ -307,6 +370,12 @@ pub type SpokenLines = Arc<Mutex<Vec<String>>>;
 
 struct SpeakingBackend(SpokenLines);
 
+/// A backend that keeps every line it is asked to speak. Every line finishes
+/// at once.
+pub fn speaking_backend(lines: SpokenLines) -> Box<dyn TtsBackend> {
+    Box::new(SpeakingBackend(lines))
+}
+
 impl TtsBackend for SpeakingBackend {
     fn start(
         &self,
@@ -315,6 +384,70 @@ impl TtsBackend for SpeakingBackend {
     ) -> Result<Box<dyn ActiveUtterance>, banshee_common::error::BansheeError> {
         self.0.lock().unwrap().push(text.to_string());
         Ok(Box::new(Done))
+    }
+}
+
+/// A speaker that keeps what it says in `lines`, as `speaker`.
+pub fn speaking_selection(lines: SpokenLines, speaker: Speaker) -> Selection {
+    Selection {
+        backend: speaking_backend(lines),
+        speaker,
+        fault: None,
+    }
+}
+
+/// A builder whose every speaker keeps what it says in `lines`, in `voice`.
+pub fn here(lines: &SpokenLines, voice: &str) -> BuildSpeaker {
+    let (lines, voice) = (lines.clone(), voice.to_string());
+    Box::new(move |_| speaking_selection(lines.clone(), Speaker::Configured(voice.clone())))
+}
+
+/// A builder that waits up to 5 s for the gate before it hands back what
+/// `select` builds. The receiver hears each build begin, and the sender is the
+/// gate.
+pub fn gated_builder(
+    select: impl Fn(&crate::config::TTSConfig) -> Selection + Send + Sync + 'static,
+) -> (
+    BuildSpeaker,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (started, building) = std::sync::mpsc::channel();
+    let (gate, opens) = std::sync::mpsc::channel::<()>();
+    let opens = Mutex::new(opens);
+    let build: BuildSpeaker = Box::new(move |tts| {
+        started.send(()).unwrap();
+        let _ = opens
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(5));
+        select(tts)
+    });
+    (build, building, gate)
+}
+
+/// A line that plays until its flag goes true.
+pub struct UntilEnds(pub Arc<std::sync::atomic::AtomicBool>);
+
+impl ActiveUtterance for UntilEnds {
+    fn is_finished(&mut self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn stop(&mut self) {}
+}
+
+/// A backend whose every line refuses to start.
+pub struct Refusing;
+
+impl TtsBackend for Refusing {
+    fn start(
+        &self,
+        _text: &str,
+        _voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, banshee_common::error::BansheeError> {
+        Err(banshee_common::error::BansheeError::Other(
+            "no voice here".into(),
+        ))
     }
 }
 
@@ -465,14 +598,6 @@ fn built(
     state
 }
 
-/// A daemon state that started with `config`, so its restart-only keys run those values.
-pub fn daemon_state_running(
-    config: Config,
-    commands: std::sync::mpsc::Sender<ConsumerCommand>,
-) -> Arc<DaemonState> {
-    daemon_state_speaking(config, Speaker::Fallback, commands)
-}
-
 /// A daemon state whose `[tts]` built `speaker`, for the reply that says which
 /// one started.
 pub fn daemon_state_speaking(
@@ -487,6 +612,16 @@ pub fn daemon_state_speaking(
         speaker,
         commands,
     )
+}
+
+/// A daemon that started on `config`, built `speaker`, and speaks through
+/// `speech`.
+pub fn daemon_state_speaking_on(
+    config: Config,
+    speaker: Speaker,
+    speech: SpeechPlayer,
+) -> Arc<DaemonState> {
+    state_running(config, None, speech, speaker, std::sync::mpsc::channel().0)
 }
 
 /// Pass a real sender only when the test reads the command receiver.

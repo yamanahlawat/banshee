@@ -5,6 +5,8 @@ vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTaur
 
 import { setSetting } from '../lib/tauri';
 import { daemon, empty, type Status } from '../lib/daemon';
+import { table } from '../lib/settings';
+import { commonTable, tableWith } from '../lib/tauri.mock';
 import HotkeyPanel from './HotkeyPanel.svelte';
 
 // The set the parser reports on Linux, from bansheed/src/binding.rs.
@@ -13,17 +15,12 @@ const ON_LINUX = ['RightOption', 'LeftOption', 'LeftControl', 'LeftCommand', 'Ri
 const MAC_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15';
 const LINUX_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15';
 
-function ready(
-  bindable: string[] = ON_LINUX,
-  feedback?: Record<string, unknown>,
-  cues?: Record<string, unknown>,
-) {
+function ready(bindable: string[] = ON_LINUX, feedback?: Record<string, unknown>) {
   const audio: Record<string, unknown> = {
     hotkey: 'RightOption',
     hotkey_mode: 'hold',
     barge_in: 'stop',
   };
-  if (cues) audio.cues = cues;
   const config: Record<string, unknown> = { audio };
   if (feedback) config.feedback = feedback;
   const status = {
@@ -55,6 +52,7 @@ function renderPanel(options: { userAgent?: string; feedback?: Record<string, un
 }
 
 beforeEach(() => {
+  table.set(commonTable);
   vi.mocked(setSetting).mockReset();
   vi.mocked(setSetting).mockResolvedValue(undefined as never);
   ready();
@@ -188,9 +186,13 @@ it('writes feedback.mode, never the retired cue switch', async () => {
   expect(setSetting).not.toHaveBeenCalledWith('audio.cues.enabled', expect.anything());
 });
 
-it('reads Off from the old cue switch when an older daemon reports no feedback table', () => {
-  ready(ON_LINUX, undefined, { enabled: false });
-  const panel = render(HotkeyPanel);
-  const chosen = panel.getByRole('radio', { name: 'Off' });
-  expect(chosen.getAttribute('aria-checked')).toBe('true');
+it('offers the press behaviours in the order the table lists them', () => {
+  table.set(
+    tableWith('audio.hotkey_mode', { domain: { kind: 'choice', values: ['toggle', 'hold'] } }),
+  );
+  const { getByRole } = render(HotkeyPanel);
+  const modes = getByRole('radiogroup', { name: 'Press behaviour' });
+  expect(
+    [...modes.querySelectorAll('[role="radio"]')].map((radio) => radio.textContent?.trim()),
+  ).toEqual(['Tap', 'Hold']);
 });

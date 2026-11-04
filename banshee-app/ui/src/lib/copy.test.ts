@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./tauri', () => ({ copyText: vi.fn().mockResolvedValue(null) }));
 import {
   announcement,
+  CHOICE_LABELS,
   copy,
   copied,
   listeningLead,
@@ -10,12 +11,14 @@ import {
   problem,
   speechLead,
   speechNote,
-  TAKES_EFFECT,
   languagesHeard,
   modelCost,
   modelFacts,
 } from './copy';
-import type { Listening, Speech } from './daemon';
+import * as copyModule from './copy';
+import { empty, listeningFacts, type Listening, type Speech } from './daemon';
+import type { Setting } from './tauri';
+import mockTable from '../mocks/settings.json';
 beforeEach(() => vi.useFakeTimers());
 it('marks the control Copied for a moment, then clears', async () => {
   await copy('hello', 'row-14:02');
@@ -41,15 +44,11 @@ it('says so when the clipboard refuses, rather than looking like it worked', asy
   expect(get(problem)).toMatch(/Nothing was copied/);
 });
 
-// A remote side in force, with a different host in the config, so a sentence
-// that reads the one it was not given is caught.
 const HEARD: Listening = {
   live: true,
   remote: true,
   keyPresent: true,
-  pending: false,
   host: 'api.openai.com',
-  willUse: 'api.groq.com',
   device: 'MacBook Pro Microphone',
   open: true,
   keepOpen: false,
@@ -63,9 +62,7 @@ const SPOKEN: Speech = {
   remote: true,
   started: true,
   keyPresent: true,
-  pending: false,
   host: 'api.openai.com',
-  willUse: 'api.groq.com',
   voiceName: 'marin',
   voiceDownloaded: true,
 };
@@ -73,7 +70,7 @@ const SPOKEN: Speech = {
 const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
   [
     'a stopped daemon has no microphone open',
-    { live: false, remote: false, pending: true, device: null, stoppedBy: 'pipeline' },
+    { live: false, remote: false, device: null, stoppedBy: 'pipeline' },
     'Banshee is not running, so no microphone is open.',
   ],
   [
@@ -85,21 +82,6 @@ const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
     'a host the daemon cannot name',
     { host: null },
     'Banshee sends what you say to a transcription server to be heard.',
-  ],
-  [
-    'a flip away from a remote listener still sends there',
-    { pending: true },
-    'Banshee sends what you say to api.openai.com until it restarts.',
-  ],
-  [
-    'a flip to a remote listener names the server the config asks for',
-    { remote: false, pending: true },
-    'Banshee will send what you say to api.groq.com when it restarts.',
-  ],
-  [
-    'a flip to a server the config does not name',
-    { remote: false, pending: true, willUse: null },
-    'Banshee will send what you say to a transcription server when it restarts.',
   ],
   [
     'a local listener names the device it is listening through',
@@ -156,11 +138,6 @@ const LISTENING_LEADS: [string, Partial<Listening>, string][] = [
     { stoppedBy: 'keyfile' },
     'Banshee cannot read the key file for api.openai.com.',
   ],
-  [
-    'a listener down while a switch to local waits sends nothing yet',
-    { pending: true, stoppedBy: 'provider' },
-    'Banshee cannot reach api.openai.com to hear you.',
-  ],
 ];
 
 it.each(LISTENING_LEADS)('the microphone lead, when %s', (_, over, says) => {
@@ -168,24 +145,9 @@ it.each(LISTENING_LEADS)('the microphone lead, when %s', (_, over, says) => {
 });
 
 const LISTENING_NOTES: [string, Partial<Listening>, string][] = [
-  ['the daemon is down', { live: false, pending: true }, 'Nothing is heard until Banshee starts.'],
+  ['the daemon is down', { live: false }, 'Nothing is heard until Banshee starts.'],
   ['a remote listener is in force', {}, 'Audio goes to api.openai.com.'],
   ['the daemon cannot name the host', { host: null }, 'Audio goes to a transcription server.'],
-  [
-    'a flip away from a remote listener waits',
-    { pending: true },
-    `Audio still goes to api.openai.com. ${TAKES_EFFECT}`,
-  ],
-  [
-    'a flip to a remote listener waits',
-    { remote: false, pending: true },
-    `Audio still stays on this machine. ${TAKES_EFFECT}`,
-  ],
-  [
-    'a waiting flip says nothing about the key',
-    { remote: false, pending: true, keyPresent: false },
-    `Audio still stays on this machine. ${TAKES_EFFECT}`,
-  ],
   [
     'a local listener still holds a key',
     { remote: false },
@@ -207,11 +169,6 @@ const LISTENING_NOTES: [string, Partial<Listening>, string][] = [
     { stoppedBy: 'keyfile' },
     'Nothing goes to api.openai.com until the key file is removed and the key is set again.',
   ],
-  [
-    'a listener down while a switch to local waits sends nothing yet',
-    { pending: true, stoppedBy: 'provider' },
-    'Nothing goes to api.openai.com until the listener starts.',
-  ],
 ];
 
 it.each(LISTENING_NOTES)('the listening note, when %s', (_, over, says) => {
@@ -221,7 +178,7 @@ it.each(LISTENING_NOTES)('the listening note, when %s', (_, over, says) => {
 const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
   [
     'a stopped daemon speaks nothing',
-    { live: false, started: false, pending: true },
+    { live: false, started: false },
     'Banshee is not running, so nothing is spoken.',
   ],
   [
@@ -234,11 +191,6 @@ const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
     'the daemon cannot name the host',
     { host: null },
     'Banshee speaks through a voice server as marin.',
-  ],
-  [
-    'a flip away from a started speaker waits',
-    { pending: true },
-    'Banshee speaks through api.openai.com until it restarts.',
   ],
   ['the speaker did not start', { started: false }, 'Banshee cannot speak through api.openai.com.'],
   [
@@ -256,11 +208,6 @@ const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
     { started: false, keyPresent: false, voiceName: '' },
     'Banshee cannot speak through api.openai.com until you paste a key.',
   ],
-  [
-    'a waiting flip outranks the fields that would fix the speaker',
-    { started: false, pending: true, keyPresent: false, voiceName: '' },
-    'Banshee cannot speak through api.openai.com. Your choice takes effect when it restarts.',
-  ],
   ['a local speaker names its voice', { remote: false }, 'Banshee speaks as marin.'],
   ['a local speaker has no voice', { remote: false, voiceName: '' }, 'Banshee has no voice yet.'],
   [
@@ -273,16 +220,6 @@ const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
     { remote: false, started: false, voiceName: 'Bella' },
     'Bella did not load, so Banshee is silent. Pick another voice.',
   ],
-  [
-    'a flip to a remote speaker names the server the config asks for',
-    { remote: false, pending: true },
-    'Banshee will speak through api.groq.com when it restarts.',
-  ],
-  [
-    'a flip to a server the config does not name',
-    { remote: false, pending: true, willUse: null },
-    'Banshee will speak through a voice server when it restarts.',
-  ],
 ];
 
 it.each(SPEECH_LEADS)('the voice lead, when %s', (_, over, says) => {
@@ -290,28 +227,13 @@ it.each(SPEECH_LEADS)('the voice lead, when %s', (_, over, says) => {
 });
 
 const SPEECH_NOTES: [string, Partial<Speech>, string][] = [
-  ['the daemon is down', { live: false, pending: true }, 'Nothing is spoken until Banshee starts.'],
+  ['the daemon is down', { live: false }, 'Nothing is spoken until Banshee starts.'],
   ['a started remote speaker', {}, 'Text goes to api.openai.com.'],
   ['the daemon cannot name the host', { host: null }, 'Text goes to a voice server.'],
-  [
-    'a flip away from a remote speaker waits',
-    { pending: true },
-    `Text still goes to api.openai.com. ${TAKES_EFFECT}`,
-  ],
   [
     'the speaker did not start',
     { started: false },
     'The speaker on api.openai.com did not start, so text stays on this machine.',
-  ],
-  [
-    'the speaker did not start and a flip waits',
-    { started: false, pending: true },
-    `The speaker on api.openai.com did not start, so text stays on this machine. ${TAKES_EFFECT}`,
-  ],
-  [
-    'a flip to a remote speaker waits',
-    { remote: false, pending: true },
-    `Text still stays on this machine. ${TAKES_EFFECT}`,
   ],
   [
     'a local speaker still holds a key',
@@ -386,4 +308,42 @@ describe('modelCost', () => {
     expect(said).toContain('About 1.0 GB to fetch');
     expect(said).toContain('1.3 GB in all');
   });
+});
+
+// No panel shows tts.fallback: the CLI sets it.
+it('names every choice a panel offers', () => {
+  for (const row of mockTable as Setting[]) {
+    if (row.domain.kind !== 'choice' || row.key === 'tts.fallback') continue;
+    for (const value of row.domain.values) {
+      expect(CHOICE_LABELS[row.key]?.[value], `${row.key} = ${value}`).toBeTruthy();
+    }
+  }
+});
+
+it('says nothing about a restart', () => {
+  for (const said of Object.values(copyModule).filter((one) => typeof one === 'string')) {
+    expect(said).not.toMatch(/restart/i);
+  }
+  for (const remote of [true, false]) {
+    for (const keyPresent of [true, false]) {
+      for (const started of [true, false]) {
+        const side = {
+          ...listeningFacts(empty()),
+          live: true,
+          remote,
+          keyPresent,
+          host: 'api.example.test',
+        };
+        const speech = { ...side, started, voiceName: 'alloy', voiceDownloaded: true };
+        for (const said of [
+          listeningLead(side),
+          listeningNote(side),
+          speechLead(speech),
+          speechNote(speech),
+        ]) {
+          expect(said).not.toMatch(/restart/i);
+        }
+      }
+    }
+  }
 });

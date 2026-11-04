@@ -74,6 +74,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::status,
+            commands::settings_table,
             commands::set_setting,
             commands::list_devices,
             commands::list_voices,

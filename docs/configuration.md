@@ -137,30 +137,28 @@ banshee config set feedback.mode none
 ```
 
 - **The key is the section and the field,** as they appear in the file.
-- **A number, a `true`, or a `[list]`** is read as that type. Anything else is
-  read as text.
-- **Quote twice to force text,** as in
-  `banshee config set audio.input_device '"12"'`.
+- **A value is read as the type its setting takes.** A text setting keeps digits
+  as text, so `banshee config set audio.input_device 12` needs no quotes.
+- **A key that is no setting is refused** before anything is written.
 - **A value the field does not accept is refused,** and the message lists the
   legal ones.
 - **The command works** whether or not the daemon runs.
-- **Most settings take effect at once:**
-  - `stt.vad_threshold`, `stt.vocabulary`, `stt.model`, `stt.translate`
-  - `audio.input_device`, `audio.barge_in`, `audio.keep_open`
+- **Every setting takes effect at once:**
+  - `stt.vad_threshold`, `stt.endpoint_silence_ms`, `stt.vocabulary`, `stt.model`, `stt.translate`
+  - `audio.hotkey`, `audio.hotkey_mode`, `audio.input_device`, `audio.barge_in`, `audio.keep_open`
   - `feedback.mode`, `feedback.speak_problems`
   - `models.unload_after`
   - `tts.voice`, `daemon.save_history`
-- **The rest are read when the daemon starts,** so the command tells you to
-  restart. Among them:
-  - `audio.hotkey`, `audio.hotkey_mode`, `stt.endpoint_silence_ms`
-  - `stt.provider` and the `[stt.remote]` keys
-  - `tts.fallback`, `tts.provider` and the `[tts.remote]` keys
-- **A live setting whose model is not downloaded yet waits for the file.**
+  - `stt.remote.api_key`, which is in use at the next dictation
+  - `stt.provider`, `stt.remote.base_url` and `stt.remote.model`, which take
+    the next dictation
+  - `tts.provider`, `tts.fallback`, the `[tts.remote]` keys and
+    `tts.remote.api_key`, which take the next reply
+- **A model or voice still to download waits for its file.**
 - Once `banshee setup` fetches it, a running daemon applies the setting as the
   download finishes.
-- **A daemon that started without its models is a different case.**
-- It has no pipeline to change, so the first setup on a new machine ends with
-  a restart.
+- **A daemon that started without its voice detection model still needs
+  `banshee start`** once the file is here.
 
 ## Pronouncing unknown words
 
@@ -245,8 +243,7 @@ Speak with one by: banshee config set tts.voice "<id>"
 - **Both keys go to `~/.banshee/credentials.toml`,** which only you can read.
 - **A key is never written to `config.toml`** and never appears in a status
   reply.
-- **The daemon reads the providers and both remote tables when it starts,** so
-  the command ends with a restart.
+- **A running daemon applies both sides at once.**
 - **A server out on the internet needs `https`.** Banshee accepts plain `http`
   to this machine and to your own network:
   - a private or link-local address, such as `192.168.1.5`
@@ -271,11 +268,22 @@ Speak with one by: banshee config set tts.voice "<id>"
 - **The `vocabulary` list goes out with each request** as the server's prompt,
   so those words leave the machine too.
 - **`banshee config set stt.remote.api_key`** asks for the key by itself.
+- **The next dictation sends the new key,** with no restart.
 - **To remove the key, pass an empty one:**
   `banshee config set stt.remote.api_key ""`.
+- **With no key on file, a press records nothing.** `banshee status` and the
+  window name the command that sets one.
 - **A failed transcription plays the error tone,** and `banshee status` and the
   window say why.
-- **Banshee never falls back** to the local model on its own.
+- **Turning the server off stops a recording on its way there.** Banshee
+  transcribes it on this machine. Without the local model, that dictation
+  fails and says why.
+- **Removing the key does the same.**
+- **A dictation recorded for one server goes to another** if you switch to it
+  before the release. One started on this machine stays here.
+- **A request already on its way to one server finishes there** when you
+  switch to another.
+- **A request that fails never falls back** to the local model.
 - **`banshee status` probes a side** whose provider is `remote` and whose key is
   on file. It asks that server for `/models` with the key.
 - **A server that answers earns a pass.**
@@ -346,6 +354,14 @@ Speak with one by: banshee config set tts.voice "<id>"
   in another voice mid-sentence is worse than a stop.
 - **A speaker that will not start never stops the daemon,** so dictation goes
   on.
+- **A switch to or from a voice server takes the next reply.** The reply
+  already speaking finishes in its voice.
+- **Turning the server off stops the reply,** and the local voice speaks it
+  from the start.
+- **Removing the key stops it too.** The fallback voice speaks it from the
+  start, and under `fallback = "none"` nothing does.
+- **A reply on its way to one server finishes there** when you switch to
+  another. The next reply goes to the new one.
 
 ## The hotkey
 
@@ -357,8 +373,7 @@ Speak with one by: banshee config set tts.voice "<id>"
   stops it.
 - **The watchdog ends a recording after 120 seconds.** It returns the microphone
   and still transcribes what it heard.
-- **The key is rebindable:** `banshee config set audio.hotkey F6`, then
-  `banshee start`.
+- **The key is rebindable:** `banshee config set audio.hotkey F6`.
 - **Legal values** are an F-key (`F1`-`F12`), a modifier alone, or modifiers and
   a key, as in `Ctrl+Alt+D`.
 - **The modifiers are** `RightOption`, `LeftOption`, `LeftControl` and

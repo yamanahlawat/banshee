@@ -305,6 +305,23 @@ mod tests {
             ])
         );
     }
+
+    #[test]
+    fn the_window_mock_is_the_table_the_common_crate_holds() {
+        let mock: serde_json::Value =
+            serde_json::from_str(include_str!("../ui/src/mocks/settings.json")).unwrap();
+        assert_eq!(
+            mock,
+            serde_json::to_value(banshee_common::settings::SETTINGS).unwrap()
+        );
+    }
+}
+
+/// The table of settings the daemon takes, as the window reads it. No socket
+/// call: the table is data compiled into both binaries.
+#[tauri::command]
+pub fn settings_table() -> serde_json::Value {
+    serde_json::to_value(banshee_common::settings::SETTINGS).expect("the table is plain data")
 }
 
 #[tauri::command]
@@ -553,8 +570,8 @@ pub async fn start_daemon() -> Result<(), CommandError> {
         .map_err(|error| failed(error.to_string()))?
 }
 
-/// A setting the daemon reads once, and a pipeline dead at startup, both need
-/// the process renewed. The daemon answers, then exits for launchd to start it
+/// A pipeline dead at start, and a permission grant, both need the process
+/// renewed. The daemon answers, then exits for launchd to start it
 /// again; with no daemon to answer, `banshee start` brings one up.
 #[cfg(target_os = "macos")]
 #[tauri::command]
@@ -569,7 +586,7 @@ pub async fn restart_daemon(daemon: State<'_, Daemon>) -> Result<(), CommandErro
     }
 }
 
-/// A setting the daemon reads once, and a pipeline dead at startup, both need the process renewed.
+/// A pipeline dead at start, and a permission grant, both need the process renewed.
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 pub async fn restart_daemon() -> Result<(), CommandError> {

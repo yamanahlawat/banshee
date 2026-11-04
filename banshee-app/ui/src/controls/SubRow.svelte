@@ -1,19 +1,22 @@
 <script lang="ts">
-  import { PENDING_SAYS } from '../lib/copy';
+  import { waiting } from '../lib/daemon';
+  import { waitingSays } from '../lib/copy';
 
   export let name: string;
-  export let pending = false;
-  /// What the wait is for, where a restart is not it. A chosen model that is
-  /// absent waits on a download, and a restart with nothing on disk to load
-  /// changes nothing.
+  // The key this part writes, when it writes one.
+  export let setting: string | undefined = undefined;
+  /// A wait the daemon does not report, said in place of the key's own line. A
+  /// chosen model that is absent waits on a download.
   export let says: string | null = null;
+
+  $: line = says ?? (setting !== undefined && $waiting.has(setting) ? waitingSays(setting) : null);
 </script>
 
 <div class="part">
   <span class="sub mono">{name}</span>
   <div class="control"><slot /></div>
-  {#if pending}
-    <p class="note pending">{says ?? PENDING_SAYS}</p>
+  {#if line !== null}
+    <p class="note pending">{line}</p>
   {/if}
   <!-- After the sentence that explains it, the way a drawn box orders its own
        head, consequence and fix. -->

@@ -13,7 +13,7 @@
   // The daemon reads an empty key as removal.
   async function removeKey() {
     if (await write(setting, '')) {
-      announce('The key is removed. It takes effect when Banshee restarts.');
+      announce('The key is removed.');
     }
   }
 

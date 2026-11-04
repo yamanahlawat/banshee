@@ -5,6 +5,7 @@ import permissionsJson from './permissions.json';
 import notRunningJson from './not-running.json';
 import remoteJson from './remote.json';
 import remoteSpeechJson from './remote-speech.json';
+import settingsJson from './settings.json';
 import type { AgentRow, Devices, HistoryRow, PlannedChange, Voices } from '../lib/tauri';
 import type { Status } from '../lib/daemon';
 
@@ -119,7 +120,7 @@ const STATES: Record<string, Status> = {
   pending: { ...ready, pending: ['audio.hotkey', 'daemon.save_history'] },
   // The listener the config asks for and the one the daemon runs, in each
   // direction. Neither has any other way to be looked at: the pair only
-  // disagrees between a write and the restart that applies it.
+  // disagrees when the listener asked for could not start.
   'to-remote': {
     ...remote,
     remote: inForce({ remote: false, key: true }, { remote: false, started: true, key: false }),
@@ -174,8 +175,8 @@ const STATES: Record<string, Status> = {
     config: asks('remote', 'gpt-4o-mini-tts', 'marin'),
     remote: inForce({ remote: true, key: true }, { remote: true, started: false, key: true }),
   },
-  // The reader left a speaker that never started, and the flip waits on the
-  // restart. Both halves of that are true at once here and nowhere else.
+  // The reader left a speaker that never started, and the daemon could not use
+  // the choice yet. Both halves of that are true at once here and nowhere else.
   'to-local-not-started': {
     ...remote,
     config: asks('local', 'gpt-4o-mini-tts', 'marin'),
@@ -249,6 +250,7 @@ function statusNow(): unknown {
 const ANSWERS: Record<string, () => unknown> = {
   status: statusNow,
   history: () => (written['daemon.save_history'] === false ? [] : rows()),
+  settings_table: () => settingsJson,
   set_setting: () => [],
   // A failure has no other way to be looked at: every other state is a status
   // reply, and this one only happens when a call rejects.

@@ -193,3 +193,31 @@ fn toggle_with_a_lone_modifier_acts_on_the_release() {
     t.on_event(&press(Key::AltGr));
     assert_eq!(t.on_event(&release(Key::AltGr)), Some(HotkeyAction::Toggle));
 }
+
+#[test]
+fn a_rebind_while_the_old_key_is_held_waits_for_its_release() {
+    let mut t = tracker("F5", HotkeyMode::Hold);
+    assert_eq!(t.on_event(&press(Key::F5)), Some(HotkeyAction::Start));
+    assert!(!t.rebind(hotkey("F6").unwrap(), HotkeyMode::Hold));
+    assert_eq!(t.on_event(&release(Key::F5)), Some(HotkeyAction::Stop));
+    assert!(t.rebind(hotkey("F6").unwrap(), HotkeyMode::Hold));
+    assert_eq!(t.on_event(&press(Key::F5)), None);
+    assert_eq!(t.on_event(&press(Key::F6)), Some(HotkeyAction::Start));
+}
+
+#[test]
+fn a_mode_flip_mid_hold_waits_for_the_release() {
+    let mut t = tracker("F5", HotkeyMode::Hold);
+    t.on_event(&press(Key::F5));
+    assert!(!t.rebind(hotkey("F5").unwrap(), HotkeyMode::Toggle));
+    assert_eq!(t.on_event(&release(Key::F5)), Some(HotkeyAction::Stop));
+}
+
+#[test]
+fn a_rebind_keeps_the_modifiers_already_held() {
+    let mut t = tracker("F5", HotkeyMode::Hold);
+    t.on_event(&press(Key::ControlLeft));
+    t.on_event(&press(Key::Alt));
+    assert!(t.rebind(hotkey("Ctrl+Alt+D").unwrap(), HotkeyMode::Hold));
+    assert_eq!(t.on_event(&press(Key::KeyD)), Some(HotkeyAction::Start));
+}

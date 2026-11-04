@@ -7,7 +7,6 @@
     fixGroups,
     fixProse,
     type Blocker,
-    type BlockerKind,
     type ListeningModel,
     type Progress,
     type Remedy,
@@ -81,13 +80,6 @@
     return null;
   }
 
-  // The restart alone fixes none of these faults, so the label says how much it is worth.
-  const RESTART_LABELS: Partial<Record<BlockerKind, string>> = {
-    pipeline: 'Restart anyway',
-    provider: 'Restart',
-    keyfile: 'Restart anyway',
-  };
-
   const PANES: Record<string, string> = {
     accessibility: 'Accessibility',
     microphone: 'Microphone',
@@ -124,7 +116,8 @@
       case 'restart':
         return {
           title: first.name,
-          label: RESTART_LABELS[first.kind] ?? 'Restart Banshee',
+          // A restart alone does not fix a pipeline fault, so the label says how much it is worth.
+          label: first.kind === 'pipeline' ? 'Restart anyway' : 'Restart Banshee',
           pane: '',
           confirmsWithRestart: false,
           run: restart,

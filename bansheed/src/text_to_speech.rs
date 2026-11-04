@@ -15,7 +15,7 @@ use banshee_common::error::BansheeError;
 use tokio::sync::watch;
 
 use crate::audio::cues::{Cues, Reason, ReasonCode, Signal};
-use crate::config::{Provider, TTSConfig, TTSFallback};
+use crate::config::{Provider, RemoteTtsConfig, TTSConfig, TTSFallback};
 use local::{Engine, OnDemand, local_backend, local_on_demand};
 use output::Output;
 use remote::openai_compatible::RemoteSpeechBackend;
@@ -116,7 +116,11 @@ pub fn drain_faults(
         fault.log();
         match fault {
             Fault::Played => state.set_last_speech_error(None),
-            Fault::Loaded => state.set_speaker_started(true),
+            // A local voice an earlier speaker still loads names no server
+            Fault::Loaded if state.speaker_provider() == Provider::Local => {
+                state.set_speaker_started(true)
+            }
+            Fault::Loaded => {}
             Fault::Failed(reason) | Fault::SpokenByFallback(reason) => failed(reason),
         }
     }
@@ -153,6 +157,11 @@ pub trait TtsBackend: Send + Sync {
     fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
         None
     }
+
+    /// The server each line's text goes to, or `None` when it stays here.
+    fn sends_to(&self) -> Option<&str> {
+        None
+    }
 }
 
 impl<T: TtsBackend + ?Sized> TtsBackend for Arc<T> {
@@ -178,6 +187,10 @@ impl<T: TtsBackend + ?Sized> TtsBackend for Arc<T> {
 
     fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
         (**self).unload()
+    }
+
+    fn sends_to(&self) -> Option<&str> {
+        (**self).sends_to()
     }
 }
 
@@ -208,6 +221,36 @@ impl Speaker {
     }
 }
 
+/// What decides which speaker runs. `tts.voice` is not part of it: a voice
+/// moves on the speaker in force. The local voice reads neither `fallback`
+/// nor `remote`, so under it both hold their defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeakerSpec {
+    pub provider: Provider,
+    pub fallback: TTSFallback,
+    pub remote: RemoteTtsConfig,
+}
+
+impl SpeakerSpec {
+    pub fn of(tts: &TTSConfig) -> Self {
+        match tts.provider {
+            Provider::Local => {
+                let unread = TTSConfig::default();
+                Self {
+                    provider: Provider::Local,
+                    fallback: unread.fallback,
+                    remote: unread.remote,
+                }
+            }
+            Provider::Remote => Self {
+                provider: Provider::Remote,
+                fallback: tts.fallback,
+                remote: tts.remote.clone(),
+            },
+        }
+    }
+}
+
 /// `fault` holds the reason the speaker `[tts]` names did not start. It has no
 /// utterance in flight, so the fault channel never carries that reason.
 pub struct Selection {
@@ -217,47 +260,73 @@ pub struct Selection {
 }
 
 /// The selection `[tts]` asks for. `faults` is where a backend reports an
-/// utterance it could not speak.
+/// utterance it could not speak, and `credentials` is the key file a remote
+/// speaker reads at each request.
 pub fn select_backend(
     tts_config: &TTSConfig,
     models: &Path,
+    credentials: &Path,
     faults: Sender<Fault>,
     output: Arc<Output>,
 ) -> Selection {
     let faults = Faults::new(faults);
     match tts_config.provider {
         Provider::Local => select_local_backend(tts_config, models, faults, output),
-        Provider::Remote => {
-            // Not propagated: a credentials file that will not parse holds no
-            // key the speaker can use, so it takes the path a missing key takes
-            // and the daemon stays up.
-            let api_key = crate::credentials::Credentials::load().map(|credentials| {
-                credentials
-                    .key(crate::credentials::RemoteKey::Tts)
-                    .map(str::to_string)
-            });
-            select_remote_backend(tts_config, models, faults, api_key, output)
-        }
+        Provider::Remote => select_remote_backend(tts_config, models, faults, credentials, output),
     }
 }
 
-/// `api_key` is the key, its absence, or the fault that hid it.
+/// `select_backend` for a switch while the daemon runs. The local voice loads
+/// at its first line, so a switch loads nothing, and it counts as the speaker
+/// `[tts]` names from the switch on.
+pub fn select_live(
+    tts: &TTSConfig,
+    models: &Path,
+    credentials: &Path,
+    faults: Sender<Fault>,
+    output: Arc<Output>,
+) -> Selection {
+    let faults = Faults::new(faults);
+    match tts.provider {
+        Provider::Local => local_selection(
+            tts,
+            Box::new(local_on_demand(models, &tts.voice, output, faults)),
+        ),
+        Provider::Remote => select_remote_backend(tts, models, faults, credentials, output),
+    }
+}
+
+/// The local voice `tts` names, speaking through `backend`.
+fn local_selection(tts: &TTSConfig, backend: Box<dyn TtsBackend>) -> Selection {
+    log::info!(
+        "TTS: {} (voice {})",
+        Engine::of(&tts.voice).name(),
+        tts.voice
+    );
+    Selection {
+        backend,
+        speaker: Speaker::Configured(tts.voice.clone()),
+        fault: None,
+    }
+}
+
+/// A key file that will not parse holds no key the speaker can use, so it
+/// takes the path a missing key takes and the daemon stays up.
 fn select_remote_backend(
     tts_config: &TTSConfig,
     models: &Path,
     faults: Faults,
-    api_key: Result<Option<String>, BansheeError>,
+    credentials: &Path,
     output: Arc<Output>,
 ) -> Selection {
     let fallback = fallback_for(tts_config, models, Arc::clone(&output), &faults);
-    let built = match api_key {
+    let side = crate::credentials::RemoteKey::Tts;
+    let built = match crate::credentials::Credentials::key_at(credentials, side) {
         Err(unreadable) => Err(unreadable),
-        Ok(None) => Err(BansheeError::Other(
-            crate::credentials::RemoteKey::Tts.no_key(),
-        )),
-        Ok(Some(key)) => RemoteSpeechBackend::new(
+        Ok(None) => Err(BansheeError::Other(side.no_key())),
+        Ok(Some(_)) => RemoteSpeechBackend::new(
             &tts_config.remote,
-            key,
+            credentials.to_path_buf(),
             fallback.clone().map(|f| f as Arc<dyn TtsBackend>),
             output,
             faults,
@@ -350,18 +419,7 @@ fn select_local_backend(
         faults.clone(),
     );
     match local_backend(models, &tts_config.voice, output, faults) {
-        Ok(backend) => {
-            log::info!(
-                "TTS: {} (voice {})",
-                Engine::of(&tts_config.voice).name(),
-                tts_config.voice
-            );
-            Selection {
-                backend: Box::new(voice.holding(backend)),
-                speaker: Speaker::Configured(tts_config.voice.clone()),
-                fault: None,
-            }
-        }
+        Ok(backend) => local_selection(tts_config, Box::new(voice.holding(backend))),
         Err(error) => {
             let reason = error.to_string();
             log::warn!("The local voice will not load: {reason}");
@@ -429,14 +487,22 @@ impl Hold {
 struct Active {
     utterance_id: u64,
     utterance: Box<dyn ActiveUtterance>,
+    text: String,
+    voice: Option<String>,
+    /// The server the text went to, or `None` when it stayed here.
+    sent_to: Option<String>,
 }
 
 struct Playback {
+    backend: Arc<dyn TtsBackend>,
     utterance_id: u64,
     last_started: u64,
     active: Option<Active>,
     queue: VecDeque<Line>,
     watcher_running: bool,
+    /// A switch is building the next speaker, so no line starts until it is
+    /// in place.
+    switching: bool,
     hold: Hold,
     /// When an utterance last began or ended, which the voice's idle unload
     /// counts from.
@@ -451,13 +517,29 @@ impl Playback {
         }
     }
 
-    fn begin(&mut self, utterance_id: u64, utterance: Box<dyn ActiveUtterance>) {
-        self.last_started = utterance_id;
+    fn begin(&mut self, line: Line, utterance: Box<dyn ActiveUtterance>) {
+        self.last_started = line.utterance_id;
         self.used = Instant::now();
         self.active = Some(Active {
-            utterance_id,
+            utterance_id: line.utterance_id,
             utterance,
+            text: line.text,
+            voice: line.voice,
+            sent_to: self.backend.sends_to().map(str::to_string),
         });
+    }
+
+    /// Stops the utterance playing and puts its line back at the front.
+    fn take_back_active(&mut self) {
+        if let Some(mut active) = self.active.take() {
+            active.utterance.stop();
+            self.used = Instant::now();
+            self.queue.push_front(Line {
+                utterance_id: active.utterance_id,
+                text: active.text,
+                voice: active.voice,
+            });
+        }
     }
 
     fn busy(&self) -> bool {
@@ -476,18 +558,87 @@ impl Playback {
     }
 }
 
+/// Builds the speaker a `[tts]` write names.
+pub type BuildSpeaker = Box<dyn Fn(&TTSConfig) -> Selection + Send + Sync>;
+
+/// Clears `switching` when the switch that set it ends, even by a panic in
+/// the build.
+struct Switching<'a>(&'a SpeechPlayer);
+
+impl Drop for Switching<'_> {
+    fn drop(&mut self) {
+        self.0.lock().switching = false;
+    }
+}
+
+/// The speaker a switch put in place. `fault` is why the speaker `[tts]` names
+/// did not start.
+pub struct Switched {
+    pub speaker: Speaker,
+    pub fault: Option<String>,
+}
+
 pub struct SpeechPlayer {
-    backend: Box<dyn TtsBackend>,
     playback: Mutex<Playback>,
     playing: watch::Sender<Option<u64>>,
+    builder: std::sync::OnceLock<BuildSpeaker>,
 }
 
 impl SpeechPlayer {
     /// What a live `[tts]` write reaches. An utterance already speaking keeps
     /// the voice it started with.
     pub fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
-        self.lock().used = Instant::now();
-        self.backend.reconfigure(tts)
+        let backend = {
+            let mut playback = self.lock();
+            playback.used = Instant::now();
+            Arc::clone(&playback.backend)
+        };
+        backend.reconfigure(tts)
+    }
+
+    pub fn set_builder(&self, build: BuildSpeaker) {
+        let _ = self.builder.set(build);
+    }
+
+    /// Puts the speaker `tts` names in place for the next line. With
+    /// `cut_off`, a line playing from a server stops and starts again from its
+    /// beginning on the new speaker. Any other line finishes on the speaker it
+    /// started on. No line starts while the new speaker builds, so each one
+    /// after the switch starts on it. `None` when no builder is set.
+    pub fn switch(self: &Arc<Self>, tts: &TTSConfig, cut_off: bool) -> Option<Switched> {
+        let build = self.builder.get()?;
+        self.lock().switching = true;
+        let _switching = Switching(self);
+        let Selection {
+            backend,
+            speaker,
+            fault,
+        } = build(tts);
+        let old = {
+            let mut playback = self.lock();
+            let old = std::mem::replace(&mut playback.backend, Arc::from(backend));
+            playback.switching = false;
+            let from_a_server = playback
+                .active
+                .as_ref()
+                .and_then(|active| active.sent_to.as_deref())
+                .map(crate::config::host_of);
+            if cut_off && let Some(host) = from_a_server {
+                log::info!("The reply from {host} stopped, and the speaker in force says it again");
+                playback.take_back_active();
+            }
+            if playback.active.is_none() && self.start_next(&mut playback) {
+                self.publish_and_watch(playback);
+            } else {
+                // A queued line whose start failed is gone with no change to
+                // publish, and a question waiting on it has to look again
+                let playing = playback.active.as_ref().map(|active| active.utterance_id);
+                self.playing.send_modify(|was| *was = playing);
+            }
+            old
+        };
+        drop(old);
+        Some(Switched { speaker, fault })
     }
 
     /// Frees the voice once nothing has played for `limit`, and answers when
@@ -505,7 +656,7 @@ impl SpeechPlayer {
                 return Some(due);
             }
             playback.used = now;
-            self.backend.unload()
+            playback.backend.unload()
         };
         if let Some(voice) = freed {
             drop(voice);
@@ -517,17 +668,19 @@ impl SpeechPlayer {
 
     pub fn new(backend: Box<dyn TtsBackend>) -> Self {
         Self {
-            backend,
             playback: Mutex::new(Playback {
+                backend: Arc::from(backend),
                 utterance_id: 0,
                 last_started: 0,
                 active: None,
                 queue: VecDeque::new(),
                 watcher_running: false,
+                switching: false,
                 hold: Hold(None),
                 used: Instant::now(),
             }),
             playing: watch::channel(None).0,
+            builder: std::sync::OnceLock::new(),
         }
     }
 
@@ -544,6 +697,13 @@ impl SpeechPlayer {
     /// it until `release`. What is already playing or queued up to it still plays.
     pub fn speak_and_hold(self: &Arc<Self>, text: &str) -> Result<u64, BansheeError> {
         self.submit(text, false, None, true)
+    }
+
+    pub fn is_queued(&self, utterance_id: u64) -> bool {
+        self.lock()
+            .queue
+            .iter()
+            .any(|line| line.utterance_id == utterance_id)
     }
 
     pub fn has_started(&self, utterance_id: u64) -> bool {
@@ -599,19 +759,21 @@ impl SpeechPlayer {
             return Ok(utterance_id);
         }
 
-        if playback.active.is_some() || playback.hold.keeps_back(utterance_id) {
-            playback.queue.push_back(Line {
-                utterance_id,
-                text: text.to_string(),
-                voice: voice.map(str::to_string),
-            });
+        let line = Line {
+            utterance_id,
+            text: text.to_string(),
+            voice: voice.map(str::to_string),
+        };
+        if playback.active.is_some() || playback.switching || playback.hold.keeps_back(utterance_id)
+        {
+            playback.queue.push_back(line);
             // The interrupt above may have stopped what played
             self.publish(&playback);
             return Ok(utterance_id);
         }
 
-        match self.backend.start(text, voice) {
-            Ok(utterance) => playback.begin(utterance_id, utterance),
+        match playback.backend.start(text, voice) {
+            Ok(utterance) => playback.begin(line, utterance),
             // An interrupt stopped whatever was speaking and nothing replaced
             // it. The hotkey listener discards every chunk it captures while
             // this reads true, so a reply that never starts would leave the
@@ -679,13 +841,16 @@ impl SpeechPlayer {
     }
 
     fn start_next(&self, playback: &mut Playback) -> bool {
+        if playback.switching {
+            return false;
+        }
         while let Some(line) = playback
             .queue
             .pop_front_if(|line| !playback.hold.keeps_back(line.utterance_id))
         {
-            match self.backend.start(&line.text, line.voice.as_deref()) {
+            match playback.backend.start(&line.text, line.voice.as_deref()) {
                 Ok(utterance) => {
-                    playback.begin(line.utterance_id, utterance);
+                    playback.begin(line, utterance);
                     return true;
                 }
                 Err(e) => {
@@ -865,10 +1030,8 @@ mod tests {
             .expect("playing sender dropped");
     }
 
-    fn remote_without_a_key(
-        fallback: TTSFallback,
-        api_key: Result<Option<String>, BansheeError>,
-    ) -> Selection {
+    /// `keys` is what the speaker's key file holds.
+    fn remote_without_a_key(fallback: TTSFallback, keys: &str) -> Selection {
         let tts = TTSConfig {
             provider: Provider::Remote,
             remote: crate::config::RemoteTtsConfig {
@@ -882,14 +1045,14 @@ mod tests {
             &tts,
             &crate::test_support::unique_scratch("remote-models"),
             Faults::new(std::sync::mpsc::channel().0),
-            api_key,
+            &crate::test_support::key_file(keys),
             Arc::new(Output::silent()),
         )
     }
 
     #[test]
     fn a_remote_speaker_with_no_key_falls_back_and_says_why() {
-        let selected = remote_without_a_key(TTSFallback::Local, Ok(None));
+        let selected = remote_without_a_key(TTSFallback::Local, "");
         assert!(
             !selected.speaker.started(),
             "the local voice is not the speaker the config names"
@@ -903,11 +1066,10 @@ mod tests {
 
     #[test]
     fn a_credentials_file_that_will_not_parse_falls_back_and_says_why() {
-        let unreadable = Err(BansheeError::Other(
-            "/tmp/credentials.toml does not parse; fix it or delete it and set the keys again"
-                .to_string(),
-        ));
-        let selected = remote_without_a_key(TTSFallback::Local, unreadable);
+        let selected = remote_without_a_key(
+            TTSFallback::Local,
+            "[tts.remote]\napi_key = sk-live-SECRET123\n",
+        );
         assert!(
             !selected.speaker.started(),
             "the local voice is not the speaker the config names"
@@ -918,7 +1080,7 @@ mod tests {
 
     #[test]
     fn with_no_fallback_every_utterance_fails_with_the_reason() {
-        let selected = remote_without_a_key(TTSFallback::None, Ok(None));
+        let selected = remote_without_a_key(TTSFallback::None, "");
         let reason = refusal_of(selected.backend.as_ref());
         assert!(
             reason.contains("banshee config set tts.remote.api_key"),
@@ -938,7 +1100,7 @@ mod tests {
             &tts,
             &crate::test_support::unique_scratch("remote-models"),
             Faults::new(std::sync::mpsc::channel().0),
-            Ok(Some("sk-test".to_string())),
+            &crate::test_support::key_file("[tts.remote]\napi_key = \"sk-test\"\n"),
             Arc::new(Output::silent()),
         );
         let reason = refusal_of(selected.backend.as_ref());
@@ -1031,15 +1193,6 @@ mod tests {
         ends: Arc<std::sync::atomic::AtomicBool>,
     }
 
-    struct UntilEnds(Arc<std::sync::atomic::AtomicBool>);
-
-    impl ActiveUtterance for UntilEnds {
-        fn is_finished(&mut self) -> bool {
-            self.0.load(std::sync::atomic::Ordering::SeqCst)
-        }
-        fn stop(&mut self) {}
-    }
-
     impl TtsBackend for Gated {
         fn start(
             &self,
@@ -1050,7 +1203,9 @@ mod tests {
                 return Err(BansheeError::Other("refused".to_string()));
             }
             self.started.lock().unwrap().push(text.to_string());
-            Ok(Box::new(UntilEnds(Arc::clone(&self.ends))))
+            Ok(Box::new(crate::test_support::UntilEnds(Arc::clone(
+                &self.ends,
+            ))))
         }
     }
 
@@ -1270,5 +1425,91 @@ mod tests {
             .await
             .expect("a reply that never started left the daemon deaf to the microphone")
             .expect("playing sender dropped");
+    }
+
+    /// A daemon holding each line for `hold`, and the lines the speaker it
+    /// switches to says.
+    fn switching_here(
+        hold: Duration,
+    ) -> (
+        crate::test_support::HoldingSpeech,
+        crate::test_support::SpokenLines,
+    ) {
+        let held =
+            crate::test_support::daemon_state_holding_speech(hold, std::sync::mpsc::channel().0);
+        let spoken_here = crate::test_support::SpokenLines::default();
+        held.state
+            .speech()
+            .set_builder(crate::test_support::here(&spoken_here, "af_sky"));
+        (held, spoken_here)
+    }
+
+    #[test]
+    fn a_switch_lets_the_reply_playing_finish_in_its_voice() {
+        let (held, spoken_here) = switching_here(Duration::from_millis(200));
+        held.state.speech().speak("first", false, None).unwrap();
+        held.state
+            .speech()
+            .switch(&TTSConfig::default(), false)
+            .unwrap();
+        held.state.speech().speak("second", false, None).unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            !held.cut_short.load(std::sync::atomic::Ordering::Relaxed),
+            "the reply playing was not cut"
+        );
+        assert_eq!(*held.spoken.lock().unwrap(), ["first"]);
+        assert_eq!(*spoken_here.lock().unwrap(), ["second"]);
+    }
+
+    #[test]
+    fn turning_the_server_off_stops_the_reply_and_speaks_it_here() {
+        let (held, spoken_here) = switching_here(Duration::from_secs(30));
+        held.state
+            .speech()
+            .speak("the long reply", false, None)
+            .unwrap();
+        held.state
+            .speech()
+            .switch(&TTSConfig::default(), true)
+            .unwrap();
+        assert!(
+            held.cut_short.load(std::sync::atomic::Ordering::Relaxed),
+            "the reply on the server stopped"
+        );
+        assert_eq!(*spoken_here.lock().unwrap(), ["the long reply"]);
+    }
+
+    #[test]
+    fn a_switch_keeps_a_held_question_held() {
+        let (held, spoken_here) = switching_here(Duration::from_secs(30));
+        let line = held.state.speech().speak("a line", false, None).unwrap();
+        held.state.speech().speak_and_hold("a question?").unwrap();
+        held.state
+            .speech()
+            .switch(&TTSConfig::default(), false)
+            .unwrap();
+        assert!(
+            spoken_here.lock().unwrap().is_empty(),
+            "the question still waits behind the line"
+        );
+        held.state.speech().skip_to_question(line);
+        assert_eq!(*spoken_here.lock().unwrap(), ["a question?"]);
+    }
+
+    #[test]
+    fn a_build_that_panics_leaves_lines_free_to_start() {
+        let (state, spoken) =
+            crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
+        state
+            .speech()
+            .set_builder(Box::new(|_| panic!("the build failed")));
+        let switching = Arc::clone(state.speech());
+        let switched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            switching.switch(&TTSConfig::default(), false)
+        }));
+        assert!(switched.is_err());
+        state.speech().speak("after", false, None).unwrap();
+        assert_eq!(*spoken.lock().unwrap(), ["after"]);
     }
 }

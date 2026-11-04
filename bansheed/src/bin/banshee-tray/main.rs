@@ -1739,12 +1739,11 @@ mod tray {
             );
         }
 
-        // The speaker is chosen at startup, so a voice cleared in the file
-        // since then changes nothing until the restart. A row that read the
-        // live voice beside the frozen host would claim a privacy this
-        // machine does not have.
+        // The daemon reports the speaker in force, which the file can stop
+        // agreeing with. A row that read the voice in the file beside the host
+        // the daemon reports would claim a privacy this machine does not have.
         #[test]
-        fn a_voice_cleared_after_startup_still_names_the_host() {
+        fn a_cleared_voice_names_the_host_the_daemon_reports() {
             let reply = serde_json::json!({
                 "config": {"tts": {"remote": {"voice": ""}}},
                 "remote": {

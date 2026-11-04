@@ -1,10 +1,11 @@
-/// What a dashed mark says to anyone listening, in one place, so the wording
-/// cannot differ between the marks that carry it.
-export const RESTART_SAYS = '— set, and in effect when Banshee restarts';
+/// What a key the daemon wrote but could not use says, in one place, so the
+/// wording cannot differ between the marks and rows that carry it.
+export const WAITING_SAYS = 'Set. Banshee could not use it yet.';
+export const WAITS_FOR_ITS_FILE = 'Set. Banshee uses it once its file is here.';
 
-/// The same fact as a sentence, for a row or a sub-row that has the width to
-/// say it in full.
-export const PENDING_SAYS = 'Set. It takes effect when Banshee restarts.';
+export function waitingSays(key: string): string {
+  return WAITS_ON_A_FILE.has(key) ? WAITS_FOR_ITS_FILE : WAITING_SAYS;
+}
 
 /// What each side calls its own failure. The server's words follow, so these
 /// end in a full stop rather than a colon.
@@ -76,16 +77,13 @@ export function modelCost(chosen: string, megabytes: number, owed: number): stri
     : one;
 }
 
-// The whole group waits on one restart, so a group states it once.
-export const TAKES_EFFECT = 'Your choice takes effect when Banshee restarts.';
-
 import { writable } from 'svelte/store';
 import { copyText, openLicence } from './tauri';
-import type { Listening, ListeningModel, Speech } from './daemon';
+import { WAITS_ON_A_FILE, type Listening, type ListeningModel, type Speech } from './daemon';
 
 // A side the daemon cannot name still gets a whole sentence.
-export const A_TRANSCRIPTION_SERVER = 'a transcription server';
-export const A_VOICE_SERVER = 'a voice server';
+const A_TRANSCRIPTION_SERVER = 'a transcription server';
+const A_VOICE_SERVER = 'a voice server';
 
 export function listeningLead(facts: Listening): string {
   if (!facts.live) return 'Banshee is not running, so no microphone is open.';
@@ -95,11 +93,7 @@ export function listeningLead(facts: Listening): string {
     if (facts.stoppedBy !== null) return `Banshee cannot reach ${host} to hear you.`;
     // A remote listener loads no model of its own, only the detector.
     if (facts.loading) return 'Banshee is loading the voice detection model.';
-    if (facts.pending) return `Banshee sends what you say to ${host} until it restarts.`;
     return `Banshee sends what you say to ${host} to be heard.`;
-  }
-  if (facts.pending) {
-    return `Banshee will send what you say to ${facts.willUse ?? A_TRANSCRIPTION_SERVER} when it restarts.`;
   }
   if (facts.refused) return 'macOS does not allow Banshee to use the microphone.';
   if (facts.loading) return 'Banshee is loading the listening model.';
@@ -117,31 +111,24 @@ export function listeningLead(facts: Listening): string {
 export function listeningNote(facts: Listening): string {
   if (!facts.live) return 'Nothing is heard until Banshee starts.';
   const host = facts.host ?? A_TRANSCRIPTION_SERVER;
-  const waits = facts.pending ? ` ${TAKES_EFFECT}` : '';
   if (facts.remote) {
     if (facts.stoppedBy === 'keyfile') {
       return `Nothing goes to ${host} until the key file is removed and the key is set again.`;
     }
     if (facts.stoppedBy !== null) return `Nothing goes to ${host} until the listener starts.`;
-    if (facts.pending) return `Audio still goes to ${host}.${waits}`;
     return `Audio goes to ${host}.`;
   }
-  if (facts.pending) return `Audio still stays on this machine.${waits}`;
   return facts.keyPresent
     ? 'Audio stays on this machine. The server and key you set are still saved.'
     : 'Audio stays on this machine.';
 }
 
-// A started speaker's name comes off the live table, which a write the restart
-// has not applied may have cleared, so the host carries the sentence and the
-// name only decorates it.
+// A started speaker's name comes off the config table, which a later write may
+// have cleared, so the host carries the sentence and the name only decorates it.
 export function speechLead(facts: Speech): string {
   if (!facts.live) return 'Banshee is not running, so nothing is spoken.';
   const host = facts.host ?? A_VOICE_SERVER;
   if (!facts.remote) {
-    if (facts.pending) {
-      return `Banshee will speak through ${facts.willUse ?? A_VOICE_SERVER} when it restarts.`;
-    }
     if (!facts.started) {
       const fix = facts.voiceDownloaded
         ? 'Pick another voice.'
@@ -151,16 +138,10 @@ export function speechLead(facts: Speech): string {
     return facts.voiceName ? `Banshee speaks as ${facts.voiceName}.` : 'Banshee has no voice yet.';
   }
   if (!facts.started) {
-    // The reader has already chosen the other speaker, so the fields that would
-    // fix this one are no longer the thing to name.
-    if (facts.pending) {
-      return `Banshee cannot speak through ${host}. Your choice takes effect when it restarts.`;
-    }
     if (!facts.keyPresent) return `Banshee cannot speak through ${host} until you paste a key.`;
     if (!facts.voiceName) return `Banshee cannot speak through ${host} until you name a voice.`;
     return `Banshee cannot speak through ${host}.`;
   }
-  if (facts.pending) return `Banshee speaks through ${host} until it restarts.`;
   return facts.voiceName
     ? `Banshee speaks through ${host} as ${facts.voiceName}.`
     : `Banshee speaks through ${host}.`;
@@ -171,14 +152,8 @@ export function speechLead(facts: Speech): string {
 export function speechNote(facts: Speech): string {
   if (!facts.live) return 'Nothing is spoken until Banshee starts.';
   const host = facts.host ?? A_VOICE_SERVER;
-  const waits = facts.pending ? ` ${TAKES_EFFECT}` : '';
   if (facts.remote && !facts.started) {
-    return `The speaker on ${host} did not start, so text stays on this machine.${waits}`;
-  }
-  if (facts.pending) {
-    return facts.remote
-      ? `Text still goes to ${host}.${waits}`
-      : `Text still stays on this machine.${waits}`;
+    return `The speaker on ${host} did not start, so text stays on this machine.`;
   }
   if (facts.remote) return `Text goes to ${host}.`;
   return facts.keyPresent
@@ -262,3 +237,14 @@ export async function copy(text: string, id: string): Promise<void> {
     announcement.set('');
   }, HELD_MS);
 }
+
+// The window's word for each value a choice key takes. The table holds the
+// values and their order.
+export const CHOICE_LABELS: Record<string, Record<string, string>> = {
+  'audio.hotkey_mode': { hold: 'Hold', toggle: 'Tap' },
+  'audio.barge_in': { stop: 'Stop', none: 'Carry on' },
+  'feedback.mode': { visual: 'On screen', sound: 'Sound', both: 'Both', none: 'Off' },
+  'stt.provider': { local: 'On this machine', remote: 'A transcription server' },
+  'tts.provider': { local: 'On this machine', remote: 'A voice server' },
+  'tts.remote.response_format': { wav: 'WAV', pcm: 'PCM' },
+};

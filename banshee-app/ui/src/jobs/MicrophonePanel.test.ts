@@ -12,7 +12,6 @@ import {
   listeningFacts,
   reduceLive,
   reduceStatus,
-  waitsOnARestart,
   type ListeningModel,
   type Status,
 } from '../lib/daemon';
@@ -30,10 +29,11 @@ import {
   listeningNote,
   problem,
   report,
-  PENDING_SAYS,
-  TAKES_EFFECT,
+  WAITING_SAYS,
 } from '../lib/copy';
 import { forgetTheAsk } from '../lib/downloads';
+import { table } from '../lib/settings';
+import { commonTable, tableWith } from '../lib/tauri.mock';
 import MicrophonePanel from './MicrophonePanel.svelte';
 
 // The daemon's own reply under a remote listener, so each test states only what
@@ -131,11 +131,6 @@ function modelRow(label: string): HTMLElement {
     .closest('.model') as HTMLElement;
 }
 
-// The two directions the choice can wait in: the config holds one listener and
-// the daemon runs the other.
-const toRemote: Status = { ...withStt({}, LOCAL_IN_FORCE), pending: ['stt.provider'] };
-const toLocal: Status = { ...withStt({ provider: 'local' }), pending: ['stt.provider'] };
-
 function keyField(): HTMLInputElement | null {
   return document.querySelector('input[type="password"]');
 }
@@ -151,6 +146,7 @@ const agent = vi.spyOn(navigator, 'userAgent', 'get');
 
 // The panel reads the hardware as it mounts.
 beforeEach(() => {
+  table.set(commonTable);
   agent.mockReset();
   forgetTheAsk();
   daemon.set(empty());
@@ -376,12 +372,12 @@ it('says nothing about the model when only a voice is missing', () => {
   expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
 });
 
-it('says the remote server waits on a restart', () => {
+it('says the remote server is set but not in use yet', () => {
   daemon.set(reduceStatus(empty(), { ...remoteStatus, pending: ['stt.remote.base_url'] }));
   const { container } = render(MicrophonePanel);
   const pending = container.querySelectorAll('.note.pending');
   expect(pending).toHaveLength(1);
-  expect(pending[0].textContent).toBe(PENDING_SAYS);
+  expect(pending[0].textContent).toBe(WAITING_SAYS);
 });
 
 it('holds the server, the model and the key inside the listener group', () => {
@@ -456,19 +452,8 @@ it('describes the choice by the sentence that says where audio goes', () => {
     .getByRole('radiogroup', { name: 'Listening' })
     .getAttribute('aria-describedby');
   expect(document.getElementById(described ?? '')?.textContent).toBe(
-    listeningNote(listeningFacts(get(daemon), get(waitsOnARestart))),
+    listeningNote(listeningFacts(get(daemon))),
   );
-});
-
-// The group says the restart in its own sentence, so the pending line every
-// other row draws would state it a second time.
-it('states the restart in the sentence, and draws no pending line for it', () => {
-  daemon.set(reduceStatus(empty(), toRemote));
-  render(MicrophonePanel);
-  expect(
-    screen.getByText(listeningNote(listeningFacts(get(daemon), get(waitsOnARestart)))),
-  ).toBeTruthy();
-  expect(listenerGroup().querySelectorAll('.note.pending')).toHaveLength(0);
 });
 
 // The choice is real but idle while the daemon is down, so the note may not
@@ -479,14 +464,12 @@ it('says nothing is heard while the daemon is down', () => {
   expect(screen.getByText('Nothing is heard until Banshee starts.')).toBeTruthy();
 });
 
-it('removes a stored key from the window and says the restart it needs', async () => {
+it('removes a stored key from the window and says so', async () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
   render(MicrophonePanel);
   await fireEvent.click(screen.getByRole('button', { name: 'Remove the key' }));
   await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('stt.remote.api_key', ''));
-  await waitFor(() =>
-    expect(get(announcement)).toBe('The key is removed. It takes effect when Banshee restarts.'),
-  );
+  await waitFor(() => expect(get(announcement)).toBe('The key is removed.'));
 });
 
 // A screen reader hears the fields appear from nothing otherwise, and the
@@ -496,10 +479,10 @@ it('announces where audio goes at the flip, and nothing on arrival', async () =>
   render(MicrophonePanel);
   expect(get(announcement)).toBe('');
 
-  daemon.set(reduceStatus(empty(), toRemote));
+  daemon.set(reduceStatus(empty(), remoteStatus));
   await waitFor(() =>
     expect(get(announcement)).toBe(
-      `Audio still stays on this machine. ${TAKES_EFFECT} Server, key and model are below.`,
+      'Audio goes to api.openai.com. Server, key and model are below.',
     ),
   );
 });
@@ -508,10 +491,10 @@ it('announces the way back, and what it leaves below', async () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
   render(MicrophonePanel);
 
-  daemon.set(reduceStatus(empty(), toLocal));
+  daemon.set(reduceStatus(empty(), localStatus));
   await waitFor(() =>
     expect(get(announcement)).toBe(
-      `Audio still goes to api.openai.com. ${TAKES_EFFECT} Model is below.`,
+      'Audio stays on this machine. The server and key you set are still saved. Model is below.',
     ),
   );
 });
@@ -689,4 +672,12 @@ it('keeps a hand-edited idle time among the choices', async () => {
   const picker = screen.getByRole('combobox', { name: 'Free memory' }) as HTMLSelectElement;
   expect(picker.value).toBe('30');
   expect(picker.options[0].textContent).toBe('After 30 minutes idle');
+});
+
+it('shows the quiet length the table states when the daemon sends none', () => {
+  table.set(tableWith('stt.endpoint_silence_ms', { default: '1500' }));
+  daemon.set(reduceStatus(empty(), withStt({ endpoint_silence_ms: undefined }, undefined)));
+  render(MicrophonePanel);
+  const shown = screen.getByRole('option', { name: 'After 1.5 seconds of quiet' });
+  expect((shown as HTMLOptionElement).selected).toBe(true);
 });

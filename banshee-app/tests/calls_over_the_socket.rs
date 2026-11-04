@@ -30,10 +30,10 @@ async fn status_returns_the_reply_untouched() {
 #[tokio::test]
 async fn a_setting_is_written_with_persist_true() {
     let (path, mut seen, _guard) =
-        recording_daemon(serde_json::json!({"restart_required": ["feedback.mode"]})).await;
+        recording_daemon(serde_json::json!({"waiting": ["feedback.mode"]})).await;
     let mut client = Client::connect(&path).await.unwrap();
 
-    let restart = calls::set_setting(&mut client, "feedback.mode", serde_json::json!("none"))
+    let waiting = calls::set_setting(&mut client, "feedback.mode", serde_json::json!("none"))
         .await
         .unwrap();
 
@@ -46,15 +46,15 @@ async fn a_setting_is_written_with_persist_true() {
             "persist": true,
         })
     );
-    assert_eq!(restart, vec!["feedback.mode".to_string()]);
+    assert_eq!(waiting, vec!["feedback.mode".to_string()]);
 }
 
 #[tokio::test]
 async fn a_settings_reply_with_the_wrong_shape_is_an_error_not_an_empty_list() {
-    // "restart_required" as a string, not an array: a wrong-shaped reply
-    // must not read as "nothing needs a restart".
+    // "waiting" as a string, not an array: a wrong-shaped reply must not
+    // read as "nothing waits".
     let (path, _seen, _guard) =
-        recording_daemon(serde_json::json!({"restart_required": "feedback.mode"})).await;
+        recording_daemon(serde_json::json!({"waiting": "feedback.mode"})).await;
     let mut client = Client::connect(&path).await.unwrap();
 
     let error = calls::set_setting(&mut client, "feedback.mode", serde_json::json!("none"))
