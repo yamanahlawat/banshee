@@ -147,7 +147,7 @@ fn refusal_of(status: isize) -> Option<Refusal> {
 /// Reads the grant into the state, so a move reaches every client.
 #[cfg(target_os = "macos")]
 pub fn read_microphone(state: &DaemonState) -> Option<Refusal> {
-    let refusal = microphone_access();
+    let refusal = state.microphone_access();
     state.set_microphone_refusal(refusal);
     refusal
 }
@@ -261,12 +261,12 @@ pub fn open_pane(id: &str) -> Result<(), BansheeError> {
 
 #[cfg(target_os = "macos")]
 pub fn blockers(state: &DaemonState) -> Vec<Blocker> {
-    grant_blockers(accessibility_granted(), read_microphone(state))
+    grant_blockers(state.accessibility_granted(), read_microphone(state))
 }
 
 #[cfg(target_os = "macos")]
 pub fn blockers_as_read(state: &DaemonState) -> Vec<Blocker> {
-    grant_blockers(accessibility_granted(), state.microphone_refusal())
+    grant_blockers(state.accessibility_granted(), state.microphone_refusal())
 }
 
 // Nothing here is a grant read into the state, so a read writes nothing.
@@ -307,9 +307,14 @@ fn blocker(grant: &Grant) -> Blocker {
     }
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn blockers(state: &DaemonState) -> Vec<Blocker> {
+    state.typer_blockers()
+}
+
 // X11 types through enigo directly, so only a Wayland session needs a typer.
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn blockers(_: &DaemonState) -> Vec<Blocker> {
+pub fn live_typer_blockers() -> Vec<Blocker> {
     let path = crate::connect::resolved_path();
     blockers_for(
         crate::dictation::is_wayland(),

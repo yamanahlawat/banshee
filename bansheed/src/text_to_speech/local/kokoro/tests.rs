@@ -3,7 +3,7 @@ use super::*;
 /// A second installed voice, whichever this machine holds. Naming one would fix
 /// the test to a file `banshee setup` does not fetch.
 fn another_voice_than(loaded: &str) -> String {
-    let models = crate::models::download::models_dir().expect("a home directory");
+    let models = crate::test_support::tts_models();
     crate::models::installed_voices_in(&models)
         .into_iter()
         .find(|id| id != loaded)
@@ -21,13 +21,13 @@ fn another_voice_than(loaded: &str) -> String {
 /// The engine, or the reason it could not load. Every caller is `#[ignore]`d,
 /// so a machine that runs one wants the failure.
 fn engine_for(voice: &str) -> KokoroEngine {
-    let models = crate::models::download::models_dir().expect("a home directory");
-    KokoroEngine::new(&models, voice)
+    let models = crate::test_support::tts_models();
+    KokoroEngine::new(&models, voice, None)
         .unwrap_or_else(|error| panic!("run `banshee setup` first: {voice} did not load: {error}"))
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and two voices: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and two voices in BANSHEE_TTS_MODELS"]
 fn a_voice_swap_changes_the_style_and_swaps_back() {
     let mut engine = engine_for("af_sky");
     let other = another_voice_than("af_sky");
@@ -40,7 +40,7 @@ fn a_voice_swap_changes_the_style_and_swaps_back() {
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and voices: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and voices in BANSHEE_TTS_MODELS"]
 fn an_uninstalled_voice_is_refused_and_leaves_the_engine_speaking() {
     let mut engine = engine_for("af_sky");
     let before = engine.style_fingerprint();
@@ -53,7 +53,7 @@ fn an_uninstalled_voice_is_refused_and_leaves_the_engine_speaking() {
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and two voices: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and two voices in BANSHEE_TTS_MODELS"]
 fn an_ordinary_utterance_returns_the_engine_to_the_configured_voice() {
     let mut engine = engine_for("af_sky");
     let other = another_voice_than("af_sky");
@@ -69,10 +69,10 @@ fn an_ordinary_utterance_returns_the_engine_to_the_configured_voice() {
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and voices: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and voices in BANSHEE_TTS_MODELS"]
 fn a_voice_outside_the_installed_set_is_refused_without_naming_a_path() {
     let mut engine = engine_for("af_sky");
-    let models = banshee_common::utils::models_path().expect("a home directory");
+    let models = crate::test_support::tts_models();
     let error = engine
         .set_voice("../../../../etc/hosts")
         .unwrap_err()
@@ -105,7 +105,7 @@ fn an_utterance_that_names_no_voice_takes_the_configured_one() {
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and voices: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and voices in BANSHEE_TTS_MODELS"]
 fn ensure_voice_on_the_loaded_voice_reads_nothing() {
     let mut engine = engine_for("af_sky");
     let before = engine.voice_ptr();
@@ -199,9 +199,8 @@ fn g2p_output_maps_into_vocab() {
     assert!(ids.len() * 2 >= phonemes.chars().count());
 }
 
-// Needs the real model on disk: cargo test kokoro_synthesizes -- --ignored
 #[test]
-#[ignore]
+#[ignore = "needs the Kokoro model and af_sky in BANSHEE_TTS_MODELS"]
 fn kokoro_synthesizes_audible_speech() {
     let mut engine = engine_for("af_sky");
     let samples = engine.synthesize("Kokoro is alive.").unwrap();

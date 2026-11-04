@@ -60,6 +60,7 @@ fn companion_resident(models: &Path) -> (LocalBackend, Asked) {
     let asked = Asked::default();
     let backend = LocalBackend {
         models: models.to_path_buf(),
+        oov_log: None,
         output: Arc::new(Output::silent()),
         faults: ignored_faults(),
         resident: RwLock::new(Resident {
@@ -355,9 +356,9 @@ fn a_per_request_voice_that_will_not_load_reports_a_fault() {
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and a voice: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and a voice in BANSHEE_TTS_MODELS"]
 fn a_per_request_kokoro_voice_plays_beside_the_companion() {
-    let models = crate::models::download::models_dir().expect("a home directory");
+    let models = crate::test_support::tts_models();
     let voice = crate::models::installed_voices_in(&models)
         .into_iter()
         .next()

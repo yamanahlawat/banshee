@@ -55,7 +55,11 @@ fn missing_file(dir: &std::path::Path) -> Option<String> {
 }
 
 pub fn engine() -> Result<KokoroEngine, BansheeError> {
-    KokoroEngine::new(&crate::models::download::models_dir()?, VOICE)
+    KokoroEngine::new(
+        &crate::models::download::models_dir()?,
+        VOICE,
+        banshee_common::utils::oov_log_path(),
+    )
 }
 
 pub fn run_facts() -> String {

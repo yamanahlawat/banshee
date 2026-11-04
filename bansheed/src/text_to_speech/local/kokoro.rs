@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use banshee_common::{KokoroTTSConfig, error::BansheeError, utils::oov_log_path};
+use banshee_common::{KokoroTTSConfig, error::BansheeError};
 use misaki_rs::fallback::FallbackError;
 use misaki_rs::lexicon::PhonemeEntry;
 use misaki_rs::{Fallback, G2P, Language, MToken};
@@ -221,10 +221,11 @@ pub struct KokoroEngine {
     voice: Vec<f32>,
     loaded_voice: String,
     logged_oov: HashSet<String>,
+    oov_log: Option<PathBuf>,
 }
 
 impl KokoroEngine {
-    pub fn new(models: &Path, voice: &str) -> Result<Self, BansheeError> {
+    pub fn new(models: &Path, voice: &str, oov_log: Option<PathBuf>) -> Result<Self, BansheeError> {
         let kokoro_config = KokoroTTSConfig::new(voice);
         let threads = crate::models::thread_count();
         let model_path = models.join(&kokoro_config.model_name);
@@ -249,6 +250,7 @@ impl KokoroEngine {
             voice: style,
             loaded_voice: voice.to_string(),
             logged_oov: HashSet::new(),
+            oov_log,
         })
     }
 
@@ -306,8 +308,11 @@ impl KokoroEngine {
     // Log words still spelled out as table candidates; never changes audio.
     fn note_letter_spelled(&mut self, tokens: &[MToken]) {
         for tk in tokens {
-            if is_letter_spelled(tk) && self.logged_oov.insert(tk.text.to_lowercase()) {
-                append_oov(&tk.text);
+            if is_letter_spelled(tk)
+                && self.logged_oov.insert(tk.text.to_lowercase())
+                && let Some(path) = &self.oov_log
+            {
+                append_oov(path, &tk.text);
             }
         }
     }
@@ -476,10 +481,7 @@ pub(crate) fn is_letter_spelled(tk: &MToken) -> bool {
 }
 
 // Dedup is per run, so a word can repeat across restarts; sort -u at read time
-fn append_oov(word: &str) {
-    let Some(path) = oov_log_path() else {
-        return;
-    };
+fn append_oov(path: &Path, word: &str) {
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
         let _ = writeln!(f, "{word}"); // logging must never break playback

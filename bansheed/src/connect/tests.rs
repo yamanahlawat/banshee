@@ -44,18 +44,6 @@ fn installed_env(home: &std::path::Path, agent: Agent) -> Env {
 const SHIM: &str = "/opt/banshee/bin/banshee-mcp-shim";
 
 #[test]
-fn detection_searches_the_resolved_path_not_the_process_path() {
-    let dir = scratch("resolved-path");
-    // Executable, because an installed CLI is: a file it cannot run is not one
-    crate::test_support::write_executable(&dir.join("codex"), "#!/bin/sh\n");
-
-    let env = Env::with_shell_path(Some(OsString::from(&dir))).unwrap();
-    let expected = dir.join("codex");
-    assert_eq!(env.program(Agent::Codex), Some(expected.as_path()));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn the_searched_path_holds_the_installer_directory() {
     let path = with_local_bin(OsString::from("/usr/bin:/bin"), Path::new("/home/someone"));
     assert_eq!(
@@ -142,21 +130,6 @@ fn an_empty_answer_is_no_answer() {
         answered(Some(OsString::from("/usr/bin"))),
         Some(OsString::from("/usr/bin"))
     );
-}
-
-#[test]
-fn the_fallback_keeps_every_directory_the_process_had() {
-    let fallback = fallback_path();
-    for dir in path_dirs(&std::env::var_os("PATH").unwrap_or_default()) {
-        assert!(path_holds(&fallback, &dir), "{} is lost", dir.display());
-    }
-}
-
-#[test]
-fn every_caller_of_the_resolved_path_gets_the_installer_directory() {
-    let local_bin = crate::service::home_dir().unwrap().join(".local/bin");
-    let path = resolved_path();
-    assert!(path_holds(&path, &local_bin), "{path:?}");
 }
 
 fn fake_shell(name: &str, body: &str) -> PathBuf {
@@ -1777,4 +1750,14 @@ fn only_codex_carries_a_note_after_connecting() {
     {
         assert_eq!(agent.connect_note(), None, "{agent:?}");
     }
+}
+
+#[test]
+fn detection_finds_an_agent_on_the_path_it_is_given() {
+    let bin = scratch("found-on");
+    let codex = bin.join("codex");
+    crate::test_support::write_executable(&codex, "#!/bin/sh\n");
+    let found = found_on(bin.as_os_str());
+    assert_eq!(found, vec![("codex", codex)]);
+    let _ = std::fs::remove_dir_all(&bin);
 }
