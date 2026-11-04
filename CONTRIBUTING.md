@@ -56,10 +56,11 @@ cargo build --release --workspace --exclude banshee-app
 - The VAD tests read the committed `bansheed/tests/data/silero_vad.onnx`, so
   plain `cargo test` needs no setup.
 - The Kokoro tests need the model and two voices, which are too large for CI, so
-  they are `#[ignore]`d. Run them on a machine that has them:
+  they are `#[ignore]`d. Run them on a machine that has them, naming the
+  folder that holds them:
 
 ```bash
-cargo test kokoro -- --ignored
+BANSHEE_TTS_MODELS=$HOME/.banshee/models cargo test kokoro -- --ignored
 ```
 
 - The Pocket tests need the companion voice's files, about 400 MB, so they are
@@ -67,7 +68,7 @@ cargo test kokoro -- --ignored
   with `banshee setup`, then run:
 
 ```bash
-cargo test pocket -- --ignored
+BANSHEE_TTS_MODELS=$HOME/.banshee/models cargo test pocket -- --ignored
 ```
 
 - Before opening a PR, make sure both of these pass:

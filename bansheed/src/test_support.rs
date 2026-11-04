@@ -10,6 +10,12 @@ use crate::text_to_speech::{
     ActiveUtterance, BuildSpeaker, Faults, Selection, Speaker, SpeechPlayer, TtsBackend,
 };
 
+pub fn tts_models() -> PathBuf {
+    std::env::var_os("BANSHEE_TTS_MODELS")
+        .map(PathBuf::from)
+        .expect("set BANSHEE_TTS_MODELS to a folder holding the Kokoro and companion files")
+}
+
 pub fn silero() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/silero_vad.onnx")
 }
@@ -83,9 +89,9 @@ pub fn remote_stt_default() -> crate::config::STTConfig {
     }
 }
 
-/// A models folder, a config path and a key file path inside a fresh temp
-/// directory, and VoiceOver off, so no test reads or writes the machine that
-/// runs it.
+/// A models folder, a config path, a key file path and a licence record inside
+/// a fresh temp directory, every grant given, no typer missing, and VoiceOver
+/// off, so no test reads or writes the machine that runs it.
 pub fn scratch_machine(prefix: &str) -> crate::state::Machine {
     let dir = unique_scratch(prefix);
     let models = dir.join("models");
@@ -94,7 +100,16 @@ pub fn scratch_machine(prefix: &str) -> crate::state::Machine {
         models,
         config: dir.join("config.toml"),
         credentials: dir.join("credentials.toml"),
+        licences: dir.join("accepted-licences"),
         voiceover: || false,
+        #[cfg(target_os = "macos")]
+        accessibility: || true,
+        #[cfg(target_os = "macos")]
+        microphone: || None,
+        #[cfg(target_os = "macos")]
+        key_presses: || crate::permissions::Access::Granted,
+        #[cfg(all(unix, not(target_os = "macos")))]
+        typer_blockers: Vec::new,
     }
 }
 
@@ -195,6 +210,7 @@ pub fn on_demand(
         load,
         Arc::new(Output::silent()),
         faults,
+        None,
     )
 }
 

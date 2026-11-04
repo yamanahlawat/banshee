@@ -10,7 +10,6 @@ pub struct Accepted {
 }
 
 impl Accepted {
-    #[cfg(test)]
     pub fn at(path: PathBuf) -> Self {
         Self::read(Some(path))
     }

@@ -1267,6 +1267,36 @@ fn status_carries_the_listening_models() {
 }
 
 #[test]
+fn status_reads_the_licence_record_the_machine_names() {
+    let mut config = crate::config::Config::default();
+    config.stt.model = "canary-1b".to_string();
+    let state = crate::test_support::daemon_state_speaking(
+        config,
+        crate::text_to_speech::Speaker::Fallback,
+        std::sync::mpsc::channel().0,
+    );
+    let canary = |status: serde_json::Value| {
+        status["stt_models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|one| one["id"] == "canary-1b")
+            .unwrap()["accept_command"]
+            .clone()
+    };
+    assert_eq!(
+        canary(status_payload(&state)),
+        "banshee setup --model canary-1b --accept-licence"
+    );
+
+    crate::models::licences::Accepted::at(state.licences().to_path_buf())
+        .add("CC-BY-NC-4.0")
+        .unwrap();
+
+    assert_eq!(canary(status_payload(&state)), serde_json::Value::Null);
+}
+
+#[test]
 fn stt_model_is_the_id_of_the_model_in_use() {
     let state = test_state(std::sync::mpsc::channel().0);
     assert_eq!(

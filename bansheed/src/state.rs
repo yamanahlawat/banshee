@@ -42,13 +42,22 @@ const ARM_PLAYED: u8 = 7;
 // launchd's `SuccessfulExit=false` and systemd's `Restart=on-failure`.
 const RESTART_EXIT: u8 = 75;
 
-/// What the daemon reads from the machine it runs on: its files, and whether
-/// VoiceOver is on. Handed in, so a test decides.
+/// What the daemon reads from the machine it runs on: its files, its grants,
+/// and whether VoiceOver is on. Handed in, so a test decides.
 pub struct Machine {
     pub models: std::path::PathBuf,
     pub config: std::path::PathBuf,
     pub credentials: std::path::PathBuf,
+    pub licences: std::path::PathBuf,
     pub voiceover: fn() -> bool,
+    #[cfg(target_os = "macos")]
+    pub accessibility: fn() -> bool,
+    #[cfg(target_os = "macos")]
+    pub microphone: fn() -> Option<Refusal>,
+    #[cfg(target_os = "macos")]
+    pub key_presses: fn() -> crate::permissions::Access,
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub typer_blockers: fn() -> Vec<banshee_common::Blocker>,
 }
 
 /// A stopped dictation's place in the ring. Dropped, it gives the place back,
@@ -1180,6 +1189,30 @@ impl DaemonState {
 
     pub fn voiceover_on(&self) -> bool {
         (self.machine.voiceover)()
+    }
+
+    pub fn licences(&self) -> &std::path::Path {
+        &self.machine.licences
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn accessibility_granted(&self) -> bool {
+        (self.machine.accessibility)()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn microphone_access(&self) -> Option<Refusal> {
+        (self.machine.microphone)()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn key_presses(&self) -> crate::permissions::Access {
+        (self.machine.key_presses)()
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn typer_blockers(&self) -> Vec<banshee_common::Blocker> {
+        (self.machine.typer_blockers)()
     }
 
     pub fn version(&self) -> &'static str {

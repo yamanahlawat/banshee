@@ -20,7 +20,11 @@ fn ranked(state: &DaemonState, pipeline: &Pipeline, grants: Vec<Blocker>) -> Vec
         models::stt_model(&state.config()).map(|model| model.file),
         state.vad_model(),
     );
-    assemble(grants, models::blockers(&names), pipeline)
+    assemble(
+        grants,
+        models::blockers_in(state.models_dir(), &names),
+        pipeline,
+    )
 }
 
 // A blocker says the daemon does not work, so this answers for the listener
@@ -108,7 +112,7 @@ fn assemble(
 
 #[cfg(test)]
 mod tests {
-    use super::{assemble, must_be_on_disk};
+    use super::{assemble, blockers, must_be_on_disk};
     use banshee_common::{Blocker, BlockerKind};
 
     use crate::state::{Pipeline, RecordingError};
@@ -385,6 +389,29 @@ mod tests {
             kinds,
             vec![BlockerKind::Permission, BlockerKind::Model],
             "one click should come before a gigabyte download"
+        );
+    }
+
+    #[test]
+    fn a_listening_model_in_the_machines_folder_is_no_blocker() {
+        let (commands, _drain) = std::sync::mpsc::channel();
+        let state = crate::test_support::daemon_state(commands);
+        let listening = state.stt_model().map(|model| model.file);
+        let asked = crate::models::stt_model(&state.config()).map(|model| model.file);
+        let names: Vec<&str> = listening
+            .into_iter()
+            .chain(asked)
+            .chain([state.vad_model()])
+            .collect();
+        crate::test_support::write_empty(state.models_dir(), &names);
+
+        let found = blockers(&state, &state.pipeline());
+
+        assert!(
+            found
+                .iter()
+                .all(|blocker| blocker.kind != BlockerKind::Model),
+            "{found:?}"
         );
     }
 }

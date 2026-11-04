@@ -131,6 +131,9 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
     std::thread::spawn(text_to_speech::pronunciation::warm);
     let credentials = crate::credentials::Credentials::path()?;
     let models_dir = models::download::models_dir()?;
+    let licences = banshee_common::utils::accepted_licences_path().ok_or_else(|| {
+        BansheeError::Other("Could not find the accepted licences record".to_string())
+    })?;
     let speech = text_to_speech::select_backend(
         &config.tts,
         &models_dir,
@@ -166,7 +169,16 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
             models: models_dir,
             config: Config::path()?,
             credentials,
+            licences,
             voiceover: crate::settings::voiceover_on,
+            #[cfg(target_os = "macos")]
+            accessibility: permissions::accessibility_granted,
+            #[cfg(target_os = "macos")]
+            microphone: permissions::microphone_access,
+            #[cfg(target_os = "macos")]
+            key_presses: permissions::key_presses_reach_us,
+            #[cfg(all(unix, not(target_os = "macos")))]
+            typer_blockers: permissions::live_typer_blockers,
         },
     ));
     tokio::spawn(crate::level::sample(Arc::clone(&daemon_state)));

@@ -59,9 +59,7 @@ const SAMPLE_TOKENS: [&[u32]; 8] = [
 ];
 
 fn pocket_dir() -> PathBuf {
-    crate::models::download::models_dir()
-        .expect("a home directory")
-        .join(POCKET_DIR)
+    crate::test_support::tts_models().join(POCKET_DIR)
 }
 
 /// The engine, or the reason it could not load. Every caller is `#[ignore]`d,
@@ -289,7 +287,7 @@ fn a_voice_other_than_the_companion_is_refused() {
 }
 
 #[test]
-#[ignore = "needs the Pocket files"]
+#[ignore = "needs the Pocket files in BANSHEE_TTS_MODELS"]
 fn the_companion_speaks_a_line() {
     let engine = engine();
     let line = "Banshee speaks with the companion voice.";
@@ -320,7 +318,7 @@ fn the_companion_speaks_a_line() {
 }
 
 #[test]
-#[ignore = "needs the Pocket files"]
+#[ignore = "needs the Pocket files in BANSHEE_TTS_MODELS"]
 fn a_stop_ends_at_the_next_chunk() {
     let engine = engine();
     let at_load = lock(&engine).runs();
@@ -348,7 +346,7 @@ fn a_stop_ends_at_the_next_chunk() {
 }
 
 #[test]
-#[ignore = "needs the Pocket files"]
+#[ignore = "needs the Pocket files in BANSHEE_TTS_MODELS"]
 fn tokens_match_the_onig_tokenizer() {
     let tokenizer = Tokenizer::from_file(pocket_dir().join("tokenizer.json"))
         .unwrap_or_else(|error| panic!("tokenizer.json did not load: {error}"));
@@ -370,7 +368,7 @@ fn splitter() -> Splitter {
 /// The expected chunks are the reference's `_split_into_best_sentences`, run
 /// with sentencepiece on the bundle's `tokenizer.model`.
 #[test]
-#[ignore = "needs the Pocket files"]
+#[ignore = "needs the Pocket files in BANSHEE_TTS_MODELS"]
 fn text_splits_the_way_the_reference_does() {
     let splitter = splitter();
     assert_eq!(splitter.limit, 50);
@@ -410,7 +408,7 @@ fn text_splits_the_way_the_reference_does() {
 }
 
 #[test]
-#[ignore = "needs the Pocket files"]
+#[ignore = "needs the Pocket files in BANSHEE_TTS_MODELS"]
 fn a_run_with_no_punctuation_splits_between_words_within_the_limit() {
     let splitter = splitter();
     let run = vec!["then the build ran again"; 40].join(" and ");
@@ -434,7 +432,7 @@ fn a_run_with_no_punctuation_splits_between_words_within_the_limit() {
 }
 
 #[test]
-#[ignore = "needs the Pocket files"]
+#[ignore = "needs the Pocket files in BANSHEE_TTS_MODELS"]
 fn a_run_on_reply_plays_to_the_end() {
     let engine = engine();
     let run = vec!["then the build ran again"; 40].join(" and ");

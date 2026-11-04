@@ -63,6 +63,7 @@ fn load_engine(
     voice: &str,
     output: Arc<Output>,
     faults: Faults,
+    oov_log: Option<PathBuf>,
 ) -> Result<Box<dyn TtsBackend>, BansheeError> {
     check_files(models, voice)?;
     Ok(match Engine::of(voice) {
@@ -72,7 +73,7 @@ fn load_engine(
             faults,
         )),
         Engine::Kokoro => Box::new(KokoroBackend::new(
-            KokoroEngine::new(models, voice)?,
+            KokoroEngine::new(models, voice, oov_log)?,
             output,
             faults,
         )),
@@ -86,9 +87,17 @@ pub fn local_backend(
     output: Arc<Output>,
     faults: Faults,
 ) -> Result<Box<dyn TtsBackend>, BansheeError> {
-    let backend = load_engine(models, voice, Arc::clone(&output), faults.clone())?;
+    let oov_log = banshee_common::utils::oov_log_path();
+    let backend = load_engine(
+        models,
+        voice,
+        Arc::clone(&output),
+        faults.clone(),
+        oov_log.clone(),
+    )?;
     Ok(Box::new(LocalBackend {
         models: models.to_path_buf(),
+        oov_log,
         output,
         faults,
         resident: RwLock::new(Resident {
@@ -113,6 +122,7 @@ pub fn local_on_demand(
         move |voice: &str| local_backend(&loaded, voice, Arc::clone(&engine_output), loads.clone()),
         output,
         faults,
+        banshee_common::utils::oov_log_path(),
     )
 }
 
@@ -124,13 +134,14 @@ fn visit(
     faults: &Faults,
     text: &str,
     voice: &str,
+    oov_log: Option<PathBuf>,
 ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
     admit_request(models, voice)?;
     let (models, name) = (models.to_path_buf(), voice.to_string());
     let (output, loads) = (Arc::clone(output), faults.clone());
     Ok(start_once_loaded(
         voice,
-        move || load_engine(&models, &name, output, loads).map(Arc::from),
+        move || load_engine(&models, &name, output, loads, oov_log).map(Arc::from),
         text,
         Some(voice),
         faults.clone(),
@@ -146,6 +157,7 @@ struct Resident {
 /// `tts.voice` write, and loads for one utterance when a request names it.
 pub struct LocalBackend {
     models: PathBuf,
+    oov_log: Option<PathBuf>,
     output: Arc<Output>,
     faults: Faults,
     resident: RwLock<Resident>,
@@ -161,7 +173,14 @@ impl TtsBackend for LocalBackend {
         match voice {
             Some(requested) if Engine::of(requested) != resident.engine => {
                 drop(resident);
-                visit(&self.models, &self.output, &self.faults, text, requested)
+                visit(
+                    &self.models,
+                    &self.output,
+                    &self.faults,
+                    text,
+                    requested,
+                    self.oov_log.clone(),
+                )
             }
             _ => resident.backend.start(text, voice),
         }
@@ -180,6 +199,7 @@ impl TtsBackend for LocalBackend {
             &tts.voice,
             Arc::clone(&self.output),
             self.faults.clone(),
+            self.oov_log.clone(),
         ) {
             Ok(backend) => {
                 *lock_write(&self.resident) = Resident { engine, backend };
@@ -209,6 +229,7 @@ pub struct OnDemand {
     loaded: Slot,
     output: Arc<Output>,
     faults: Faults,
+    oov_log: Option<PathBuf>,
 }
 
 impl OnDemand {
@@ -223,6 +244,7 @@ impl OnDemand {
         load: impl Fn(&str) -> Result<Box<dyn TtsBackend>, BansheeError> + Send + Sync + 'static,
         output: Arc<Output>,
         faults: Faults,
+        oov_log: Option<PathBuf>,
     ) -> Self {
         Self {
             models: models.to_path_buf(),
@@ -231,6 +253,7 @@ impl OnDemand {
             loaded: Arc::default(),
             output,
             faults,
+            oov_log,
         }
     }
 
@@ -250,8 +273,15 @@ impl OnDemand {
         }
         let configured = lock(&self.voice).clone();
         if let Some(requested) = voice.filter(|requested| *requested != configured) {
-            return visit(&self.models, &self.output, &self.faults, text, requested)
-                .map(Route::Started);
+            return visit(
+                &self.models,
+                &self.output,
+                &self.faults,
+                text,
+                requested,
+                self.oov_log.clone(),
+            )
+            .map(Route::Started);
         }
         check_files(&self.models, &configured)?;
         Ok(Route::Load(configured))

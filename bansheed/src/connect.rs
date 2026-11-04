@@ -961,12 +961,6 @@ impl Env {
         Env::with_path(refreshed_path())
     }
 
-    #[cfg(test)]
-    fn with_shell_path(shell_path: Option<OsString>) -> Result<Env, BansheeError> {
-        let path = answered(shell_path).map(searchable);
-        Env::with_path(path.unwrap_or_else(fallback_path))
-    }
-
     /// Where detection found this agent's binary. `None` for an agent found by
     /// a directory, and for one that is not installed.
     pub fn program(&self, agent: Agent) -> Option<&Path> {
@@ -992,16 +986,7 @@ impl Env {
         let banshee = std::fs::canonicalize(&exe)?;
         let shim = banshee_common::utils::sibling(&exe, SHIM_NAME).ok();
         // Starting Claude Code makes it rewrite its own config, so detection never spawns an agent
-        let on_path = Agent::ALL
-            .iter()
-            .filter_map(|agent| match agent.signal() {
-                Signal::OnPath(binary) => Some(binary),
-                Signal::HomeDir(_) => None,
-            })
-            .filter_map(|binary| {
-                crate::status::resolve(binary, &path).map(|program| (binary, program))
-            })
-            .collect();
+        let on_path = found_on(&path);
         Ok(Env {
             home,
             claude_config_dir,
@@ -1012,6 +997,17 @@ impl Env {
             claude_shim: registered_claude_shim(&claude_global),
         })
     }
+}
+
+fn found_on(path: &OsStr) -> Vec<(&'static str, PathBuf)> {
+    Agent::ALL
+        .iter()
+        .filter_map(|agent| match agent.signal() {
+            Signal::OnPath(binary) => Some(binary),
+            Signal::HomeDir(_) => None,
+        })
+        .filter_map(|binary| crate::status::resolve(binary, path).map(|program| (binary, program)))
+        .collect()
 }
 
 /// Applies in order and names what is left when one fails.

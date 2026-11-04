@@ -287,7 +287,7 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "stt_models": listening_models(
             &daemon_state.config().stt.model,
             daemon_state.models_dir(),
-            &crate::models::licences::Accepted::in_banshee_dir(),
+            &crate::models::licences::Accepted::at(daemon_state.licences().to_path_buf()),
         ),
         // False where the compositor holds the binding, so the window does not
         // name a key the daemon never listens for.
@@ -314,7 +314,12 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         .as_object_mut()
         .expect("live_state answers an object")
         .extend(rest);
-    with_key_press_access(payload)
+    #[cfg(target_os = "macos")]
+    {
+        // Only the daemon can answer this, so only its reply carries it.
+        payload["key_press_access"] = daemon_state.key_presses().as_str().into();
+    }
+    payload
 }
 
 /// The listening models the window offers: the suggestions, then each one
@@ -400,18 +405,6 @@ fn remote_report(
             "key_present": key_present(crate::credentials::RemoteKey::Tts),
         },
     })
-}
-
-/// Only the daemon can answer this, so only its reply carries it.
-#[cfg(target_os = "macos")]
-fn with_key_press_access(mut payload: serde_json::Value) -> serde_json::Value {
-    payload["key_press_access"] = crate::permissions::key_presses_reach_us().as_str().into();
-    payload
-}
-
-#[cfg(not(target_os = "macos"))]
-fn with_key_press_access(payload: serde_json::Value) -> serde_json::Value {
-    payload
 }
 
 /// The `banshee.state_changed` params: what moves without a client touching it.
@@ -807,7 +800,7 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
         }
         {
             let mut report = |progress| state.report_download(progress);
-            let accepted = crate::models::licences::Accepted::in_banshee_dir();
+            let accepted = crate::models::licences::Accepted::at(state.licences().to_path_buf());
             if let Err(error) =
                 crate::models::download::download_all(&dir, &missing, &accepted, &mut report).await
             {

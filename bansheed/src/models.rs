@@ -200,13 +200,6 @@ pub fn installed_voices_in(dir: &std::path::Path) -> Vec<String> {
     voices_among(entries.filter_map(|entry| Some(entry.ok()?.file_name().to_str()?.to_string())))
 }
 
-pub fn blockers(names: &[&str]) -> Vec<Blocker> {
-    let Ok(dir) = download::models_dir() else {
-        return Vec::new();
-    };
-    blockers_in(&dir, names)
-}
-
 pub fn blockers_in(dir: &std::path::Path, names: &[&str]) -> Vec<Blocker> {
     missing_in(dir, names)
         .into_iter()
@@ -270,9 +263,11 @@ mod tests {
 
     const ABSENT: &str = "no-such-model-9f3a.bin";
 
-    #[test]
-    fn missing_reports_a_model_that_is_not_on_disk() {
-        assert_eq!(super::missing(&[ABSENT]), vec![ABSENT.to_string()]);
+    fn blockers_of_absent_model() -> Vec<banshee_common::Blocker> {
+        let empty = crate::test_support::unique_scratch("absent-model");
+        let blockers = super::blockers_in(&empty, &[ABSENT]);
+        let _ = std::fs::remove_dir_all(&empty);
+        blockers
     }
 
     #[test]
@@ -328,7 +323,7 @@ mod tests {
 
     #[test]
     fn a_blocker_names_the_model_a_client_has_to_fetch() {
-        let blockers = super::blockers(&[ABSENT]);
+        let blockers = blockers_of_absent_model();
         let [blocker] = &blockers[..] else {
             panic!("one absent model must raise exactly one blocker: {blockers:?}");
         };
@@ -376,7 +371,7 @@ mod tests {
     /// an implementation detail of the sentence beside it.
     #[test]
     fn a_missing_model_names_the_command_a_client_routes_on() {
-        let blockers = super::blockers(&["no-such-model-9f3a.bin"]);
+        let blockers = blockers_of_absent_model();
         assert_eq!(blockers[0].command.as_deref(), Some("banshee setup"));
     }
 
@@ -386,8 +381,7 @@ mod tests {
     /// whatever the blocker names.
     #[test]
     fn a_model_blocker_says_what_the_file_is() {
-        const ABSENT: &str = "no-such-model-9f3a.bin";
-        let blockers = super::blockers(&[ABSENT]);
+        let blockers = blockers_of_absent_model();
         assert_eq!(blockers[0].role, Some(super::download::role(ABSENT)));
     }
 

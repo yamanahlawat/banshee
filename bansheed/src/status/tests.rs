@@ -104,7 +104,9 @@ fn a_remote_listener_loading_names_the_detector_it_loads() {
 
 #[test]
 fn no_device_to_open_fails_with_the_fix_and_borrows_a_model_blockers() {
-    let models = crate::models::blockers(&["no-such-model-9f3a.bin"]);
+    let empty = crate::test_support::unique_scratch("no-device-models");
+    let models = crate::models::blockers_in(&empty, &["no-such-model-9f3a.bin"]);
+    let _ = std::fs::remove_dir_all(&empty);
     assert_eq!(
         microphone(serde_json::json!({ "audio_device": null }), &[]),
         [Line::Fail(
@@ -155,6 +157,47 @@ fn a_model_failure_always_leaves_a_model_blocker_to_borrow_the_fix_from() {
         .expect("a model failure leaves a model blocker");
 
     assert_eq!(super::open_fix(&blockers), model.fix);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_test_daemon_has_no_grant_blocker() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+    let blockers = crate::readiness::blockers(&state, &state.pipeline());
+
+    assert!(
+        blockers
+            .iter()
+            .all(|blocker| blocker.kind != banshee_common::BlockerKind::Permission),
+        "{blockers:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_status_read_stores_the_microphone_refusal() {
+    use crate::state::Refusal;
+    let state = crate::state::DaemonState::new(
+        std::sync::Arc::new(crate::config::Config::default()),
+        None,
+        crate::test_support::quiet_speech(),
+        crate::text_to_speech::Speaker::Fallback,
+        std::sync::mpsc::channel().0,
+        crate::audio::cues::Cues::silent(),
+        crate::state::Machine {
+            microphone: || Some(Refusal::Denied),
+            ..crate::test_support::scratch_machine("status-refused")
+        },
+    );
+
+    let blockers = crate::permissions::blockers(&state);
+
+    assert_eq!(state.microphone_refusal(), Some(Refusal::Denied));
+    assert!(
+        blockers.iter().any(|blocker| blocker.id == "microphone"),
+        "{blockers:?}"
+    );
 }
 
 #[test]
