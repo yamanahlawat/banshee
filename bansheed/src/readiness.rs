@@ -70,14 +70,19 @@ fn assemble(
                 RecordingError::Microphone(_) | RecordingError::MicrophoneRefused(_) => {
                     BlockerKind::Pipeline
                 }
-                RecordingError::Provider(_) => BlockerKind::Provider,
+                RecordingError::Provider(_) | RecordingError::UnbuiltListener(_) => {
+                    BlockerKind::Provider
+                }
                 RecordingError::KeyFile(_) => BlockerKind::KeyFile,
             },
             role: None,
-            remedy: Some(match error {
-                RecordingError::NoListeningModel(_) => banshee_common::Remedy::Download,
-                _ => banshee_common::Remedy::Restart,
-            }),
+            remedy: match error {
+                RecordingError::NoListeningModel(_) => Some(banshee_common::Remedy::Download),
+                // A key write clears either fault, and a restart reads the
+                // same key file
+                RecordingError::Provider(_) | RecordingError::KeyFile(_) => None,
+                _ => Some(banshee_common::Remedy::Restart),
+            },
             id: "recording_pipeline".to_string(),
             // Each carries the id above, so the name is what parts them for
             // a reader.
@@ -87,7 +92,9 @@ fn assemble(
                 RecordingError::Microphone(_) | RecordingError::MicrophoneRefused(_) => {
                     "The microphone is not working"
                 }
-                RecordingError::Provider(_) => "The remote listener is not reachable",
+                RecordingError::Provider(_) | RecordingError::UnbuiltListener(_) => {
+                    "The remote listener is not reachable"
+                }
                 RecordingError::KeyFile(_) => "The remote listener's key file is unreadable",
             }
             .to_string(),
@@ -280,7 +287,11 @@ mod tests {
             panic!("expected exactly one blocker, got {blockers:?}");
         };
         assert_eq!(blocker.kind, BlockerKind::Provider);
-        assert_eq!(blocker.command.as_deref(), Some("banshee start"));
+        assert_eq!(blocker.remedy, None, "a restart reads no key");
+        assert_eq!(
+            blocker.command.as_deref(),
+            Some("banshee config set stt.remote.api_key")
+        );
         assert!(
             blocker
                 .fix
@@ -288,6 +299,7 @@ mod tests {
             "the fix must name the key command: {}",
             blocker.fix
         );
+        assert!(!blocker.fix.contains("restart"), "{}", blocker.fix);
         assert!(!blocker.consequence.ends_with('.'));
     }
 
@@ -302,6 +314,7 @@ mod tests {
             panic!("expected exactly one blocker, got {blockers:?}");
         };
         assert_eq!(blocker.kind, BlockerKind::KeyFile);
+        assert_eq!(blocker.remedy, None, "a restart reads the same file");
         assert_eq!(blocker.name, "The remote listener's key file is unreadable");
         assert!(
             blocker.fix.contains("credentials.toml"),
@@ -314,6 +327,50 @@ mod tests {
             blocker.fix
         );
         assert!(!blocker.consequence.ends_with('.'));
+    }
+
+    /// The pipeline blocker a daemon whose microphone reads `mic` and whose
+    /// listener reads `listening` reports.
+    fn pipeline_blocker(mic: crate::state::Mic, listening: crate::state::Listening) -> Blocker {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        state.set_listening(listening);
+        state.set_mic(mic);
+        assemble(vec![], vec![], &state.pipeline())
+            .into_iter()
+            .find(|blocker| blocker.id == "recording_pipeline")
+            .expect("a dead pipeline reports a blocker")
+    }
+
+    #[test]
+    fn a_listener_that_would_not_build_at_start_asks_for_a_restart() {
+        let blocker = pipeline_blocker(
+            crate::state::Mic::Faulted(
+                RecordingError::Provider("plain http to a public host".to_string()).at_start(),
+            ),
+            crate::state::Listening::Remote,
+        );
+        assert_eq!(blocker.kind, BlockerKind::Provider);
+        assert_eq!(blocker.remedy, Some(banshee_common::Remedy::Restart));
+        assert_eq!(blocker.command.as_deref(), Some("banshee start"));
+        assert!(blocker.fix.contains("base_url"), "{}", blocker.fix);
+        assert!(blocker.fix.contains("banshee start"), "{}", blocker.fix);
+        assert!(!blocker.fix.contains("api_key"), "{}", blocker.fix);
+    }
+
+    #[test]
+    fn a_listener_with_no_key_names_the_key_command() {
+        let blocker = pipeline_blocker(
+            crate::state::Mic::Closed,
+            crate::state::Listening::Refused(RecordingError::Provider(
+                "no key for the remote listener".to_string(),
+            )),
+        );
+        assert_eq!(blocker.kind, BlockerKind::Provider);
+        assert_eq!(blocker.remedy, None, "a key write clears it");
+        assert_eq!(
+            blocker.command.as_deref(),
+            Some("banshee config set stt.remote.api_key")
+        );
     }
 
     #[test]

@@ -80,7 +80,7 @@ pub async fn set_setting(
         )
         .await
         .map_err(CommandError::from)?;
-    serde_json::from_value(result["restart_required"].clone()).map_err(shape_mismatch)
+    waiting_of(&result)
 }
 
 pub async fn list_devices(client: &mut Client) -> Result<Devices, CommandError> {
@@ -169,6 +169,10 @@ fn note_of(result: &Value) -> Option<String> {
     result["note"].as_str().map(String::from)
 }
 
+fn waiting_of(result: &Value) -> Result<Vec<String>, CommandError> {
+    serde_json::from_value(result["waiting"].clone()).map_err(shape_mismatch)
+}
+
 /// `limit` is forwarded when present and omitted entirely when absent: the
 /// daemon reads an absent `limit` as every row, and an explicit `0` as none.
 pub async fn history(client: &mut Client, limit: Option<u32>) -> Result<Vec<Value>, CommandError> {
@@ -216,5 +220,17 @@ mod tests {
     #[test]
     fn a_connect_reply_without_a_note_gives_none() {
         assert_eq!(note_of(&json!({"applied": 1})), None);
+    }
+
+    #[test]
+    fn a_write_answers_the_keys_the_daemon_names_as_waiting() {
+        assert_eq!(
+            super::waiting_of(&json!({"ok": true, "applied": [], "waiting": ["stt.model"]}))
+                .unwrap(),
+            ["stt.model"]
+        );
+        assert!(
+            super::waiting_of(&json!({"ok": true, "restart_required": ["stt.model"]})).is_err()
+        );
     }
 }

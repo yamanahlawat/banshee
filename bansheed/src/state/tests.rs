@@ -116,6 +116,7 @@ fn a_recording_error_names_the_same_command_its_sentence_does() {
         RecordingError::Model(String::new()),
         RecordingError::NoListeningModel("parakeet-unified-en-0.6b"),
         RecordingError::Provider(String::new()),
+        RecordingError::UnbuiltListener(String::new()),
     ] {
         let command = error.command().expect("every fault names a command");
         assert!(
@@ -149,6 +150,15 @@ fn dead() -> RecordingError {
 
 fn damaged() -> Listening {
     Listening::Failed(parakeet(), "the file is damaged".to_string())
+}
+
+#[test]
+fn a_refused_remote_listener_breaks_the_pipeline_with_its_reason() {
+    let error = RecordingError::Provider("no key".into());
+    assert_eq!(
+        pipeline(&Mic::Closed, &Listening::Refused(error.clone())),
+        Pipeline::Broken(error)
+    );
 }
 
 #[test]
@@ -258,7 +268,7 @@ fn the_model_reported_is_the_one_the_listener_serves_or_waits_for() {
     state.listening_model_loaded(Some(turbo()));
     assert_eq!(state.stt_model(), Some(turbo()));
 
-    state.await_listening_model(parakeet());
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
     assert_eq!(state.stt_model(), Some(parakeet()));
 
     state.listening_model_loaded(None);
@@ -269,7 +279,7 @@ fn the_model_reported_is_the_one_the_listener_serves_or_waits_for() {
 fn a_pipeline_waiting_for_its_listening_model_opens_once_the_model_loads() {
     let state = test_state();
     let waiting = Pipeline::Broken(RecordingError::NoListeningModel(parakeet().id));
-    state.await_listening_model(parakeet());
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
     assert_eq!(state.pipeline(), waiting);
     state.set_mic(Mic::Open);
     assert_eq!(
@@ -284,7 +294,7 @@ fn a_pipeline_waiting_for_its_listening_model_opens_once_the_model_loads() {
 #[test]
 fn a_model_that_loads_under_a_dead_microphone_leaves_the_microphone_fault() {
     let state = test_state();
-    state.await_listening_model(parakeet());
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
     state.set_mic(Mic::Faulted(dead()));
     state.listening_model_loaded(Some(parakeet()));
     assert_eq!(state.pipeline(), Pipeline::Broken(dead()));
@@ -299,7 +309,7 @@ fn a_model_that_loads_under_a_dead_microphone_leaves_the_microphone_fault() {
 #[test]
 fn a_failed_load_outlasts_a_microphone_fault() {
     let state = test_state();
-    state.await_listening_model(parakeet());
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
     state.set_mic(Mic::Faulted(dead()));
     state.listening_model_failed(parakeet(), "the file is damaged".to_string());
     assert_eq!(state.pipeline(), Pipeline::Broken(dead()));
@@ -313,7 +323,7 @@ fn a_failed_load_outlasts_a_microphone_fault() {
 #[test]
 fn a_failed_load_outlasts_the_microphone_opening_again() {
     let state = test_state();
-    state.await_listening_model(parakeet());
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
     state.listening_model_failed(parakeet(), "the file is damaged".to_string());
     let failed = Pipeline::Broken(RecordingError::Model("the file is damaged".to_string()));
     assert_eq!(state.pipeline(), failed);
@@ -332,7 +342,7 @@ fn a_failed_load_outlasts_the_microphone_opening_again() {
 #[test]
 fn a_model_that_loads_before_the_pipeline_stands_leaves_it_opening() {
     let state = crate::test_support::daemon_state_before_the_pipeline();
-    state.await_listening_model(parakeet());
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
     state.listening_model_loaded(Some(parakeet()));
     assert_eq!(
         state.pipeline(),
@@ -395,7 +405,7 @@ fn a_reload_on_demand_that_fails_leaves_the_model_to_the_next_use() {
 #[test]
 fn a_claimed_load_is_left_to_its_own_reload() {
     let state = test_state();
-    state.await_listening_model(parakeet());
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
     state.claim_listening_model(parakeet(), true);
 
     assert!(
@@ -409,7 +419,7 @@ fn a_claimed_load_is_left_to_its_own_reload() {
 #[test]
 fn a_claimed_load_answers_a_second_claim_as_serving_and_its_failure_is_a_fault() {
     let state = test_state();
-    state.await_listening_model(parakeet());
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
 
     let first = state.claim_listening_model(parakeet(), true);
     assert!(!first.serves(), "the first claim found nothing loading");
@@ -532,7 +542,7 @@ fn record_start_and_arming_are_refused_until_the_pipeline_is_open() {
 
         state.set_mic(mic);
         if let Some(error) = load_failure {
-            state.await_listening_model(parakeet());
+            state.set_listening(crate::state::Listening::Missing(parakeet()));
             state.listening_model_failed(parakeet(), error.to_string());
         }
         assert_eq!(
@@ -816,10 +826,10 @@ fn every_path_that_moves_the_mic_publishes_it() {
 fn the_voice_reported_is_the_one_the_daemon_loaded() {
     let state = test_state();
     assert_eq!(state.tts_voice(), None);
-    state.set_tts_voice("af_sky".to_string());
+    state.set_tts_voice(Some("af_sky".to_string()));
     assert_eq!(state.tts_voice().as_deref(), Some("af_sky"));
 
-    state.set_tts_voice("am_adam".to_string());
+    state.set_tts_voice(Some("am_adam".to_string()));
 
     assert_eq!(
         state.tts_voice().as_deref(),
@@ -1035,6 +1045,38 @@ fn a_voice_loaded_after_the_start_is_the_speaker_started() {
     );
 
     assert!(state.speaker_started());
+}
+
+#[test]
+fn a_voice_loaded_after_a_switch_to_a_server_names_no_server() {
+    use crate::text_to_speech::{Fault, drain_faults};
+
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    state
+        .speech()
+        .set_builder(Box::new(|_| crate::text_to_speech::Selection {
+            backend: crate::test_support::speaking_backend(Default::default()),
+            speaker: crate::text_to_speech::Speaker::Fallback,
+            fault: Some("no key for the remote speaker".to_string()),
+        }));
+    let tts = crate::config::TTSConfig {
+        provider: crate::config::Provider::Remote,
+        ..Default::default()
+    };
+    assert!(state.switch_speaker(&tts, false));
+    let (faults, receiver) = std::sync::mpsc::channel();
+    faults.send(Fault::Loaded).unwrap();
+    drop(faults);
+    drain_faults(
+        std::sync::Arc::clone(&state),
+        crate::audio::cues::Cues::recording().0,
+        receiver,
+    );
+
+    assert!(
+        !state.speaker_started(),
+        "the local voice that loaded is not the server's"
+    );
 }
 
 struct StopWaits {

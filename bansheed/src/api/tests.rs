@@ -1,4 +1,5 @@
 use super::*;
+use crate::speech_to_text::Route;
 use crate::state::RecordingMode;
 use crate::test_support::daemon_state as test_state;
 
@@ -244,6 +245,93 @@ async fn a_stalled_status_is_skipped_and_the_question_still_plays() {
             crate::test_support::STALLS,
             "Ready to ship?"
         ]
+    );
+}
+
+#[tokio::test]
+async fn a_question_sent_while_the_speaker_switches_plays_after_the_switch() {
+    let (state, _spoken) =
+        crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
+    let spoken_after = crate::test_support::SpokenLines::default();
+    let lines = spoken_after.clone();
+    let (build, building, gate) = crate::test_support::gated_builder(move |_| {
+        crate::test_support::speaking_selection(
+            lines.clone(),
+            crate::text_to_speech::Speaker::Fallback,
+        )
+    });
+    state.speech().set_builder(build);
+    let speech = Arc::clone(state.speech());
+    let switching = std::thread::spawn(move || {
+        speech.switch(&crate::config::TTSConfig::default(), false);
+    });
+    building
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the switch never began its build");
+    let question = state.speech().speak_and_hold("Ready to ship?").unwrap();
+
+    let asking = question_played(
+        &state,
+        question,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
+    );
+    tokio::pin!(asking);
+    let first = std::future::poll_fn(|cx| std::task::Poll::Ready(asking.as_mut().poll(cx))).await;
+    assert!(
+        first.is_pending(),
+        "answered {first:?} while the question waited for the switch"
+    );
+    gate.send(()).unwrap();
+    switching.join().unwrap();
+
+    assert_eq!(asking.await, Asked::Played);
+    assert_eq!(*spoken_after.lock().unwrap(), ["Ready to ship?"]);
+}
+
+/// The stall bound is 3 s, and the answer has to come within 1 s of the
+/// switch's end: the switch itself wakes the wait.
+#[tokio::test]
+async fn a_question_whose_new_voice_will_not_start_is_answered_at_the_switch() {
+    let (state, _spoken) =
+        crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
+    let (build, building, gate) =
+        crate::test_support::gated_builder(|_| crate::text_to_speech::Selection {
+            backend: Box::new(crate::test_support::Refusing),
+            speaker: crate::text_to_speech::Speaker::Fallback,
+            fault: None,
+        });
+    state.speech().set_builder(build);
+    let speech = Arc::clone(state.speech());
+    let switching = std::thread::spawn(move || {
+        speech.switch(&crate::config::TTSConfig::default(), false);
+    });
+    building
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the switch never began its build");
+    let question = state.speech().speak_and_hold("Ready to ship?").unwrap();
+
+    let asking = question_played(
+        &state,
+        question,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(3),
+    );
+    tokio::pin!(asking);
+    let first = std::future::poll_fn(|cx| std::task::Poll::Ready(asking.as_mut().poll(cx))).await;
+    assert!(
+        first.is_pending(),
+        "answered {first:?} while the question waited for the switch"
+    );
+    gate.send(()).unwrap();
+    switching.join().unwrap();
+    let switched = std::time::Instant::now();
+
+    assert_eq!(asking.await, Asked::Unspoken);
+    assert!(
+        switched.elapsed() < std::time::Duration::from_secs(1),
+        "answered {:?} after the switch",
+        switched.elapsed()
     );
 }
 
@@ -905,9 +993,9 @@ fn a_pushed_change_agrees_with_what_status_reports() {
 #[test]
 fn the_state_push_carries_the_blockers() {
     let state = test_state(std::sync::mpsc::channel().0);
-    state.await_listening_model(
+    state.set_listening(crate::state::Listening::Missing(
         banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap(),
-    );
+    ));
 
     let status = status_payload(&state);
     let live = live_state(&state);
@@ -1191,7 +1279,11 @@ fn stt_model_is_the_id_of_the_model_in_use() {
 fn a_remote_listener_reports_no_model_and_translates() {
     let mut config = crate::config::Config::default();
     config.stt.provider = crate::config::Provider::Remote;
-    let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
+    let state = crate::test_support::daemon_state_speaking(
+        config,
+        crate::text_to_speech::Speaker::Fallback,
+        std::sync::mpsc::channel().0,
+    );
     let status = status_payload(&state);
     assert_eq!(status["stt_model"], serde_json::Value::Null);
     assert_eq!(status["stt_translates"], true);
@@ -1199,7 +1291,12 @@ fn a_remote_listener_reports_no_model_and_translates() {
 
 #[test]
 fn status_says_nothing_leaves_the_machine_while_every_provider_is_local() {
-    let remote = remote_report(&crate::config::Config::default(), |_| false, true);
+    let remote = remote_report(
+        &Route::Local,
+        &crate::text_to_speech::SpeakerSpec::of(&crate::config::TTSConfig::default()),
+        |_| false,
+        true,
+    );
     for side in ["stt", "tts"] {
         assert_eq!(remote[side]["remote"], false);
         assert_eq!(remote[side]["host"], serde_json::Value::Null);
@@ -1216,7 +1313,12 @@ fn each_side_reports_its_own_key() {
         crate::credentials::RemoteKey::Stt,
         crate::credentials::RemoteKey::Tts,
     ] {
-        let report = remote_report(&crate::config::Config::default(), |side| side == held, true);
+        let report = remote_report(
+            &Route::Local,
+            &crate::text_to_speech::SpeakerSpec::of(&crate::config::TTSConfig::default()),
+            |side| side == held,
+            true,
+        );
         assert_eq!(
             report["stt"]["key_present"],
             held == crate::credentials::RemoteKey::Stt,
@@ -1255,7 +1357,7 @@ fn the_reply_says_which_speaker_started_and_not_which_voice_is_held() {
             speaker,
             std::sync::mpsc::channel().0,
         );
-        state.set_tts_voice("marin".to_string());
+        state.set_tts_voice(Some("marin".to_string()));
         let remote = &status_payload(&state)["remote"];
         assert_eq!(remote["tts"]["speaker_started"], started, "{remote}");
         assert_eq!(remote["tts"]["remote"], true);
@@ -1277,7 +1379,7 @@ async fn list_voices_names_no_current_voice_until_one_is_set_and_then_the_one_he
     assert!(result["current"].is_null());
     assert!(result["voices"].is_array(), "{result}");
 
-    state.set_tts_voice("marin".to_string());
+    state.set_tts_voice(Some("marin".to_string()));
 
     let JsonRpcResponse::Success { result, .. } =
         dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
@@ -1331,10 +1433,29 @@ fn status_names_the_host_a_remote_listener_sends_audio_to() {
     let mut config = crate::config::Config::default();
     config.stt.provider = crate::config::Provider::Remote;
     config.stt.remote.base_url = "https://api.groq.com/openai/v1".to_string();
-    let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
+    let state = crate::test_support::daemon_state_speaking(
+        config,
+        crate::text_to_speech::Speaker::Fallback,
+        std::sync::mpsc::channel().0,
+    );
     let remote = &status_payload(&state)["remote"];
     assert_eq!(remote["stt"]["remote"], true);
     assert_eq!(remote["stt"]["host"], "api.groq.com");
+}
+
+#[test]
+fn the_report_names_the_listener_in_force() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.install_listener(
+        Route::Remote {
+            base_url: "https://api.example.test/v1".into(),
+            model: "whisper-1".into(),
+        },
+        crate::state::Listening::Remote,
+    );
+    let status = status_payload(&state);
+    assert_eq!(status["remote"]["stt"]["remote"], true);
+    assert_eq!(status["remote"]["stt"]["host"], "api.example.test");
 }
 
 #[test]
@@ -2267,4 +2388,47 @@ async fn turn_ended_with_repeat_true_answers_pass() {
         panic!("expected success response");
     };
     assert_eq!(result["verdict"], "pass", "even on a silent turn");
+}
+
+#[test]
+fn the_report_names_the_speaker_in_force() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.speech().set_builder(crate::test_support::here(
+        &crate::test_support::SpokenLines::default(),
+        "alloy",
+    ));
+    let tts = crate::config::TTSConfig {
+        provider: crate::config::Provider::Remote,
+        remote: crate::config::RemoteTtsConfig {
+            base_url: "https://api.example.test/v1".to_string(),
+            voice: "alloy".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(state.switch_speaker(&tts, false));
+    let status = status_payload(&state);
+    assert_eq!(status["remote"]["tts"]["remote"], true);
+    assert_eq!(status["remote"]["tts"]["host"], "api.example.test");
+}
+
+#[tokio::test]
+async fn a_configure_reply_names_the_keys_still_waiting() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let reply = dispatch(
+        request(
+            BANSHEE_CONFIGURE,
+            Some(serde_json::json!({
+                "settings": {"stt.model": "whisper-large-v3-turbo"},
+                "persist": true
+            })),
+        ),
+        &state,
+    )
+    .await;
+    let JsonRpcResponse::Success { result, .. } = reply else {
+        panic!("a legal write succeeds")
+    };
+    assert_eq!(result["waiting"], serde_json::json!(["stt.model"]));
+    assert!(result.get("restart_required").is_none());
 }

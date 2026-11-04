@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { daemon, speechFacts, waitsOnARestart } from '../lib/daemon';
-  import { write } from '../lib/settings';
+  import { daemon, speechFacts } from '../lib/daemon';
+  import { defaultOf, optionsOf, rowOf, table, write } from '../lib/settings';
   import { previewVoice, type Voice, type Voices } from '../lib/tauri';
   import { claimTheRun, fetching, forgetTheAsk, runTheDownload } from '../lib/downloads';
   import {
@@ -23,24 +23,18 @@
   // The choice and its consequence are one reading, so the group names the
   // sentence its radiogroup is described by.
   const SPEAKER_NOTE = 'speaker-note';
-  const SPEAKING = [
-    { value: 'local', label: 'On this machine' },
-    { value: 'remote', label: 'A voice server' },
-  ];
-  const FORMATS = [
-    { value: 'wav', label: 'WAV' },
-    { value: 'pcm', label: 'PCM' },
-  ];
 
   $: tts = ($daemon.status?.config?.tts ?? {}) as Record<string, unknown>;
   // The config leads, so the mark moves to the voice a write just chose.
   $: current = String(tts.voice ?? voices.current ?? '');
-  $: provider = String(tts.provider ?? 'local');
+  $: provider = String(tts.provider ?? defaultOf($table, 'tts.provider'));
   $: remoteTable = (tts.remote ?? {}) as Record<string, unknown>;
-  $: format = String(remoteTable.response_format ?? 'wav');
+  $: format = String(
+    remoteTable.response_format ?? defaultOf($table, 'tts.remote.response_format'),
+  );
   // The daemon says which speaker is in force; `provider` above says only which
   // one was asked for.
-  $: speech = speechFacts($daemon, $waitsOnARestart, voices.voices);
+  $: speech = speechFacts($daemon, voices.voices);
   $: speakerNote = speechNote(speech);
 
   $: lastError = $daemon.live.last_speech_error;
@@ -60,8 +54,11 @@
   function writeRate(typed: string): Promise<boolean> | boolean {
     const rate = typed.trim();
     if (rate === '') return write('tts.remote.sample_rate', null);
-    // The bound is the config type's own: a NonZero<u32>.
-    if (!/^\d+$/.test(rate) || Number(rate) < 1 || Number(rate) > 4_294_967_295) {
+    const domain = rowOf($table, 'tts.remote.sample_rate')?.domain;
+    const outside =
+      domain?.kind === 'number' &&
+      (Number(rate) < domain.min || (domain.max !== null && Number(rate) > domain.max));
+    if (!/^\d+$/.test(rate) || outside) {
       announce('The sample rate is a whole number of hertz, as in 24000.');
       return false;
     }
@@ -93,14 +90,14 @@
   name="Speaking"
   label="Speaking"
   value={provider}
-  options={SPEAKING}
+  options={optionsOf($table, 'tts.provider')}
   note={speakerNote}
   noteId={SPEAKER_NOTE}
   alsoId={lastError ? SPEECH_FAILURE : undefined}
   change={(next) => write('tts.provider', next)}
 >
   {#if provider === 'remote'}
-    <SubRow name="server" pending={$waitsOnARestart.has('tts.remote.base_url')}>
+    <SubRow name="server" setting="tts.remote.base_url">
       <Field
         label="Server"
         value={String(remoteTable.base_url ?? '')}
@@ -109,7 +106,7 @@
       />
     </SubRow>
     <KeyRow setting="tts.remote.api_key" present={speech.keyPresent} />
-    <SubRow name="model" pending={$waitsOnARestart.has('tts.remote.model')}>
+    <SubRow name="model" setting="tts.remote.model">
       <Field
         label="Model"
         value={String(remoteTable.model ?? '')}
@@ -117,7 +114,7 @@
         commit={(next) => write('tts.remote.model', next)}
       />
     </SubRow>
-    <SubRow name="voice" pending={$waitsOnARestart.has('tts.remote.voice')}>
+    <SubRow name="voice" setting="tts.remote.voice">
       <Field
         label="Voice"
         value={String(remoteTable.voice ?? '')}
@@ -126,7 +123,7 @@
         commit={(next) => write('tts.remote.voice', next)}
       />
     </SubRow>
-    <SubRow name="tone" pending={$waitsOnARestart.has('tts.remote.instructions')}>
+    <SubRow name="tone" setting="tts.remote.instructions">
       <Field
         label="Tone"
         value={String(remoteTable.instructions ?? '')}
@@ -134,16 +131,16 @@
         commit={(next) => write('tts.remote.instructions', next)}
       />
     </SubRow>
-    <SubRow name="format" pending={$waitsOnARestart.has('tts.remote.response_format')}>
+    <SubRow name="format" setting="tts.remote.response_format">
       <Segmented
         label="Audio format"
         value={format}
-        options={FORMATS}
+        options={optionsOf($table, 'tts.remote.response_format')}
         change={(next) => write('tts.remote.response_format', next)}
       />
     </SubRow>
     {#if format === 'pcm'}
-      <SubRow name="rate" pending={$waitsOnARestart.has('tts.remote.sample_rate')}>
+      <SubRow name="rate" setting="tts.remote.sample_rate">
         <Field
           label="Sample rate"
           value={remoteTable.sample_rate == null ? '' : String(remoteTable.sample_rate)}
@@ -153,7 +150,7 @@
       </SubRow>
     {/if}
   {:else}
-    <SubRow name="voice" pending={$waitsOnARestart.has('tts.voice')}>
+    <SubRow name="voice" setting="tts.voice">
       <div class="voices" role="radiogroup" aria-label="Voice">
         {#each voices.voices as voice (voice.id)}
           {@const on = voice.id === current}

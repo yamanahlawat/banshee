@@ -3,9 +3,6 @@
   import type { LampForm, Word } from '../lib/daemon';
   export let word: Word;
   export let form: LampForm;
-  export let waiting = false;
-  export let restart: () => void;
-  export let restarting = false;
   /// What failed, in two words. A server's message never reaches this band:
   /// it would grow it to any width.
   export let failure: string | null = null;
@@ -19,11 +16,6 @@
   {#if failure}
     <button id={failureId} class="caps failed btn-underline" on:click={showFailure}>
       {failure}
-    </button>
-  {/if}
-  {#if waiting}
-    <button class="caps waiting btn-underline" on:click={restart} disabled={restarting}>
-      {restarting ? 'Restarting' : 'Restart to apply'}
     </button>
   {/if}
 </header>
@@ -47,23 +39,11 @@
     color: var(--ink);
   }
 
-  /* The window can do this, so it is the control and not a note about one. */
-  .waiting {
-    margin-left: auto;
-    color: var(--accent);
-  }
-
-  /* Takes the right edge when it is alone, and stands left of the restart when
-     both are up. */
   .failed {
     margin-left: auto;
     color: var(--accent);
     font-variation-settings:
       'wght' 700,
       'wdth' 100;
-  }
-
-  .failed + .waiting {
-    margin-left: 16px;
   }
 </style>

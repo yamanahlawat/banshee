@@ -3,6 +3,8 @@ pub mod remote;
 pub mod vad;
 mod vocabulary;
 
+use std::path::Path;
+
 use banshee_common::error::BansheeError;
 use banshee_common::listening::ListeningModel;
 
@@ -26,6 +28,30 @@ impl From<&STTConfig> for Speech {
         Self {
             translate: stt.translate,
         }
+    }
+}
+
+/// Where the listener sends what it hears. Two configs with one route need
+/// no new listener.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route {
+    Local,
+    Remote { base_url: String, model: String },
+}
+
+impl Route {
+    pub fn of(stt: &STTConfig) -> Route {
+        match stt.provider {
+            Provider::Local => Route::Local,
+            Provider::Remote => Route::Remote {
+                base_url: stt.remote.base_url.clone(),
+                model: stt.remote.model.clone(),
+            },
+        }
+    }
+
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Route::Remote { .. })
     }
 }
 
@@ -61,6 +87,15 @@ impl ModelFacts {
 pub trait Transcriber: Send {
     /// `audio` is mono `f32` at `SAMPLE_RATE`.
     fn transcribe(&mut self, audio: &[f32]) -> Result<String, BansheeError>;
+    /// `transcribe`, for a listener that sends: a notice on `stop` ends the
+    /// request, and nothing more of it leaves.
+    fn transcribe_until(
+        &mut self,
+        audio: &[f32],
+        _stop: &tokio::sync::Notify,
+    ) -> Result<String, BansheeError> {
+        self.transcribe(audio)
+    }
     /// Opens a stream for the audio that follows, abandoning any stream still
     /// open. False for a listener that does not stream. The stream gives live
     /// words only: the text kept is a `transcribe` of the whole recording.
@@ -100,13 +135,19 @@ pub trait Transcriber: Send {
     fn unload(&mut self) -> bool {
         false
     }
+    /// The audio leaves this machine.
+    fn sends_out(&self) -> bool {
+        false
+    }
 }
 
 /// A listener, and the listening model it waits for when that file is still
 /// to download. A waiting listener holds no model until a reload loads one.
+/// `refused` says why a remote listener cannot send yet.
 pub struct Listener {
     pub engine: Box<dyn Transcriber>,
     pub awaiting: Option<&'static ListeningModel>,
+    pub refused: Option<RecordingError>,
 }
 
 impl Listener {
@@ -114,65 +155,107 @@ impl Listener {
         Self {
             engine,
             awaiting: None,
+            refused: None,
         }
     }
 }
 
-pub fn select_transcriber(stt: &STTConfig) -> Result<Listener, RecordingError> {
+/// `credentials` is the key file a remote listener reads at each request.
+pub fn select_transcriber(stt: &STTConfig, credentials: &Path) -> Result<Listener, RecordingError> {
     match stt.provider {
         Provider::Local => select_local(
             stt,
             crate::models::download::models_dir()
                 .map_err(|e| RecordingError::Model(e.to_string()))?,
         ),
-        Provider::Remote => {
-            select_remote(stt, crate::credentials::Credentials::load()).map(Listener::ready)
-        }
+        Provider::Remote => select_remote(stt, credentials),
     }
+}
+
+/// The listener a running daemon switches to. A local one loads nothing until
+/// its next use, and `awaiting` names its model only when the file is absent.
+pub fn select_on_demand(stt: &STTConfig, credentials: &Path) -> Result<Listener, RecordingError> {
+    match stt.provider {
+        Provider::Local => select_local_on_demand(
+            stt,
+            crate::models::download::models_dir()
+                .map_err(|e| RecordingError::Model(e.to_string()))?,
+        ),
+        Provider::Remote => select_remote(stt, credentials),
+    }
+}
+
+/// The catalogue model `stt` names, or the fault a listener reports for a
+/// name the catalogue does not hold.
+pub fn listening_model_of(
+    stt: &STTConfig,
+) -> Result<&'static banshee_common::listening::ListeningModel, RecordingError> {
+    stt.listening_model()
+        .ok_or_else(|| RecordingError::Model(format!("'{}' is not a listening model", stt.model)))
+}
+
+fn select_local_on_demand(
+    stt: &STTConfig,
+    models_dir: std::path::PathBuf,
+) -> Result<Listener, RecordingError> {
+    let model = listening_model_of(stt)?;
+    let here = models_dir.join(model.file).exists();
+    Ok(Listener {
+        engine: Box::new(TranscribeEngine::awaiting(
+            models_dir,
+            model,
+            stt.into(),
+            &stt.vocabulary,
+        )),
+        awaiting: (!here).then_some(model),
+        refused: None,
+    })
 }
 
 fn select_local(
     stt: &STTConfig,
     models_dir: std::path::PathBuf,
 ) -> Result<Listener, RecordingError> {
-    let model = stt.listening_model().ok_or_else(|| {
-        RecordingError::Model(format!("'{}' is not a listening model", stt.model))
-    })?;
+    let model = listening_model_of(stt)?;
     if !models_dir.join(model.file).exists() {
-        return Ok(Listener {
-            engine: Box::new(TranscribeEngine::awaiting(
-                models_dir,
-                model,
-                stt.into(),
-                &stt.vocabulary,
-            )),
-            awaiting: Some(model),
-        });
+        return select_local_on_demand(stt, models_dir);
     }
     let engine = TranscribeEngine::new(models_dir, model, stt.into(), &stt.vocabulary)
         .map_err(|e| RecordingError::Model(e.to_string()))?;
     Ok(Listener::ready(Box::new(engine)))
 }
 
-fn select_remote(
-    stt: &STTConfig,
-    credentials: Result<crate::credentials::Credentials, BansheeError>,
-) -> Result<Box<dyn Transcriber>, RecordingError> {
-    let side = crate::credentials::RemoteKey::Stt;
-    let key = credentials
-        .map_err(|e| RecordingError::KeyFile(e.to_string()))?
-        .key(side)
-        .ok_or_else(|| RecordingError::Provider(side.no_key()))?
-        .to_string();
+/// Builds whether or not a key is on file: the key is read at each request,
+/// so a key written later is the one the next request sends.
+fn select_remote(stt: &STTConfig, credentials: &Path) -> Result<Listener, RecordingError> {
     log::info!("Listening through {}", stt.remote.host());
-    let engine = RemoteTranscriber::new(&stt.remote, key, &stt.vocabulary, stt.into())
-        .map_err(|e| RecordingError::Provider(e.to_string()))?;
-    Ok(Box::new(engine))
+    let engine = RemoteTranscriber::new(
+        &stt.remote,
+        credentials.to_path_buf(),
+        &stt.vocabulary,
+        stt.into(),
+    )
+    .map_err(|e| RecordingError::Provider(e.to_string()))?;
+    Ok(Listener {
+        refused: key_refusal(credentials),
+        ..Listener::ready(Box::new(engine))
+    })
+}
+
+/// Why a remote listener cannot send with the key file at `credentials`, or
+/// `None` when the file holds its key.
+pub fn key_refusal(credentials: &Path) -> Option<RecordingError> {
+    let side = crate::credentials::RemoteKey::Stt;
+    match crate::credentials::Credentials::key_at(credentials, side) {
+        Err(error) => Some(RecordingError::KeyFile(error.to_string())),
+        Ok(None) => Some(RecordingError::Provider(side.no_key())),
+        Ok(Some(_)) => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelFacts, RecordingError, select_remote};
+    use super::{ModelFacts, RecordingError};
 
     #[test]
     fn a_listening_model_not_on_disk_is_awaited_by_a_listener_that_holds_none() {
@@ -212,34 +295,26 @@ mod tests {
     }
 
     #[test]
-    fn a_key_file_that_does_not_parse_is_a_key_file_fault() {
-        let path = std::env::temp_dir().join(format!(
-            "banshee-select-transcriber-{}.toml",
-            std::process::id()
+    fn a_remote_listener_with_no_key_still_builds_and_says_why_it_refuses() {
+        let listener = super::select_remote(
+            &crate::test_support::remote_stt_default(),
+            &crate::test_support::key_file(""),
+        )
+        .expect("the pipeline stands without a key");
+        assert!(matches!(
+            &listener.refused,
+            Some(RecordingError::Provider(reason)) if reason.contains("stt.remote.api_key")
         ));
-        std::fs::write(&path, "[stt.remote]\napi_key = sk-live-SECRET123\n").unwrap();
-        let credentials = crate::credentials::Credentials::read(&path);
-        let _ = std::fs::remove_file(&path);
-
-        let stt = crate::config::STTConfig::default();
-        let fault = select_remote(&stt, credentials)
-            .err()
-            .expect("a file that does not parse holds no key");
-        assert!(
-            matches!(&fault, RecordingError::KeyFile(reason) if reason.contains("does not parse")),
-            "{fault}"
-        );
     }
 
     #[test]
-    fn a_key_nobody_set_is_a_provider_fault() {
-        let stt = crate::config::STTConfig::default();
-        let fault = select_remote(&stt, Ok(crate::credentials::Credentials::default()))
-            .err()
-            .expect("a remote listener without a key cannot start");
-        assert!(
-            matches!(&fault, RecordingError::Provider(reason) if reason.contains("stt.remote.api_key")),
-            "{fault}"
-        );
+    fn a_key_file_that_does_not_parse_is_a_key_file_refusal() {
+        let path = crate::test_support::key_file("[stt.remote]\napi_key = sk-live-SECRET123\n");
+        let listener = super::select_remote(&crate::test_support::remote_stt_default(), &path)
+            .expect("the pipeline stands");
+        assert!(matches!(
+            &listener.refused,
+            Some(RecordingError::KeyFile(reason)) if reason.contains("does not parse")
+        ));
     }
 }

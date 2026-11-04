@@ -39,7 +39,14 @@ import { agents } from './lib/agents';
 import { table as historyTable } from './lib/history';
 import { daemon, empty, reduceStatus, type Blocker } from './lib/daemon';
 import { forgetTheAsk } from './lib/downloads';
-import { announcement, forgetCopy, DICTATION_FAILURE, RESTART_SAYS } from './lib/copy';
+import {
+  announcement,
+  forgetCopy,
+  waitingSays,
+  DICTATION_FAILURE,
+  WAITING_SAYS,
+  WAITS_FOR_ITS_FILE,
+} from './lib/copy';
 import { forgetKeys } from './lib/keys';
 import App from './App.svelte';
 
@@ -239,20 +246,17 @@ it('marks a foot value the daemon has not taken', async () => {
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
-  // The daemon reports no bound key, so the foot names the configured one. The
-  // mark is the only thing that stops it reading as the key in force.
-  //
   // The class carries the dashed rule. jsdom resolves no scoped stylesheet, so
   // the class is the only part of the visual mark a test here can see.
   expect(screen.getByText('Right Command').classList.contains('pending')).toBe(true);
-  expect(screen.getByText('— set, and in effect when Banshee restarts')).toBeTruthy();
+  expect(screen.getByText(WAITING_SAYS)).toBeTruthy();
 });
 
 it('leaves a foot value unmarked when the daemon has taken it', async () => {
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
   expect(screen.getByText('Right Command').classList.contains('pending')).toBe(false);
-  expect(screen.queryByText('— set, and in effect when Banshee restarts')).toBeNull();
+  expect(screen.queryByText(WAITING_SAYS)).toBeNull();
 });
 
 it('marks the saving switch the daemon has not taken', async () => {
@@ -261,36 +265,17 @@ it('marks the saving switch the daemon has not taken', async () => {
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
   const swtch = screen.getByRole('button', {
-    name: /Stop saving.*in effect when Banshee restarts/,
+    name: /Stop saving.*could not use it yet/,
   });
   expect(swtch.classList.contains('pending')).toBe(true);
 });
 
-it('restarts from the header rather than naming a command', async () => {
+// Every setting applies at once, so a key that waits is one the daemon could
+// not use.
+it('offers no restart in the header for a key that waits', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, pending: ['audio.hotkey'] });
   render(App);
-
-  // `audio.hotkey` is never applied live, so the only way out is a new process.
-  // The window can do that, so the notice is the control.
-  const notice = await screen.findByRole('button', { name: 'Restart to apply' });
-  await fireEvent.click(notice);
-  expect(vi.mocked(restartDaemon)).toHaveBeenCalled();
-});
-
-it('asks for a restart in the header, which a panel does not cover', async () => {
-  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['audio.hotkey'] });
-  render(App);
-  await waitFor(() => expect(screen.getByText('Restart to apply')).toBeTruthy());
-
-  // The ledger scrolls away and a job takes the body; the header does neither.
-  await fireEvent.click(screen.getByRole('button', { name: /Hotkey/ }));
-  await waitFor(() => expect(panelHeading('Hotkey')).toBeTruthy());
-  expect(screen.getByText('Restart to apply')).toBeTruthy();
-});
-
-it('asks for no restart when the daemon has taken everything', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(WAITING_SAYS)).toBeTruthy());
   expect(screen.queryByText('Restart to apply')).toBeNull();
 });
 
@@ -414,7 +399,7 @@ it('marks the microphone cell for a pending stt.remote key', async () => {
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
   const cell = container.querySelector('#job-microphone') as HTMLElement;
-  await waitFor(() => expect(cell.textContent).toContain(RESTART_SAYS));
+  await waitFor(() => expect(cell.textContent).toContain(WAITING_SAYS));
 });
 
 it('names a remote listener the daemon cannot name', async () => {
@@ -441,9 +426,7 @@ it('names a remote listener the daemon cannot name', async () => {
   );
 });
 
-// The mark says the value is not the one coming, so the phrase beside it names
-// what is coming rather than repeating that a restart is owed.
-it('marks the value in force and says which way it is changing', async () => {
+it('marks the listener in force when the one asked for could not start', async () => {
   vi.mocked(status).mockResolvedValue({
     ...remote,
     remote: {
@@ -457,76 +440,7 @@ it('marks the value in force and says which way it is changing', async () => {
 
   const cell = container.querySelector('#job-microphone') as HTMLElement;
   expect(screen.getByText('On this machine').classList.contains('pending')).toBe(true);
-  expect(cell.textContent).toContain('changing to api.openai.com when Banshee restarts');
-});
-
-it('says the listening comes back to this machine while it waits', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...remote,
-    config: { ...remote.config, stt: { ...remote.config.stt, provider: 'local' } },
-    pending: ['stt.provider'],
-  });
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const cell = container.querySelector('#job-microphone') as HTMLElement;
-  expect(screen.getByText('api.openai.com').classList.contains('pending')).toBe(true);
-  expect(cell.textContent).toContain('changing to this machine when Banshee restarts');
-
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
-  await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toContain(
-      'Banshee sends what you say to api.openai.com until it restarts.',
-    ),
-  );
-});
-
-// The lead is otherwise the live device, which is still the truth about where
-// nothing goes yet.
-it('says a remote listener is coming while it waits on a restart', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...remote,
-    remote: {
-      stt: { remote: false, host: null, key_present: true },
-      tts: { remote: false, host: null, speaker_started: true, key_present: false },
-    },
-    pending: ['stt.provider'],
-  });
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
-  await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toContain(
-      'Banshee will send what you say to api.openai.com when it restarts.',
-    ),
-  );
-});
-
-// A sentence with a hole in it was the first thing the flip rendered, because
-// the address is set after the choice is.
-it('names no host it does not have, in the heading or the foot', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...remote,
-    config: { ...remote.config, stt: { ...remote.config.stt, remote: { model: 'whisper-1' } } },
-    remote: {
-      stt: { remote: false, host: null, key_present: false },
-      tts: { remote: false, host: null, speaker_started: true, key_present: false },
-    },
-    pending: ['stt.provider'],
-  });
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const cell = container.querySelector('#job-microphone') as HTMLElement;
-  expect(cell.textContent).toContain('changing to a transcription server when Banshee restarts');
-
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
-  await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toBe(
-      'Banshee will send what you say to a transcription server when it restarts.',
-    ),
-  );
+  expect(cell.textContent).toContain(WAITING_SAYS);
 });
 
 it('does not reflow the paragraph when a copy is confirmed', async () => {
@@ -871,40 +785,6 @@ it('offers no command to copy, because every fix is a button', async () => {
   expect(screen.queryByRole('button', { name: 'banshee setup' })).toBeNull();
 });
 
-// Choosing a model marks it pending at once, because the daemon cannot load a
-// model that is not on disk. A restart reads the same config and fails the same
-// way, so the notice would be advice that cannot work.
-it('does not ask for a restart while the files it needs are still missing', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    ready: false,
-    pending: ['stt.model'],
-    blockers: [
-      {
-        kind: 'model',
-        id: 'ggml-large-v3-turbo-q5_0.bin',
-        name: 'ggml-large-v3-turbo-q5_0.bin',
-        role: 'speech',
-        remedy: 'download',
-        consequence: 'recording, dictation, and ask_user do not work',
-        fix: 'run: banshee setup',
-        command: 'banshee setup',
-      },
-    ],
-  });
-  render(App);
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
-  expect(screen.queryByRole('button', { name: 'Restart to apply' })).toBeNull();
-});
-
-it('asks for a restart once the files are there and a setting still waits', async () => {
-  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['stt.model'] });
-  render(App);
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Restart to apply' })).toBeTruthy(),
-  );
-});
-
 // The voice files arrive with the download, and the last one a run fetches is a
 // voice, so the list read at startup is answered before any of them exist.
 it('reads the voices again once their files have landed', async () => {
@@ -994,14 +874,13 @@ it('does not fetch a voice that is already here', async () => {
 });
 
 // Choosing a voice that is not here writes it, and the daemon refuses until the
-// file lands, so `tts.voice` is pending for the second the fetch takes. A
-// restart is not the remedy: the daemon applies it when the run ends.
-it('does not ask for a restart while the file it waits on is still arriving', async () => {
+// file lands, so `tts.voice` waits for the second the fetch takes. The download
+// speaks for it while it runs, and the daemon applies it when the run ends.
+it('leaves a voice that waits for its file to the download while one runs', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, pending: ['tts.voice'] });
-  render(App);
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Restart to apply' })).toBeTruthy(),
-  );
+  const { container } = render(App);
+  const cell = () => container.querySelector('#job-voice')?.textContent ?? '';
+  await waitFor(() => expect(cell()).toContain(WAITS_FOR_ITS_FILE));
 
   pushes.get('daemon:downloads')?.({
     payload: {
@@ -1014,9 +893,7 @@ it('does not ask for a restart while the file it waits on is still arriving', as
       state: 'downloading',
     },
   });
-  await waitFor(() =>
-    expect(screen.queryByRole('button', { name: 'Restart to apply' })).toBeNull(),
-  );
+  await waitFor(() => expect(cell()).not.toContain(WAITS_FOR_ITS_FILE));
 });
 
 // A run reports once per file. A download writes no history, so the record
@@ -1125,9 +1002,9 @@ it('says so when an action is refused', async () => {
   await waitFor(() => expect(screen.getByText(/Download did not work/)).toBeTruthy());
 });
 
-// `audio.hotkey` is read once at startup and no arriving file answers it, so a
-// download must not quiet the notice that says so.
-it('still asks for a restart for a key no download can settle', async () => {
+// No arriving file answers `audio.hotkey`, so a download must not quiet the
+// mark that says the daemon could not use it.
+it('still marks a key no download can settle', async () => {
   vi.mocked(status).mockResolvedValue({
     ...ready,
     ready: false,
@@ -1145,9 +1022,9 @@ it('still asks for a restart for a key no download can settle', async () => {
       },
     ],
   });
-  render(App);
+  const { container } = render(App);
   await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Restart to apply' })).toBeTruthy(),
+    expect(container.querySelector('#job-hotkey')?.textContent).toContain(WAITING_SAYS),
   );
 });
 
@@ -1563,94 +1440,6 @@ it('says where text goes in the Voice heading and in the foot', async () => {
   );
 });
 
-it('says the speaker is waiting on a restart, in whichever direction it waits', async () => {
-  const base = {
-    ...ready,
-    config: {
-      ...ready.config,
-      tts: {
-        ...ready.config.tts,
-        provider: 'remote',
-        remote: {
-          base_url: 'https://api.openai.com/v1',
-          model: 'tts-1',
-          voice: 'marin',
-          instructions: '',
-        },
-      },
-    },
-  };
-  vi.mocked(status).mockResolvedValue({
-    ...base,
-    remote: {
-      stt: { remote: false, host: null, key_present: false },
-      tts: { remote: false, host: null, speaker_started: true, key_present: true },
-    },
-    pending: ['tts.provider'],
-  });
-  const going = render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
-  await waitFor(() =>
-    expect(
-      screen.getByText('Banshee will speak through api.openai.com when it restarts.'),
-    ).toBeTruthy(),
-  );
-  going.unmount();
-
-  vi.mocked(status).mockResolvedValue({
-    ...base,
-    config: { ...base.config, tts: { ...base.config.tts, provider: 'local' } },
-    remote: {
-      stt: { remote: false, host: null, key_present: false },
-      tts: { remote: true, host: 'api.openai.com', speaker_started: true, key_present: true },
-    },
-    pending: ['tts.provider'],
-  });
-  render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
-  await waitFor(() =>
-    expect(
-      screen.getByText('Banshee speaks through api.openai.com until it restarts.'),
-    ).toBeTruthy(),
-  );
-});
-
-// The reader flipped Speaking back to this machine, and the speaker they
-// flipped away from never started. It spoke nothing through that host, so the
-// lead says the restart is coming and claims no speech through the server.
-it('says a speaker that never started speaks through no host while a flip waits', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    config: {
-      ...ready.config,
-      tts: {
-        ...ready.config.tts,
-        provider: 'local',
-        remote: {
-          base_url: 'https://api.openai.com/v1',
-          model: 'tts-1',
-          voice: 'marin',
-          instructions: '',
-        },
-      },
-    },
-    remote: {
-      stt: { remote: false, host: null, key_present: false },
-      tts: { remote: true, host: 'api.openai.com', speaker_started: false, key_present: true },
-    },
-    pending: ['tts.provider'],
-  });
-  render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
-  await waitFor(() =>
-    expect(
-      screen.getByText(
-        'Banshee cannot speak through api.openai.com. Your choice takes effect when it restarts.',
-      ),
-    ).toBeTruthy(),
-  );
-});
-
 // Kokoro speaks for every user who has not set a remote speaker up, so the two
 // local arms of the heading are the ones most people read.
 it('names the local voice Kokoro speaks in', async () => {
@@ -1848,9 +1637,9 @@ it('blames the stopped daemon rather than the voice', async () => {
   );
 });
 
-// Every key in the speaker's table waits on the same restart, and the cell read
-// a hand-written list of them, so the two added last carried no mark. A key of
-// another job's is the discriminating half: it marks that job's cell instead.
+// The cell reads every key under the speaker's table, so a key added later
+// cannot be left off a hand-written list and lose its mark. A key of another
+// job's is the discriminating half: it marks that job's cell instead.
 const VOICE_WAITS: [string, boolean][] = [
   ['tts.voice', true],
   ['tts.speed', false],
@@ -1872,8 +1661,8 @@ it.each(VOICE_WAITS)('marks the voice cell for %s: %s', async (key, marked) => {
   // The name arriving is what says the reply and the voice list both landed, so
   // an unmarked cell is not merely one nothing has reached yet.
   await waitFor(() => expect(cell()).toContain('Sky'));
-  if (marked) await waitFor(() => expect(cell()).toContain(RESTART_SAYS));
-  else expect(cell()).not.toContain(RESTART_SAYS);
+  if (marked) await waitFor(() => expect(cell()).toContain(waitingSays(key)));
+  else expect(cell()).not.toContain('Set. Banshee');
 });
 
 // A stopped daemon has no key to apply and the cell shows no value either, so a
@@ -1886,13 +1675,11 @@ it('marks no waiting voice key while the daemon is down', async () => {
   });
   const { container } = render(App);
   await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
-  expect(container.querySelector('#job-voice')?.textContent).not.toContain(RESTART_SAYS);
+  expect(container.querySelector('#job-voice')?.textContent).not.toContain(WAITING_SAYS);
 });
 
-// The voice in force is the one being replaced, so the cell names what it
-// changes to, as LISTENING does.
-it('says what the voice changes to, in whichever direction it waits', async () => {
-  const base = {
+it('marks the voice in force when the speaker asked for could not start', async () => {
+  vi.mocked(status).mockResolvedValue({
     ...ready,
     config: {
       ...ready.config,
@@ -1907,40 +1694,15 @@ it('says what the voice changes to, in whichever direction it waits', async () =
         },
       },
     },
-  };
-  vi.mocked(status).mockResolvedValue({
-    ...base,
     remote: {
       stt: { remote: false, host: null, key_present: false },
       tts: { remote: false, host: null, speaker_started: true, key_present: true },
     },
     pending: ['tts.provider'],
   });
-  const going = render(App);
+  const { container } = render(App);
   await waitFor(() =>
-    expect(going.container.querySelector('#job-voice')?.textContent).toContain(
-      'changing to api.openai.com when Banshee restarts',
-    ),
-  );
-  expect(going.container.querySelector('#job-voice')?.textContent).not.toContain(
-    'set, and in effect',
-  );
-  going.unmount();
-
-  vi.mocked(status).mockResolvedValue({
-    ...base,
-    config: { ...base.config, tts: { ...base.config.tts, provider: 'local' } },
-    remote: {
-      stt: { remote: false, host: null, key_present: false },
-      tts: { remote: true, host: 'api.openai.com', speaker_started: true, key_present: true },
-    },
-    pending: ['tts.provider'],
-  });
-  const back = render(App);
-  await waitFor(() =>
-    expect(back.container.querySelector('#job-voice')?.textContent).toContain(
-      'changing to this machine when Banshee restarts',
-    ),
+    expect(container.querySelector('#job-voice')?.textContent).toContain(WAITING_SAYS),
   );
 });
 

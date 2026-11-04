@@ -1,16 +1,20 @@
 <script lang="ts">
-  import { PENDING_SAYS } from '../lib/copy';
+  import { waiting } from '../lib/daemon';
+  import { waitingSays } from '../lib/copy';
 
   export let name: string;
   export let note = '';
   // Passed when a control has to point at the note with `aria-describedby`.
   export let noteId: string | undefined = undefined;
-  export let pending = false;
+  // The key this row writes, when it writes one.
+  export let setting: string | undefined = undefined;
   // A control that cannot sit on one line takes the width and drops beneath its label.
   export let block = false;
   // For a control with no baseline of its own, such as a range input, which
   // would otherwise drop its label to the bottom of the row.
   export let centred = false;
+
+  $: line = setting !== undefined && $waiting.has(setting) ? waitingSays(setting) : null;
 </script>
 
 <div class="row" class:block class:centred>
@@ -22,8 +26,8 @@
     {#if note}
       <p class="note" id={noteId}>{note}</p>
     {/if}
-    {#if pending}
-      <p class="note pending">{PENDING_SAYS}</p>
+    {#if line !== null}
+      <p class="note pending">{line}</p>
     {/if}
     <slot name="under" />
   </div>

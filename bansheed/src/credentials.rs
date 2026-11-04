@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use banshee_common::{error::BansheeError, utils::credentials_path};
@@ -105,9 +104,15 @@ impl std::fmt::Debug for Credentials {
 }
 
 impl Credentials {
+    #[cfg(not(test))]
     pub fn path() -> Result<PathBuf, BansheeError> {
         credentials_path()
             .ok_or_else(|| BansheeError::Other("Failed to get the credentials path".to_string()))
+    }
+
+    #[cfg(test)]
+    pub fn path() -> Result<PathBuf, BansheeError> {
+        panic!("a test reached the real credentials file; pass a scratch path")
     }
 
     pub fn load() -> Result<Self, BansheeError> {
@@ -121,17 +126,27 @@ impl Credentials {
         }
     }
 
+    /// The key on file at `path` for `side`, or `None` when the file holds none.
+    pub fn key_at(path: &Path, side: RemoteKey) -> Result<Option<String>, BansheeError> {
+        Ok(Self::read(path)?.key(side).map(str::to_string))
+    }
+
     /// A file that will not parse holds no key the engine can use, so it answers
     /// the same as an absent one. The status checklist reports the parse fault.
+    pub fn present_at(path: &Path, side: RemoteKey) -> bool {
+        Self::key_at(path, side).is_ok_and(|key| key.is_some())
+    }
+
     pub fn present(side: RemoteKey) -> bool {
-        Self::load().is_ok_and(|credentials| credentials.key(side).is_some())
+        Self::path().is_ok_and(|path| Self::present_at(&path, side))
     }
 
     /// The command that clears a key file the parser cannot read.
     pub fn remove_command() -> String {
-        let path = Self::path()
+        // Names the file and never opens it, so it need not go through `path`
+        let path = credentials_path()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "~/.banshee/credentials.toml".to_string());
+            .unwrap_or_else(|| "~/.banshee/credentials.toml".to_string());
         format!("rm {path}, then set the keys again")
     }
 
@@ -170,11 +185,7 @@ impl Credentials {
     /// Every key given, in one write. `banshee config remote` sets both sides
     /// at once, and two writes leave a window where one side is on file and the
     /// other is not. An empty value removes the key on file.
-    pub fn set_many(keys: &[(RemoteKey, &str)]) -> Result<(), BansheeError> {
-        Self::write_many(&Self::path()?, keys)
-    }
-
-    fn write_many(path: &Path, keys: &[(RemoteKey, &str)]) -> Result<(), BansheeError> {
+    pub(crate) fn set_many_at(path: &Path, keys: &[(RemoteKey, &str)]) -> Result<(), BansheeError> {
         let mut file = Self::read_file(path)?;
         for (side, value) in keys {
             let stored = Some(value.trim())
@@ -286,13 +297,32 @@ pub fn may_read_body(status: reqwest::StatusCode) -> bool {
     !matches!(status.as_u16(), 401 | 403)
 }
 
-pub fn read_body(response: reqwest::blocking::Response) -> String {
+/// The text of a refused answer, up to `BODY_LIMIT`.
+pub async fn read_body(mut response: reqwest::Response) -> String {
     let mut body = Vec::new();
-    let read = response.take(BODY_LIMIT).read_to_end(&mut body);
-    let text = String::from_utf8_lossy(&body);
+    let read = loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = BODY_LIMIT as usize - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                if body.len() as u64 >= BODY_LIMIT {
+                    break true;
+                }
+            }
+            Ok(None) => break true,
+            Err(_) => break false,
+        }
+    };
+    capped_text(&body, read)
+}
+
+/// `body` as text. `read_whole` says the read ended at the end of the body or
+/// at the cap, and not at a fault.
+fn capped_text(body: &[u8], read_whole: bool) -> String {
+    let text = String::from_utf8_lossy(body);
     // A read that stopped early, at the cap or at a fault, can have stopped
     // inside a key
-    let whole = if read.is_ok() && (body.len() as u64) < BODY_LIMIT {
+    let whole = if read_whole && (body.len() as u64) < BODY_LIMIT {
         text.as_ref()
     } else {
         without_a_split_key(&text)
@@ -326,6 +356,11 @@ mod tests {
     }
 
     #[test]
+    fn a_test_never_reaches_the_real_key_file() {
+        assert!(std::panic::catch_unwind(super::Credentials::path).is_err());
+    }
+
+    #[test]
     fn a_missing_file_holds_no_key() {
         let path = scratch("absent");
         let _ = std::fs::remove_file(&path);
@@ -338,7 +373,7 @@ mod tests {
     #[test]
     fn one_write_sets_both_keys_and_the_file_is_owner_only() {
         let path = scratch("both");
-        Credentials::write_many(
+        Credentials::set_many_at(
             &path,
             &[
                 (RemoteKey::Stt, "sk-listener"),
@@ -361,7 +396,7 @@ mod tests {
     #[test]
     fn removing_one_key_leaves_the_other_on_file() {
         let path = scratch("one-removed");
-        Credentials::write_many(
+        Credentials::set_many_at(
             &path,
             &[
                 (RemoteKey::Stt, "sk-listener"),
@@ -369,7 +404,7 @@ mod tests {
             ],
         )
         .unwrap();
-        Credentials::write_many(&path, &[(RemoteKey::Tts, "")]).unwrap();
+        Credentials::set_many_at(&path, &[(RemoteKey::Tts, "")]).unwrap();
         let held = Credentials::read(&path).unwrap();
         assert_eq!(held.key(RemoteKey::Stt), Some("sk-listener"));
         assert_eq!(held.key(RemoteKey::Tts), None);
@@ -381,7 +416,7 @@ mod tests {
     #[test]
     fn a_key_written_with_a_trailing_space_and_newline_reads_back_without_them() {
         let path = scratch("padded");
-        Credentials::write_many(&path, &[(RemoteKey::Stt, "sk-listener \n")]).unwrap();
+        Credentials::set_many_at(&path, &[(RemoteKey::Stt, "sk-listener \n")]).unwrap();
         let held = Credentials::read(&path).unwrap();
         assert_eq!(held.key(RemoteKey::Stt), Some("sk-listener"));
         let _ = std::fs::remove_file(&path);

@@ -14,7 +14,7 @@
     refreshStatus,
     readinessIsStale,
     speechFacts,
-    waitsOnARestart,
+    waiting as waitingKeys,
     stateWord,
     type Live,
     type Status,
@@ -26,12 +26,10 @@
     problem,
     report,
     speechLead,
-    A_TRANSCRIPTION_SERVER,
-    A_VOICE_SERVER,
     DICTATION_FAILED,
     DICTATION_FAILURE,
     failureSays,
-    RESTART_SAYS,
+    waitingSays,
     SPEECH_FAILED,
     SPEECH_FAILURE,
     failureReads,
@@ -46,6 +44,7 @@
     table,
   } from './lib/history';
   import { agents, refresh as readAgents } from './lib/agents';
+  import { loadTable } from './lib/settings';
   import { forgetTheAsk } from './lib/downloads';
   import {
     listen,
@@ -224,8 +223,8 @@
   // says only which ones were asked for. The heading, the panel's note and the
   // foot cell all read one record of each side, so no two of them can state a
   // different truth.
-  $: listening = listeningFacts($daemon, $waitsOnARestart);
-  $: speech = speechFacts($daemon, $waitsOnARestart, voices.voices);
+  $: listening = listeningFacts($daemon);
+  $: speech = speechFacts($daemon, voices.voices);
   // The opening line names a host only while text reaches it.
   $: textLeavesTo = speech.started ? speech.host : null;
 
@@ -233,8 +232,7 @@
   // detectable today, so the list needs no more than this.
   // Name and lead are declared together. "Record" would collide with the RECORDING state word, so
   // the panel is named for what is kept. Every lead reads live state, never the config: the config
-  // says only what was asked for. The one exception is the sentence about a listener that waits on
-  // a restart, and that sentence says in its own words that it is not in force yet.
+  // says only what was asked for.
   $: panels = {
     Microphone: {
       name: 'Microphone',
@@ -337,7 +335,7 @@
       }
       await readLatest();
     } catch {
-      // The pending keys are still pending, so the notice already says it.
+      // The blocker still stands, so its box already says it.
     }
     restarting = false;
   }
@@ -360,9 +358,8 @@
     starting = false;
   }
 
-  // Empty when the daemon is stopped. The hotkey is never applied live and the daemon reports no
-  // bound key. Pending is the only way the foot stops naming a key nobody listens for.
-  // audio.input_device always applies.
+  // Empty when the daemon is stopped. A key the daemon could not use yet marks the cell it
+  // changes.
   $: footValues = ((): {
     id: string;
     label: Job;
@@ -371,14 +368,12 @@
     pending?: string;
   }[] => {
     const said = (value: string) => (live ? value : '');
-    const waits = (...keys: string[]) =>
-      live && keys.some((key) => $waitsOnARestart.has(key)) ? RESTART_SAYS : undefined;
+    const says = (key: string | undefined) => (live && key ? waitingSays(key) : undefined);
+    const waits = (...keys: string[]) => says(keys.find((key) => $waitingKeys.has(key)));
     // The prefix form, so a `[tts.remote]` key added later cannot be left off a
     // hand-written list and lose its mark.
     const waitsUnder = (prefix: string) =>
-      live && [...$waitsOnARestart].some((key) => key.startsWith(prefix))
-        ? RESTART_SAYS
-        : undefined;
+      says([...$waitingKeys].find((key) => key.startsWith(prefix)));
     return [
       {
         // Where the words are heard, not the device they are picked up on: the
@@ -389,12 +384,7 @@
         value: said(
           listening.remote ? (listening.host ?? 'A transcription server') : 'On this machine',
         ),
-        pending:
-          live && listening.pending
-            ? listening.remote
-              ? 'changing to this machine when Banshee restarts'
-              : `changing to ${listening.willUse ?? A_TRANSCRIPTION_SERVER} when Banshee restarts`
-            : waitsUnder('stt.remote.'),
+        pending: waits('stt.provider') ?? waitsUnder('stt.remote.'),
       },
       {
         id: 'job-hotkey',
@@ -406,14 +396,7 @@
         id: 'job-voice',
         label: 'Voice',
         value: said(speech.voiceName),
-        // The voice shown is the one being replaced, so a flip names what it
-        // changes to rather than marking the value as taken.
-        pending:
-          live && speech.pending
-            ? speech.remote
-              ? 'changing to this machine when Banshee restarts'
-              : `changing to ${speech.willUse ?? A_VOICE_SERVER} when Banshee restarts`
-            : (waits('tts.voice') ?? waitsUnder('tts.remote.')),
+        pending: waits('tts.provider', 'tts.voice') ?? waitsUnder('tts.remote.'),
       },
       {
         id: 'job-agents',
@@ -557,7 +540,7 @@
       }),
     ]);
     // The foot needs neither, so it does not queue behind the whole-table read.
-    await Promise.all([readDaemon(), readTheRest()]);
+    await Promise.all([loadTable(), readDaemon(), readTheRest()]);
   });
 </script>
 
@@ -573,9 +556,6 @@
   <Header
     {word}
     {form}
-    waiting={live && $waitsOnARestart.size > 0}
-    {restart}
-    {restarting}
     failure={failed?.says ?? null}
     failureId={RETURNS_TO.failure}
     showFailure={() => failed && openJob(failed.job, RETURNS_TO.failure, failed.at)}

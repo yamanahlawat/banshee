@@ -51,31 +51,41 @@ struct Recording {
 /// The models and the thread that turns audio into text. All of it or none:
 /// with any piece missing the daemon cannot transcribe, so they share one
 /// error path and one reason for `banshee status` to report. A listening model
-/// still to download is the exception: the rest stands, and the model loads
-/// when its file arrives. The microphone is not part of it: it opens for each
-/// use.
+/// still to download, and a remote listener with no key, are the exceptions:
+/// the rest stands, and the listener serves once the file or the key arrives.
+/// The microphone is not part of it: it opens for each use.
 fn start_recording(
     daemon_state: &Arc<DaemonState>,
     config: &Config,
     command_receiver: std::sync::mpsc::Receiver<ConsumerCommand>,
     cues: audio::cues::Cues,
 ) -> Result<Recording, RecordingError> {
-    let listener = crate::speech_to_text::select_transcriber(&config.stt)?;
+    let listener =
+        crate::speech_to_text::select_transcriber(&config.stt, daemon_state.credentials_path())?;
     let vad = models::model_path(models::VAD_MODEL)
         .and_then(Detector::open)
         .map_err(|e| RecordingError::Model(e.to_string()))?;
     // Before the consumer exists, so a load a write queued meanwhile lands
     // after this and is not overwritten by it.
-    match listener.awaiting {
-        Some(model) => {
+    let listening = match (listener.awaiting, listener.refused) {
+        (Some(model), _) => {
             log::warn!(
                 "Recording waits for the listening model {}: run banshee setup",
                 model.id
             );
-            daemon_state.await_listening_model(model);
+            crate::state::Listening::Missing(model)
         }
-        None => daemon_state.listening_model_loaded(models::stt_model(config)),
-    }
+        (None, Some(refused)) => {
+            log::warn!("The remote listener cannot send yet: {refused}");
+            crate::state::Listening::Refused(refused)
+        }
+        (None, None) => models::stt_model(config).map_or(
+            crate::state::Listening::Remote,
+            crate::state::Listening::Loaded,
+        ),
+    };
+    daemon_state.install_listener(crate::speech_to_text::Route::of(&config.stt), listening);
+    let credentials = daemon_state.credentials_path().to_path_buf();
     // One capture, read by the consumer thread and filled by the thread that
     // owns the stream. A question that is already listening reads it too.
     let capture = Arc::new(hotkey::Capture::new(hotkey::CaptureSource::unopened()));
@@ -86,8 +96,11 @@ fn start_recording(
             vad,
             state: Arc::clone(daemon_state),
             cues,
-            endpoint_silence_ms: config.stt.endpoint_silence_ms,
             used: std::time::Instant::now(),
+            build_listener: Box::new(move |stt| {
+                crate::speech_to_text::select_on_demand(stt, &credentials)
+            }),
+            withdrawals_seen: daemon_state.listener_withdrawals(),
         },
         command_receiver,
     );
@@ -116,24 +129,43 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
     // one device is the point: two holders drift apart the moment one dies.
     let output = Arc::new(text_to_speech::output::Output::lazy());
     std::thread::spawn(text_to_speech::pronunciation::warm);
+    let credentials = crate::credentials::Credentials::path()?;
+    let models_dir = models::download::models_dir()?;
     let speech = text_to_speech::select_backend(
         &config.tts,
-        &models::download::models_dir()?,
-        faults,
+        &models_dir,
+        &credentials,
+        faults.clone(),
         Arc::clone(&output),
     );
+    let build_speaker: text_to_speech::BuildSpeaker = {
+        let (credentials, output, models_dir) =
+            (credentials.clone(), Arc::clone(&output), models_dir.clone());
+        Box::new(move |tts| {
+            text_to_speech::select_live(
+                tts,
+                &models_dir,
+                &credentials,
+                faults.clone(),
+                Arc::clone(&output),
+            )
+        })
+    };
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let cues = audio::cues::start_cue_player(config.feedback_mode(), output);
+    let speech_player = text_to_speech::SpeechPlayer::new(speech.backend);
+    speech_player.set_builder(build_speaker);
     let daemon_state = Arc::new(DaemonState::new(
         Arc::clone(&config),
         db_connection,
-        text_to_speech::SpeechPlayer::new(speech.backend),
+        speech_player,
         speech.speaker,
         commands,
         cues.clone(),
         crate::state::Machine {
-            models: models::download::models_dir()?,
+            models: models_dir,
             config: Config::path()?,
+            credentials,
             voiceover: crate::settings::voiceover_on,
         },
     ));
@@ -198,7 +230,7 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
                              Recording, dictation, and ask_user do not."
                     );
                     log::info!("Run `banshee status` for the fix.");
-                    state.set_mic(crate::state::Mic::Faulted(error));
+                    state.set_mic(crate::state::Mic::Faulted(error.at_start()));
                     None
                 }
             }
@@ -206,11 +238,7 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
     };
     // A press that lands before the pipeline stands answers with the error cue:
     // record_start refuses anything but an open pipeline.
-    hotkey::start_global_hotkey(
-        Arc::clone(&daemon_state),
-        config.audio.hotkey,
-        config.audio.hotkey_mode,
-    );
+    hotkey::start_global_hotkey(Arc::clone(&daemon_state));
     let result = run(&daemon_state, socket_path, listener).await;
     // A build still loading a model cannot be woken, so the process leaves
     // without it rather than never leaving at all. Core Audio, which stalls

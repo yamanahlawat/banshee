@@ -8,7 +8,9 @@ use toml_edit::DocumentMut;
 use crate::config::{Config, FeedbackMode};
 use crate::credentials::RemoteKey;
 use crate::models::download::Download;
+use crate::speech_to_text::Route;
 use crate::state::{DaemonState, Listening};
+use crate::text_to_speech::SpeakerSpec;
 
 /// Dotted `section.field` keys, spelled as `config.toml` spells them.
 pub type Assignments = BTreeMap<String, serde_json::Value>;
@@ -27,6 +29,7 @@ pub fn listening_model_named(
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Live {
     VadThreshold,
+    EndpointSilence,
     InputDevice,
     BargeIn,
     KeepOpen,
@@ -38,27 +41,43 @@ enum Live {
     Model,
     Speech,
     UnloadAfter,
+    Hotkey,
+    Listener,
+    Speaker,
 }
 
 fn live(key: &str) -> Option<Live> {
     match key {
         "stt.vad_threshold" => Some(Live::VadThreshold),
+        "stt.endpoint_silence_ms" => Some(Live::EndpointSilence),
         "audio.input_device" => Some(Live::InputDevice),
         "audio.barge_in" => Some(Live::BargeIn),
         "audio.keep_open" => Some(Live::KeepOpen),
         "feedback.mode" | "audio.cues.enabled" => Some(Live::Feedback),
         "feedback.speak_problems" => Some(Live::SpeakProblems),
         "daemon.save_history" => Some(Live::SaveHistory),
-        // `tts.fallback` is not here: it decides what speaks when the remote
-        // speaker does not start, which is settled once, at startup.
         "tts.voice" => Some(Live::Tts),
         "stt.vocabulary" => Some(Live::Vocabulary),
         // Read per utterance, so it moves no model.
         "stt.translate" => Some(Live::Speech),
         "stt.model" => Some(Live::Model),
         "models.unload_after" => Some(Live::UnloadAfter),
+        "audio.hotkey" | "audio.hotkey_mode" => Some(Live::Hotkey),
+        "stt.provider" | "stt.remote.base_url" | "stt.remote.model" => Some(Live::Listener),
+        "tts.provider"
+        | "tts.fallback"
+        | "tts.remote.base_url"
+        | "tts.remote.model"
+        | "tts.remote.voice"
+        | "tts.remote.instructions"
+        | "tts.remote.response_format"
+        | "tts.remote.sample_rate" => Some(Live::Speaker),
         _ => None,
     }
+}
+
+pub fn is_hotkey(key: &str) -> bool {
+    live(key) == Some(Live::Hotkey)
 }
 
 /// Puts one live setting into effect, and answers whether the daemon took it.
@@ -68,6 +87,11 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
     match variant {
         Live::VadThreshold => {
             state.set_vad_threshold(config.stt.vad_threshold);
+            true
+        }
+        // Read when the next answer opens; an answer already open keeps its length
+        Live::EndpointSilence => {
+            state.set_endpoint_silence_ms(config.stt.endpoint_silence_ms);
             true
         }
         // Open capture rebinds on its next tick, and closed capture opens it
@@ -120,7 +144,51 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
             state.set_unload_after(config.models.unload_limit());
             true
         }
+        // The listener takes it at the next key event once no key is held. On
+        // Wayland the compositor holds the key, and the daemon listens for none.
+        Live::Hotkey => {
+            state.set_binding(config.audio.hotkey, config.audio.hotkey_mode);
+            true
+        }
+        Live::Listener => switch_listener(state, config),
+        Live::Speaker => switch_speaker(state, config),
     }
+}
+
+/// Puts the speaker `config` names in place, unless it is the one in force.
+fn switch_speaker(state: &DaemonState, config: &Config) -> bool {
+    let next = SpeakerSpec::of(&config.tts);
+    if next == state.speaker_spec() {
+        return true;
+    }
+    state.switch_speaker(&config.tts, cuts_off(state, &next))
+}
+
+/// Whether a reply from a server has to stop: `next` names no server, or no
+/// key is on file. A reply on its way to one server finishes there while the
+/// config names another.
+fn cuts_off(state: &DaemonState, next: &SpeakerSpec) -> bool {
+    let keyed =
+        crate::credentials::Credentials::present_at(state.credentials_path(), RemoteKey::Tts);
+    !(next.provider.is_remote() && keyed)
+}
+
+/// Hands the listener the route `config` names. The switch last asked may
+/// still wait in the queue behind a dictation, so a route goes unless it is
+/// both the one in force and the one last asked, and the listener in force
+/// built. Turning a server off stops a request on its way there.
+fn switch_listener(state: &DaemonState, config: &Config) -> bool {
+    let next = Route::of(&config.stt);
+    let in_force = state.listener_route();
+    let asked = state.asked_listener_route();
+    let unbuilt = matches!(state.listening(), Listening::Failed(..)) && next == Route::Local;
+    if next == in_force && next == asked && !unbuilt {
+        return true;
+    }
+    if next == Route::Local && (in_force.is_remote() || asked.is_remote()) {
+        state.withdraw_listener(Some(config.stt.clone()));
+    }
+    state.replace_listener(config.stt.clone())
 }
 
 /// Loads the listening model `config` names when the listener serves another
@@ -149,9 +217,9 @@ fn reconcile(state: &DaemonState, config: &Config) -> bool {
         }
         return false;
     }
-    // The engine that loads this starts on the pending restart, and a listener
-    // that holds no file holds no engine to load into.
-    if had == Listening::Remote {
+    // The listener switch in the same write builds the local engine, and a
+    // listener that holds no file holds no engine to load into.
+    if had.is_remote() {
         return true;
     }
     state.load_stt_model(wanted)
@@ -165,14 +233,14 @@ fn reconcile_waiting(state: &DaemonState, config: &Config) {
         return;
     };
     let here = is_here(state, wanted);
-    if !state.claim_listening_model(wanted, here).serves() && here {
+    let had = state.claim_listening_model(wanted, here);
+    if !had.serves() && !had.is_remote() && here {
         state.load_stt_model(wanted);
     }
 }
 
-/// The listening model `config` names. A file that chose a transcription
-/// server runs it from the next start, so until then the local listener
-/// still waits for the model it started without.
+/// The listening model `config` names, or under a transcription server the
+/// one the local listener still waits for.
 fn waited_for(
     state: &DaemonState,
     config: &Config,
@@ -213,7 +281,7 @@ fn writing() -> std::sync::MutexGuard<'static, ()> {
 #[derive(Default, Debug)]
 pub struct Outcome {
     pub applied: Vec<String>,
-    pub restart_required: Vec<String>,
+    pub waiting: Vec<String>,
 }
 
 /// The section a dotted path names, or `None` when the file never wrote it.
@@ -245,11 +313,8 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
             BansheeError::Rejected(format!("'{key}' must name a section, as in stt.model"))
         })?;
         if value.is_null() {
-            let retired = crate::config::is_retired(key);
-            if !retired
-                && value_at(&Config::default(), key).is_none_or(|default| default.is_object())
-            {
-                return Err(BansheeError::Rejected(format!("'{key}' is not a setting")));
+            if !writes_without_a_row(key) && banshee_common::settings::find(key).is_none() {
+                return Err(not_a_setting(key));
             }
             if let Some(section) = table_along(document.as_table_mut(), path)? {
                 section.remove(field);
@@ -350,9 +415,24 @@ fn take_api_keys(assignments: &mut Assignments) -> Result<Vec<(RemoteKey, String
     Ok(taken)
 }
 
-/// Applying one of these without writing it would report success and change nothing.
-fn startup_only(assignments: &Assignments) -> Option<&String> {
-    assignments.keys().find(|key| live(key).is_none())
+/// A key that decides what leaves this machine is never held only in memory,
+/// so the file always names where Banshee sends.
+fn refuse_sending_without_persist(
+    assignments: &Assignments,
+    persist: bool,
+) -> Result<(), BansheeError> {
+    if persist {
+        return Ok(());
+    }
+    let sending = assignments
+        .keys()
+        .find(|key| banshee_common::settings::find(key).is_some_and(|setting| setting.sends_out));
+    match sending {
+        Some(key) => Err(BansheeError::Rejected(format!(
+            "'{key}' decides what leaves this machine, so it needs persist: true"
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Asks again for the live settings that refused while their file was missing,
@@ -378,35 +458,12 @@ pub fn reapply_pending(state: &DaemonState) {
     }
 }
 
-/// The value a dotted key names, read off a serialized `Config` so both sides
-/// of a comparison are spelled by the same serializer. `None` for a key no
-/// config field answers to.
-fn value_at(config: &Config, key: &str) -> Option<serde_json::Value> {
-    let mut node = serde_json::to_value(config).ok()?;
-    for segment in key.split('.') {
-        node = node.get(segment)?.clone();
-    }
-    Some(node)
-}
-
-/// True when the daemon already runs the value written; a key changed and changed back has nothing
-/// to wait for.
-fn in_effect(key: &str, state: &DaemonState, config: &Config) -> bool {
-    let running = state.running_config();
-    let was = value_at(&running, key);
-    was.is_some() && was == value_at(config, key)
-}
-
 fn apply_each<'a>(
     state: &DaemonState,
     config: &Config,
     keys: impl Iterator<Item = &'a String>,
 ) -> Outcome {
-    outcome_of(
-        keys,
-        |variant| apply(variant, state, config),
-        |key| in_effect(key, state, config),
-    )
+    outcome_of(keys, |variant| apply(variant, state, config))
 }
 
 /// A variant applies once however many of its keys one call carries: a null
@@ -414,7 +471,6 @@ fn apply_each<'a>(
 fn outcome_of<'a>(
     keys: impl Iterator<Item = &'a String>,
     mut apply: impl FnMut(Live) -> bool,
-    in_effect: impl Fn(&str) -> bool,
 ) -> Outcome {
     let mut outcome = Outcome::default();
     let mut done: BTreeMap<Live, bool> = BTreeMap::new();
@@ -425,20 +481,35 @@ fn outcome_of<'a>(
                 if honoured {
                     outcome.applied.push(key.clone());
                 } else {
-                    outcome.restart_required.push(key.clone());
+                    outcome.waiting.push(key.clone());
                 }
             }
-            None if in_effect(key) => outcome.applied.push(key.clone()),
-            None => outcome.restart_required.push(key.clone()),
+            // Nothing reads a retired key, so its removal is in effect once written
+            None if crate::config::is_retired(key) => outcome.applied.push(key.clone()),
+            // Unreachable: `edit` refuses a key with no row, and every row
+            // but a secret has a `Live`
+            None => outcome.waiting.push(key.clone()),
         }
     }
     outcome
 }
 
+/// Replaced by `feedback.mode`, and still read from a file that holds it.
+pub const CUE_SWITCH: &str = "audio.cues.enabled";
+
+/// A key with no row that a write still takes: a null write removes it.
+pub fn writes_without_a_row(key: &str) -> bool {
+    crate::config::is_retired(key) || key == CUE_SWITCH
+}
+
+pub fn not_a_setting(key: &str) -> BansheeError {
+    BansheeError::Rejected(format!("'{key}' is not a setting"))
+}
+
 // A null write passes, because it is the only way `config set` removes the key.
 fn refuse_retired_keys(assignments: &Assignments) -> Result<(), BansheeError> {
     if assignments
-        .get("audio.cues.enabled")
+        .get(CUE_SWITCH)
         .is_some_and(|value| !value.is_null())
     {
         return Err(BansheeError::Rejected(
@@ -457,50 +528,62 @@ pub fn configure(
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
     match state {
-        Some(state) => configure_at(state.config_path(), Some(state), assignments, persist),
-        None => configure_at(&Config::path()?, None, assignments, persist),
+        Some(state) => configure_at(
+            state.config_path(),
+            state.credentials_path(),
+            Some(state),
+            assignments,
+            persist,
+        ),
+        None => configure_at(
+            &Config::path()?,
+            &crate::credentials::Credentials::path()?,
+            None,
+            assignments,
+            persist,
+        ),
     }
 }
 
 /// `path` is the config.toml the write reads and, with `persist`, replaces.
+/// `credentials` is the key file a key write replaces.
 fn configure_at(
     path: &std::path::Path,
+    credentials: &std::path::Path,
     state: Option<&DaemonState>,
     mut assignments: Assignments,
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
     refuse_retired_keys(&assignments)?;
+    refuse_sending_without_persist(&assignments, persist)?;
 
-    if !persist && let Some(key) = startup_only(&assignments) {
-        return Err(BansheeError::Rejected(format!(
-            "'{key}' is read when the daemon starts, so it needs persist: true"
-        )));
-    }
-
-    let api_keys = take_api_keys(&mut assignments)?;
+    let keys = take_api_keys(&mut assignments)?;
+    let keys = (!keys.is_empty()).then_some(KeyWrite {
+        file: credentials,
+        keys,
+    });
 
     let writing = writing();
     let existing = Config::read(path)?;
-    write_locked(
-        &writing,
-        path,
-        &existing,
-        state,
-        assignments,
-        api_keys,
-        persist,
-    )
+    write_locked(&writing, path, &existing, state, assignments, keys, persist)
+}
+
+/// The keys one write stores, and the key file they go to.
+struct KeyWrite<'a> {
+    file: &'a std::path::Path,
+    keys: Vec<(RemoteKey, String)>,
 }
 
 /// The rest of a checked write, with `existing` read under the guard. The
-/// guard proves the caller holds `WRITING`, which does not re-enter.
+/// guard proves the caller holds `WRITING`, which does not re-enter. No `keys`
+/// is a write that carries no key.
 fn write_locked(
     _writing: &std::sync::MutexGuard<'_, ()>,
     path: &std::path::Path,
     existing: &str,
     state: Option<&DaemonState>,
     assignments: Assignments,
-    api_keys: Vec<(RemoteKey, String)>,
+    keys: Option<KeyWrite>,
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
     let (rendered, config) = edit(existing, &assignments)?;
@@ -509,37 +592,73 @@ fn write_locked(
     // Last of the checks, first of the writes: a key stored before `edit`
     // refused a value beside it would be on disk under an error the caller
     // reads as "nothing was stored"
-    if !api_keys.is_empty() {
-        let keys: Vec<_> = api_keys
-            .iter()
-            .map(|(side, key)| (*side, key.as_str()))
-            .collect();
-        crate::credentials::Credentials::set_many(&keys)?;
-    }
+    // Each side written, and whether its key was removed
+    let written: Vec<(RemoteKey, bool)> = match keys {
+        Some(KeyWrite { file, keys }) => {
+            let held: Vec<_> = keys
+                .iter()
+                .map(|(side, key)| (*side, key.as_str()))
+                .collect();
+            crate::credentials::Credentials::set_many_at(file, &held)?;
+            keys.into_iter()
+                .map(|(side, key)| (side, key.trim().is_empty()))
+                .collect()
+        }
+        None => Vec::new(),
+    };
 
     // The key alone changes nothing in config.toml, so there is nothing to write
     if persist && !assignments.is_empty() {
         banshee_common::utils::write_atomically(path, rendered.as_bytes(), None)?;
     }
 
-    // A live key needs a restart too when no daemon runs, so with no state
-    // every key is one.
+    // Saved before the applies: the listener checks a switch against it
+    let config = std::sync::Arc::new(config);
+    if persist && let Some(state) = state {
+        state.set_config(std::sync::Arc::clone(&config));
+    }
+    let speaker_before = state.map(DaemonState::speaker_spec);
     let mut outcome = match state {
         Some(state) => apply_each(state, &config, assignments.keys()),
+        // With no daemon running nothing applies, so every key waits for one
         None => Outcome {
             applied: Vec::new(),
-            restart_required: assignments.keys().cloned().collect(),
+            waiting: assignments.keys().cloned().collect(),
         },
     };
-    for (side, _) in &api_keys {
-        outcome.restart_required.push(side.setting().to_string());
+    for (side, removed) in written {
+        match (side, state) {
+            // Each request reads the key file, so the next dictation sends this key
+            (RemoteKey::Stt, Some(state)) => {
+                state.listener_key_changed();
+                if removed && state.listener_route().is_remote() {
+                    state.withdraw_listener(None);
+                }
+                outcome.applied.push(side.setting().to_string());
+            }
+            // A speaker built in this write already read the key on file, and
+            // the local voice reads none
+            (RemoteKey::Tts, Some(state)) => {
+                let in_force = state.speaker_spec();
+                let local = !config.tts.provider.is_remote() && !in_force.provider.is_remote();
+                let rebuilt = local
+                    || Some(&in_force) != speaker_before.as_ref()
+                    || state.switch_speaker(
+                        &config.tts,
+                        cuts_off(state, &SpeakerSpec::of(&config.tts)),
+                    );
+                if rebuilt {
+                    outcome.applied.push(side.setting().to_string());
+                } else {
+                    outcome.waiting.push(side.setting().to_string());
+                }
+            }
+            (_, None) => outcome.waiting.push(side.setting().to_string()),
+        }
     }
 
     if let Some(state) = state {
-        state.record_outcome(&outcome.applied, &outcome.restart_required);
-        if persist {
-            state.set_config(std::sync::Arc::new(config));
-        }
+        state.record_outcome(&outcome.applied, &outcome.waiting);
     }
 
     Ok(outcome)
@@ -623,15 +742,7 @@ pub fn write_first_feedback(
         return Ok(None);
     }
     let assignments = [("feedback.mode".to_string(), mode.word().into())].into();
-    write_locked(
-        &writing,
-        path,
-        &existing,
-        state,
-        assignments,
-        Vec::new(),
-        true,
-    )?;
+    write_locked(&writing, path, &existing, state, assignments, None, true)?;
     Ok(Some(mode))
 }
 
@@ -648,3 +759,6 @@ pub fn write_first_feedback(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod table_tests;

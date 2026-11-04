@@ -6,10 +6,9 @@
     deviceLabel,
     listeningFacts,
     shownFloat,
-    waitsOnARestart,
     SYSTEM_DEVICE,
   } from '../lib/daemon';
-  import { write } from '../lib/settings';
+  import { defaultOf, optionsOf, table, write } from '../lib/settings';
   import { askForModels, fetching } from '../lib/downloads';
   import { listDevices, type Devices } from '../lib/tauri';
   import Row from '../controls/Row.svelte';
@@ -53,10 +52,6 @@
     { value: 'english', label: 'English' },
   ];
   const mac = onMac();
-  const LISTENING = [
-    { value: 'local', label: 'On this machine' },
-    { value: 'remote', label: 'A transcription server' },
-  ];
   const OPENS = [
     { value: 'use', label: 'When you speak' },
     { value: 'always', label: 'Always' },
@@ -111,21 +106,21 @@
   $: if (adding && field) field.focus();
 
   $: stt = ($daemon.status?.config?.stt ?? {}) as Record<string, unknown>;
-  $: threshold = shownFloat(Number(stt.vad_threshold ?? 0.5));
+  $: threshold = shownFloat(Number(stt.vad_threshold ?? defaultOf($table, 'stt.vad_threshold')));
   $: band = BANDS.find((b) => threshold < b.upTo)?.word ?? 'High';
-  $: silence = Number(stt.endpoint_silence_ms ?? 2500);
+  $: silence = Number(stt.endpoint_silence_ms ?? defaultOf($table, 'stt.endpoint_silence_ms'));
   // Keyed by word below, and a duplicate in a hand-edited config raises
   // Svelte's `each_key_duplicate` and renders no panel.
   $: vocabulary = [...new Set((stt.vocabulary ?? []) as string[])];
   $: models = $daemon.status?.stt_models ?? [];
   $: chosenId = String(stt.model ?? '');
   $: chosen = models.find((one) => one.id === chosenId) ?? null;
-  $: provider = String(stt.provider ?? 'local');
+  $: provider = String(stt.provider ?? defaultOf($table, 'stt.provider'));
   $: remoteTable = (stt.remote ?? {}) as Record<string, unknown>;
   // The daemon says which listener is in force; `provider` above says only
   // which one was asked for. One sentence reads both, so the group cannot say
   // two things at once.
-  $: listening = listeningFacts($daemon, $waitsOnARestart);
+  $: listening = listeningFacts($daemon);
   $: listenerNote = listeningNote(listening);
   // The daemon sends the vocabulary as the remote request's prompt, so under a
   // remote listener these words leave the machine too.
@@ -135,8 +130,8 @@
   $: lastError = $daemon.live.last_error;
   $: waitsOnLicence = provider === 'local' ? chosenWaitsOnLicence(models, chosenId) : null;
   // The model's own entry, not the blockers: dictation carries on with the
-  // loaded model, so a chosen one that is absent raises nothing. Not `pending`
-  // either, which a restart empties while the file is still gone.
+  // loaded model, so a chosen one that is absent raises nothing. Not `waiting`
+  // either, which drops the model while its download runs.
   $: needsFetching =
     provider === 'local' && chosen !== null && !chosen.downloaded && waitsOnLicence === null;
   // No guard here: `askForModels` claims the run before it awaits anything.
@@ -179,7 +174,9 @@
   $: openNote = keepOpen
     ? 'The microphone stays open, so recording starts at once. The system shows the microphone in use, and a Bluetooth headset plays at phone-call quality.'
     : 'Banshee opens the microphone when you speak and closes it right after.';
-  $: unloadAfter = Number($daemon.status?.config?.models?.unload_after ?? 5);
+  $: unloadAfter = Number(
+    $daemon.status?.config?.models?.unload_after ?? defaultOf($table, 'models.unload_after'),
+  );
   // A hand-edited config can hold a value none of these offer.
   $: unloadOffered = UNLOAD.includes(unloadAfter) ? UNLOAD : [unloadAfter, ...UNLOAD];
   $: unloadNote =
@@ -215,7 +212,7 @@
   }
 </script>
 
-<Row name="Input" block pending={$daemon.pending.has('audio.input_device')}>
+<Row name="Input" block setting="audio.input_device">
   <Picker label="Input device" value={current} change={(next) => write('audio.input_device', next)}>
     <option value={SYSTEM_DEVICE}>{deviceLabel($daemon.live.audio_device)}</option>
     {#each options as name (name)}
@@ -224,16 +221,20 @@
   </Picker>
 </Row>
 
-<Row name="Sensitivity" pending={$daemon.pending.has('stt.vad_threshold')}>
+<Row name="Sensitivity" setting="stt.vad_threshold">
   <Segmented
     label="Sensitivity"
     value={band}
     options={HEARD}
-    change={(next) => write('stt.vad_threshold', BANDS.find((b) => b.word === next)?.writes ?? 0.5)}
+    change={(next) =>
+      write(
+        'stt.vad_threshold',
+        BANDS.find((b) => b.word === next)?.writes ?? defaultOf($table, 'stt.vad_threshold'),
+      )}
   />
 </Row>
 
-<Row name="End of speech" block pending={$daemon.pending.has('stt.endpoint_silence_ms')}>
+<Row name="End of speech" block setting="stt.endpoint_silence_ms">
   <Picker
     label="End of speech"
     value={String(silence)}
@@ -249,14 +250,14 @@
   name="Listening"
   label="Listening"
   value={provider}
-  options={LISTENING}
+  options={optionsOf($table, 'stt.provider')}
   note={listenerNote}
   noteId={LISTENER_NOTE}
   alsoId={lastError ? DICTATION_FAILURE : undefined}
   change={(next) => write('stt.provider', next)}
 >
   {#if provider === 'remote'}
-    <SubRow name="server" pending={$waitsOnARestart.has('stt.remote.base_url')}>
+    <SubRow name="server" setting="stt.remote.base_url">
       <Field
         label="Server"
         value={String(remoteTable.base_url ?? '')}
@@ -265,7 +266,7 @@
       />
     </SubRow>
     <KeyRow setting="stt.remote.api_key" present={listening.keyPresent} />
-    <SubRow name="model" pending={$waitsOnARestart.has('stt.remote.model')}>
+    <SubRow name="model" setting="stt.remote.model">
       <Field
         label="Model"
         value={String(remoteTable.model ?? '')}
@@ -274,7 +275,7 @@
       />
     </SubRow>
   {:else if models.length > 0}
-    <SubRow name="model" pending={modelSays !== null} says={modelSays}>
+    <SubRow name="model" says={modelSays}>
       <div class="models" role="radiogroup" aria-label="Listening model">
         {#each models as model (model.id)}
           <div class="model" class:on={model.id === chosenId}>
@@ -328,7 +329,7 @@
 </ProviderGroup>
 
 {#if translates}
-  <Row name="Write it in" pending={$waitsOnARestart.has('stt.translate')}>
+  <Row name="Write it in" setting="stt.translate">
     <Segmented
       label="Write it in"
       value={translate ? 'english' : 'spoken'}
@@ -338,12 +339,7 @@
   </Row>
 {/if}
 
-<Row
-  name="Words to know"
-  block
-  note={vocabularyNote}
-  pending={$daemon.pending.has('stt.vocabulary')}
->
+<Row name="Words to know" block note={vocabularyNote} setting="stt.vocabulary">
   <div class="chips">
     {#each vocabulary as word (word)}
       <span class="chip">
@@ -402,12 +398,7 @@
 
 <div id={MORE}>
   {#if more}
-    <Row
-      name="Microphone"
-      note={openNote}
-      noteId="microphone-opens-note"
-      pending={$daemon.pending.has('audio.keep_open')}
-    >
+    <Row name="Microphone" note={openNote} noteId="microphone-opens-note" setting="audio.keep_open">
       <Segmented
         label="Microphone"
         value={keepOpen ? 'always' : 'use'}
@@ -417,12 +408,7 @@
       />
     </Row>
 
-    <Row
-      name="Free memory"
-      block
-      note={unloadNote}
-      pending={$daemon.pending.has('models.unload_after')}
-    >
+    <Row name="Free memory" block note={unloadNote} setting="models.unload_after">
       <Picker
         label="Free memory"
         value={String(unloadAfter)}

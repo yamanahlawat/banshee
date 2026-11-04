@@ -1,0 +1,301 @@
+[
+  {
+    "key": "daemon.save_history",
+    "domain": {
+      "kind": "toggle"
+    },
+    "default": "true",
+    "sends_out": false,
+    "description": "keep transcriptions in ~/.banshee/banshee.db"
+  },
+  {
+    "key": "audio.input_device",
+    "domain": {
+      "kind": "text",
+      "empty_allowed": true
+    },
+    "default": "\"default\"",
+    "sends_out": false,
+    "description": "\"default\" = follow the OS; otherwise match a device name"
+  },
+  {
+    "key": "audio.hotkey",
+    "domain": {
+      "kind": "hotkey"
+    },
+    "default": "\"RightOption\"",
+    "sends_out": false,
+    "description": "F1-F12, a lone modifier, or a chord like \"Ctrl+Alt+D\""
+  },
+  {
+    "key": "audio.hotkey_mode",
+    "domain": {
+      "kind": "choice",
+      "values": [
+        "hold",
+        "toggle"
+      ]
+    },
+    "default": "\"hold\"",
+    "sends_out": false,
+    "description": "hold = record while the hotkey is down | toggle = tap to start, tap to stop"
+  },
+  {
+    "key": "audio.barge_in",
+    "domain": {
+      "kind": "choice",
+      "values": [
+        "stop",
+        "none"
+      ]
+    },
+    "default": "\"stop\"",
+    "sends_out": false,
+    "description": "stop = the record hotkey cuts off whatever Banshee is saying | none"
+  },
+  {
+    "key": "audio.keep_open",
+    "domain": {
+      "kind": "toggle"
+    },
+    "default": "false",
+    "sends_out": false,
+    "description": "true = hold the microphone open between uses"
+  },
+  {
+    "key": "feedback.mode",
+    "domain": {
+      "kind": "choice",
+      "values": [
+        "visual",
+        "sound",
+        "both",
+        "none"
+      ]
+    },
+    "default": "\"both\"",
+    "sends_out": false,
+    "description": "visual | sound | both | none"
+  },
+  {
+    "key": "feedback.speak_problems",
+    "domain": {
+      "kind": "toggle"
+    },
+    "default": "true",
+    "sends_out": false,
+    "description": "false = never say a new problem aloud"
+  },
+  {
+    "key": "stt.provider",
+    "domain": {
+      "kind": "choice",
+      "values": [
+        "local",
+        "remote"
+      ]
+    },
+    "default": "\"local\"",
+    "sends_out": true,
+    "description": "local | remote = send each utterance to the server in stt.remote.base_url"
+  },
+  {
+    "key": "stt.remote.base_url",
+    "domain": {
+      "kind": "url"
+    },
+    "default": "\"https://api.openai.com/v1\"",
+    "sends_out": true,
+    "description": "an OpenAI-compatible /v1 root; https, or http on your own network"
+  },
+  {
+    "key": "stt.remote.model",
+    "domain": {
+      "kind": "text",
+      "empty_allowed": false
+    },
+    "default": "\"whisper-1\"",
+    "sends_out": false,
+    "description": "the model the remote server names"
+  },
+  {
+    "key": "stt.remote.api_key",
+    "domain": {
+      "kind": "secret"
+    },
+    "default": null,
+    "sends_out": true,
+    "description": "The key for the remote listener, kept in credentials.toml"
+  },
+  {
+    "key": "stt.model",
+    "domain": {
+      "kind": "listening_model"
+    },
+    "default": "\"parakeet-unified-en-0.6b\"",
+    "sends_out": false,
+    "description": "the id of the local model that transcribes speech"
+  },
+  {
+    "key": "stt.translate",
+    "domain": {
+      "kind": "toggle"
+    },
+    "default": "false",
+    "sends_out": false,
+    "description": "true answers in English, for a model or server that translates"
+  },
+  {
+    "key": "stt.vad_threshold",
+    "domain": {
+      "kind": "number",
+      "min": 0.0,
+      "max": 1.0,
+      "whole": false
+    },
+    "default": "0.5",
+    "sends_out": false,
+    "description": "0.0 to 1.0; higher means stricter speech detection"
+  },
+  {
+    "key": "stt.vocabulary",
+    "domain": {
+      "kind": "words"
+    },
+    "default": "[]",
+    "sends_out": false,
+    "description": "words the model keeps mangling, for example [\"clippy\", \"tokio\"]"
+  },
+  {
+    "key": "stt.endpoint_silence_ms",
+    "domain": {
+      "kind": "number",
+      "min": 0.0,
+      "max": null,
+      "whole": true
+    },
+    "default": "2500",
+    "sends_out": false,
+    "description": "trailing silence that ends a spoken answer"
+  },
+  {
+    "key": "tts.provider",
+    "domain": {
+      "kind": "choice",
+      "values": [
+        "local",
+        "remote"
+      ]
+    },
+    "default": "\"local\"",
+    "sends_out": true,
+    "description": "local | remote = send each reply's text to the server in tts.remote.base_url"
+  },
+  {
+    "key": "tts.fallback",
+    "domain": {
+      "kind": "choice",
+      "values": [
+        "local",
+        "none"
+      ]
+    },
+    "default": "\"local\"",
+    "sends_out": false,
+    "description": "local = tts.voice speaks a failed remote reply | none"
+  },
+  {
+    "key": "tts.voice",
+    "domain": {
+      "kind": "voice"
+    },
+    "default": "\"companion\"",
+    "sends_out": false,
+    "description": "companion, or any voice from the Kokoro voices directory"
+  },
+  {
+    "key": "tts.remote.base_url",
+    "domain": {
+      "kind": "url"
+    },
+    "default": "\"https://api.openai.com/v1\"",
+    "sends_out": true,
+    "description": "an OpenAI-compatible /v1 root; https, or http on your own network"
+  },
+  {
+    "key": "tts.remote.model",
+    "domain": {
+      "kind": "text",
+      "empty_allowed": false
+    },
+    "default": "\"tts-1\"",
+    "sends_out": false,
+    "description": "the model the remote server names"
+  },
+  {
+    "key": "tts.remote.voice",
+    "domain": {
+      "kind": "text",
+      "empty_allowed": true
+    },
+    "default": "\"\"",
+    "sends_out": false,
+    "description": "a voice the remote server names; the remote speaker needs one to start"
+  },
+  {
+    "key": "tts.remote.instructions",
+    "domain": {
+      "kind": "text",
+      "empty_allowed": true
+    },
+    "default": "\"\"",
+    "sends_out": false,
+    "description": "tone and delivery, for a model that reads it"
+  },
+  {
+    "key": "tts.remote.response_format",
+    "domain": {
+      "kind": "choice",
+      "values": [
+        "wav",
+        "pcm"
+      ]
+    },
+    "default": "\"wav\"",
+    "sends_out": false,
+    "description": "wav | pcm; what the server is asked to send"
+  },
+  {
+    "key": "tts.remote.sample_rate",
+    "domain": {
+      "kind": "number",
+      "min": 1.0,
+      "max": 4294967295.0,
+      "whole": true
+    },
+    "default": "null",
+    "sends_out": false,
+    "description": "samples per second; only pcm needs it"
+  },
+  {
+    "key": "tts.remote.api_key",
+    "domain": {
+      "kind": "secret"
+    },
+    "default": null,
+    "sends_out": true,
+    "description": "The key for the remote speaker, kept in credentials.toml"
+  },
+  {
+    "key": "models.unload_after",
+    "domain": {
+      "kind": "number",
+      "min": 0.0,
+      "max": null,
+      "whole": true
+    },
+    "default": "5",
+    "sends_out": false,
+    "description": "idle minutes before local models unload; 0 = never"
+  }
+]

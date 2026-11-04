@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { daemon, hotkeyListens } from '../lib/daemon';
-  import { write } from '../lib/settings';
+  import { defaultOf, optionsOf, table, write } from '../lib/settings';
   import { hotkeyFrom, humanize, isModifier } from '../lib/hotkey';
   import { claimKeys, onMac } from '../lib/keys';
   import Row from '../controls/Row.svelte';
@@ -28,23 +28,16 @@
   $: bindable = $daemon.status?.bindable_modifiers ?? [];
   $: audio = ($daemon.status?.config?.audio ?? {}) as Record<string, unknown>;
   $: key = String(audio.hotkey ?? '');
-  $: mode = String(audio.hotkey_mode ?? 'hold');
-  $: bargeIn = String(audio.barge_in ?? 'stop');
-  // An older daemon sends no [feedback] table, so its cue switch decides.
-  $: cues = (audio.cues ?? {}) as Record<string, unknown>;
+  $: mode = String(audio.hotkey_mode ?? defaultOf($table, 'audio.hotkey_mode'));
+  $: bargeIn = String(audio.barge_in ?? defaultOf($table, 'audio.barge_in'));
   $: feedbackConfig = ($daemon.status?.config?.feedback ?? {}) as Record<string, unknown>;
-  $: feedback = String(feedbackConfig.mode ?? (cues.enabled === false ? 'none' : 'both'));
+  $: feedback = String(feedbackConfig.mode ?? defaultOf($table, 'feedback.mode'));
   // The menu bar icon draws the figure only on macOS, so only there does the
   // row offer On screen. Read once: the platform does not change under this window.
   const mac = onMac();
-  const FEEDBACK_BASE_OPTIONS = [
-    { value: 'sound', label: 'Sound' },
-    { value: 'both', label: 'Both' },
-    { value: 'none', label: 'Off' },
-  ];
-  const FEEDBACK_OPTIONS = mac
-    ? [{ value: 'visual', label: 'On screen' }, ...FEEDBACK_BASE_OPTIONS]
-    : FEEDBACK_BASE_OPTIONS;
+  $: FEEDBACK_OPTIONS = optionsOf($table, 'feedback.mode').filter(
+    (option) => mac || option.value !== 'visual',
+  );
   // Off macOS the row has no On screen radio, so a daemon set to visual still needs a selection.
   $: visualWithoutFigure = feedback === 'visual' && !mac;
   $: feedbackSelected = visualWithoutFigure ? 'both' : feedback;
@@ -118,7 +111,7 @@
 <svelte:window on:keydown={onKeyDown} on:keyup={onKeyUp} />
 
 {#if listens}
-  <Row name="The key" pending={$daemon.pending.has('audio.hotkey')}>
+  <Row name="The key" setting="audio.hotkey">
     <button class="key" on:click={() => (recording ? stop() : begin())}>
       {recording ? 'Press a key' : humanize(key) || 'Not set'}
       <span class="sr">— change the hotkey</span>
@@ -135,15 +128,12 @@
   <Row
     name="Press behaviour"
     note="Hold: speak while the key is down. Tap: press once to start, once to stop."
-    pending={$daemon.pending.has('audio.hotkey_mode')}
+    setting="audio.hotkey_mode"
   >
     <Segmented
       label="Press behaviour"
       value={mode}
-      options={[
-        { value: 'hold', label: 'Hold' },
-        { value: 'toggle', label: 'Tap' },
-      ]}
+      options={optionsOf($table, 'audio.hotkey_mode')}
       change={(next) => write('audio.hotkey_mode', next)}
     />
   </Row>
@@ -157,24 +147,16 @@ banshee record stop</pre>
   <p class="compositor">docs/linux.md gives the Hyprland and Omarchy syntax.</p>
 {/if}
 
-<Row name="While Banshee is talking" pending={$daemon.pending.has('audio.barge_in')}>
+<Row name="While Banshee is talking" setting="audio.barge_in">
   <Segmented
     label="While Banshee is talking"
     value={bargeIn}
-    options={[
-      { value: 'stop', label: 'Stop' },
-      { value: 'none', label: 'Carry on' },
-    ]}
+    options={optionsOf($table, 'audio.barge_in')}
     change={(next) => write('audio.barge_in', next)}
   />
 </Row>
 
-<Row
-  name="Feedback"
-  note={feedbackNote}
-  noteId={FEEDBACK_NOTE}
-  pending={$daemon.pending.has('feedback.mode')}
->
+<Row name="Feedback" note={feedbackNote} noteId={FEEDBACK_NOTE} setting="feedback.mode">
   <Segmented
     label="Feedback"
     value={feedbackSelected}

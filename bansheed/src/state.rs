@@ -47,6 +47,7 @@ const RESTART_EXIT: u8 = 75;
 pub struct Machine {
     pub models: std::path::PathBuf,
     pub config: std::path::PathBuf,
+    pub credentials: std::path::PathBuf,
     pub voiceover: fn() -> bool,
 }
 
@@ -76,6 +77,8 @@ pub enum ConsumerCommand {
     Retune(Vec<String>),
     Speak(crate::speech_to_text::Speech),
     Reload(&'static banshee_common::listening::ListeningModel),
+    /// The listener the config names takes over.
+    Replace(Box<crate::config::STTConfig>),
     /// `models.unload_after` moved, so the idle wait is measured again.
     UnloadAfter,
     Shutdown,
@@ -116,6 +119,9 @@ pub enum RecordingError {
     /// The id of a listening model whose file is not downloaded.
     NoListeningModel(&'static str),
     Provider(String),
+    /// A remote listener that would not build at start. Its server is the one
+    /// config.toml names, and a write cannot reach a pipeline that never stood.
+    UnbuiltListener(String),
     KeyFile(String),
 }
 
@@ -190,7 +196,9 @@ impl std::fmt::Display for RecordingError {
                     "the listening model {id} is not downloaded: run banshee setup"
                 )
             }
-            RecordingError::Provider(e) => write!(f, "the remote listener is not reachable: {e}"),
+            RecordingError::Provider(e) | RecordingError::UnbuiltListener(e) => {
+                write!(f, "the remote listener is not reachable: {e}")
+            }
             RecordingError::KeyFile(e) => {
                 write!(f, "the remote listener's key file is unreadable: {e}")
             }
@@ -208,7 +216,7 @@ impl RecordingError {
             RecordingError::NoListeningModel(_) => {
                 "no listening model yet: run banshee setup".to_string()
             }
-            RecordingError::Provider(_) => {
+            RecordingError::Provider(_) | RecordingError::UnbuiltListener(_) => {
                 "dictation and ask_user do not work until the key or server is fixed".to_string()
             }
             RecordingError::KeyFile(_) => {
@@ -220,12 +228,22 @@ impl RecordingError {
         }
     }
 
+    /// The fault a failed start leaves. A listener refused at start never
+    /// built, and only a start builds one.
+    pub fn at_start(self) -> Self {
+        match self {
+            RecordingError::Provider(reason) => RecordingError::UnbuiltListener(reason),
+            other => other,
+        }
+    }
+
     /// `None` where no one command clears the fault.
     pub fn command(&self) -> Option<&'static str> {
         match self {
             RecordingError::Microphone(_)
             | RecordingError::Model(_)
-            | RecordingError::Provider(_) => Some("banshee start"),
+            | RecordingError::UnbuiltListener(_) => Some("banshee start"),
+            RecordingError::Provider(_) => Some("banshee config set stt.remote.api_key"),
             RecordingError::NoListeningModel(_) => Some("banshee setup"),
             // A grant is a switch in System Settings, not a command.
             RecordingError::KeyFile(_) | RecordingError::MicrophoneRefused(_) => None,
@@ -259,9 +277,13 @@ impl RecordingError {
             RecordingError::MicrophoneRefused(refusal) => refusal.fix().to_string(),
             RecordingError::Model(_) => "restart it: banshee start".to_string(),
             RecordingError::NoListeningModel(_) => "download it: banshee setup".to_string(),
-            RecordingError::Provider(_) => "set the key: banshee config set stt.remote.api_key, \
-                 or fix [stt.remote] base_url, then restart: banshee start"
-                .to_string(),
+            RecordingError::Provider(_) => {
+                "fix [stt.remote] base_url, or set the key: banshee config set stt.remote.api_key"
+                    .to_string()
+            }
+            RecordingError::UnbuiltListener(_) => {
+                "fix [stt.remote] base_url in config.toml, then restart: banshee start".to_string()
+            }
             // A key written again reads the same file first, so the fix starts
             // by removing it.
             RecordingError::KeyFile(_) => crate::credentials::Credentials::remove_command(),
@@ -286,6 +308,8 @@ pub enum Mic {
 pub enum Listening {
     /// A listener that loads no file.
     Remote,
+    /// A remote listener that cannot send, and why. The next key write ends it.
+    Refused(RecordingError),
     /// On disk and not in memory. It loads when used, so it is no fault.
     Available(&'static ListeningModel),
     /// Being read into memory. A use waits for it, so it is no fault either.
@@ -301,7 +325,7 @@ impl Listening {
     /// `None` for a listener that loads no file.
     pub fn model(&self) -> Option<&'static ListeningModel> {
         match self {
-            Listening::Remote => None,
+            Listening::Remote | Listening::Refused(_) => None,
             Listening::Available(model)
             | Listening::Loading(model)
             | Listening::Loaded(model)
@@ -319,6 +343,12 @@ impl Listening {
                 | Listening::Loaded(_)
         )
     }
+
+    /// A listener that sends audio to a server, whether or not it can send.
+    /// It holds no engine a model loads into.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Listening::Remote | Listening::Refused(_))
+    }
 }
 
 /// A microphone fault wins: it is the first thing to fix, since no model
@@ -333,6 +363,7 @@ pub fn pipeline(mic: &Mic, listening: &Listening) -> Pipeline {
         (Mic::Closed | Mic::Open, Listening::Missing(model)) => {
             Pipeline::Broken(RecordingError::NoListeningModel(model.id))
         }
+        (Mic::Closed | Mic::Open, Listening::Refused(error)) => Pipeline::Broken(error.clone()),
         (
             Mic::Closed | Mic::Open,
             Listening::Remote
@@ -346,6 +377,7 @@ pub fn pipeline(mic: &Mic, listening: &Listening) -> Pipeline {
 struct Facts {
     mic: Mic,
     listening: Listening,
+    route: crate::speech_to_text::Route,
 }
 
 /// The right to download, held for as long as one runs.
@@ -408,6 +440,11 @@ pub struct DaemonState {
     version: &'static str,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
+    endpoint_silence_ms: AtomicU64,
+    // The hotkey listener loads the generation on every key event and locks
+    // the pair only when it moved
+    binding: Mutex<(crate::binding::Hotkey, crate::config::HotkeyMode)>,
+    binding_generation: AtomicU64,
     audio_device: RwLock<Option<String>>,
     // The named device the config asks for while something else records. Never
     // a blocker: a daemon on a substitute records correctly.
@@ -418,19 +455,16 @@ pub struct DaemonState {
     // Follows a live `tts.voice`, so the voice reported is the one now loaded
     tts_voice: RwLock<Option<String>>,
     // Said by the branch that built the speaker, and again by a local voice that
-    // loads later. A live `[tts]` write moves the voice above and not this: a
+    // loads later. A live `tts.voice` write moves the voice above and not this: a
     // backend that takes a voice name is still the fallback.
     speaker_started: AtomicBool,
+    speaker_spec: Mutex<crate::text_to_speech::SpeakerSpec>,
     wanted_downloads: RwLock<Vec<crate::models::download::Download>>,
     // The file as last parsed. `vad_threshold`, `wanted_device` and `barge_in`
     // beside it are live values the file may no longer agree with.
     config: RwLock<Arc<Config>>,
-    // A key with no live apply is read once, when the daemon starts, so this is
-    // what those keys run for the daemon's whole life. Without it a write cannot
-    // tell a change from a change back.
-    running_config: Arc<Config>,
-    // Keys the daemon accepted and wrote but has not applied. A restart empties
-    // it by nature; a live path clears its own key.
+    // Keys the daemon accepted and wrote but has not applied. A live path
+    // clears its own key.
     pending: Mutex<std::collections::BTreeSet<String>>,
     // Always `pipeline(mic, listening)` of `facts`, sent under its lock, so
     // two writers cannot publish their changes out of order. The watchdog
@@ -506,6 +540,23 @@ pub struct DaemonState {
     level_watchers: Arc<watch::Sender<usize>>,
     // The committed words of the recording in progress, empty between recordings.
     words: watch::Sender<String>,
+    withdrawals: Mutex<Withdrawals>,
+    // The route of the last switch handed to the listener, which may still
+    // wait in its queue.
+    asked_listener: Mutex<crate::speech_to_text::Route>,
+}
+
+/// The requests on their way to a server that have to stop. The listener
+/// compares `count` with the count it last acted on.
+#[derive(Default)]
+struct Withdrawals {
+    count: u64,
+    /// Every withdrawal up to this count was undone by a later switch to a
+    /// server.
+    settled: u64,
+    /// The listener a turn-off hands over to, until the listener takes it or
+    /// a switch to a server undoes it.
+    next: Option<crate::config::STTConfig>,
 }
 
 impl DaemonState {
@@ -522,6 +573,7 @@ impl DaemonState {
         let keep_open = config.audio.keep_open;
         let speak_problems = config.speak_problems();
         let unload_after = config.models.unload_limit();
+        let asked_listener = crate::speech_to_text::Route::of(&config.stt);
         let facts = Facts {
             mic: Mic::Starting,
             listening: match crate::models::stt_model(&config) {
@@ -533,20 +585,24 @@ impl DaemonState {
                 }
                 Some(model) => Listening::Missing(model),
             },
+            route: asked_listener.clone(),
         };
         Self {
             machine,
             version: env!("CARGO_PKG_VERSION"),
             vad_model: crate::models::VAD_MODEL,
             vad_threshold: AtomicU32::new(config.stt.vad_threshold.to_bits()),
+            endpoint_silence_ms: AtomicU64::new(config.stt.endpoint_silence_ms),
+            binding: Mutex::new((config.audio.hotkey, config.audio.hotkey_mode)),
+            binding_generation: AtomicU64::new(0),
             audio_device: RwLock::new(None),
             missing_device: RwLock::new(None),
             wanted_device: Mutex::new(config.audio.input_device.clone()),
             speaker_started: AtomicBool::new(speaker.started()),
             tts_voice: RwLock::new(speaker.voice()),
+            speaker_spec: Mutex::new(crate::text_to_speech::SpeakerSpec::of(&config.tts)),
             wanted_downloads: RwLock::new(wanted_downloads),
             barge_in: Mutex::new(config.audio.barge_in),
-            running_config: Arc::clone(&config),
             config: RwLock::new(config),
             pending: Mutex::new(std::collections::BTreeSet::new()),
             pipeline: watch::channel(pipeline(&facts.mic, &facts.listening)).0,
@@ -588,6 +644,8 @@ impl DaemonState {
             level: watch::channel(0.0).0,
             level_watchers: Arc::new(watch::channel(0).0),
             words: watch::channel(String::new()).0,
+            withdrawals: Mutex::new(Withdrawals::default()),
+            asked_listener: Mutex::new(asked_listener),
         }
     }
 
@@ -1116,6 +1174,10 @@ impl DaemonState {
         &self.machine.config
     }
 
+    pub fn credentials_path(&self) -> &std::path::Path {
+        &self.machine.credentials
+    }
+
     pub fn voiceover_on(&self) -> bool {
         (self.machine.voiceover)()
     }
@@ -1227,21 +1289,94 @@ impl DaemonState {
         lock(&self.facts).listening.clone()
     }
 
-    /// The pipeline stands, and listens once `model`'s file arrives and loads.
-    pub fn await_listening_model(&self, model: &'static ListeningModel) {
-        self.update(|facts| facts.listening = Listening::Missing(model));
+    #[cfg(test)]
+    pub fn set_listening(&self, listening: Listening) {
+        self.update(|facts| facts.listening = listening);
     }
 
-    /// A listener that serves no model takes `model` from now on: loading
-    /// when `here` says its file is, and waiting for it otherwise. One that
-    /// serves keeps its model, and a load in flight serves, so a second caller
-    /// finds it and sends no second load. Answers what the listener had, read
-    /// under the same lock as the write.
+    /// The listener key on file moved. A remote listener sends with it from
+    /// the next use, and one with no key says why it cannot.
+    pub fn listener_key_changed(&self) {
+        let now = match crate::speech_to_text::key_refusal(self.credentials_path()) {
+            Some(error) => Listening::Refused(error),
+            None => Listening::Remote,
+        };
+        self.update(|facts| {
+            if facts.listening.is_remote() {
+                facts.listening = now;
+            }
+        });
+    }
+
+    /// Where the listener in force sends what it hears.
+    pub fn listener_route(&self) -> crate::speech_to_text::Route {
+        lock(&self.facts).route.clone()
+    }
+
+    /// The listener just installed, and what it has of its model.
+    pub fn install_listener(&self, route: crate::speech_to_text::Route, listening: Listening) {
+        self.update(|facts| {
+            facts.route = route;
+            facts.listening = listening;
+        });
+    }
+
+    /// Stops any request on its way to the server in force. `next` is the
+    /// listener to take over, or `None` for a removed key. A removed key
+    /// leaves a pending turn-off in place, since the turn-off already goes local.
+    pub fn withdraw_listener(&self, next: Option<crate::config::STTConfig>) {
+        let mut withdrawals = lock(&self.withdrawals);
+        withdrawals.count += 1;
+        if next.is_some() {
+            withdrawals.next = next;
+        }
+    }
+
+    pub fn listener_withdrawals(&self) -> u64 {
+        lock(&self.withdrawals).count
+    }
+
+    /// A withdrawal landed after the one `seen` and no switch undid it.
+    pub fn listener_withdrawn_since(&self, seen: u64) -> bool {
+        let withdrawals = lock(&self.withdrawals);
+        withdrawals.count > seen.max(withdrawals.settled)
+    }
+
+    pub fn asked_listener_route(&self) -> crate::speech_to_text::Route {
+        lock(&self.asked_listener).clone()
+    }
+
+    pub fn take_withdrawn_listener(&self) -> Option<crate::config::STTConfig> {
+        lock(&self.withdrawals).next.take()
+    }
+
+    /// Hands the listener the config it switches to. A switch to a server
+    /// undoes a turn-off still pending, so the commands queued after it
+    /// follow the latest choice.
+    pub fn replace_listener(&self, stt: crate::config::STTConfig) -> bool {
+        *lock(&self.asked_listener) = crate::speech_to_text::Route::of(&stt);
+        if stt.provider.is_remote() {
+            let mut withdrawals = lock(&self.withdrawals);
+            if withdrawals.next.take().is_some() {
+                withdrawals.settled = withdrawals.count;
+            }
+        }
+        self.commands
+            .send(ConsumerCommand::Replace(Box::new(stt)))
+            .is_ok()
+    }
+
+    /// A listener that serves no model takes `model`: loading when `here`
+    /// says its file is, and waiting for it otherwise. One that serves keeps
+    /// its model, and a load in flight serves, so a second caller finds it and
+    /// sends no second load. A remote listener holds no engine to load into,
+    /// so it keeps its place. Answers what the listener had, read under the
+    /// same lock as the write.
     pub fn claim_listening_model(&self, model: &'static ListeningModel, here: bool) -> Listening {
         let mut had = Listening::Remote;
         self.update(|facts| {
             had = facts.listening.clone();
-            if !had.serves() {
+            if !had.serves() && !had.is_remote() {
                 facts.listening = if here {
                     Listening::Loading(model)
                 } else {
@@ -1462,15 +1597,38 @@ impl DaemonState {
         let Some(voice) = self.speech.reconfigure(tts) else {
             return false;
         };
-        self.set_tts_voice(voice);
+        self.set_tts_voice(Some(voice));
         true
     }
 
-    pub fn set_tts_voice(&self, voice: String) {
+    pub fn set_tts_voice(&self, voice: Option<String>) {
         *self
             .tts_voice
             .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(voice);
+            .unwrap_or_else(|poison| poison.into_inner()) = voice;
+    }
+
+    /// What the speaker in force was built from.
+    pub fn speaker_spec(&self) -> crate::text_to_speech::SpeakerSpec {
+        lock(&self.speaker_spec).clone()
+    }
+
+    pub fn speaker_provider(&self) -> crate::config::Provider {
+        lock(&self.speaker_spec).provider
+    }
+
+    /// Puts the speaker `tts` names in place and reports it as a start does.
+    /// With `cut_off`, the line playing starts again on it. False when nothing
+    /// can build a speaker.
+    pub fn switch_speaker(&self, tts: &crate::config::TTSConfig, cut_off: bool) -> bool {
+        let Some(switched) = self.speech.switch(tts, cut_off) else {
+            return false;
+        };
+        self.set_speaker_started(switched.speaker.started());
+        self.set_tts_voice(switched.speaker.voice());
+        self.set_last_speech_error(switched.fault);
+        *lock(&self.speaker_spec) = crate::text_to_speech::SpeakerSpec::of(tts);
+        true
     }
 
     /// Every file this daemon's own config needs. Set before the socket
@@ -1506,22 +1664,17 @@ impl DaemonState {
         *self.config.write().unwrap() = config;
     }
 
-    /// The config the restart-only keys are running.
-    pub fn running_config(&self) -> Arc<Config> {
-        Arc::clone(&self.running_config)
-    }
-
     pub fn pending(&self) -> Vec<String> {
         self.pending.lock().unwrap().iter().cloned().collect()
     }
 
     /// One key is either applied or waiting, never both.
-    pub fn record_outcome(&self, applied: &[String], restart_required: &[String]) {
+    pub fn record_outcome(&self, applied: &[String], waiting: &[String]) {
         let mut pending = self.pending.lock().unwrap();
         for key in applied {
             pending.remove(key);
         }
-        for key in restart_required {
+        for key in waiting {
             pending.insert(key.clone());
         }
     }
@@ -1592,6 +1745,34 @@ impl DaemonState {
             .vad_threshold
             .load(std::sync::atomic::Ordering::Relaxed);
         f32::from_bits(bits)
+    }
+
+    pub fn set_endpoint_silence_ms(&self, ms: u64) {
+        self.endpoint_silence_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn endpoint_silence_ms(&self) -> u64 {
+        self.endpoint_silence_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The hotkey and its mode, with the generation that moves on each change.
+    pub fn binding(&self) -> (crate::binding::Hotkey, crate::config::HotkeyMode, u64) {
+        let pair = lock(&self.binding);
+        (pair.0, pair.1, self.binding_generation())
+    }
+
+    pub fn set_binding(&self, hotkey: crate::binding::Hotkey, mode: crate::config::HotkeyMode) {
+        let mut pair = lock(&self.binding);
+        *pair = (hotkey, mode);
+        self.binding_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn binding_generation(&self) -> u64 {
+        self.binding_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Runs `job` against the history file, or answers `None` when history is

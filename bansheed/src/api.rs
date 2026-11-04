@@ -30,9 +30,10 @@ fn from_error(id: Option<serde_json::Value>, error: BansheeError) -> JsonRpcResp
     JsonRpcResponse::error(id, error.rpc_code(), error.rpc_message())
 }
 
-/// `Env::from_machine` polls a login shell for up to five seconds, and an
-/// apply waits on an agent's own CLI with no timeout. On a worker thread that
-/// wait holds every other socket behind it.
+/// `Env::from_machine` polls a login shell for up to five seconds, an apply
+/// waits on an agent's own CLI with no timeout, and a speaker switch builds
+/// its client and drops the old voice. On a worker thread that wait holds
+/// every other socket behind it.
 async fn off_the_worker(
     id: Option<serde_json::Value>,
     work: impl FnOnce() -> Result<serde_json::Value, BansheeError> + Send + 'static,
@@ -43,7 +44,7 @@ async fn off_the_worker(
         Err(_) => JsonRpcResponse::error(
             id,
             rpc_code::INTERNAL,
-            "The connect task stopped before it answered.",
+            "The task stopped before it answered.",
         ),
     }
 }
@@ -193,7 +194,7 @@ fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpc
             rpc_code::MICROPHONE
         }
         RecordingError::Model(_) | RecordingError::NoListeningModel(_) => rpc_code::MODEL,
-        RecordingError::Provider(_) => rpc_code::PROVIDER,
+        RecordingError::Provider(_) | RecordingError::UnbuiltListener(_) => rpc_code::PROVIDER,
         RecordingError::KeyFile(_) => rpc_code::KEY_FILE,
     };
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
@@ -242,10 +243,9 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     // of the pipeline.
     let pipeline = daemon_state.pipeline();
     let blockers = readiness::blockers(daemon_state, &pipeline);
-    let running = daemon_state.running_config();
     // Read once for the two sides below, so one reply cannot answer from two
     // states of the file. A file that will not parse holds no key either way.
-    let credentials = crate::credentials::Credentials::load().ok();
+    let credentials = crate::credentials::Credentials::read(daemon_state.credentials_path()).ok();
     // The same call the `banshee.state_changed` push answers with, so a reply
     // and a push cannot spell one fact two ways.
     let mut payload = live_state_at(daemon_state, &pipeline, &blockers);
@@ -297,11 +297,11 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         "ready": ready(&blockers, &pipeline),
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
-        // The providers are read at startup, so the running config answers,
-        // not the file a `persist` write has already replaced. The key file is
-        // read each time: a key set after startup is "present" before the restart.
+        // The listener and the speaker in force answer for their sides. The
+        // key file is read each time.
         "remote": remote_report(
-            &running,
+            &daemon_state.listener_route(),
+            &daemon_state.speaker_spec(),
             |side| credentials.as_ref().is_some_and(|held| held.key(side).is_some()),
             daemon_state.speaker_started(),
         ),
@@ -371,22 +371,31 @@ fn listening_models(
 
 /// Where each side sends what it handles, and whether its key is set. The key
 /// read is a parameter so a test can answer for one side without a key file.
-/// `speaker_started` says whether the speaker the config names is the one
-/// running. It is false under a local provider whose voice has not loaded.
+/// `listener` is the route of the listener in force, and `speaker` what the
+/// speaker in force was built from. `speaker_started` says whether the speaker
+/// the config names is the one running. It is false under a local provider
+/// whose voice has not loaded.
 fn remote_report(
-    config: &crate::config::Config,
+    listener: &crate::speech_to_text::Route,
+    speaker: &crate::text_to_speech::SpeakerSpec,
     key_present: impl Fn(crate::credentials::RemoteKey) -> bool,
     speaker_started: bool,
 ) -> serde_json::Value {
+    let listener_host = match listener {
+        crate::speech_to_text::Route::Local => None,
+        crate::speech_to_text::Route::Remote { base_url, .. } => {
+            Some(crate::config::host_of(base_url))
+        }
+    };
     serde_json::json!({
         "stt": {
-            "remote": config.stt.provider.is_remote(),
-            "host": config.stt.provider.is_remote().then(|| config.stt.remote.host()),
+            "remote": listener_host.is_some(),
+            "host": listener_host,
             "key_present": key_present(crate::credentials::RemoteKey::Stt),
         },
         "tts": {
-            "remote": config.tts.provider.is_remote(),
-            "host": config.tts.provider.is_remote().then(|| config.tts.remote.host()),
+            "remote": speaker.provider.is_remote(),
+            "host": speaker.provider.is_remote().then(|| speaker.remote.host()),
             "speaker_started": speaker_started,
             "key_present": key_present(crate::credentials::RemoteKey::Tts),
         },
@@ -562,25 +571,32 @@ async fn question_played(
     let speech = daemon_state.speech();
     let mut playing = speech.subscribe_playing();
     loop {
+        // Queued is read before started: the move from one to the other is a
+        // single step under the playback lock
         let utterance = match *playing.borrow_and_update() {
+            // A speaker switch holds every line back while it builds
+            None if speech.is_queued(question) => None,
             None if speech.has_started(question) => return Asked::Played,
             None => return Asked::Unspoken,
             Some(utterance) if utterance > question => return Asked::Played,
-            Some(utterance) => utterance,
+            Some(utterance) => Some(utterance),
         };
-        let is_question = utterance == question;
+        let is_question = utterance == Some(question);
         let bound = if is_question { budget } else { stall };
         match tokio::time::timeout(bound, playing.changed()).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => return Asked::Stalled,
             Err(_) if is_question => return Asked::Stalled,
-            Err(_) => {
-                log::warn!(
-                    "a line played {}s with no change, so the lines before the question are dropped",
-                    stall.as_secs()
-                );
-                speech.skip_to_question(utterance);
-            }
+            Err(_) => match utterance {
+                Some(utterance) => {
+                    log::warn!(
+                        "a line played {}s with no change, so the lines before the question are dropped",
+                        stall.as_secs()
+                    );
+                    speech.skip_to_question(utterance);
+                }
+                None => return Asked::Unspoken,
+            },
         }
     }
 }
@@ -689,7 +705,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     }
 }
 
-fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+async fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     let Some(requested) = params.get("settings") else {
         return JsonRpcResponse::error(
             params.id(),
@@ -712,17 +728,16 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
         Err(response) => return *response,
     };
 
-    match settings::configure(Some(daemon_state), assignments, persist) {
-        Ok(outcome) => JsonRpcResponse::success(
-            params.id(),
-            serde_json::json!({
-                "ok": true,
-                "applied": outcome.applied,
-                "restart_required": outcome.restart_required,
-            }),
-        ),
-        Err(error) => JsonRpcResponse::error(params.id(), error.rpc_code(), error.rpc_message()),
-    }
+    let state = Arc::clone(daemon_state);
+    off_the_worker(params.id(), move || {
+        let outcome = settings::configure(Some(&state), assignments, persist)?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "applied": outcome.applied,
+            "waiting": outcome.waiting,
+        }))
+    })
+    .await
 }
 
 /// With `model`, fetches that listening model's file alone; without, every file
@@ -799,9 +814,8 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
                 log::error!("Download failed: {error}");
             }
         }
-        // The files these settings were waiting for are here now, so a
-        // listening model or a voice chosen before its file arrived takes
-        // effect rather than waiting for a restart with nothing to do.
+        // A listening model or a voice chosen before its file arrived takes
+        // effect once the download brings the file.
         crate::settings::reapply_pending(&state);
         drop(slot);
     });
@@ -942,7 +956,7 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_RECORD_TOGGLE => record_toggle(params, daemon_state),
         BANSHEE_ASK_USER => ask_user(params, daemon_state).await,
         BANSHEE_TURN_ENDED => turn_ended(params, daemon_state),
-        BANSHEE_CONFIGURE => configure(params, daemon_state),
+        BANSHEE_CONFIGURE => configure(params, daemon_state).await,
         BANSHEE_DOWNLOAD_MODELS => download_models(params, daemon_state),
         BANSHEE_LIST_VOICES => list_voices(params, daemon_state),
         BANSHEE_LIST_INPUT_DEVICES => list_input_devices(params, daemon_state),

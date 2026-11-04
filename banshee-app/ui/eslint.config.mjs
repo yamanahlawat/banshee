@@ -77,7 +77,7 @@ export default ts.config(
   // specifier only.
   {
     files: ['src/**/*.ts', 'src/**/*.svelte'],
-    ignores: ['src/**/*.test.ts'],
+    ignores: ['src/**/*.test.ts', 'src/lib/tauri.mock.ts'],
     rules: {
       'no-restricted-imports': [
         'error',

@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { waitsOnARestart } from '../lib/daemon';
+  import { waiting } from '../lib/daemon';
   import { write } from '../lib/settings';
-  import { RESTART_SAYS } from '../lib/copy';
+  import { WAITING_SAYS } from '../lib/copy';
 
   export let saving: boolean;
 
   // The key is a constant of this control, so the one fact about it is read
   // here rather than computed by each band that places it.
-  $: pending = $waitsOnARestart.has('daemon.save_history');
+  $: pending = $waiting.has('daemon.save_history');
 </script>
 
 <button
@@ -16,7 +16,7 @@
   on:click={() => write('daemon.save_history', !saving)}
 >
   {saving ? 'Stop saving' : 'Start saving'}
-  {#if pending}<span class="sr">{RESTART_SAYS}</span>{/if}
+  {#if pending}<span class="sr">{WAITING_SAYS}</span>{/if}
 </button>
 
 <style>

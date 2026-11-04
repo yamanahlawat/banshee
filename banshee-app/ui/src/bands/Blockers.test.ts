@@ -161,17 +161,16 @@ it('names the remote listener when the fault is the server, not the microphone',
         kind: 'provider',
         id: 'recording_pipeline',
         name: 'The remote listener is not reachable',
-        remedy: 'restart',
         consequence: 'dictation and ask_user do not work until the key or server is fixed',
-        fix: 'set the key: banshee config set stt.remote.api_key, or fix [stt.remote] base_url, then restart: banshee start',
-        command: 'banshee start',
+        fix: 'fix [stt.remote] base_url, or set the key: banshee config set stt.remote.api_key',
+        command: 'banshee config set stt.remote.api_key',
       } satisfies Blocker,
     ],
     restart: () => {},
   });
   expect(getByRole('heading', { name: /remote listener is not reachable/i })).toBeTruthy();
   expect(queryByRole('heading', { name: /microphone/i })).toBeNull();
-  expect(getByRole('button', { name: 'Restart' })).toBeTruthy();
+  expect(queryByRole('button', { name: /restart/i })).toBeNull();
 });
 
 // Writing the key reads the same file first, so the headline sends the reader
@@ -183,7 +182,6 @@ it('names the key file when the fault is the file, not the server', () => {
         kind: 'keyfile',
         id: 'recording_pipeline',
         name: "The remote listener's key file is unreadable",
-        remedy: 'restart',
         consequence: 'dictation and ask_user do not work until the key file is fixed',
         fix: 'rm /Users/someone/.banshee/credentials.toml, then set the keys again',
       } satisfies Blocker,
@@ -192,7 +190,7 @@ it('names the key file when the fault is the file, not the server', () => {
   });
   expect(getByRole('heading', { name: /key file is unreadable/i })).toBeTruthy();
   expect(queryByRole('heading', { name: /not reachable/i })).toBeNull();
-  expect(getByRole('button', { name: 'Restart anyway' })).toBeTruthy();
+  expect(queryByRole('button', { name: /restart/i })).toBeNull();
 });
 
 // First run is the one moment a person asks what Banshee is, and it is

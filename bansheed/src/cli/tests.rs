@@ -386,11 +386,17 @@ async fn a_config_that_does_not_load_starts_nothing() {
     assert!(refused.contains("banshee start"), "{refused}");
 }
 
+fn scratch() -> std::path::PathBuf {
+    crate::test_support::unique_scratch("cli-after-write")
+}
+
 #[test]
-fn a_listening_model_not_downloaded_is_fetched_and_never_restarted_into() {
+fn a_listening_model_not_downloaded_names_the_download_and_never_the_start() {
     let dir = crate::test_support::unique_scratch("cli-model");
     let turbo = serde_json::json!("whisper-large-v3-turbo");
-    let line = super::restart_line("stt.model", &turbo, &dir);
+    let waiting = super::Written::Waiting(vec!["stt.model".into()]);
+    let lines = super::after_write("stt.model", &turbo, &waiting, true, &dir);
+    let line = lines.join("\n");
     assert!(line.contains("banshee setup"), "{line}");
     assert!(line.contains("whisper-large-v3-turbo"), "{line}");
     assert!(!line.contains("banshee start"), "{line}");
@@ -400,13 +406,112 @@ fn a_listening_model_not_downloaded_is_fetched_and_never_restarted_into() {
     );
 
     std::fs::write(dir.join("whisper-large-v3-turbo-Q5_K_M.gguf"), b"").unwrap();
-    let line = super::restart_line("stt.model", &turbo, &dir);
+    let lines = super::after_write("stt.model", &turbo, &waiting, true, &dir);
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(line, "Restart to use it: banshee start");
+    assert_eq!(lines, ["Banshee could not use it yet."]);
+}
+
+#[test]
+fn a_model_not_downloaded_gets_the_download_line_with_no_daemon_too() {
+    let dir = crate::test_support::unique_scratch("cli-model-nodaemon");
+    let turbo = serde_json::json!("whisper-large-v3-turbo");
+    let lines = super::after_write("stt.model", &turbo, &super::Written::NoDaemon, true, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    let line = lines.join("\n");
+    assert!(line.contains("banshee setup"), "{line}");
+    assert!(!line.contains("banshee start"), "{line}");
+}
+
+#[test]
+fn no_line_names_a_restart() {
+    for written in [
+        super::Written::Now,
+        super::Written::NoDaemon,
+        super::Written::Waiting(vec!["audio.keep_open".into()]),
+    ] {
+        let lines = super::after_write(
+            "audio.keep_open",
+            &serde_json::json!(true),
+            &written,
+            true,
+            &scratch(),
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("Restart")),
+            "{lines:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_key_is_refused_before_the_daemon_is_called() {
+    assert!(super::domain_of("stt.vadthreshold").is_none());
     assert_eq!(
-        super::restart_line("audio.hotkey", &serde_json::json!("F13"), &dir),
-        "Restart to use it: banshee start"
+        crate::settings::not_a_setting("stt.vadthreshold").to_string(),
+        "'stt.vadthreshold' is not a setting"
     );
+}
+
+fn sent_value(key: &str, word: &str) -> serde_json::Value {
+    super::domain_of(key).unwrap().typed(word)
+}
+
+#[test]
+fn a_known_key_takes_its_row_s_type() {
+    assert_eq!(
+        sent_value("stt.vad_threshold", "0.6"),
+        serde_json::json!(0.6)
+    );
+    assert_eq!(
+        sent_value("audio.input_device", "12"),
+        serde_json::json!("12")
+    );
+}
+
+#[test]
+fn a_retired_key_goes_to_the_daemon_so_a_null_removes_it() {
+    assert_eq!(sent_value("stt.preset", "null"), serde_json::Value::Null);
+    assert_eq!(
+        sent_value("audio.cues.enabled", "false"),
+        serde_json::json!(false),
+        "the daemon names what replaced it"
+    );
+}
+
+#[test]
+fn a_setting_the_daemon_took_says_it_is_in_use() {
+    let lines = super::after_write(
+        "stt.vad_threshold",
+        &serde_json::json!(0.6),
+        &super::Written::Now,
+        true,
+        &scratch(),
+    );
+    assert_eq!(lines, ["Banshee uses it now."]);
+}
+
+#[test]
+fn a_setting_written_with_no_daemon_names_the_start() {
+    let lines = super::after_write(
+        "stt.vad_threshold",
+        &serde_json::json!(0.6),
+        &super::Written::NoDaemon,
+        true,
+        &scratch(),
+    );
+    assert_eq!(lines, ["Banshee uses it when it starts: banshee start"]);
+}
+
+#[test]
+fn a_hotkey_the_compositor_holds_says_only_where_to_bind_it() {
+    let lines = super::after_write(
+        "audio.hotkey",
+        &serde_json::json!("F6"),
+        &super::Written::Now,
+        false,
+        &scratch(),
+    );
+    assert_eq!(lines.join("\n"), super::hotkey_hint(false).unwrap());
 }
 
 #[test]
@@ -634,4 +739,14 @@ fn up_to_three_languages_print_their_codes() {
     assert_eq!(super::languages_heard(&["en"]), "English");
     assert_eq!(super::languages_heard(&["zh", "en", "ja"]), "zh, en, ja");
     assert_eq!(super::languages_heard(&["a", "b", "c", "d"]), "4 languages");
+}
+
+#[test]
+fn a_hotkey_the_compositor_holds_names_the_bind_command() {
+    assert!(
+        super::hotkey_hint(false)
+            .unwrap()
+            .contains("banshee bind hyprland")
+    );
+    assert_eq!(super::hotkey_hint(true), None);
 }

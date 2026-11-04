@@ -43,8 +43,31 @@ export type { Progress as DownloadProgress } from './daemon';
 export type Down = { reason: string };
 export type HistoryRow = { id: string | number; text: string; timestamp: string };
 
+export type Domain =
+  | { kind: 'toggle' }
+  | { kind: 'choice'; values: string[] }
+  | { kind: 'number'; min: number; max: number | null; whole: boolean }
+  | { kind: 'words' }
+  | { kind: 'text'; empty_allowed: boolean }
+  | { kind: 'url' }
+  | { kind: 'hotkey' }
+  | { kind: 'listening_model' }
+  | { kind: 'voice' }
+  | { kind: 'secret' };
+/// A row of the table in `banshee-common`. `default` is the JSON text of what an absent key reads as.
+export type Setting = {
+  key: string;
+  domain: Domain;
+  default: string | null;
+  sends_out: boolean;
+  description: string;
+};
+
 export function status(): Promise<Status> {
   return call('status');
+}
+export function settingsTable(): Promise<Setting[]> {
+  return call('settings_table');
 }
 export function setSetting(key: string, value: unknown): Promise<string[]> {
   return call('set_setting', { key, value });

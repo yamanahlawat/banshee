@@ -80,7 +80,16 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - In a crowded room, other people's voices end up in an answer. Nothing separates the user's
   voice from the room.
 - The hotkey still fires a dictation while the window is capturing a new hotkey.
+- An X11 hotkey listener that stopped at start (`start_global_hotkey` in
+  `bansheed/src/hotkey.rs`) takes a rebind and still hears nothing. A restart is the only
+  way back.
 - A model download cannot be cancelled once it starts.
+- A daemon that started without the voice detection model still needs `banshee start` before it
+  records.
+- No upper bound is measured for `stt.endpoint_silence_ms`, `models.unload_after`,
+  `tts.remote.sample_rate` or the length of `stt.vocabulary`. The settings table leaves three of
+  them open. It stops `tts.remote.sample_rate` at the `u32` maximum, 4294967295, the limit
+  `config set` enforces.
 - On Linux, a microphone chosen by name can open the `hw:` device that offers no float format.
 - An agent installed under `nvm` can stay invisible to `banshee connect`.
 - Some readings the voices get are untested by the round trip: `127.0.0.1` reads "one hundred
@@ -94,10 +103,21 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 
 - Both remote keys live in a file in `~/.banshee`, not in the Keychain.
 - The speaker takes the OpenAI `/audio/speech` shape only.
+- The remote provider code lives inside the daemon. Moving it into a crate of its own is worth
+  doing once a second provider adapter exists. Today the remote listener and speaker both use
+  the OpenAI-compatible client.
 - `banshee setup` downloads the local voice even when speech is remote, unless `tts.fallback` is `none`.
 - The remote speaker gets the same spoken text as the local voices, with versions, paths, units,
   PR numbers and hyphenated names written out as words. How a remote voice server reads that text
   is not measured.
+- Each remote request builds a runtime and opens a connection of its own, so every spoken line
+  and every dictation pays a TLS handshake. The client keeps no idle connection
+  (`pool_max_idle_per_host(0)`), because nothing runs between requests to see a server close one.
+  One long-lived runtime per client would allow a pool. The latency is not measured.
+- Each remote dictation copies the whole recording and starts a thread for the request.
+- The listener decides a switch on both sides of the command queue. It could decide alone from
+  the saved config, but only once a `persist: false` write of `stt.remote.model` is refused,
+  since that write never reaches the saved config.
 
 ## The window
 
@@ -119,6 +139,9 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   test's server: both tests then fail (`remote_probe.rs:78` and `:118`). Seen once in a full
   Linux run on 2026-10-31; five isolated and two full reruns passed.
 - Nothing tests the window and the daemon together.
+- One state is called "pending" in some names and "waiting" in others: `DaemonState::pending`
+  beside `Outcome.waiting`, and `markPending` beside the `$waiting` store. The `pending` status
+  field is part of the protocol and keeps its name.
 - No `rust-version` is declared.
 - `rdev` pulls crates the compiler reports as future-incompatible, and has no newer release.
 - RUSTSEC-2024-0429 flags glib 0.18, which comes with Tauri's GTK 3 stack. It affects the Linux

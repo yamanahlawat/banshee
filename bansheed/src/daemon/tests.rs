@@ -565,15 +565,16 @@ fn spoken_lines(spoken: &crate::test_support::SpokenLines, count: usize) -> Vec<
 }
 
 fn unreachable_listener() -> crate::state::RecordingError {
-    crate::state::RecordingError::Provider("connection refused".to_string())
+    crate::state::RecordingError::Provider("connection refused".to_string()).at_start()
 }
 
-/// What the voice is handed, after the player reads symbols out as words.
-fn said_for(error: crate::state::RecordingError) -> String {
-    crate::text_to_speech::pronunciation::normalize(&format!(
-        "The remote listener is not reachable. {}.",
-        crate::audio::cues::capitalised(&error.fix())
-    ))
+/// What the voice is handed for a listener that would not build at start,
+/// after the player reads symbols out as words.
+fn said_for_a_dead_listener() -> String {
+    crate::text_to_speech::pronunciation::normalize(
+        "The remote listener is not reachable. Fix [stt.remote] base_url in config.toml, \
+         then restart: banshee start.",
+    )
 }
 
 // A pipeline that breaks as the daemon starts is part of the start, so the
@@ -587,7 +588,7 @@ async fn a_blocker_present_at_start_is_not_spoken() {
     set_mic_and_look(&state, crate::state::Mic::Closed).await;
     set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
 
-    assert_eq!(spoken_lines(&spoken, 1), [said_for(unreachable_listener())]);
+    assert_eq!(spoken_lines(&spoken, 1), [said_for_a_dead_listener()]);
 }
 
 #[tokio::test]
@@ -600,7 +601,7 @@ async fn a_blocker_that_clears_and_returns_is_spoken_again() {
     set_mic_and_look(&state, crate::state::Mic::Closed).await;
     set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
 
-    let said = said_for(unreachable_listener());
+    let said = said_for_a_dead_listener();
     assert_eq!(spoken_lines(&spoken, 2), [said.clone(), said]);
 }
 
@@ -639,7 +640,7 @@ async fn a_problem_is_not_spoken_while_speak_problems_is_off() {
     set_mic_and_look(&state, crate::state::Mic::Closed).await;
     set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
 
-    assert_eq!(spoken_lines(&spoken, 1), [said_for(unreachable_listener())]);
+    assert_eq!(spoken_lines(&spoken, 1), [said_for_a_dead_listener()]);
 }
 
 fn test_socket_path(name: &str) -> std::path::PathBuf {

@@ -441,7 +441,7 @@ impl RemoteTtsConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct STTConfig {
     pub provider: Provider,

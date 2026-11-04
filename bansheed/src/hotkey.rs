@@ -12,11 +12,13 @@ use rdev::listen;
 use crate::audio::cues::{Cues, Reason, ReasonCode, Signal, Target};
 use crate::audio::utils::{StreamingResampler, resample_audio};
 use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
-use crate::config::HotkeyMode;
+use crate::config::{HotkeyMode, Provider, STTConfig};
 use crate::dictation::type_text;
 use crate::speech_to_text::vad::{Detector, VAD_CHUNK};
-use crate::speech_to_text::{SAMPLE_RATE, Transcriber};
-use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingMode};
+use crate::speech_to_text::{Listener, Route, SAMPLE_RATE, Speech, Transcriber};
+use crate::state::{
+    AskCommand, ConsumerCommand, DaemonState, Listening, RecordingError, RecordingMode,
+};
 use crate::text_to_speech::lock;
 use banshee_common::error::BansheeError;
 
@@ -191,6 +193,9 @@ impl Capture {
     }
 }
 
+/// Builds the listener a config names, for a switch while the daemon runs.
+pub type BuildListener = Box<dyn FnMut(&STTConfig) -> Result<Listener, RecordingError> + Send>;
+
 // Everything the audio consumer thread owns. The listening model and the
 // detector load and drop on this thread alone.
 pub struct Pipeline {
@@ -199,9 +204,37 @@ pub struct Pipeline {
     pub vad: Detector,
     pub state: Arc<DaemonState>,
     pub cues: Cues,
-    pub endpoint_silence_ms: u64,
     /// When the models last served, which their idle unload counts from.
     pub used: Instant,
+    pub build_listener: BuildListener,
+    /// The listener withdrawals this consumer has acted on.
+    pub withdrawals_seen: u64,
+}
+
+/// Both routes send to the same server. The model may differ.
+fn same_server(one: &Route, other: &Route) -> bool {
+    matches!(
+        (one, other),
+        (Route::Remote { base_url: a, .. }, Route::Remote { base_url: b, .. }) if a == b
+    )
+}
+
+/// In force while no engine is: one away on a request, or one that would not
+/// build. Every use fails with why.
+struct Unbuilt(String);
+
+impl Transcriber for Unbuilt {
+    fn transcribe(&mut self, _audio: &[f32]) -> Result<String, BansheeError> {
+        Err(BansheeError::Transcription(self.0.clone()))
+    }
+    fn set_vocabulary(&mut self, _words: &[String]) {}
+    fn set_speech(&mut self, _speech: Speech) {}
+    fn reload(
+        &mut self,
+        _model: &'static banshee_common::listening::ListeningModel,
+    ) -> Result<Option<&'static banshee_common::listening::ListeningModel>, BansheeError> {
+        Err(BansheeError::Transcription(self.0.clone()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,7 +541,7 @@ fn bound_key_hint(hotkey: Hotkey, hotkey_mode: HotkeyMode) -> String {
 // record_start when recording is unavailable, or it answers with silence.
 // rdev needs X11's XRecord, which wayland does not serve: listen either errors
 // or attaches to Xwayland and never sees a key. Say so instead of looking broken.
-pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_mode: HotkeyMode) {
+pub fn start_global_hotkey(key_state: Arc<DaemonState>) {
     if !listens() {
         #[cfg(all(unix, not(target_os = "macos")))]
         log::info!("Wayland session: {WAYLAND_HOTKEY_HINT}.");
@@ -516,21 +549,9 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
     }
 
     thread::spawn(move || {
-        let mut tracker = HotkeyTracker::new(hotkey, hotkey_mode);
-        // Whether this listener's own start opened the session in flight.
-        // Cancel discards audio, so it must never touch a session another
-        // caller opened while our start was refused as busy.
-        let mut owned = false;
-        if let Err(error) = listen(move |event| {
-            // The daemon's own paste presses modifier keys on this same
-            // event stream; they must not re-enter the tracker
-            if key_state.is_typing() {
-                return;
-            }
-            if let Some(action) = tracker.on_event(&event.event_type) {
-                act(&key_state, action, &mut owned);
-            }
-        }) {
+        let (hotkey, mode, generation) = key_state.binding();
+        let mut bound = Bound::new(hotkey, mode, generation);
+        if let Err(error) = listen(move |event| bound.handle(&key_state, &event.event_type)) {
             // Names the capability that is gone, not just the error type
             log::error!(
                 "Global hotkey listener stopped: {error:?}. `banshee record start` \
@@ -538,6 +559,53 @@ pub fn start_global_hotkey(key_state: Arc<DaemonState>, hotkey: Hotkey, hotkey_m
             );
         }
     });
+}
+
+/// The listener's tracker, kept to the binding the daemon holds. A second
+/// rdev listen is unsound, so a new binding swaps the key inside the one
+/// callback, once no key is held.
+pub(crate) struct Bound {
+    tracker: HotkeyTracker,
+    generation: u64,
+    // Whether this listener's own start opened the session in flight.
+    // Cancel discards audio, so it must never touch a session another
+    // caller opened while this listener's start was refused as busy.
+    owned: bool,
+}
+
+impl Bound {
+    pub(crate) fn new(hotkey: Hotkey, mode: HotkeyMode, generation: u64) -> Bound {
+        Bound {
+            tracker: HotkeyTracker::new(hotkey, mode),
+            generation,
+            owned: false,
+        }
+    }
+
+    pub(crate) fn handle(&mut self, state: &DaemonState, event: &rdev::EventType) {
+        // The daemon's own paste presses modifier keys on this same
+        // event stream; they must not re-enter the tracker
+        if state.is_typing() {
+            return;
+        }
+        let generation = state.binding_generation();
+        self.follow(state, generation);
+        if let Some(action) = self.tracker.on_event(event) {
+            act(state, action, &mut self.owned);
+        }
+        // The release that ends a hold takes a waiting binding at once
+        self.follow(state, generation);
+    }
+
+    fn follow(&mut self, state: &DaemonState, generation: u64) {
+        if generation == self.generation {
+            return;
+        }
+        let (hotkey, mode, generation) = state.binding();
+        if self.tracker.rebind(hotkey, mode) {
+            self.generation = generation;
+        }
+    }
 }
 
 /// What one hotkey action does to the daemon. `owned` says whether this
@@ -588,6 +656,7 @@ impl Pipeline {
                     }
                 }
             }
+            ConsumerCommand::Replace(stt) => self.replace(&stt),
             ConsumerCommand::UnloadAfter => {}
             ConsumerCommand::Shutdown => return std::ops::ControlFlow::Break(()),
         }
@@ -599,6 +668,187 @@ impl Pipeline {
             self.used = Instant::now();
         }
         std::ops::ControlFlow::Continue(())
+    }
+
+    /// Puts the listener `stt` names in force, unless its route already is.
+    /// One that will not build leaves the listener in force, and says why.
+    /// A server config.toml does not name is not installed: a later write
+    /// already chose otherwise. A listener that would not build is built again.
+    fn replace(&mut self, stt: &STTConfig) {
+        let route = Route::of(stt);
+        if route.is_remote() && !same_server(&route, &Route::of(&self.state.config().stt)) {
+            return;
+        }
+        let unbuilt = matches!(self.state.listening(), Listening::Failed(..));
+        if (route != self.state.listener_route() || unbuilt)
+            && let Err(error) = self.install(stt)
+        {
+            log::error!("the listener did not switch: {error}");
+            self.state.set_last_error(Some(error.to_string()));
+        }
+    }
+
+    /// Builds the listener `stt` names and puts it in force. Answers what it
+    /// has of its model.
+    fn install(&mut self, stt: &STTConfig) -> Result<Listening, RecordingError> {
+        let listener = (self.build_listener)(stt)?;
+        let listening = match stt.provider {
+            Provider::Remote => listener
+                .refused
+                .map_or(Listening::Remote, Listening::Refused),
+            Provider::Local => {
+                let model = crate::speech_to_text::listening_model_of(stt)?;
+                match listener.awaiting {
+                    Some(_) => Listening::Missing(model),
+                    None => Listening::Available(model),
+                }
+            }
+        };
+        self.speech_to_text = listener.engine;
+        self.state
+            .install_listener(Route::of(stt), listening.clone());
+        Ok(listening)
+    }
+
+    /// One transcription by the listener in force. Audio for a server goes
+    /// through `through_server`, so a withdrawal can stop it.
+    fn transcribe(&mut self, audio: &[f32]) -> Result<String, BansheeError> {
+        if self.speech_to_text.sends_out() {
+            self.through_server(audio)
+        } else {
+            self.speech_to_text.transcribe(audio)
+        }
+    }
+
+    /// The request may not go: a withdrawal landed, or config.toml does not
+    /// name the server in force.
+    fn withdrawn(&self) -> bool {
+        self.state.listener_withdrawn_since(self.withdrawals_seen)
+            || !same_server(
+                &self.state.listener_route(),
+                &Route::of(&self.state.config().stt),
+            )
+    }
+
+    /// The request on its way has to stop: a withdrawal landed after the
+    /// count `begun`, even one a later switch settled, or config.toml names
+    /// no server. One that names another server lets it finish.
+    fn stops(&self, begun: u64) -> bool {
+        self.state.listener_withdrawals() > begun || !self.state.config().stt.provider.is_remote()
+    }
+
+    /// Sends `audio` on a thread that owns the engine for the request, and
+    /// stops waiting for it once it `stops`.
+    pub fn through_server(&mut self, audio: &[f32]) -> Result<String, BansheeError> {
+        // Read before the check, so a withdrawal between the two still stops it
+        let begun = self.state.listener_withdrawals();
+        if self.withdrawn() {
+            return self.after_withdrawal(audio);
+        }
+        let away = Box::new(Unbuilt("the listener is on a request".to_string()));
+        let mut engine = std::mem::replace(&mut self.speech_to_text, away);
+        let (done, answered) = mpsc::channel();
+        let sent = audio.to_vec();
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let stopping = Arc::clone(&stop);
+        let request = thread::spawn(move || {
+            let answer = engine.transcribe_until(&sent, &stopping);
+            let _ = done.send((engine, answer));
+        });
+        loop {
+            match answered.recv_timeout(ARMED_POLL) {
+                Ok((engine, answer)) => {
+                    self.speech_to_text = engine;
+                    return answer;
+                }
+                // The request keeps the old engine, and nothing reads its answer
+                Err(mpsc::RecvTimeoutError::Timeout) if self.stops(begun) => {
+                    stop.notify_one();
+                    return self.after_withdrawal(audio);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => match request.join() {
+                    Err(panic) => std::panic::resume_unwind(panic),
+                    Ok(()) => unreachable!("the request answers before it ends"),
+                },
+            }
+        }
+    }
+
+    /// Acts on a stop, for `audio` its server is not to get. A turn-off hands
+    /// over to the listener it names. Otherwise the listener config.toml names
+    /// takes over. After a removed key, its own server gets nothing until a key
+    /// is on file again, so this audio is transcribed here. Another server gets
+    /// it when no withdrawal stopped it, since config.toml names that server.
+    /// After a withdrawal it is transcribed here once.
+    fn after_withdrawal(&mut self, audio: &[f32]) -> Result<String, BansheeError> {
+        let withdrawn = self.state.listener_withdrawn_since(self.withdrawals_seen);
+        self.withdrawals_seen = self.state.listener_withdrawals();
+        let meant_for = self.state.listener_route();
+        let next = self
+            .state
+            .take_withdrawn_listener()
+            .unwrap_or_else(|| self.state.config().stt.clone());
+        let listening = match self.install(&next) {
+            Ok(listening) => listening,
+            Err(error) => return Err(self.unbuilt(&next, error)),
+        };
+        let same = same_server(&meant_for, &Route::of(&next));
+        match listening {
+            Listening::Missing(model) => Err(BansheeError::Transcription(
+                RecordingError::NoListeningModel(model.id).to_string(),
+            )),
+            Listening::Remote if !same && withdrawn => self.once_here(&next, audio, None),
+            Listening::Refused(_) if !same => self.once_here(&next, audio, None),
+            Listening::Refused(_) => {
+                self.once_here(&next, audio, Some("no key for the remote listener"))
+            }
+            _ => {
+                self.ready().map_err(BansheeError::Transcription)?;
+                self.transcribe(audio)
+            }
+        }
+    }
+
+    /// Transcribes `audio` on this machine once. The engine drops after this
+    /// use. `cause` is why the server did not get it, said beside a model that
+    /// is not downloaded.
+    fn once_here(
+        &mut self,
+        named: &STTConfig,
+        audio: &[f32],
+        cause: Option<&str>,
+    ) -> Result<String, BansheeError> {
+        let here = STTConfig {
+            provider: Provider::Local,
+            ..named.clone()
+        };
+        let mut once = (self.build_listener)(&here)
+            .map_err(|error| BansheeError::Transcription(error.to_string()))?;
+        if let Some(model) = once.awaiting {
+            return Err(BansheeError::Transcription(match cause {
+                Some(cause) => format!(
+                    "{cause}, and the listening model {} is not downloaded",
+                    model.id
+                ),
+                None => RecordingError::NoListeningModel(model.id).to_string(),
+            }));
+        }
+        once.engine.transcribe(audio)
+    }
+
+    /// The listener `stt` names would not build, so no engine is in force and
+    /// nothing is sent until a switch builds one.
+    fn unbuilt(&mut self, stt: &STTConfig, error: RecordingError) -> BansheeError {
+        let why = error.to_string();
+        log::error!("the listener did not switch: {why}");
+        self.speech_to_text = Box::new(Unbuilt(why.clone()));
+        let listening = match stt.listening_model() {
+            Some(model) => Listening::Failed(model, why.clone()),
+            None => Listening::Refused(error),
+        };
+        self.state.install_listener(Route::Local, listening);
+        BansheeError::Transcription(why)
     }
 
     /// Frees the listening model and the detector once they have idled past
@@ -877,7 +1127,7 @@ impl Pipeline {
 
         log::debug!("Transcribing...");
         let transcribe_started = Instant::now();
-        let transcribed = self.speech_to_text.transcribe(final_data);
+        let transcribed = self.transcribe(final_data);
         // A client refetches its history when `transcribing` falls, so the
         // row has to be stored before the guard drops.
         store(&self.state, transcribed.as_deref().ok());
@@ -968,10 +1218,9 @@ impl Pipeline {
 
         // The live words were the stream's; the answer is one full pass
         self.speech_to_text.cancel_stream();
-        let speech_to_text = &mut self.speech_to_text;
-        let text = settle_answer(&self.state, &self.cues, listened, |audio| {
-            speech_to_text.transcribe(audio)
-        });
+        let state = Arc::clone(&self.state);
+        let cues = self.cues.clone();
+        let text = settle_answer(&state, &cues, listened, |audio| self.transcribe(audio));
         let _ = ask.reply.send(text);
     }
 
@@ -1025,7 +1274,7 @@ impl Pipeline {
         let mut capture = Resampled::new(&self.source);
         self.vad.reset_state();
         let vad_threshold = self.state.vad_threshold();
-        let endpoint_chunks = (self.endpoint_silence_ms / CHUNK_MS).max(1) as usize;
+        let endpoint_chunks = (self.state.endpoint_silence_ms() / CHUNK_MS).max(1) as usize;
         let deadline = Instant::now() + timeout;
         let hard_deadline = deadline + MAX_ANSWER;
 
@@ -1355,6 +1604,12 @@ mod utterance_tests {
         loading: Option<mpsc::Sender<()>>,
         /// Each load waits here before it ends.
         load_gate: Option<mpsc::Receiver<()>>,
+        sends_out: bool,
+        /// Each transcribe waits here before it returns, until the sender goes
+        /// or five seconds pass.
+        transcribe_gate: Option<mpsc::Receiver<()>>,
+        /// Told as each transcribe begins.
+        transcribing: Option<mpsc::Sender<()>>,
     }
 
     /// The loading flag, the listening fact, the live state and whether the
@@ -1394,6 +1649,9 @@ mod utterance_tests {
                 unloaded: None,
                 loading: None,
                 load_gate: None,
+                sends_out: false,
+                transcribe_gate: None,
+                transcribing: None,
             }
         }
 
@@ -1409,7 +1667,16 @@ mod utterance_tests {
                 .store(self.state.is_transcribing(), Ordering::Relaxed);
             self.saw_a_dictation_in_ring
                 .store(self.state.dictation_in_ring(), Ordering::Relaxed);
+            if let Some(transcribing) = &self.transcribing {
+                let _ = transcribing.send(());
+            }
+            if let Some(gate) = &self.transcribe_gate {
+                let _ = gate.recv_timeout(Duration::from_secs(5));
+            }
             self.answer.clone().map_err(BansheeError::Transcription)
+        }
+        fn sends_out(&self) -> bool {
+            self.sends_out
         }
         fn begin_stream(&mut self) -> Result<bool, BansheeError> {
             if !self.streams {
@@ -1578,6 +1845,7 @@ mod utterance_tests {
         speech_to_text: Scripted,
     ) -> (Pipeline, HeapProd<f32>) {
         let (producer, consumer) = ringbuf::HeapRb::<f32>::new(room).split();
+        state.set_endpoint_silence_ms(800);
         let pipeline = Pipeline {
             source: Arc::new(Capture::new(CaptureSource {
                 consumer,
@@ -1587,8 +1855,13 @@ mod utterance_tests {
             vad: Detector::open(crate::test_support::silero()).unwrap(),
             state: Arc::clone(state),
             cues,
-            endpoint_silence_ms: 800,
             used: Instant::now(),
+            build_listener: Box::new(|_| {
+                Err(RecordingError::Model(
+                    "this test builds no listener".to_string(),
+                ))
+            }),
+            withdrawals_seen: 0,
         };
         (pipeline, producer)
     }
@@ -1668,6 +1941,56 @@ mod utterance_tests {
         let (heard, signals) = listened(&spoken_then_quiet(), Some(Duration::from_millis(200)));
         assert!(matches!(heard, Ok(Heard::Audio(_))));
         assert_eq!(signals, []);
+    }
+
+    /// Speech, three seconds of quiet, speech, then four seconds of quiet.
+    fn speech_gap_speech() -> Vec<f32> {
+        let mut audio = crate::speech_to_text::vad::test_speech();
+        audio.extend(std::iter::repeat_n(0.0, 3 * SAMPLE_RATE as usize));
+        audio.extend(crate::speech_to_text::vad::test_speech());
+        audio.extend(std::iter::repeat_n(0.0, 4 * SAMPLE_RATE as usize));
+        audio
+    }
+
+    /// `listened_by` with the daemon holding `quiet_ms` before the answer
+    /// opens. The audio arrives in sixteenth-second slices, so the endpoint is
+    /// judged between slices as it is on a live microphone.
+    fn listened_with_quiet_length(audio: &[f32], quiet_ms: u64) -> Vec<f32> {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        let session = state.arm_for_ask().unwrap();
+        assert!(state.open_answer(session));
+        let scripted = Scripted::new(&state, Ok(""));
+        let (mut pipeline, mut producer) = fillable(audio.len(), &state, cues, scripted);
+        state.set_endpoint_silence_ms(quiet_ms);
+        let samples = audio.to_vec();
+        let feeding = thread::spawn(move || {
+            for slice in samples.chunks(SAMPLE_RATE as usize / 16) {
+                producer.push_slice(slice);
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        // The feed reaches speech about 100 ms in on a fast machine, and the
+        // wait for it is wall time, so it is long enough for a slow runner.
+        let heard = pipeline.listen_for_answer(Duration::from_secs(5), session);
+        feeding.join().unwrap();
+        match heard {
+            Ok(Heard::Audio(samples)) => samples,
+            _ => panic!("the answer must be heard as audio"),
+        }
+    }
+
+    #[test]
+    fn an_answer_ends_on_the_quiet_length_the_daemon_holds() {
+        let short = listened_with_quiet_length(&speech_gap_speech(), 800);
+        let long = listened_with_quiet_length(&speech_gap_speech(), 3500);
+        let gap = SAMPLE_RATE as usize;
+        assert!(
+            short.len() + gap < long.len(),
+            "800 ms ends on the first gap, 3500 ms hears past it: {} then {}",
+            short.len(),
+            long.len()
+        );
     }
 
     fn untyped(_: &DaemonState, _: &str) -> Result<(), BansheeError> {
@@ -2356,7 +2679,7 @@ mod utterance_tests {
         let state = crate::test_support::daemon_state(commands);
         let parakeet =
             banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
-        state.await_listening_model(parakeet);
+        state.set_listening(crate::state::Listening::Missing(parakeet));
         assert_eq!(
             state.pipeline(),
             crate::state::Pipeline::Broken(crate::state::RecordingError::NoListeningModel(
@@ -2864,7 +3187,7 @@ mod utterance_tests {
             state,
             ..
         } = failing_loads(1, &[0.0]);
-        state.await_listening_model(parakeet());
+        state.set_listening(crate::state::Listening::Missing(parakeet()));
         state.claim_listening_model(parakeet(), true);
 
         assert!(pipeline.ready().is_err());
@@ -3227,6 +3550,954 @@ mod utterance_tests {
         );
     }
 
+    /// What a consumer did while its listener was switched, and what it
+    /// ended with.
+    struct Switched {
+        typed: Vec<String>,
+        remote_calls: Vec<Call>,
+        local_calls: Vec<Call>,
+        last_error: Option<String>,
+        route: Route,
+        listening: Listening,
+    }
+
+    fn local_stt() -> STTConfig {
+        STTConfig::default()
+    }
+
+    /// Makes config.toml name `stt`, as a write leaves it.
+    fn saved(state: &DaemonState, stt: STTConfig) {
+        state.set_config(Arc::new(crate::config::Config {
+            stt,
+            ..Default::default()
+        }));
+    }
+
+    fn remote_stt() -> STTConfig {
+        STTConfig {
+            provider: Provider::Remote,
+            remote: crate::config::RemoteSttConfig {
+                base_url: "https://api.example.test/v1".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn remote_saying(state: &Arc<DaemonState>) -> Scripted {
+        Scripted {
+            sends_out: true,
+            ..Scripted::new(state, Ok("said there"))
+        }
+    }
+
+    /// `remote_saying`, whose transcription tells `started` it began and then
+    /// waits for `gate`.
+    fn remote_held(
+        gate: mpsc::Receiver<()>,
+        started: mpsc::Sender<()>,
+    ) -> impl FnOnce(&Arc<DaemonState>) -> Scripted {
+        move |state| Scripted {
+            transcribe_gate: Some(gate),
+            transcribing: Some(started),
+            ..remote_saying(state)
+        }
+    }
+
+    /// The server turned off, as a write of `stt.provider = "local"` does.
+    fn turn_server_off(state: &DaemonState) {
+        state.withdraw_listener(Some(local_stt()));
+        state.replace_listener(local_stt());
+    }
+
+    /// Runs a consumer whose engine in force is `remote`, with a
+    /// `build_listener` that answers a local Scripted saying "said here"
+    /// (awaiting its file unless `model_here`) for a local config, and a
+    /// remote Scripted saying "said there" for a remote one. `drive` sends
+    /// the commands and the withdrawals.
+    fn switched(
+        remote: impl FnOnce(&Arc<DaemonState>) -> Scripted,
+        model_here: bool,
+        drive: impl FnOnce(&Arc<DaemonState>, &mpsc::Sender<ConsumerCommand>),
+    ) -> Switched {
+        let local = if model_here {
+            LocalModel::Here
+        } else {
+            LocalModel::Absent
+        };
+        switched_by(remote_stt(), remote, local, Sent::WhileItRuns, drive)
+    }
+
+    /// What `build_listener` answers for a local config.
+    #[derive(Clone, Copy, PartialEq)]
+    enum LocalModel {
+        Here,
+        Absent,
+        /// The first local build fails, and later ones answer `Here`.
+        Unbuildable,
+    }
+
+    /// `switched` with a local Scripted saying "said here" in force.
+    fn switched_from_local(
+        drive: impl FnOnce(&Arc<DaemonState>, &mpsc::Sender<ConsumerCommand>),
+    ) -> Switched {
+        switched_by(
+            local_stt(),
+            |state| Scripted::new(state, Ok("said here")),
+            LocalModel::Here,
+            Sent::WhileItRuns,
+            drive,
+        )
+    }
+
+    fn switched_by(
+        in_force: STTConfig,
+        engine: impl FnOnce(&Arc<DaemonState>) -> Scripted,
+        local: LocalModel,
+        sent: Sent,
+        drive: impl FnOnce(&Arc<DaemonState>, &mpsc::Sender<ConsumerCommand>),
+    ) -> Switched {
+        let (cues, _sounds) = Cues::recording();
+        let (sender, receiver) = mpsc::channel();
+        let state = crate::test_support::daemon_state_hearing(cues.clone(), sender.clone());
+        saved(&state, in_force.clone());
+        let remote = in_force.provider == Provider::Remote;
+        let listening = match in_force.listening_model() {
+            Some(model) if !remote => Listening::Available(model),
+            _ => Listening::Remote,
+        };
+        state.install_listener(Route::of(&in_force), listening);
+        let engine = engine(&state);
+        let (remote_calls, local_calls) = if remote {
+            (Arc::clone(&engine.calls), Arc::default())
+        } else {
+            (Arc::default(), Arc::clone(&engine.calls))
+        };
+        let mut pipeline = holding(&spoken_then_quiet(), &state, cues, engine);
+        let building = Arc::clone(&state);
+        let (remote_log, local_log) = (Arc::clone(&remote_calls), Arc::clone(&local_calls));
+        let mut first_local = true;
+        pipeline.build_listener = Box::new(move |stt: &STTConfig| {
+            Ok(match stt.provider {
+                Provider::Local
+                    if local == LocalModel::Unbuildable && std::mem::take(&mut first_local) =>
+                {
+                    return Err(RecordingError::Model(
+                        "the models folder is gone".to_string(),
+                    ));
+                }
+                Provider::Local => Listener {
+                    engine: Box::new(Scripted {
+                        calls: Arc::clone(&local_log),
+                        ..Scripted::new(&building, Ok("said here"))
+                    }),
+                    awaiting: (local == LocalModel::Absent).then(|| stt.listening_model().unwrap()),
+                    refused: None,
+                },
+                Provider::Remote => Listener {
+                    engine: Box::new(Scripted {
+                        calls: Arc::clone(&remote_log),
+                        ..remote_saying(&building)
+                    }),
+                    awaiting: None,
+                    refused: crate::speech_to_text::key_refusal(building.credentials_path()),
+                },
+            })
+        });
+        let typed = Arc::new(Mutex::new(Vec::new()));
+        let typing = Arc::clone(&typed);
+        let (go, gate) = mpsc::channel::<()>();
+        let consumer = thread::spawn(move || {
+            let _ = gate.recv();
+            consume(pipeline, &receiver, &move |words: &str| {
+                typing.lock().unwrap().push(words.to_string());
+                Ok(())
+            })
+        });
+        if sent == Sent::WhileItRuns {
+            let _ = go.send(());
+        }
+        drive(&state, &sender);
+        let _ = sender.send(ConsumerCommand::Shutdown);
+        let _ = go.send(());
+        consumer.join().unwrap();
+        let typed = typed.lock().unwrap().clone();
+        let remote_calls = remote_calls.lock().unwrap().clone();
+        let local_calls = local_calls.lock().unwrap().clone();
+        Switched {
+            typed,
+            remote_calls,
+            local_calls,
+            last_error: state.last_error(),
+            route: state.listener_route(),
+            listening: state.listening(),
+        }
+    }
+
+    #[test]
+    fn a_dictation_released_after_the_server_is_turned_off_is_transcribed_here() {
+        let done = switched(remote_saying, true, |state, commands| {
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            state.withdraw_listener(Some(local_stt()));
+            commands
+                .send(ConsumerCommand::Replace(Box::new(local_stt())))
+                .unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+        });
+        assert!(
+            !done.remote_calls.contains(&Call::Transcribe),
+            "{:?}",
+            done.remote_calls
+        );
+        assert_eq!(done.typed, ["said here"]);
+        assert_eq!(done.local_calls, [Call::Transcribe]);
+        assert_eq!(done.route, Route::Local);
+    }
+
+    #[test]
+    fn a_request_in_flight_when_the_server_is_turned_off_stops_and_goes_local() {
+        let (_gate_open, gate) = mpsc::channel();
+        let (started, starting) = mpsc::channel();
+        let done = switched(remote_held(gate, started), true, |state, commands| {
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+            starting.recv_timeout(Duration::from_secs(5)).unwrap();
+            state.withdraw_listener(Some(local_stt()));
+            commands
+                .send(ConsumerCommand::Replace(Box::new(local_stt())))
+                .unwrap();
+        });
+        assert_eq!(
+            done.typed,
+            ["said here"],
+            "typed while the server's gate is still shut"
+        );
+    }
+
+    #[test]
+    fn a_switch_to_a_server_mid_dictation_waits_for_the_dictation() {
+        let done = switched_from_local(|state, commands| {
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            saved(state, remote_stt());
+            commands
+                .send(ConsumerCommand::Replace(Box::new(remote_stt())))
+                .unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+        });
+        assert_eq!(
+            done.typed,
+            ["said here"],
+            "the dictation started local and ends local"
+        );
+        assert_eq!(
+            done.route,
+            Route::of(&remote_stt()),
+            "the next use goes to the server"
+        );
+    }
+
+    #[test]
+    fn turning_the_server_off_without_a_local_model_sends_nothing() {
+        let done = switched(remote_saying, false, |state, commands| {
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            state.withdraw_listener(Some(local_stt()));
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+        });
+        assert!(!done.remote_calls.contains(&Call::Transcribe));
+        assert!(done.typed.is_empty());
+        assert!(
+            done.local_calls.is_empty(),
+            "nothing loads: {:?}",
+            done.local_calls
+        );
+        assert!(done.last_error.unwrap().contains("is not downloaded"));
+    }
+
+    #[test]
+    fn on_off_on_during_one_request_types_once_and_ends_on_the_last_route() {
+        let (_gate_open, gate) = mpsc::channel();
+        let (started, starting) = mpsc::channel();
+        let done = switched(remote_held(gate, started), true, |state, commands| {
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+            starting.recv_timeout(Duration::from_secs(5)).unwrap();
+            state.withdraw_listener(Some(local_stt()));
+            commands
+                .send(ConsumerCommand::Replace(Box::new(local_stt())))
+                .unwrap();
+            commands
+                .send(ConsumerCommand::Replace(Box::new(remote_stt())))
+                .unwrap();
+        });
+        assert_eq!(done.typed, ["said here"]);
+        assert_eq!(
+            done.remote_calls
+                .iter()
+                .filter(|call| **call == Call::Transcribe)
+                .count(),
+            1,
+            "the blocked send is the only one"
+        );
+        assert_eq!(done.route, Route::of(&remote_stt()));
+    }
+
+    #[test]
+    fn a_removed_key_mid_request_transcribes_locally_when_the_model_is_here() {
+        let (_gate_open, gate) = mpsc::channel();
+        let (started, starting) = mpsc::channel();
+        let done = switched(remote_held(gate, started), true, |state, commands| {
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+            starting.recv_timeout(Duration::from_secs(5)).unwrap();
+            state.withdraw_listener(None);
+        });
+        assert_eq!(done.typed, ["said here"]);
+        assert!(done.route.is_remote(), "the remote listener stays in force");
+    }
+
+    #[test]
+    fn a_removed_key_mid_request_with_no_local_model_names_both_causes() {
+        let (_gate_open, gate) = mpsc::channel();
+        let (started, starting) = mpsc::channel();
+        let done = switched(remote_held(gate, started), false, |state, commands| {
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+            starting.recv_timeout(Duration::from_secs(5)).unwrap();
+            state.withdraw_listener(None);
+        });
+        assert!(done.typed.is_empty());
+        assert_eq!(
+            done.remote_calls
+                .iter()
+                .filter(|call| **call == Call::Transcribe)
+                .count(),
+            1,
+            "no second send"
+        );
+        let said = done.last_error.unwrap();
+        assert!(
+            said.contains("no key for the remote listener") && said.contains("is not downloaded"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_server_chosen_again_after_it_was_turned_off_takes_the_next_dictation() {
+        let done = switched(remote_saying, true, |state, commands| {
+            turn_server_off(state);
+            state.replace_listener(remote_stt());
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+        });
+        assert_eq!(
+            done.typed,
+            ["said there"],
+            "the withdrawal ended with the switch it came with"
+        );
+    }
+
+    fn queued_from_local(
+        drive: impl FnOnce(&Arc<DaemonState>, &mpsc::Sender<ConsumerCommand>),
+    ) -> Switched {
+        switched_by(
+            local_stt(),
+            |state| Scripted::new(state, Ok("said here")),
+            LocalModel::Here,
+            Sent::BeforeItStarts,
+            drive,
+        )
+    }
+
+    #[test]
+    fn toggles_queued_behind_a_busy_listener_send_nothing_after_the_last_turn_off() {
+        let done = queued_from_local(|state, commands| {
+            commands
+                .send(ConsumerCommand::Replace(Box::new(remote_stt())))
+                .unwrap();
+            state.withdraw_listener(Some(local_stt()));
+            commands
+                .send(ConsumerCommand::Replace(Box::new(local_stt())))
+                .unwrap();
+            commands
+                .send(ConsumerCommand::Replace(Box::new(remote_stt())))
+                .unwrap();
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+            state.withdraw_listener(Some(local_stt()));
+            commands
+                .send(ConsumerCommand::Replace(Box::new(local_stt())))
+                .unwrap();
+        });
+        assert!(
+            !done.remote_calls.contains(&Call::Transcribe),
+            "{:?}",
+            done.remote_calls
+        );
+        assert_eq!(done.typed, ["said here"]);
+        assert_eq!(done.route, Route::Local);
+    }
+
+    /// The same toggles as the settings writes send them.
+    #[test]
+    fn toggles_written_behind_a_busy_listener_send_nothing_after_the_last_turn_off() {
+        let done = queued_from_local(|state, commands| {
+            state.replace_listener(remote_stt());
+            turn_server_off(state);
+            state.replace_listener(remote_stt());
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+            turn_server_off(state);
+        });
+        assert!(
+            !done.remote_calls.contains(&Call::Transcribe),
+            "{:?}",
+            done.remote_calls
+        );
+        assert_eq!(done.typed, ["said here"]);
+        assert_eq!(done.route, Route::Local);
+    }
+
+    #[test]
+    fn a_key_set_again_before_the_use_sends_it_to_the_server() {
+        let done = switched(remote_saying, false, |state, commands| {
+            state.withdraw_listener(None);
+            crate::test_support::write_key(
+                state.credentials_path(),
+                crate::credentials::RemoteKey::Stt,
+                "sk-again",
+            );
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+        });
+        assert_eq!(done.typed, ["said there"]);
+        assert_eq!(done.last_error, None);
+        assert_eq!(done.listening, Listening::Remote);
+    }
+
+    fn unbuildable(
+        drive: impl FnOnce(&Arc<DaemonState>, &mpsc::Sender<ConsumerCommand>),
+    ) -> Switched {
+        switched_by(
+            remote_stt(),
+            remote_saying,
+            LocalModel::Unbuildable,
+            Sent::WhileItRuns,
+            drive,
+        )
+    }
+
+    #[test]
+    fn a_switch_that_will_not_build_names_no_server() {
+        let done = unbuildable(|state, commands| {
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            state.withdraw_listener(Some(local_stt()));
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+        });
+        assert!(!done.remote_calls.contains(&Call::Transcribe));
+        assert!(done.typed.is_empty());
+        assert_eq!(done.route, Route::Local, "nothing goes to the server");
+        assert!(
+            matches!(&done.listening, Listening::Failed(_, why) if why.contains("the models folder is gone")),
+            "{:?}",
+            done.listening
+        );
+    }
+
+    /// Waits up to five seconds for the first dictation to fail.
+    fn failed_once(state: &DaemonState) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state.last_error().is_none() {
+            assert!(Instant::now() < deadline, "the dictation never failed");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn turning_the_server_on_after_a_switch_that_would_not_build_recovers() {
+        let done = unbuildable(|state, commands| {
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            state.withdraw_listener(Some(local_stt()));
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+            failed_once(state);
+            state.replace_listener(remote_stt());
+        });
+        assert_eq!(done.route, Route::of(&remote_stt()));
+        assert!(
+            matches!(done.listening, Listening::Remote | Listening::Refused(_)),
+            "{:?}",
+            done.listening
+        );
+    }
+
+    #[test]
+    fn a_turn_off_stops_the_upload_already_under_way() {
+        use std::io::Read;
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", server.local_addr().unwrap());
+        let (accepted, accepting) = mpsc::channel();
+        let (read, reading) = mpsc::channel::<()>();
+        let received = thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            accepted.send(()).unwrap();
+            let _ = reading.recv();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut total = 0;
+            let mut buffer = vec![0; 64 * 1024];
+            while let Ok(read) = stream.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                total += read;
+            }
+            total
+        });
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        crate::test_support::write_key(
+            state.credentials_path(),
+            crate::credentials::RemoteKey::Stt,
+            "sk-test",
+        );
+        let stt = STTConfig {
+            provider: Provider::Remote,
+            remote: crate::config::RemoteSttConfig {
+                base_url,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        saved(&state, stt.clone());
+        state.install_listener(Route::of(&stt), Listening::Remote);
+        let mut pipeline = holding(&[0.0], &state, cues, Scripted::new(&state, Ok("unused")));
+        pipeline.speech_to_text =
+            crate::speech_to_text::select_on_demand(&stt, state.credentials_path())
+                .unwrap()
+                .engine;
+        let building = Arc::clone(&state);
+        pipeline.build_listener = Box::new(move |_: &STTConfig| {
+            Ok(Listener {
+                engine: Box::new(Scripted::new(&building, Ok("said here"))),
+                awaiting: None,
+                refused: None,
+            })
+        });
+        let withdrawing = Arc::clone(&state);
+        let turn_off = thread::spawn(move || {
+            accepting.recv_timeout(Duration::from_secs(5)).unwrap();
+            withdrawing.withdraw_listener(Some(local_stt()));
+        });
+        let said = pipeline.through_server(&vec![0.0; 8_000_000]);
+        turn_off.join().unwrap();
+        read.send(()).unwrap();
+        let received = received.join().unwrap();
+        assert_eq!(said.unwrap(), "said here");
+        assert!(
+            received < 8_000_000,
+            "{received} of 16 MB reached the server after the turn-off"
+        );
+    }
+
+    #[test]
+    fn writing_local_again_after_a_switch_that_would_not_build_recovers() {
+        let done = unbuildable(|state, commands| {
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            state.withdraw_listener(Some(local_stt()));
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+            failed_once(state);
+            commands
+                .send(ConsumerCommand::Replace(Box::new(local_stt())))
+                .unwrap();
+        });
+        assert_eq!(done.route, Route::Local);
+        assert!(
+            matches!(done.listening, Listening::Available(_)),
+            "{:?}",
+            done.listening
+        );
+    }
+
+    /// A pipeline over `in_force`, served by direct calls in the order a
+    /// busy consumer would serve its queue.
+    fn served_in_order(in_force: STTConfig) -> (Pipeline, Arc<DaemonState>, Arc<Mutex<Vec<Call>>>) {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        saved(&state, in_force.clone());
+        let remote = in_force.provider == Provider::Remote;
+        let listening = match in_force.listening_model() {
+            Some(model) if !remote => Listening::Available(model),
+            _ => Listening::Remote,
+        };
+        state.install_listener(Route::of(&in_force), listening);
+        let engine = if remote {
+            remote_saying(&state)
+        } else {
+            Scripted::new(&state, Ok("said here"))
+        };
+        let remote_calls = if remote {
+            Arc::clone(&engine.calls)
+        } else {
+            Arc::default()
+        };
+        let mut pipeline = holding(&[0.0], &state, cues, engine);
+        let building = Arc::clone(&state);
+        let remote_log = Arc::clone(&remote_calls);
+        pipeline.build_listener = Box::new(move |stt: &STTConfig| {
+            Ok(Listener {
+                engine: Box::new(match stt.provider {
+                    Provider::Local => Scripted::new(&building, Ok("said here")),
+                    Provider::Remote => Scripted {
+                        calls: Arc::clone(&remote_log),
+                        ..remote_saying(&building)
+                    },
+                }),
+                awaiting: None,
+                refused: None,
+            })
+        });
+        (pipeline, state, remote_calls)
+    }
+
+    /// Server on, dictate D1, off, on, dictate D2, off, each a write the
+    /// listener serves only after the last of them.
+    #[test]
+    fn a_dictation_queued_between_two_turn_offs_stays_here() {
+        let (mut pipeline, state, remote) = served_in_order(local_stt());
+        for stt in [remote_stt(), local_stt(), remote_stt(), local_stt()] {
+            if stt.provider == Provider::Local {
+                state.withdraw_listener(Some(stt.clone()));
+            }
+            saved(&state, stt.clone());
+            state.replace_listener(stt);
+        }
+        pipeline.replace(&remote_stt());
+        let first = pipeline.transcribe(&[0.0; 160]);
+        pipeline.replace(&local_stt());
+        pipeline.replace(&remote_stt());
+        let second = pipeline.transcribe(&[0.0; 160]);
+        pipeline.replace(&local_stt());
+        assert_eq!(first.unwrap(), "said here");
+        assert_eq!(second.unwrap(), "said here");
+        assert!(
+            !remote.lock().unwrap().contains(&Call::Transcribe),
+            "{:?}",
+            remote.lock().unwrap()
+        );
+        assert_eq!(state.listener_route(), Route::Local);
+    }
+
+    /// Server A in force: dictate D1, switch to server B, dictate D2, turn
+    /// the server off.
+    #[test]
+    fn a_server_change_queued_before_a_turn_off_sends_nothing() {
+        let other = STTConfig {
+            provider: Provider::Remote,
+            remote: crate::config::RemoteSttConfig {
+                base_url: "https://other.example.test/v1".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (mut pipeline, state, remote) = served_in_order(remote_stt());
+        saved(&state, other.clone());
+        state.replace_listener(other.clone());
+        state.withdraw_listener(Some(local_stt()));
+        saved(&state, local_stt());
+        state.replace_listener(local_stt());
+        let first = pipeline.transcribe(&[0.0; 160]);
+        pipeline.replace(&other);
+        let second = pipeline.transcribe(&[0.0; 160]);
+        pipeline.replace(&local_stt());
+        assert_eq!(first.unwrap(), "said here");
+        assert_eq!(second.unwrap(), "said here");
+        assert!(
+            !remote.lock().unwrap().contains(&Call::Transcribe),
+            "{:?}",
+            remote.lock().unwrap()
+        );
+        assert_eq!(state.listener_route(), Route::Local);
+    }
+
+    fn other_server() -> STTConfig {
+        STTConfig {
+            provider: Provider::Remote,
+            remote: crate::config::RemoteSttConfig {
+                base_url: "https://other.example.test/v1".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A dictation on its way to the server in force, with a key on file.
+    /// `then` runs once the request has started; the request answers when
+    /// the test sends on the gate, or after 5 s.
+    fn while_a_request_runs(
+        then: impl FnOnce(&Arc<DaemonState>, &mpsc::Sender<ConsumerCommand>, &mpsc::Sender<()>),
+    ) -> Switched {
+        let (gate_open, gate) = mpsc::channel();
+        let (started, starting) = mpsc::channel();
+        switched(remote_held(gate, started), true, |state, commands| {
+            crate::test_support::write_key(
+                state.credentials_path(),
+                crate::credentials::RemoteKey::Stt,
+                "sk-test",
+            );
+            commands.send(ConsumerCommand::Stream(0)).unwrap();
+            commands
+                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .unwrap();
+            starting.recv_timeout(Duration::from_secs(5)).unwrap();
+            then(state, commands, &gate_open);
+        })
+    }
+
+    /// The consumer polls every `ARMED_POLL`, so 200 ms gives it several
+    /// looks at the new server before the first one answers.
+    #[test]
+    fn a_request_in_flight_when_the_server_changes_finishes_there() {
+        let done = while_a_request_runs(|state, _commands, gate_open| {
+            saved(state, other_server());
+            state.replace_listener(other_server());
+            thread::sleep(Duration::from_millis(200));
+            gate_open.send(()).unwrap();
+        });
+        assert_eq!(done.typed, ["said there"]);
+        assert_eq!(
+            done.route,
+            Route::of(&other_server()),
+            "the next use goes to the new server"
+        );
+    }
+
+    /// Server A in force with a key on file: a dictation records on A, and
+    /// config.toml names server B before its release.
+    fn released_after_a_switch(model_here: bool) -> Switched {
+        switched(
+            |state| Scripted {
+                sends_out: true,
+                ..Scripted::new(state, Ok("said on a"))
+            },
+            model_here,
+            |state, commands| {
+                crate::test_support::write_key(
+                    state.credentials_path(),
+                    crate::credentials::RemoteKey::Stt,
+                    "sk-test",
+                );
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
+                saved(state, other_server());
+                state.replace_listener(other_server());
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .unwrap();
+            },
+        )
+    }
+
+    #[test]
+    fn a_dictation_released_after_a_switch_to_another_server_goes_there() {
+        for model_here in [true, false] {
+            let done = released_after_a_switch(model_here);
+            assert_eq!(done.typed, ["said there"], "model here: {model_here}");
+            assert!(done.local_calls.is_empty(), "{:?}", done.local_calls);
+            assert_eq!(done.last_error, None);
+            assert_eq!(done.route, Route::of(&other_server()));
+        }
+    }
+
+    /// Server A, off, server B, all written while one dictation records.
+    #[test]
+    fn a_dictation_released_after_off_then_another_server_goes_to_that_server() {
+        let done = switched(
+            |state| Scripted {
+                sends_out: true,
+                ..Scripted::new(state, Ok("said on a"))
+            },
+            true,
+            |state, commands| {
+                crate::test_support::write_key(
+                    state.credentials_path(),
+                    crate::credentials::RemoteKey::Stt,
+                    "sk-test",
+                );
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
+                saved(state, local_stt());
+                turn_server_off(state);
+                saved(state, other_server());
+                state.replace_listener(other_server());
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .unwrap();
+            },
+        );
+        assert_eq!(done.typed, ["said there"]);
+        assert!(done.local_calls.is_empty(), "{:?}", done.local_calls);
+    }
+
+    /// Server A in force: the key is removed, set again, and config.toml
+    /// names server B, all while one dictation records.
+    #[test]
+    fn a_dictation_released_after_a_key_removal_then_another_server_stays_here() {
+        let done = switched(
+            |state| Scripted {
+                sends_out: true,
+                ..Scripted::new(state, Ok("said on a"))
+            },
+            true,
+            |state, commands| {
+                let key = |value| {
+                    crate::test_support::write_key(
+                        state.credentials_path(),
+                        crate::credentials::RemoteKey::Stt,
+                        value,
+                    );
+                };
+                key("sk-test");
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
+                key("");
+                state.withdraw_listener(None);
+                key("sk-again");
+                saved(state, other_server());
+                state.replace_listener(other_server());
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .unwrap();
+            },
+        );
+        assert_eq!(
+            done.typed,
+            ["said here"],
+            "a removal during the dictation keeps it here"
+        );
+        assert_eq!(done.local_calls, [Call::Transcribe]);
+        assert_eq!(
+            done.route,
+            Route::of(&other_server()),
+            "the next use goes to the new server"
+        );
+    }
+
+    /// A write saves the config before it withdraws, so the consumer can see
+    /// the saved "off" first.
+    #[test]
+    fn a_request_in_flight_stops_once_the_saved_config_names_no_server() {
+        let done = while_a_request_runs(|state, _commands, _gate_open| {
+            saved(state, local_stt());
+        });
+        assert_eq!(
+            done.typed,
+            ["said here"],
+            "typed while the server's gate is still shut"
+        );
+    }
+
+    #[test]
+    fn a_request_in_flight_stops_when_the_new_server_is_turned_off() {
+        let done = while_a_request_runs(|state, _commands, _gate_open| {
+            saved(state, other_server());
+            state.replace_listener(other_server());
+            thread::sleep(Duration::from_millis(200));
+            saved(state, local_stt());
+            turn_server_off(state);
+        });
+        assert_eq!(
+            done.typed,
+            ["said here"],
+            "typed while the first server's gate is still shut"
+        );
+        assert_eq!(done.route, Route::Local);
+    }
+
+    /// "Off" and server B are written together while a request is on its way
+    /// to server A, whose gate stays shut until its five seconds pass. Any
+    /// poll that sees the turn-off stops the request, whether B settled it
+    /// yet or not.
+    #[test]
+    fn a_request_in_flight_stops_when_off_and_another_server_land_together() {
+        let (_gate_open, gate) = mpsc::channel();
+        let (started, starting) = mpsc::channel();
+        let done = switched(
+            |state| Scripted {
+                transcribe_gate: Some(gate),
+                transcribing: Some(started),
+                sends_out: true,
+                ..Scripted::new(state, Ok("said on a"))
+            },
+            true,
+            |state, commands| {
+                crate::test_support::write_key(
+                    state.credentials_path(),
+                    crate::credentials::RemoteKey::Stt,
+                    "sk-test",
+                );
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .unwrap();
+                starting.recv_timeout(Duration::from_secs(5)).unwrap();
+                saved(state, local_stt());
+                turn_server_off(state);
+                saved(state, other_server());
+                state.replace_listener(other_server());
+            },
+        );
+        assert!(
+            done.typed == ["said there"] || done.typed == ["said here"],
+            "{:?}",
+            done.typed
+        );
+        assert_eq!(done.route, Route::of(&other_server()));
+    }
+
+    #[test]
+    fn a_switch_to_a_server_config_toml_no_longer_names_installs_nothing() {
+        let (mut pipeline, state, remote) = served_in_order(local_stt());
+        pipeline.replace(&remote_stt());
+        assert_eq!(state.listener_route(), Route::Local);
+        assert!(remote.lock().unwrap().is_empty(), "nothing was built");
+    }
+
+    #[test]
+    fn a_switch_names_the_listener_it_installed() {
+        let done = switched(remote_saying, false, |state, commands| {
+            state.withdraw_listener(Some(local_stt()));
+            commands
+                .send(ConsumerCommand::Replace(Box::new(local_stt())))
+                .unwrap();
+        });
+        assert!(matches!(done.listening, Listening::Missing(_)));
+    }
+
     #[test]
     fn a_held_answer_streams_from_the_hold() {
         let (heard, _, calls, words) =
@@ -3265,6 +4536,48 @@ mod hint_tests {
                 "the default must not leak in: {hint}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use rdev::EventType;
+
+    fn bound_to_the_default(state: &DaemonState) -> Bound {
+        let (hotkey, mode, generation) = state.binding();
+        Bound::new(hotkey, mode, generation)
+    }
+
+    #[test]
+    fn a_press_of_the_new_key_records_and_the_old_key_does_nothing() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        let mut bound = bound_to_the_default(&state);
+        state.set_binding(crate::binding::hotkey("F6").unwrap(), HotkeyMode::Hold);
+        bound.handle(&state, &EventType::KeyPress(rdev::Key::AltGr));
+        assert!(!state.is_recording(), "the old key no longer records");
+        bound.handle(&state, &EventType::KeyRelease(rdev::Key::AltGr));
+        bound.handle(&state, &EventType::KeyPress(rdev::Key::F6));
+        assert!(state.is_recording(), "the new key records");
+    }
+
+    #[test]
+    fn a_rebind_during_a_hold_ends_that_recording_at_its_release() {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        let mut bound = bound_to_the_default(&state);
+        bound.handle(&state, &EventType::KeyPress(rdev::Key::AltGr));
+        assert!(state.is_recording());
+        state.set_binding(crate::binding::hotkey("F6").unwrap(), HotkeyMode::Hold);
+        bound.handle(&state, &EventType::KeyRelease(rdev::Key::AltGr));
+        assert!(
+            !state.is_recording(),
+            "the old key's release still owes its stop"
+        );
+        bound.handle(&state, &EventType::KeyPress(rdev::Key::F6));
+        assert!(
+            state.is_recording(),
+            "the rebind applied once the hold ended"
+        );
     }
 }
 

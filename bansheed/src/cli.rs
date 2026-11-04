@@ -502,22 +502,55 @@ fn ask_key(side: crate::credentials::RemoteKey) -> Result<String, BansheeError> 
     }
 }
 
-/// Answers whether a restart is needed.
-async fn write_settings(assignments: settings::Assignments) -> Result<bool, BansheeError> {
+/// How the daemon took a write.
+enum Written {
+    Now,
+    /// The keys the daemon could not use yet.
+    Waiting(Vec<String>),
+    NoDaemon,
+}
+
+async fn write_settings(assignments: settings::Assignments) -> Result<Written, BansheeError> {
     match utils::call_daemon(
         banshee_common::BANSHEE_CONFIGURE,
         serde_json::json!({ "settings": &assignments, "persist": true }),
     )
     .await
     {
-        Ok(reply) => Ok(reply
-            .get("restart_required")
-            .and_then(|keys| keys.as_array())
-            .is_some_and(|keys| !keys.is_empty())),
+        Ok(reply) => Ok(waiting_or_now(
+            reply
+                .get("waiting")
+                .and_then(|keys| keys.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|key| key.as_str().map(str::to_string))
+                .collect(),
+        )),
         // A daemon that is down never writes, so the CLI can be the one writer
-        Err(error) if daemon_is_down(&error) => settings::configure(None, assignments, true)
-            .map(|outcome| !outcome.restart_required.is_empty()),
+        Err(error) if daemon_is_down(&error) => {
+            settings::configure(None, assignments, true).map(|_| Written::NoDaemon)
+        }
         Err(error) => Err(error),
+    }
+}
+
+fn waiting_or_now(waiting: Vec<String>) -> Written {
+    if waiting.is_empty() {
+        Written::Now
+    } else {
+        Written::Waiting(waiting)
+    }
+}
+
+/// The type `key`'s value is written as, or `None` for no setting. A retired
+/// key has no row and still goes to the daemon, which removes it on a null and
+/// names what replaced it otherwise.
+fn domain_of(key: &str) -> Option<banshee_common::settings::Domain> {
+    match banshee_common::settings::find(key) {
+        Some(row) => Some(row.domain),
+        None => {
+            settings::writes_without_a_row(key).then_some(banshee_common::settings::Domain::Words)
+        }
     }
 }
 
@@ -546,54 +579,111 @@ async fn config_api_key(
         return Ok(());
     };
     // The credentials file reads the empty string as the key being gone
-    let done = if key.is_empty() { "Removed" } else { "Set" };
+    let removed = key.is_empty();
     let assignments = settings::Assignments::from([(side.setting().to_string(), key.into())]);
-    match write_settings(assignments).await {
-        Ok(restart_required) => {
-            println!("{done} {}.", side.setting());
-            if restart_required {
-                println!("Restart to use it: banshee start");
-            }
-        }
-        Err(error) => return Err(error),
+    let written = write_settings(assignments).await?;
+    if removed {
+        println!("Removed {}.", side.setting());
+        return Ok(());
+    }
+    println!("Set {}.", side.setting());
+    let models_dir = models::download::models_dir()?;
+    for line in after_write(
+        side.setting(),
+        &serde_json::Value::Null,
+        &written,
+        true,
+        &models_dir,
+    ) {
+        println!("{line}");
     }
     Ok(())
 }
 
 pub async fn config(key: String, value: Option<String>) -> Result<(), BansheeError> {
+    let domain = domain_of(&key).ok_or_else(|| settings::not_a_setting(&key))?;
     if let Some(side) = crate::credentials::RemoteKey::of_setting(&key) {
         return config_api_key(side, key_change(value, || ask_key(side))?).await;
     }
     let Some(value) = value else {
         return Err(BansheeError::Rejected(format!("'{key}' needs a value")));
     };
-    // So `0.6` arrives as a number and `de` as a string
-    let value: serde_json::Value =
-        serde_json::from_str(&value).unwrap_or_else(|_| serde_json::Value::String(value.clone()));
-    let written = written_line(&key, &value);
+    let value = domain.typed(&value);
     let assignments = settings::Assignments::from([(key.clone(), value.clone())]);
 
-    let restart_required = write_settings(assignments).await?;
-    println!("{written}");
-    if restart_required {
-        let models_dir = models::download::models_dir()?;
-        println!("{}", restart_line(&key, &value, &models_dir));
+    let written = write_settings(assignments).await?;
+    println!("{}", written_line(&key, &value));
+    let listens = if settings::is_hotkey(&key) {
+        daemon_listens().await
+    } else {
+        true
+    };
+    let models_dir = models::download::models_dir()?;
+    for line in after_write(&key, &value, &written, listens, &models_dir) {
+        println!("{line}");
     }
     Ok(())
 }
 
-/// A listening model whose file is absent waits for its download, and a
-/// restart would start a daemon that cannot listen.
-fn restart_line(key: &str, value: &serde_json::Value, models_dir: &std::path::Path) -> String {
-    let absent = settings::listening_model_named(key, value)
-        .filter(|model| !models_dir.join(model.file).exists());
-    match absent {
+/// The lines printed after `Set ... in config.toml.`
+fn after_write(
+    key: &str,
+    value: &serde_json::Value,
+    written: &Written,
+    listens: bool,
+    models_dir: &std::path::Path,
+) -> Vec<String> {
+    if settings::is_hotkey(key)
+        && let Some(hint) = hotkey_hint(listens)
+    {
+        return hint.lines().map(str::to_string).collect();
+    }
+    // A listening model whose file is absent waits for its download, and a
+    // start would run a daemon that cannot listen
+    let absent_model = || {
+        settings::listening_model_named(key, value)
+            .filter(|model| !models_dir.join(model.file).exists())
+    };
+    let waits = match written {
+        Written::Now => false,
+        Written::Waiting(keys) => keys.iter().any(|waiting| waiting == key),
+        Written::NoDaemon => true,
+    };
+    let line = match absent_model().filter(|_| waits) {
         Some(model) => format!(
             "{} is not downloaded yet: run banshee setup. Banshee listens with it once the file arrives.",
             model.id
         ),
-        None => "Restart to use it: banshee start".to_string(),
+        None if waits => written_says(written).to_string(),
+        None => written_says(&Written::Now).to_string(),
+    };
+    vec![line]
+}
+
+/// What became of a write, said of the whole write.
+fn written_says(written: &Written) -> &'static str {
+    match written {
+        Written::Now => "Banshee uses it now.",
+        Written::Waiting(_) => "Banshee could not use it yet.",
+        Written::NoDaemon => "Banshee uses it when it starts: banshee start",
     }
+}
+
+/// What a hotkey write tells the user when the daemon listens for no key.
+fn hotkey_hint(listens: bool) -> Option<&'static str> {
+    (!listens).then_some(
+        "The compositor holds the hotkey on Wayland, so Banshee does not listen for it.\n\
+         On Hyprland, bind it with: banshee bind hyprland",
+    )
+}
+
+/// The running daemon's answer, or this session's when no daemon answers.
+async fn daemon_listens() -> bool {
+    utils::call_daemon(banshee_common::BANSHEE_STATUS, serde_json::json!({}))
+        .await
+        .ok()
+        .and_then(|status| status.get("hotkey_listens")?.as_bool())
+        .unwrap_or_else(hotkey::listens)
 }
 
 fn written_line(key: &str, value: &serde_json::Value) -> String {
@@ -661,7 +751,7 @@ pub async fn config_remote() -> Result<(), BansheeError> {
     }
 
     match write_settings(assignments).await {
-        Ok(_) => {
+        Ok(written) => {
             println!();
             println!(
                 "Listening through {} with {stt_model}.",
@@ -679,7 +769,7 @@ pub async fn config_remote() -> Result<(), BansheeError> {
             } else {
                 println!("The speaker stays on this machine: name a voice to send text out.");
             }
-            println!("Restart to use it: banshee start");
+            println!("{}", written_says(&written));
         }
         Err(error) => return Err(error),
     }

@@ -1,6 +1,36 @@
+import { writable } from 'svelte/store';
 import { daemon, markPending, refreshStatus } from './daemon';
-import { setSetting, status } from './tauri';
-import { announce } from './copy';
+import { setSetting, settingsTable, status, type Setting } from './tauri';
+import { announce, CHOICE_LABELS } from './copy';
+
+export type { Domain, Setting } from './tauri';
+
+// The daemon's table of what each key takes and reads as when absent. The
+// window keeps no copy of either.
+export const table = writable<Setting[]>([]);
+
+export async function loadTable(): Promise<void> {
+  table.set(await settingsTable());
+}
+
+export function rowOf(rows: Setting[], key: string): Setting | undefined {
+  return rows.find((row) => row.key === key);
+}
+
+/// The choices in the table's order, each under the window's word for it.
+export function optionsOf(rows: Setting[], key: string): { value: string; label: string }[] {
+  const domain = rowOf(rows, key)?.domain;
+  const values = domain?.kind === 'choice' ? domain.values : [];
+  return values.map((value) => ({
+    value,
+    label: CHOICE_LABELS[key]?.[value] ?? value,
+  }));
+}
+
+export function defaultOf(rows: Setting[], key: string): unknown {
+  const text = rowOf(rows, key)?.default;
+  return text == null ? undefined : JSON.parse(text);
+}
 
 // Every caller is a control the user just moved, so a refusal is said rather
 // than left as a rejected promise nothing reads.
@@ -19,9 +49,8 @@ export async function write(
 }
 
 export async function set(key: string, value: unknown): Promise<void> {
-  // The daemon answers which keys it could not apply live.
-  const restartRequired = await setSetting(key, value);
-  daemon.update((state) => markPending(state, restartRequired));
+  const waiting = await setSetting(key, value);
+  daemon.update((state) => markPending(state, waiting));
   // A write changes what `status` answers, and nothing pushes that, so a row
   // would go on showing the value the user just replaced.
   try {

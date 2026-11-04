@@ -26,18 +26,7 @@ pub fn build_client(
         Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(read_timeout)
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= REDIRECT_LIMIT {
-                    return attempt.error(format!("redirected more than {REDIRECT_LIMIT} times"));
-                }
-                match crate::config::cleartext_internet_host(attempt.url()) {
-                    Some(host) => {
-                        let reason = format!("redirected to plain http at {host}");
-                        attempt.error(reason)
-                    }
-                    None => attempt.follow(),
-                }
-            }))
+            .redirect(redirect_policy())
             .build()
     };
     std::thread::spawn(build)
@@ -49,6 +38,60 @@ pub fn build_client(
             ))
         })?
         .map_err(|error| BansheeError::Other(error.to_string()))
+}
+
+/// `build_client` for the async client, whose builder needs no thread of its
+/// own. The read bound is the caller's to add.
+///
+/// It keeps no idle connection: nothing runs between requests to see a
+/// server close one, and a request sent on a closed one fails.
+pub fn async_builder(
+    side: RemoteKey,
+    base_url: &str,
+) -> Result<reqwest::ClientBuilder, BansheeError> {
+    crate::config::refuse_plain_http_to_the_internet(side, base_url)
+        .map_err(BansheeError::Other)?;
+    Ok(reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(redirect_policy())
+        .pool_max_idle_per_host(0))
+}
+
+/// A runtime for one request, dropped with it.
+pub fn request_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
+/// `work` run on `runtime`, or `None` once `stop` is notified first. `work`
+/// is called inside the runtime, since reqwest's `send` needs its timer.
+pub fn run_until_stopped<F: std::future::Future>(
+    runtime: &tokio::runtime::Runtime,
+    stop: &tokio::sync::Notify,
+    work: impl FnOnce() -> F,
+) -> Option<F::Output> {
+    runtime.block_on(async {
+        tokio::select! {
+            done = work() => Some(done),
+            () = stop.notified() => None,
+        }
+    })
+}
+
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= REDIRECT_LIMIT {
+            return attempt.error(format!("redirected more than {REDIRECT_LIMIT} times"));
+        }
+        match crate::config::cleartext_internet_host(attempt.url()) {
+            Some(host) => {
+                let reason = format!("redirected to plain http at {host}");
+                attempt.error(reason)
+            }
+            None => attempt.follow(),
+        }
+    })
 }
 
 /// The sentence a status carries on its own, for an answer whose body names no

@@ -13,6 +13,7 @@ pub mod error;
 pub mod feedback;
 pub mod listening;
 pub mod logging;
+pub mod settings;
 pub mod utils;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]

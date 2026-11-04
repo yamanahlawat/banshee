@@ -128,7 +128,7 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 | --------------------- | ------------------ | ------------------------ | ------------------------------------------------------- |
 | **Dictate**           | `F9`               | `Right Option`           | The text is typed into the app you are focused on.      |
 
-- **The key is yours.** On Linux, `banshee bind hyprland` asks for it. On macOS, run `banshee config set audio.hotkey LeftOption`, then `banshee start`.
+- **The key is yours.** On Linux, `banshee bind hyprland` asks for it. On macOS, run `banshee config set audio.hotkey LeftOption`.
 - **Hold the key** while you speak, or [tap it instead](docs/configuration.md#the-hotkey).
 
 ## Use it

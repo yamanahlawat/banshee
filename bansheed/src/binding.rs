@@ -367,6 +367,18 @@ impl HotkeyTracker {
         }
     }
 
+    /// Matches `hotkey` in `mode` from the next event, and answers whether it
+    /// took them. Refused while the bound key is held, so the hold's release
+    /// still owes its stop. The modifiers already down stay down.
+    pub fn rebind(&mut self, hotkey: Hotkey, mode: HotkeyMode) -> bool {
+        if self.held {
+            return false;
+        }
+        self.hotkey = hotkey;
+        self.mode = mode;
+        true
+    }
+
     pub fn on_event(&mut self, event: &EventType) -> Option<HotkeyAction> {
         let (key, pressed) = match event {
             EventType::KeyPress(key) => (*key, true),
