@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after the daemon starts is spoken once, and never at login.
   A model file that goes missing shows at the next use.
   `feedback.speak_problems = false` turns the speech off.
+- **When Banshee cannot type a dictation, it copies it.** With no Accessibility
+  grant, no Wayland typer, or a typer that fails, the words stay on the
+  clipboard. The capsule says "Copied" for 3 s on macOS; Linux has no capsule. A
+  level two-note sound plays in place of the error sound. Paste them yourself.
+  The old clipboard is not put back.
+- **A dictation is copied when you switch apps before it lands.** If the app in
+  front when the words arrive is not the one you were in when you stopped
+  recording, Banshee copies them and plays the two-note sound. On macOS the
+  capsule also says "Copied". This works on macOS and on Hyprland. Elsewhere,
+  and whenever Banshee cannot tell, it types as before. A wrong field inside the
+  same app still gets the words.
 
 ### Changed
 
@@ -180,6 +191,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type, copy or hear the X11 hotkey, and `banshee status` said all was well.
   Banshee now starts with your desktop and stops when you log out. Run
   `banshee start` once from your desktop after updating.
+
+- **A macOS dictation stays out of clipboard history.** Banshee marks the text it
+  pastes as transient, as nspasteboard.org describes, so clipboard managers that
+  follow it skip the paste. Linux already kept it out.
 
 - **`banshee start` and `banshee tray` wait until Banshee runs.** After an upgrade,
   macOS can refuse the first launch of the new build. They now register it once

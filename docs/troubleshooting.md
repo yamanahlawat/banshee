@@ -94,7 +94,7 @@ This page lists what breaks, and the fix.
   - A Wayland session needs a helper to type into the focused window.
   - Install `wtype`, or `ydotool` where GNOME denies `wtype` the
     virtual-keyboard protocol it needs.
-  - The text is not lost either way: `banshee history` holds it.
+  - Banshee copies the words instead, and `banshee history` holds them too.
 - **`banshee status` says the remote listener refused the key.**
   - The check asks that server for `/models` with the key, and the server
     rejected it.

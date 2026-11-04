@@ -171,6 +171,7 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
             credentials,
             licences,
             voiceover: crate::settings::voiceover_on,
+            frontmost: crate::frontmost::frontmost,
             #[cfg(target_os = "macos")]
             accessibility: permissions::accessibility_granted,
             #[cfg(target_os = "macos")]

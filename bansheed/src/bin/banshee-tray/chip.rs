@@ -14,6 +14,9 @@ pub const QUIET: Duration = Duration::from_secs(1);
 /// Done stays this long, so its float out plays to the end.
 pub const FLOAT: Duration = Duration::from_millis(440);
 
+/// The capsule's word and the VoiceOver announcement for a copied dictation.
+pub const COPIED: &str = "Copied";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Show {
     /// With the committed words heard so far.
@@ -25,6 +28,7 @@ pub enum Show {
     NothingHeard(String),
     Broken(String),
     Done(Done),
+    Copied,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +64,7 @@ pub fn words_of(show: &Show) -> Option<(&str, Cut)> {
         }
         Show::YourTurn | Show::Answering(_) => Some(("Your turn", Cut::End)),
         Show::NothingHeard(text) | Show::Broken(text) => Some((text, Cut::End)),
+        Show::Copied => Some((COPIED, Cut::End)),
         Show::Recording(_) | Show::Working | Show::Done(_) => None,
     }
 }
@@ -275,10 +280,12 @@ impl Chip {
                 self.surface(Show::NothingHeard(words), false, now);
             }
             Signal::Ready { .. } => {
-                if self.working() {
-                    self.press = None;
-                }
+                self.release_working_press();
                 self.finish(Done::Typed, now);
+            }
+            Signal::Copied => {
+                self.release_working_press();
+                self.surface(Show::Copied, false, now);
             }
             Signal::Error { reason, target } => self.error(reason, target, now),
             Signal::Onset => {
@@ -360,6 +367,12 @@ impl Chip {
         self.press == Some(Press::Working)
     }
 
+    fn release_working_press(&mut self) {
+        if self.working() {
+            self.press = None;
+        }
+    }
+
     /// A new state cancels a pending hide and an exit in progress.
     fn begin(&mut self) {
         self.held = None;
@@ -434,6 +447,7 @@ pub fn announcement(before: Option<&Scene>, after: Option<&Scene>) -> Option<Str
     match &after.show {
         Show::Working => Some("Working".to_string()),
         Show::Done(done) => Some(done.words().to_string()),
+        Show::Copied => Some(COPIED.to_string()),
         Show::NothingHeard(text) | Show::Broken(text) => Some(text.clone()),
         Show::Recording(_) | Show::YourTurn | Show::Answering(_) => None,
     }
@@ -1547,5 +1561,70 @@ mod tests {
         );
         assert_eq!(announcement(before.as_ref(), after.as_ref()), None);
         assert_eq!(announcement(None, after.as_ref()), None);
+    }
+
+    #[test]
+    fn a_copied_dictation_holds_its_word_then_hides() {
+        let clock = Clock::new();
+        let mut chip = Chip::default();
+        fed(
+            &mut chip,
+            clock.at(0),
+            [
+                Signal::RecordStart {
+                    target: Target::Dictate,
+                },
+                Signal::RecordStop {
+                    target: Target::Dictate,
+                },
+            ],
+        );
+        fed(&mut chip, clock.at(500), [Signal::Copied]);
+        assert_eq!(shown(&chip), Some(Show::Copied));
+        assert_eq!(words_of(&Show::Copied), Some((COPIED, Cut::End)));
+        assert_eq!(chip.deadline(), Some(clock.at(500) + FAULT_HOLD));
+        chip.tick(clock.at(500) + FAULT_HOLD);
+        assert_eq!(shown(&chip), None);
+    }
+
+    #[test]
+    fn a_copy_under_a_newer_press_shows_once_the_press_ends() {
+        let clock = Clock::new();
+        let mut chip = Chip::default();
+        let press = Signal::RecordStart {
+            target: Target::Dictate,
+        };
+        let release = Signal::RecordStop {
+            target: Target::Dictate,
+        };
+        fed(
+            &mut chip,
+            clock.at(0),
+            [press.clone(), release.clone(), press],
+        );
+        fed(&mut chip, clock.at(100), [Signal::Copied]);
+        assert_eq!(shown(&chip), Some(RECORDING));
+        fed(
+            &mut chip,
+            clock.at(200),
+            [
+                release,
+                Signal::Ready {
+                    target: Target::Dictate,
+                },
+            ],
+        );
+        assert_eq!(shown(&chip), Some(Show::Done(Done::Typed)));
+        chip.tick(clock.at(200) + FLOAT);
+        assert_eq!(shown(&chip), Some(Show::Copied));
+    }
+
+    #[test]
+    fn voiceover_hears_copied() {
+        let after = Scene {
+            show: Show::Copied,
+            serial: 1,
+        };
+        assert_eq!(announcement(None, Some(&after)).as_deref(), Some(COPIED));
     }
 }

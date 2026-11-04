@@ -95,6 +95,10 @@ pub enum CommandType {
         /// The agent whose hook runs this
         agent: crate::turn_end::GatedAgent,
     },
+    /// Prints the frontmost app's pid, read fresh in this process
+    #[cfg(target_os = "macos")]
+    #[clap(hide = true)]
+    FrontmostPid,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]

@@ -24,6 +24,7 @@ pub enum Cue {
     RecordStart,
     RecordStop,
     Ready,
+    Copied,
     Error,
     // The only signal that an armed mic went hot or shut
     Arm,
@@ -37,6 +38,7 @@ impl Cue {
             Cue::RecordStart => &[(660.0, 70), (880.0, 90)],
             Cue::RecordStop => &[(880.0, 70), (660.0, 90)],
             Cue::Ready => &[(523.0, 90), (784.0, 140)],
+            Cue::Copied => &[(784.0, 90), (784.0, 140)],
             Cue::Error => &[(220.0, 120), (196.0, 160)],
             Cue::Arm => &[(523.0, 70), (1046.0, 120)],
             Cue::Disarm => &[(1046.0, 70), (523.0, 120)],
@@ -84,6 +86,7 @@ pub fn cue_of(signal: &Signal) -> Option<Cue> {
         Signal::RecordStart { .. } => Some(Cue::RecordStart),
         Signal::RecordStop { .. } => Some(Cue::RecordStop),
         Signal::Ready { .. } => Some(Cue::Ready),
+        Signal::Copied => Some(Cue::Copied),
         Signal::Error { .. } => Some(Cue::Error),
         Signal::Arm => Some(Cue::Arm),
         Signal::Disarm => Some(Cue::Disarm),
@@ -305,11 +308,21 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_has_its_own_level_earcon() {
+        assert_eq!(cue_of(&Signal::Copied), Some(Cue::Copied));
+        let tones = Cue::Copied.tones();
+        assert_ne!(tones, Cue::Ready.tones());
+        assert_ne!(tones, Cue::Error.tones());
+        assert_eq!(tones.first().map(|t| t.0), tones.last().map(|t| t.0));
+    }
+
+    #[test]
     fn every_cue_has_audible_tones() {
         for cue in [
             Cue::RecordStart,
             Cue::RecordStop,
             Cue::Ready,
+            Cue::Copied,
             Cue::Error,
             Cue::Arm,
             Cue::Disarm,
@@ -358,6 +371,7 @@ mod tests {
                 reason: Reason::new(ReasonCode::SpeechFailed, None),
                 target: None,
             },
+            Signal::Copied,
         ];
 
         let (cues, heard) = Cues::recording_in(FeedbackMode::Visual);
@@ -376,7 +390,7 @@ mod tests {
         }
         assert_eq!(
             heard.try_iter().count(),
-            4,
+            5,
             "with no chip, every job sounds again"
         );
     }

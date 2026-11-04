@@ -43,13 +43,15 @@ const ARM_PLAYED: u8 = 7;
 const RESTART_EXIT: u8 = 75;
 
 /// What the daemon reads from the machine it runs on: its files, its grants,
-/// and whether VoiceOver is on. Handed in, so a test decides.
+/// whether VoiceOver is on and which app is in front. Handed in, so a test
+/// decides.
 pub struct Machine {
     pub models: std::path::PathBuf,
     pub config: std::path::PathBuf,
     pub credentials: std::path::PathBuf,
     pub licences: std::path::PathBuf,
     pub voiceover: fn() -> bool,
+    pub frontmost: fn() -> Option<crate::frontmost::App>,
     #[cfg(target_os = "macos")]
     pub accessibility: fn() -> bool,
     #[cfg(target_os = "macos")]
@@ -75,7 +77,8 @@ pub enum ConsumerCommand {
     // later one. The consumer reads the ring while the key is held and ends
     // on the `Transcribe` or `Discard` that follows.
     Stream(u64),
-    Transcribe(RingClaim),
+    // With the app in front at the stop, or `None` when that is unknown.
+    Transcribe(RingClaim, Option<crate::frontmost::App>),
     // The consumer empties the ring, so a cancelled session does not feed
     // the next transcription
     Discard,
@@ -702,7 +705,7 @@ impl DaemonState {
     // A stop with nothing in flight is a no-op, so release keybinds can fire
     // unconditionally.
     pub fn record_stop(&self) {
-        if self.stop_push_to_talk(lock(&self.push_to_talk)) {
+        if self.stop_push_to_talk(lock(&self.push_to_talk), self.machine.frontmost) {
             return;
         }
         let session = lock(&self.push_to_talk);
@@ -735,19 +738,26 @@ impl DaemonState {
         true
     }
 
-    fn stop_push_to_talk(&self, deadline: std::sync::MutexGuard<'_, Instant>) -> bool {
+    fn stop_push_to_talk(
+        &self,
+        deadline: std::sync::MutexGuard<'_, Instant>,
+        at_stop: impl FnOnce() -> Option<crate::frontmost::App>,
+    ) -> bool {
         // Claimed under the push-to-talk lock and before the mode changes, so
         // `arm_after_dictations` never sees the microphone free and the ring unclaimed.
         let ring = self.claim_ring();
         if !self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             return false;
         }
-        drop(deadline);
         log::info!("Recording stopped");
         self.cues.emit(Signal::RecordStop {
             target: Target::Dictate,
         });
-        let _ = self.commands.send(ConsumerCommand::Transcribe(ring));
+        // Held through the send, so a press during the read queues behind this stop.
+        let _ = self
+            .commands
+            .send(ConsumerCommand::Transcribe(ring, at_stop()));
+        drop(deadline);
         true
     }
 
@@ -820,7 +830,8 @@ impl DaemonState {
             "Push-to-talk ran past {}s with no stop; releasing the microphone.",
             MAX_PUSH_TO_TALK.as_secs()
         );
-        self.stop_push_to_talk(deadline)
+        // Nobody pressed stop, so no app marks where the words belong.
+        self.stop_push_to_talk(deadline, || None)
     }
 
     pub fn speech(&self) -> &Arc<SpeechPlayer> {

@@ -81,6 +81,8 @@ pub enum Signal {
         target: Target,
     },
     Onset,
+    /// A dictation went to the clipboard instead of being typed.
+    Copied,
 }
 
 #[cfg(test)]
@@ -96,6 +98,7 @@ mod tests {
                     target: Target::Dictate,
                 },
             ),
+            (r#"{"cue":"copied"}"#, Signal::Copied),
             (
                 r#"{"cue":"ready","target":"dictate"}"#,
                 Signal::Ready {
@@ -173,6 +176,7 @@ mod tests {
                 target: Target::Dictate,
             },
             Signal::Onset,
+            Signal::Copied,
         ] {
             let line = serde_json::to_string(&signal).unwrap();
             assert_eq!(

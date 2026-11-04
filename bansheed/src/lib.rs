@@ -11,6 +11,7 @@ mod connect;
 mod credentials;
 mod daemon;
 mod dictation;
+mod frontmost;
 mod history;
 mod hotkey;
 mod level;
@@ -43,6 +44,13 @@ use crate::config::Config;
 pub async fn run() -> ExitCode {
     banshee_common::logging::install("daemon");
     let cli = Cli::parse();
+
+    // The helper that `frontmost` starts never loads the config.
+    #[cfg(target_os = "macos")]
+    if matches!(cli.command, CommandType::FrontmostPid) {
+        return frontmost::print_pid();
+    }
+
     // Unwrapped only by the arms that read it: RPC works without a parseable
     // config, and the checklist diagnoses a broken one
     let config_result = Config::load();
@@ -88,6 +96,8 @@ pub async fn run() -> ExitCode {
             turn_end::run(agent).await;
             Ok(())
         }
+        #[cfg(target_os = "macos")]
+        CommandType::FrontmostPid => unreachable!("handled before the config loads"),
     };
     exit_code(outcome.map(|()| 0))
 }

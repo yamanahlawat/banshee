@@ -5,7 +5,15 @@ use enigo::{
     Direction::{Click, Press, Release},
     Enigo, Key, Keyboard, Settings,
 };
+#[cfg(target_os = "macos")]
+use objc2::{ClassType, msg_send, rc::Retained};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSArray, NSString};
 use std::{thread, time::Duration};
+
+use crate::frontmost::{self, App};
 
 const PASTE_SETTLE: Duration = Duration::from_millis(50);
 
@@ -16,7 +24,50 @@ pub fn is_wayland() -> bool {
         || std::env::var("WAYLAND_DISPLAY").is_ok()
 }
 
-pub fn type_text(text: &str) -> Result<(), BansheeError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivered {
+    Typed,
+    Copied,
+}
+
+pub fn deliver_text(text: &str, at_stop: Option<App>) -> Result<Delivered, BansheeError> {
+    let moved = at_stop.is_some() && frontmost::moved(at_stop, frontmost::frontmost());
+    deliver_with(text, moved, type_text, copy_text)
+}
+
+fn deliver_with(
+    text: &str,
+    moved: bool,
+    type_words: impl FnOnce(&str) -> Result<(), BansheeError>,
+    copy_words: impl FnOnce(&str) -> Result<(), BansheeError>,
+) -> Result<Delivered, BansheeError> {
+    if moved {
+        match copy_words(text) {
+            Ok(()) => {
+                log::info!("The app changed after the recording stopped, so the words were copied");
+                return Ok(Delivered::Copied);
+            }
+            Err(e) => log::warn!("Could not copy the dictation, so it is typed: {e}"),
+        }
+        return type_words(text).map(|()| Delivered::Typed);
+    }
+    let why = match type_words(text) {
+        Ok(()) => return Ok(Delivered::Typed),
+        Err(why) => why,
+    };
+    match copy_words(text) {
+        Ok(()) => {
+            log::warn!("Copied the dictation, since it could not be typed: {why}");
+            Ok(Delivered::Copied)
+        }
+        Err(e) => {
+            log::warn!("Could not copy the dictation either: {e}");
+            Err(why)
+        }
+    }
+}
+
+fn type_text(text: &str) -> Result<(), BansheeError> {
     #[cfg(all(unix, not(target_os = "macos")))]
     if is_wayland() {
         return type_text_wayland(text);
@@ -35,12 +86,39 @@ pub fn type_text(text: &str) -> Result<(), BansheeError> {
 
     let old_clipboard = clipboard.get_text().ok();
 
-    stage(clipboard, text, old_clipboard)?;
+    let restore = stage(clipboard, text, old_clipboard)?;
 
     thread::sleep(PASTE_SETTLE);
 
     send_paste()?;
+    restore.after_paste();
 
+    Ok(())
+}
+
+// Plain, with no marker: a person pastes this copy on purpose.
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn copy_text(text: &str) -> Result<(), BansheeError> {
+    Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .map_err(|e| BansheeError::Other(format!("could not copy the dictation: {e}")))
+}
+
+// X11 and Wayland serve the clipboard from the process that set it, so the
+// thread holds the text until anything else takes the clipboard. Clipboard
+// history keeps this copy, unlike a staged paste.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn copy_text(text: &str) -> Result<(), BansheeError> {
+    use arboard::SetExtLinux;
+
+    let failed =
+        |e: arboard::Error| BansheeError::Other(format!("could not copy the dictation: {e}"));
+    let mut clipboard = Clipboard::new().map_err(failed)?;
+    clipboard.set().text(text).map_err(failed)?;
+    let text = text.to_string();
+    thread::spawn(move || {
+        let _ = clipboard.set().wait().text(text);
+    });
     Ok(())
 }
 
@@ -171,22 +249,29 @@ fn type_text_wayland(text: &str) -> Result<(), BansheeError> {
     type_with(&resolve_wayland_typers(&path), text)
 }
 
-// Stage the text, then restore the old clipboard. Two impls: macOS and Windows
-// hand contents to a system service, X11 and Wayland keep them in a live process.
+// Stage the text, then put the old clipboard back. Two impls: macOS and
+// Windows hand contents to a system service and restore once the paste is
+// sent. X11 and Wayland keep them in a live process, which restores once the
+// paste window ends, whether or not the paste went out.
 
 // Restore only after the app has consumed the paste.
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 const CLIPBOARD_RESTORE_DELAY: Duration = Duration::from_millis(500);
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]
-fn stage(mut clipboard: Clipboard, text: &str, old: Option<String>) -> Result<(), BansheeError> {
-    clipboard
-        .set_text(text.to_string())
-        .map_err(|e| BansheeError::Other(e.to_string()))?;
+struct Restore {
+    old: Option<String>,
+    dictated: String,
+}
 
-    // Restore off the hot path so the ready cue fires without waiting.
-    if let Some(old) = old {
-        let dictated = text.to_string();
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+impl Restore {
+    // Off the hot path so the ready cue fires without waiting.
+    fn after_paste(self) {
+        let Some(old) = self.old else {
+            return;
+        };
+        let dictated = self.dictated;
         thread::spawn(move || {
             thread::sleep(CLIPBOARD_RESTORE_DELAY);
             let Ok(mut clipboard) = Clipboard::new() else {
@@ -201,8 +286,196 @@ fn stage(mut clipboard: Clipboard, text: &str, old: Option<String>) -> Result<()
             }
         });
     }
+}
 
-    Ok(())
+#[cfg(windows)]
+fn stage(
+    mut clipboard: Clipboard,
+    text: &str,
+    old: Option<String>,
+) -> Result<Restore, BansheeError> {
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|e| BansheeError::Other(e.to_string()))?;
+    Ok(Restore {
+        old,
+        dictated: text.to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+const TRANSIENT_TYPE: &str = "org.nspasteboard.TransientType";
+#[cfg(target_os = "macos")]
+const AUTO_GENERATED_TYPE: &str = "org.nspasteboard.AutoGeneratedType";
+
+// Every type is declared in one change, before any data lands, so a clipboard
+// manager that polls mid-write never sees the text without its markers.
+#[cfg(target_os = "macos")]
+fn write_transient(board: &NSPasteboard, text: &str) -> Result<(), BansheeError> {
+    // SAFETY: a framework constant, valid for the life of the process.
+    let string_type = unsafe { NSPasteboardTypeString };
+    let transient = NSString::from_str(TRANSIENT_TYPE);
+    let auto_generated = NSString::from_str(AUTO_GENERATED_TYPE);
+    let types = NSArray::from_slice(&[string_type, &*transient, &*auto_generated]);
+    // SAFETY: a nil owner is allowed, and the types are NSStrings.
+    unsafe { board.declareTypes_owner(&types, None) };
+
+    let empty = NSString::from_str("");
+    let filled = board.setString_forType(&NSString::from_str(text), string_type)
+        && board.setString_forType(&empty, &transient)
+        && board.setString_forType(&empty, &auto_generated);
+    if filled {
+        Ok(())
+    } else {
+        Err(BansheeError::Other(
+            "the pasteboard refused the dictated text".into(),
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn stage(_clipboard: Clipboard, text: &str, old: Option<String>) -> Result<Restore, BansheeError> {
+    // generalPasteboard can be nil under launchd, which the binding does not allow for.
+    let board: Option<Retained<NSPasteboard>> =
+        // SAFETY: a class method with no arguments, returning an object or nil.
+        unsafe { msg_send![NSPasteboard::class(), generalPasteboard] };
+    let board =
+        board.ok_or_else(|| BansheeError::Other("the general pasteboard is unavailable".into()))?;
+    write_transient(&board, text)?;
+    Ok(Restore {
+        old,
+        dictated: text.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn typed_words_are_never_copied() {
+        let copied = Cell::new(false);
+        let delivered = deliver_with(
+            "hi",
+            false,
+            |_| Ok(()),
+            |_| {
+                copied.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(delivered.unwrap(), Delivered::Typed);
+        assert!(!copied.get());
+    }
+
+    #[test]
+    fn words_that_cannot_be_typed_are_copied_whole() {
+        let copied = RefCell::new(String::new());
+        let delivered = deliver_with(
+            "hi there",
+            false,
+            |_| Err(BansheeError::Other("no accessibility grant".into())),
+            |words| {
+                copied.replace(words.to_string());
+                Ok(())
+            },
+        );
+        assert_eq!(delivered.unwrap(), Delivered::Copied);
+        assert_eq!(copied.into_inner(), "hi there");
+    }
+
+    #[test]
+    fn a_copy_that_fails_too_reports_why_typing_failed() {
+        let delivered = deliver_with(
+            "hi",
+            false,
+            |_| Err(BansheeError::Other("no typer on PATH".into())),
+            |_| Err(BansheeError::Other("no clipboard".into())),
+        );
+        let message = delivered.unwrap_err().to_string();
+        assert!(message.contains("no typer on PATH"), "{message}");
+    }
+
+    #[test]
+    fn a_changed_app_copies_and_never_types() {
+        let typed = Cell::new(false);
+        let delivered = deliver_with(
+            "hi",
+            true,
+            |_| {
+                typed.set(true);
+                Ok(())
+            },
+            |_| Ok(()),
+        );
+        assert_eq!(delivered.unwrap(), Delivered::Copied);
+        assert!(!typed.get());
+    }
+
+    #[test]
+    fn a_changed_app_whose_copy_fails_types_as_today() {
+        let delivered = deliver_with(
+            "hi",
+            true,
+            |_| Ok(()),
+            |_| Err(BansheeError::Other("no clipboard".into())),
+        );
+        assert_eq!(delivered.unwrap(), Delivered::Typed);
+    }
+
+    #[test]
+    fn a_changed_app_with_no_clipboard_and_no_typer_fails() {
+        let copies = Cell::new(0);
+        let delivered = deliver_with(
+            "hi",
+            true,
+            |_| Err(BansheeError::Other("no typer".into())),
+            |_| {
+                copies.set(copies.get() + 1);
+                Err(BansheeError::Other("no clipboard".into()))
+            },
+        );
+        assert!(delivered.is_err());
+        assert_eq!(copies.get(), 1);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+
+    #[test]
+    fn a_staged_dictation_is_transient_and_auto_generated_and_never_concealed() {
+        let board = NSPasteboard::pasteboardWithUniqueName();
+        write_transient(&board, "hello there").unwrap();
+        let types: Vec<String> = board
+            .types()
+            .unwrap()
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        assert!(
+            types.iter().any(|t| t == "org.nspasteboard.TransientType"),
+            "{types:?}"
+        );
+        assert!(
+            types
+                .iter()
+                .any(|t| t == "org.nspasteboard.AutoGeneratedType"),
+            "{types:?}"
+        );
+        assert!(
+            !types.iter().any(|t| t == "org.nspasteboard.ConcealedType"),
+            "{types:?}"
+        );
+        // SAFETY: a framework constant, valid for the life of the process.
+        let string_type = unsafe { NSPasteboardTypeString };
+        let text = board.stringForType(string_type).unwrap();
+        assert_eq!(text.to_string(), "hello there");
+        // SAFETY: releaseGlobally takes no arguments and returns nothing.
+        let _: () = unsafe { msg_send![&*board, releaseGlobally] };
+    }
 }
 
 #[cfg(all(test, unix, not(target_os = "macos")))]
@@ -311,9 +584,19 @@ mod tests {
     }
 }
 
+// Nothing to do after the paste: the hold thread in `stage` puts the old text
+// back, and a copy's write ends that thread early.
+#[cfg(all(unix, not(target_os = "macos")))]
+struct Restore;
+
+#[cfg(all(unix, not(target_os = "macos")))]
+impl Restore {
+    fn after_paste(self) {}
+}
+
 // The caller's handle only ever read; ownership belongs to the thread below.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn stage(_clipboard: Clipboard, text: &str, old: Option<String>) -> Result<(), BansheeError> {
+fn stage(_clipboard: Clipboard, text: &str, old: Option<String>) -> Result<Restore, BansheeError> {
     use arboard::SetExtLinux;
     use std::time::Instant;
 
@@ -348,5 +631,5 @@ fn stage(_clipboard: Clipboard, text: &str, old: Option<String>) -> Result<(), B
         }
     });
 
-    Ok(())
+    Ok(Restore)
 }

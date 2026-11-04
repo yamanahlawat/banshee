@@ -765,17 +765,22 @@ fn remaining(deadline: std::time::Instant) -> std::time::Duration {
     deadline.saturating_duration_since(std::time::Instant::now())
 }
 
-/// The exit status, or `None` when the shell still runs at the deadline.
-fn exit_status(child: &mut std::process::Child, deadline: std::time::Instant) -> Option<String> {
+/// The exit status, or `None` when the child still runs at the deadline. A
+/// failed poll counts as the answer.
+pub(crate) fn exit_by(
+    deadline: std::time::Instant,
+    poll: std::time::Duration,
+    mut try_wait: impl FnMut() -> std::io::Result<Option<std::process::ExitStatus>>,
+) -> Option<std::io::Result<std::process::ExitStatus>> {
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status.to_string()),
-            Err(error) => return Some(error.to_string()),
+        match try_wait() {
+            Ok(Some(status)) => return Some(Ok(status)),
+            Err(error) => return Some(Err(error)),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     return None;
                 }
-                std::thread::sleep(SHELL_POLL);
+                std::thread::sleep(poll);
             }
         }
     }
@@ -834,7 +839,10 @@ fn probe(shell: &OsStr, flags: &[&str], wait: std::time::Duration) -> Probe {
     let found = extract_path(&answer);
     let ended = match found {
         Some(_) => None,
-        None => exit_status(&mut child, deadline),
+        None => exit_by(deadline, SHELL_POLL, || child.try_wait()).map(|status| match status {
+            Ok(status) => status.to_string(),
+            Err(error) => error.to_string(),
+        }),
     };
     reap(&mut child);
     if let Some(path) = found {
@@ -876,7 +884,7 @@ impl SearchPath {
 
     /// The PATH in hand, or `probe`'s answer when nothing is in hand yet.
     fn get(&self, probe: impl FnOnce() -> OsString) -> OsString {
-        if let Some(path) = self.held().clone() {
+        if let Some(path) = self.in_hand() {
             return path;
         }
         // No probe runs under the lock. A reader that waited behind another
@@ -884,6 +892,10 @@ impl SearchPath {
         // race probes twice instead, and the first answer stored wins.
         let probed = probe();
         self.held().get_or_insert(probed).clone()
+    }
+
+    fn in_hand(&self) -> Option<OsString> {
+        self.held().clone()
     }
 
     /// Puts a PATH in hand, and answers what readers now get.
@@ -944,6 +956,13 @@ fn refreshed(
 
 pub(crate) fn resolved_path() -> OsString {
     SEARCH_PATH.get(|| probed_path().unwrap_or_else(fallback_path))
+}
+
+/// The PATH `resolved_path` answers, once a reader has resolved it. Never asks
+/// a shell.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn resolved_path_in_hand() -> Option<OsString> {
+    SEARCH_PATH.in_hand()
 }
 
 /// Asks the shell again, so an agent installed since the daemon started

@@ -84,6 +84,14 @@ fn readers_after_the_first_share_its_probe() {
 }
 
 #[test]
+fn the_path_in_hand_is_read_without_a_probe() {
+    let path = SearchPath::new();
+    assert_eq!(path.in_hand(), None);
+    path.get(|| OsString::from("/probed"));
+    assert_eq!(path.in_hand(), Some(OsString::from("/probed")));
+}
+
+#[test]
 fn a_replaced_path_is_what_readers_then_get() {
     let probes = std::cell::Cell::new(0);
     let probe = counting(&probes);
@@ -1760,4 +1768,33 @@ fn detection_finds_an_agent_on_the_path_it_is_given() {
     let found = found_on(bin.as_os_str());
     assert_eq!(found, vec![("codex", codex)]);
     let _ = std::fs::remove_dir_all(&bin);
+}
+
+#[test]
+fn a_child_is_waited_for_until_the_deadline_and_no_longer() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+    use std::time::{Duration, Instant};
+
+    const POLL: Duration = Duration::from_millis(1);
+    const CAP: Duration = Duration::from_millis(250);
+
+    let deadline = Instant::now() + Duration::from_millis(20);
+    assert!(exit_by(deadline, POLL, || Ok(None)).is_none());
+    assert!(Instant::now() >= deadline);
+
+    let exited = ExitStatus::from_raw(0);
+    let mut polls = 0;
+    let third = || {
+        polls += 1;
+        Ok((polls == 3).then_some(exited))
+    };
+    assert_eq!(
+        exit_by(Instant::now() + CAP, POLL, third).map(Result::unwrap),
+        Some(exited)
+    );
+
+    let gone = || Err(std::io::Error::other("gone"));
+    let failed = exit_by(Instant::now() + CAP, POLL, gone).expect("an error is an answer");
+    assert_eq!(failed.unwrap_err().to_string(), "gone");
 }

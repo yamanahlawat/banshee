@@ -90,8 +90,8 @@ pub fn remote_stt_default() -> crate::config::STTConfig {
 }
 
 /// A models folder, a config path, a key file path and a licence record inside
-/// a fresh temp directory, every grant given, no typer missing, and VoiceOver
-/// off, so no test reads or writes the machine that runs it.
+/// a fresh temp directory, every grant given, no typer missing, VoiceOver off
+/// and no app in front, so no test reads or writes the machine that runs it.
 pub fn scratch_machine(prefix: &str) -> crate::state::Machine {
     let dir = unique_scratch(prefix);
     let models = dir.join("models");
@@ -102,6 +102,7 @@ pub fn scratch_machine(prefix: &str) -> crate::state::Machine {
         credentials: dir.join("credentials.toml"),
         licences: dir.join("accepted-licences"),
         voiceover: || false,
+        frontmost: || None,
         #[cfg(target_os = "macos")]
         accessibility: || true,
         #[cfg(target_os = "macos")]

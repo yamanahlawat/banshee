@@ -105,6 +105,7 @@ fn history_turned_back_on_is_written_to_again() {
 }
 
 use super::*;
+use crate::frontmost::App;
 use crate::text_to_speech::lock;
 
 /// A client offers the command behind a Copy button, so `command` has to
@@ -692,7 +693,7 @@ fn a_toggle_stops_the_session_a_toggle_started() {
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     assert!(matches!(
         requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(_))
+        Ok(ConsumerCommand::Transcribe(_, _))
     ));
 
     // A manual override counts as in flight and ends as a stop
@@ -755,8 +756,82 @@ fn a_cancelled_push_to_talk_emits_a_silent_signal() {
 }
 
 #[test]
+fn a_stop_sends_the_app_it_read_with_the_recording() {
+    let (state, requests) = test_state_with_commands();
+    assert!(state.record_start());
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
+    assert!(state.stop_push_to_talk(lock(&state.push_to_talk), || Some(App(7))));
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Transcribe(_, Some(App(7))))
+    ));
+}
+
+#[test]
+fn a_press_during_the_stop_read_queues_behind_the_stop() {
+    let (state, requests) = test_state_with_commands();
+    assert!(state.record_start());
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
+    std::thread::scope(|scope| {
+        assert!(state.stop_push_to_talk(lock(&state.push_to_talk), || {
+            scope.spawn(|| assert!(state.record_start()));
+            std::thread::sleep(Duration::from_millis(50));
+            Some(App(7))
+        }));
+    });
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Transcribe(_, Some(App(7))))
+    ));
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
+}
+
+#[test]
+fn a_stop_with_nothing_in_flight_reads_no_app() {
+    let (state, _requests) = test_state_with_commands();
+    let read = std::cell::Cell::new(false);
+    assert!(!state.stop_push_to_talk(lock(&state.push_to_talk), || {
+        read.set(true);
+        None
+    }));
+    assert!(!read.get());
+}
+
+#[test]
+fn a_stop_reads_the_app_through_the_machine() {
+    let (state, requests) = state_on(Machine {
+        frontmost: || Some(App(9)),
+        ..crate::test_support::scratch_machine("state-reader")
+    });
+    state.listening_model_loaded(Some(parakeet()));
+    assert!(state.record_start());
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
+    state.record_stop();
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Transcribe(_, Some(App(9))))
+    ));
+}
+
+#[test]
 fn watchdog_releases_a_push_to_talk_that_never_stopped() {
-    let (state, transcribe_requests) = test_state_with_commands();
+    let (state, transcribe_requests) = state_on(Machine {
+        frontmost: || Some(App(9)),
+        ..crate::test_support::scratch_machine("state-watchdog")
+    });
+    state.listening_model_loaded(Some(parakeet()));
 
     assert!(state.record_start());
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
@@ -772,12 +847,13 @@ fn watchdog_releases_a_push_to_talk_that_never_stopped() {
     // Bring the deadline forward instead of waiting out MAX_PUSH_TO_TALK
     *lock(&state.push_to_talk) = Instant::now();
 
-    // Past it, the mic comes back and the utterance is still transcribed
+    // Past it, the mic comes back and the utterance is still transcribed,
+    // with no app read for a stop nobody pressed
     assert!(state.expire_stuck_recording());
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     assert!(matches!(
         transcribe_requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(_))
+        Ok(ConsumerCommand::Transcribe(_, None))
     ));
 
     // And a fresh start is accepted rather than refused as busy

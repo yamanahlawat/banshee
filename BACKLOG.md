@@ -7,6 +7,10 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - SentinelOne flags every new Banshee build on a managed Mac as `persistence_deception`: the
   daemon, the window, and even `tar` unpacking the app. Each install or upgrade raises it again.
   The app is self-signed and not notarized.
+- A running daemon never sees an Accessibility change. Switched off, it still reads granted:
+  the hotkey works and the speech is transcribed, but nothing types and nothing is copied.
+  Switched on, it still reads missing, so the restart that should follow the grant never runs.
+  Both held for over a minute on macOS 26, and a restart picked up each change at once.
 - Dictating replaces a copied image for good. Banshee saves only clipboard text to put back: with
   a 2x2 image copied, the clipboard held no image and only the dictated words 1.5 s later. Files
   and rich text are likely the same; not tested. The Linux path is separate and not tested.
@@ -48,6 +52,7 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - A model file removed while Banshee is idle shows in the tray at the next use.
 - Every recording pipeline fault shares one id. When one fault turns into another without
   clearing, Banshee does not say the new one.
+- A second Copied within the capsule's hold gets no second VoiceOver announcement.
 - Waybar shows no problem until the Linux capsule item lands.
 - An agent's question loads the listening model only after it has played, so the first answer
   after an idle unload waits for the load. Dictation overlaps its load with the press. The
@@ -59,6 +64,10 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 
 ## Listening and speaking
 
+- A dictated password lands in History in plain text, since History stores every dictation
+  before it is typed (`store` in `Pipeline::deliver`, `bansheed/src/hotkey.rs`).
+- `BANSHEE_LOG=debug` writes every transcription to the log, a dictated password included
+  (the `Transcription:` and `Dictating:` debug lines in `Pipeline::deliver`).
 - Any process running as the user can start a recording through the daemon's socket, and can
   read every transcript in `banshee.db`. Nothing shows which client opened the microphone.
 - The corrector for words to know has its threshold (0.10, Soundex weight 0.5) measured on
@@ -83,6 +92,10 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - An X11 hotkey listener that stopped at start (`start_global_hotkey` in
   `bansheed/src/hotkey.rs`) takes a rebind and still hears nothing. A restart is the only
   way back.
+- On X11 the app-changed check does not run. No X11 desktop was measured.
+- The copy paths have not been tried live on Hyprland: a dictation with neither `wtype` nor
+  `ydotool` on `PATH`, and a window switch after the stop and before the words land. Both pass
+  their tests on Linux; nobody has dictated through them yet.
 - A model download cannot be cancelled once it starts.
 - A daemon that started without the voice detection model still needs `banshee start` before it
   records.
