@@ -175,6 +175,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On Linux, dictation types after you log in.** Banshee started at login before
+  the desktop shared its display. Until you ran `banshee start`, it could not
+  type, copy or hear the X11 hotkey, and `banshee status` said all was well.
+  Banshee now starts with your desktop and stops when you log out. Run
+  `banshee start` once from your desktop after updating.
+
 - **`banshee start` and `banshee tray` wait until Banshee runs.** After an upgrade,
   macOS can refuse the first launch of the new build. They now register it once
   more, and say so when it still does not start. Before, they said Banshee was

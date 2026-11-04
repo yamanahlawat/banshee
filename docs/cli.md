@@ -10,7 +10,7 @@
 
 | Command                         | What it does                                               |
 | ------------------------------- | ---------------------------------------------------------- |
-| `banshee start`                 | Start the daemon, now and at every login (on macOS as a Login Item); it registers again if already on and names any model that is missing |
+| `banshee start`                 | Start the daemon, now and at every login (on macOS as a Login Item, on Linux with the desktop session); it registers again if already on and names any model that is missing |
 | `banshee stop`                  | Stop the running daemon                                    |
 | `banshee setup`                 | Download the required models; a re-run fetches only what is missing         |
 | `banshee setup --model <id>`    | Download one listening model by its id; then `banshee config set stt.model <id>` listens with it |

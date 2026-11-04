@@ -80,6 +80,14 @@ bind = , F9, exec, banshee record toggle
   `banshee history`.
 - **`banshee status`** tells you which one it found.
 
+## When Banshee runs
+
+- **`banshee start`** runs the daemon with your desktop session, like the tray:
+  it starts when the desktop does, and stops when you log out.
+- **A desktop that never starts `graphical-session.target`,** such as Sway
+  without its systemd integration or `startx`, starts neither. Run
+  `banshee serve` and `banshee-tray` from its autostart instead.
+
 ## Showing the state in a bar
 
 - **`banshee tray`** puts the mark in any bar that hosts StatusNotifierItem.

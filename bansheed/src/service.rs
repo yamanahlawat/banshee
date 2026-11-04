@@ -404,32 +404,25 @@ mod systemd {
         })
     }
 
-    /// The daemon opens the microphone and is useful with no desktop, so it
-    /// waits on pipewire and wants the boot target. The tray has no bar to
-    /// sit in without a session, so it waits on the session instead, and
-    /// stops when the session does.
+    /// Both units hang on the graphical session: systemd fixes a unit's
+    /// environment when it starts, and the display variables arrive with the
+    /// session. PartOf stops them with it. No Requires, so `banshee start`
+    /// from a shell outside the session does not fail.
     pub(super) fn content(agent: Agent, exec_start: &str, level: Option<&str>) -> String {
         let environment = level.map_or(String::new(), |level| {
             format!("Environment=BANSHEE_LOG={level}\n")
         });
-        match agent {
-            Agent::Daemon => format!(
-                r#"[Unit]
-Description=Banshee voice daemon
-After=pipewire.service
-
-[Service]
-ExecStart={exec_start}
-{environment}Restart=on-failure
-
-[Install]
-WantedBy=default.target
-"#
+        let (description, after) = match agent {
+            Agent::Daemon => (
+                "Banshee voice daemon",
+                "pipewire.service graphical-session.target",
             ),
-            Agent::Tray => format!(
-                r#"[Unit]
-Description=Banshee menu bar icon
-After=graphical-session.target
+            Agent::Tray => ("Banshee menu bar icon", "graphical-session.target"),
+        };
+        format!(
+            r#"[Unit]
+Description={description}
+After={after}
 PartOf=graphical-session.target
 
 [Service]
@@ -439,8 +432,7 @@ ExecStart={exec_start}
 [Install]
 WantedBy=graphical-session.target
 "#
-            ),
-        }
+        )
     }
 
     pub fn install(agent: Agent) -> Result<String, BansheeError> {
@@ -458,7 +450,8 @@ WantedBy=graphical-session.target
             None,
         )?;
         systemctl(&["daemon-reload"])?;
-        systemctl(&["enable", unit_name(agent)])?;
+        // reenable drops any link an earlier [Install] section made
+        systemctl(&["reenable", unit_name(agent)])?;
         // restart, not start: a reinstall must hand over to the new binary
         systemctl(&["restart", unit_name(agent)])?;
         let service = unit_name(agent).trim_end_matches(".service");
@@ -1095,5 +1088,17 @@ mod service_file_tests {
     fn no_level_writes_no_environment() {
         let unit = super::systemd::content(Agent::Daemon, "/usr/bin/banshee serve", None);
         assert!(!unit.contains("Environment="), "{unit}");
+    }
+
+    #[test]
+    fn the_daemon_starts_and_stops_with_the_desktop() {
+        let unit = super::systemd::content(Agent::Daemon, "/usr/bin/banshee serve", None);
+        assert!(
+            unit.contains("After=pipewire.service graphical-session.target"),
+            "{unit}"
+        );
+        assert!(unit.contains("PartOf=graphical-session.target"), "{unit}");
+        assert!(unit.contains("WantedBy=graphical-session.target"), "{unit}");
+        assert!(!unit.contains("default.target"), "{unit}");
     }
 }
