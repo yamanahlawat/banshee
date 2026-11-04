@@ -637,7 +637,7 @@ async fn an_ask_waits_until_the_dictation_leaves_the_ring() {
             else {
                 panic!("the press never reached the consumer");
             };
-            let Ok(ConsumerCommand::Transcribe(ring)) =
+            let Ok(ConsumerCommand::Transcribe(ring, _)) =
                 command_receiver.recv_timeout(std::time::Duration::from_secs(5))
             else {
                 panic!("the dictation never reached the consumer");
@@ -832,7 +832,7 @@ async fn record_start_and_stop_drive_push_to_talk() {
     let Ok(ConsumerCommand::Stream(_)) = command_receiver.try_recv() else {
         panic!("expected the start to stream");
     };
-    let Ok(ConsumerCommand::Transcribe(_)) = command_receiver.try_recv() else {
+    let Ok(ConsumerCommand::Transcribe(..)) = command_receiver.try_recv() else {
         panic!("expected a transcribe command");
     };
 }
@@ -913,7 +913,7 @@ async fn record_toggle_starts_then_stops_and_says_which() {
     let Ok(ConsumerCommand::Stream(_)) = command_receiver.try_recv() else {
         panic!("expected the start to stream");
     };
-    let Ok(ConsumerCommand::Transcribe(_)) = command_receiver.try_recv() else {
+    let Ok(ConsumerCommand::Transcribe(..)) = command_receiver.try_recv() else {
         panic!("expected a transcribe command");
     };
 }

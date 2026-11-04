@@ -13,7 +13,8 @@ use crate::audio::cues::{Cues, Reason, ReasonCode, Signal, Target};
 use crate::audio::utils::{StreamingResampler, resample_audio};
 use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
 use crate::config::{HotkeyMode, Provider, STTConfig};
-use crate::dictation::type_text;
+use crate::dictation::{Delivered, deliver_text};
+use crate::frontmost::App;
 use crate::speech_to_text::vad::{Detector, VAD_CHUNK};
 use crate::speech_to_text::{Listener, Route, SAMPLE_RATE, Speech, Transcriber};
 use crate::state::{
@@ -315,7 +316,7 @@ pub fn hotkey_listener(
     commands: mpsc::Receiver<ConsumerCommand>,
 ) -> thread::JoinHandle<()> {
     // The handle lets shutdown join it, dropping the listening model before atexit
-    thread::spawn(move || consume(pipeline, &commands, &type_text))
+    thread::spawn(move || consume(pipeline, &commands, &deliver_text))
 }
 
 /// The next command. A command already waiting is served first, so a use
@@ -343,10 +344,13 @@ fn next_command(
     }
 }
 
+/// Delivers the words, given the app in front when the recording stopped.
+type TypeWords = dyn Fn(&str, Option<App>) -> Result<Delivered, BansheeError>;
+
 fn consume(
     mut pipeline: Pipeline,
     commands: &mpsc::Receiver<ConsumerCommand>,
-    type_words: &dyn Fn(&str) -> Result<(), BansheeError>,
+    type_words: &TypeWords,
 ) {
     // Commands that arrived while a dictation streamed, in the order they came
     let mut deferred = VecDeque::new();
@@ -627,19 +631,21 @@ impl Pipeline {
         command: ConsumerCommand,
         commands: &mpsc::Receiver<ConsumerCommand>,
         deferred: &mut VecDeque<ConsumerCommand>,
-        type_words: &dyn Fn(&str) -> Result<(), BansheeError>,
+        type_words: &TypeWords,
     ) -> std::ops::ControlFlow<()> {
         let records = matches!(
             command,
             ConsumerCommand::Stream(_)
-                | ConsumerCommand::Transcribe(_)
+                | ConsumerCommand::Transcribe(..)
                 | ConsumerCommand::Discard
                 | ConsumerCommand::Ask(_)
         );
         let uses_a_model = records || matches!(command, ConsumerCommand::Reload(_));
         match command {
             ConsumerCommand::Stream(press) => self.dictate(press, commands, deferred, type_words),
-            ConsumerCommand::Transcribe(ring) => self.transcribe_utterance(ring, type_words),
+            ConsumerCommand::Transcribe(ring, at_stop) => {
+                self.transcribe_utterance(ring, |words| type_words(words, at_stop));
+            }
             ConsumerCommand::Discard => self.discard(),
             ConsumerCommand::Ask(ask) => self.ask(ask),
             ConsumerCommand::Retune(words) => self.speech_to_text.set_vocabulary(&words),
@@ -913,7 +919,7 @@ impl Pipeline {
     fn transcribe_utterance(
         &mut self,
         ring: crate::state::RingClaim,
-        type_words: impl FnOnce(&str) -> Result<(), BansheeError>,
+        type_words: impl FnOnce(&str) -> Result<Delivered, BansheeError>,
     ) {
         let state = Arc::clone(&self.state);
         let _transcribing = Raised::on(&state, DaemonState::set_transcribing);
@@ -976,7 +982,7 @@ impl Pipeline {
         press: u64,
         commands: &mpsc::Receiver<ConsumerCommand>,
         deferred: &mut VecDeque<ConsumerCommand>,
-        type_words: impl FnOnce(&str) -> Result<(), BansheeError>,
+        type_words: impl FnOnce(&str, Option<App>) -> Result<Delivered, BansheeError>,
     ) {
         // At the press, so a model that idled out loads while the words are spoken
         let refused = match self.ready() {
@@ -1003,7 +1009,8 @@ impl Pipeline {
                     .map_err(|_| mpsc::TryRecvError::Disconnected),
             };
             match command {
-                Ok(ConsumerCommand::Transcribe(ring)) => {
+                Ok(ConsumerCommand::Transcribe(ring, at_stop)) => {
+                    let type_words = |words: &str| type_words(words, at_stop);
                     match (live, refused) {
                         (_, true) => self.drop_refused(ring),
                         (Some(mut dictation), false) => {
@@ -1041,7 +1048,7 @@ impl Pipeline {
     fn finish_dictation(
         &mut self,
         mut dictation: Dictation,
-        type_words: impl FnOnce(&str) -> Result<(), BansheeError>,
+        type_words: impl FnOnce(&str) -> Result<Delivered, BansheeError>,
     ) {
         let state = Arc::clone(&self.state);
         let _transcribing = Raised::on(&state, DaemonState::set_transcribing);
@@ -1058,7 +1065,7 @@ impl Pipeline {
     fn deliver(
         &mut self,
         final_data: &[f32],
-        type_words: impl FnOnce(&str) -> Result<(), BansheeError>,
+        type_words: impl FnOnce(&str) -> Result<Delivered, BansheeError>,
     ) {
         let device = self.state.audio_device();
         if log::log_enabled!(log::Level::Debug) {
@@ -1165,11 +1172,12 @@ impl Pipeline {
                 let typed = type_words(&transcription);
                 self.state.set_typing(false);
                 match typed {
-                    Ok(_) => {
+                    Ok(Delivered::Typed) => {
                         self.cues.emit(Signal::Ready {
                             target: Target::Dictate,
                         });
                     }
+                    Ok(Delivered::Copied) => self.cues.emit(Signal::Copied),
                     Err(e) => {
                         log::error!("Failed to type text: {e}");
                         self.cues.emit(Signal::Error {
@@ -1769,7 +1777,7 @@ mod utterance_tests {
     fn handle(
         audio: &[f32],
         answer: Result<&str, &str>,
-        type_words: impl FnOnce(&DaemonState, &str) -> Result<(), BansheeError>,
+        type_words: impl FnOnce(&DaemonState, &str) -> Result<Delivered, BansheeError>,
     ) -> Handled {
         let (cues, _sounds) = Cues::recording();
         let mut subscribed = cues.subscribe_signals();
@@ -1804,7 +1812,7 @@ mod utterance_tests {
             matches!(requests.try_recv(), Ok(ConsumerCommand::Stream(_))),
             "the press streams first"
         );
-        let Ok(ConsumerCommand::Transcribe(ring)) = requests.try_recv() else {
+        let Ok(ConsumerCommand::Transcribe(ring, _)) = requests.try_recv() else {
             panic!("the stop sends the dictation to the consumer");
         };
         assert!(state.dictation_in_ring());
@@ -1815,7 +1823,7 @@ mod utterance_tests {
         };
         let mut pipeline = holding(&spoken_then_quiet(), &state, Cues::recording().0, scripted);
 
-        pipeline.transcribe_utterance(ring, |_| Ok(()));
+        pipeline.transcribe_utterance(ring, |_| Ok(Delivered::Typed));
 
         assert!(
             !saw_a_dictation_in_ring.load(Ordering::Relaxed),
@@ -1993,7 +2001,7 @@ mod utterance_tests {
         );
     }
 
-    fn untyped(_: &DaemonState, _: &str) -> Result<(), BansheeError> {
+    fn untyped(_: &DaemonState, _: &str) -> Result<Delivered, BansheeError> {
         panic!("this utterance never reaches the typer")
     }
 
@@ -2074,10 +2082,38 @@ mod utterance_tests {
         assert!(!handled.state.is_transcribing());
     }
 
+    #[test]
+    fn a_dictation_that_could_only_be_copied_says_copied_and_never_ready() {
+        let handled = handle(
+            &crate::speech_to_text::vad::test_speech(),
+            Ok("hello there"),
+            |_, _| Ok(Delivered::Copied),
+        );
+        assert!(
+            handled.signals.contains(&Signal::Copied),
+            "{:?}",
+            handled.signals
+        );
+        assert!(
+            !handled
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::Ready { .. }))
+        );
+        assert!(
+            !handled
+                .signals
+                .iter()
+                .any(failed(ReasonCode::TypeFailed, Target::Dictate))
+        );
+        assert!(!handled.state.is_transcribing());
+    }
+
     /// What a consumer thread did with the commands `commands` sends, then a
     /// shutdown, with a capture that holds `audio`.
     struct Consumed {
         typed: Vec<String>,
+        at_stop: Vec<Option<App>>,
         calls: Vec<Call>,
         words_after: String,
     }
@@ -2132,13 +2168,16 @@ mod utterance_tests {
         let pipeline = holding(audio, &state, cues, scripted);
         let typed = Arc::new(Mutex::new(Vec::new()));
         let typing = Arc::clone(&typed);
+        let at_stop = Arc::new(Mutex::new(Vec::new()));
+        let reading = Arc::clone(&at_stop);
         let (sender, receiver) = mpsc::channel();
         let (go, gate) = mpsc::channel::<()>();
         let consumer = thread::spawn(move || {
             let _ = gate.recv();
-            consume(pipeline, &receiver, &move |words: &str| {
+            consume(pipeline, &receiver, &move |words: &str, app| {
                 typing.lock().unwrap().push(words.to_string());
-                Ok(())
+                reading.lock().unwrap().push(app);
+                Ok(Delivered::Typed)
             })
         });
         if sent == Sent::WhileItRuns {
@@ -2149,10 +2188,12 @@ mod utterance_tests {
         let _ = go.send(());
         consumer.join().unwrap();
         let typed = typed.lock().unwrap().clone();
+        let at_stop = at_stop.lock().unwrap().clone();
         let calls = calls.lock().unwrap().clone();
         let words_after = state.subscribe_words().borrow().clone();
         Consumed {
             typed,
+            at_stop,
             calls,
             words_after,
         }
@@ -2163,6 +2204,33 @@ mod utterance_tests {
             streams: true,
             ..Scripted::new(state, Ok(answer))
         }
+    }
+
+    fn the_app_at_the_stop_reaches_a_delivery(streamed: bool, app: App) {
+        let done = consumed(
+            |state| Scripted::new(state, Ok("words")),
+            &spoken_then_quiet(),
+            |state, commands| {
+                if streamed {
+                    commands.send(ConsumerCommand::Stream(0)).unwrap();
+                }
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), Some(app)))
+                    .unwrap();
+            },
+        );
+        assert_eq!(done.typed, ["words"]);
+        assert_eq!(done.at_stop, [Some(app)]);
+    }
+
+    #[test]
+    fn the_app_at_the_stop_reaches_the_delivery() {
+        the_app_at_the_stop_reaches_a_delivery(true, App(42));
+    }
+
+    #[test]
+    fn the_app_at_the_stop_reaches_a_delivery_with_no_stream() {
+        the_app_at_the_stop_reaches_a_delivery(false, App(43));
     }
 
     #[test]
@@ -2180,7 +2248,7 @@ mod utterance_tests {
                 commands.send(ConsumerCommand::Stream(0)).unwrap();
                 fed_before_release = feeding.recv_timeout(Duration::from_secs(5)).is_ok();
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -2205,7 +2273,7 @@ mod utterance_tests {
             |state, commands| {
                 commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -2245,7 +2313,7 @@ mod utterance_tests {
                 // Polls enough for a stream that kept going to be fed again
                 thread::sleep(ARMED_POLL * 4);
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -2284,7 +2352,7 @@ mod utterance_tests {
                     .recv_timeout(Duration::from_secs(5))
                     .expect("the first window is fed");
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
                 drop(opens);
             },
@@ -2620,7 +2688,7 @@ mod utterance_tests {
                     ))
                     .unwrap();
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -2648,7 +2716,8 @@ mod utterance_tests {
         }));
         let capture = Arc::clone(&pipeline.source);
         let (sender, receiver) = mpsc::channel();
-        let consumer = thread::spawn(move || consume(pipeline, &receiver, &|_: &str| Ok(())));
+        let consumer =
+            thread::spawn(move || consume(pipeline, &receiver, &|_: &str, _| Ok(Delivered::Typed)));
         sender.send(ConsumerCommand::Stream(0)).unwrap();
         thread::sleep(ARMED_POLL * 4);
         let audio = spoken_then_quiet();
@@ -2660,7 +2729,7 @@ mod utterance_tests {
         });
         let heard = feeding.recv_timeout(Duration::from_secs(5)).is_ok();
         sender
-            .send(ConsumerCommand::Transcribe(state.claim_ring()))
+            .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
             .unwrap();
         sender.send(ConsumerCommand::Shutdown).unwrap();
         consumer.join().unwrap();
@@ -2692,7 +2761,8 @@ mod utterance_tests {
         };
         let calls = Arc::clone(&scripted.calls);
         let pipeline = holding(&[0.0], &state, Cues::recording().0, scripted);
-        let consumer = thread::spawn(move || consume(pipeline, &receiver, &|_: &str| Ok(())));
+        let consumer =
+            thread::spawn(move || consume(pipeline, &receiver, &|_: &str, _| Ok(Delivered::Typed)));
 
         std::fs::write(state.models_dir().join(parakeet.file), b"").unwrap();
         crate::settings::reapply_pending(&state);
@@ -2767,10 +2837,10 @@ mod utterance_tests {
         let before = Instant::now();
 
         let served = pipeline.serve(
-            ConsumerCommand::Transcribe(state.claim_ring()),
+            ConsumerCommand::Transcribe(state.claim_ring(), None),
             &receiver,
             &mut VecDeque::new(),
-            &|_: &str| Ok(()),
+            &|_: &str, _| Ok(Delivered::Typed),
         );
 
         assert!(served.is_continue());
@@ -2810,7 +2880,7 @@ mod utterance_tests {
         let mut typed = Vec::new();
         pipeline.transcribe_utterance(state.claim_ring(), |words| {
             typed.push(words.to_string());
-            Ok(())
+            Ok(Delivered::Typed)
         });
 
         assert_eq!(typed, ["back again"]);
@@ -2882,7 +2952,7 @@ mod utterance_tests {
         let mut typed = Vec::new();
         pipeline.transcribe_utterance(state.claim_ring(), |words| {
             typed.push(words.to_string());
-            Ok(())
+            Ok(Delivered::Typed)
         });
         assert_eq!(typed, ["second time"]);
         assert_eq!(
@@ -2934,7 +3004,7 @@ mod utterance_tests {
             |state, commands| {
                 commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -3050,7 +3120,7 @@ mod utterance_tests {
         // No release ever comes, so only the refusal ends the press
         let (_, receiver) = mpsc::channel();
 
-        pipeline.dictate(state.press(), &receiver, &mut VecDeque::new(), |_| {
+        pipeline.dictate(state.press(), &receiver, &mut VecDeque::new(), |_, _| {
             panic!("nothing is typed")
         });
 
@@ -3091,11 +3161,11 @@ mod utterance_tests {
             } else {
                 state.record_stop();
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             }
 
-            pipeline.dictate(state.press(), &receiver, &mut VecDeque::new(), |_| {
+            pipeline.dictate(state.press(), &receiver, &mut VecDeque::new(), |_, _| {
                 panic!("nothing is typed")
             });
 
@@ -3137,7 +3207,7 @@ mod utterance_tests {
             .unwrap();
         state.record_stop();
         commands
-            .send(ConsumerCommand::Transcribe(state.claim_ring()))
+            .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
             .unwrap();
         assert!(state.record_start());
         commands
@@ -3146,9 +3216,9 @@ mod utterance_tests {
         let typed = Arc::new(Mutex::new(Vec::new()));
         let typing = Arc::clone(&typed);
         let consumer = thread::spawn(move || {
-            consume(pipeline, &receiver, &move |words: &str| {
+            consume(pipeline, &receiver, &move |words: &str, _| {
                 typing.lock().unwrap().push(words.to_string());
-                Ok(())
+                Ok(Delivered::Typed)
             })
         });
 
@@ -3168,7 +3238,7 @@ mod utterance_tests {
         producer.push_slice(&speech);
         state.record_stop();
         commands
-            .send(ConsumerCommand::Transcribe(state.claim_ring()))
+            .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
             .unwrap();
         commands.send(ConsumerCommand::Shutdown).unwrap();
         consumer.join().unwrap();
@@ -3210,7 +3280,7 @@ mod utterance_tests {
             |state, commands| {
                 commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -3237,16 +3307,16 @@ mod utterance_tests {
         let typing = Arc::clone(&typed);
         let (commands, receiver) = mpsc::channel();
         let consumer = thread::spawn(move || {
-            consume(pipeline, &receiver, &move |words: &str| {
+            consume(pipeline, &receiver, &move |words: &str, _| {
                 typing.lock().unwrap().push(words.to_string());
-                Ok(())
+                Ok(Delivered::Typed)
             })
         });
         let dictate = |producer: &mut HeapProd<f32>| {
             producer.push_slice(&speech);
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
         };
 
@@ -3292,7 +3362,7 @@ mod utterance_tests {
                     .recv_timeout(Duration::from_secs(5))
                     .expect("the dictation is fed while it is held");
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -3317,7 +3387,7 @@ mod utterance_tests {
             |state, commands| {
                 commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -3337,7 +3407,7 @@ mod utterance_tests {
             |state, commands| {
                 commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -3355,7 +3425,7 @@ mod utterance_tests {
                 |state, commands| {
                     commands.send(ConsumerCommand::Stream(0)).unwrap();
                     let first = if end {
-                        ConsumerCommand::Transcribe(state.claim_ring())
+                        ConsumerCommand::Transcribe(state.claim_ring(), None)
                     } else {
                         ConsumerCommand::Discard
                     };
@@ -3364,7 +3434,7 @@ mod utterance_tests {
                     for _ in 0..2 {
                         commands.send(ConsumerCommand::Stream(0)).unwrap();
                         commands
-                            .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                            .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                             .unwrap();
                     }
                 },
@@ -3459,7 +3529,7 @@ mod utterance_tests {
                     ))
                     .unwrap();
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -3489,7 +3559,8 @@ mod utterance_tests {
         let pipeline = holding(&spoken_then_quiet(), &state, cues, scripted);
         let capture = Arc::clone(&pipeline.source);
         let (sender, receiver) = mpsc::channel();
-        let consumer = thread::spawn(move || consume(pipeline, &receiver, &|_: &str| Ok(())));
+        let consumer =
+            thread::spawn(move || consume(pipeline, &receiver, &|_: &str, _| Ok(Delivered::Typed)));
         sender.send(ConsumerCommand::Stream(0)).unwrap();
         feeding
             .recv_timeout(Duration::from_secs(5))
@@ -3505,7 +3576,7 @@ mod utterance_tests {
         producer.push_slice(&[0.5; 4800]);
         thread::sleep(ARMED_POLL * 4);
         sender
-            .send(ConsumerCommand::Transcribe(state.claim_ring()))
+            .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
             .unwrap();
         sender.send(ConsumerCommand::Shutdown).unwrap();
         consumer.join().unwrap();
@@ -3709,9 +3780,9 @@ mod utterance_tests {
         let (go, gate) = mpsc::channel::<()>();
         let consumer = thread::spawn(move || {
             let _ = gate.recv();
-            consume(pipeline, &receiver, &move |words: &str| {
+            consume(pipeline, &receiver, &move |words: &str, _| {
                 typing.lock().unwrap().push(words.to_string());
-                Ok(())
+                Ok(Delivered::Typed)
             })
         });
         if sent == Sent::WhileItRuns {
@@ -3743,7 +3814,7 @@ mod utterance_tests {
                 .send(ConsumerCommand::Replace(Box::new(local_stt())))
                 .unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
         });
         assert!(
@@ -3763,7 +3834,7 @@ mod utterance_tests {
         let done = switched(remote_held(gate, started), true, |state, commands| {
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
             starting.recv_timeout(Duration::from_secs(5)).unwrap();
             state.withdraw_listener(Some(local_stt()));
@@ -3787,7 +3858,7 @@ mod utterance_tests {
                 .send(ConsumerCommand::Replace(Box::new(remote_stt())))
                 .unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
         });
         assert_eq!(
@@ -3808,7 +3879,7 @@ mod utterance_tests {
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             state.withdraw_listener(Some(local_stt()));
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
         });
         assert!(!done.remote_calls.contains(&Call::Transcribe));
@@ -3828,7 +3899,7 @@ mod utterance_tests {
         let done = switched(remote_held(gate, started), true, |state, commands| {
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
             starting.recv_timeout(Duration::from_secs(5)).unwrap();
             state.withdraw_listener(Some(local_stt()));
@@ -3858,7 +3929,7 @@ mod utterance_tests {
         let done = switched(remote_held(gate, started), true, |state, commands| {
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
             starting.recv_timeout(Duration::from_secs(5)).unwrap();
             state.withdraw_listener(None);
@@ -3874,7 +3945,7 @@ mod utterance_tests {
         let done = switched(remote_held(gate, started), false, |state, commands| {
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
             starting.recv_timeout(Duration::from_secs(5)).unwrap();
             state.withdraw_listener(None);
@@ -3902,7 +3973,7 @@ mod utterance_tests {
             state.replace_listener(remote_stt());
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
         });
         assert_eq!(
@@ -3939,7 +4010,7 @@ mod utterance_tests {
                 .unwrap();
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
             state.withdraw_listener(Some(local_stt()));
             commands
@@ -3964,7 +4035,7 @@ mod utterance_tests {
             state.replace_listener(remote_stt());
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
             turn_server_off(state);
         });
@@ -3988,7 +4059,7 @@ mod utterance_tests {
             );
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
         });
         assert_eq!(done.typed, ["said there"]);
@@ -4014,7 +4085,7 @@ mod utterance_tests {
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             state.withdraw_listener(Some(local_stt()));
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
         });
         assert!(!done.remote_calls.contains(&Call::Transcribe));
@@ -4042,7 +4113,7 @@ mod utterance_tests {
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             state.withdraw_listener(Some(local_stt()));
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
             failed_once(state);
             state.replace_listener(remote_stt());
@@ -4131,7 +4202,7 @@ mod utterance_tests {
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             state.withdraw_listener(Some(local_stt()));
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
             failed_once(state);
             commands
@@ -4274,7 +4345,7 @@ mod utterance_tests {
             );
             commands.send(ConsumerCommand::Stream(0)).unwrap();
             commands
-                .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                 .unwrap();
             starting.recv_timeout(Duration::from_secs(5)).unwrap();
             then(state, commands, &gate_open);
@@ -4318,7 +4389,7 @@ mod utterance_tests {
                 saved(state, other_server());
                 state.replace_listener(other_server());
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         )
@@ -4356,7 +4427,7 @@ mod utterance_tests {
                 saved(state, other_server());
                 state.replace_listener(other_server());
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -4390,7 +4461,7 @@ mod utterance_tests {
                 saved(state, other_server());
                 state.replace_listener(other_server());
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
             },
         );
@@ -4462,7 +4533,7 @@ mod utterance_tests {
                 );
                 commands.send(ConsumerCommand::Stream(0)).unwrap();
                 commands
-                    .send(ConsumerCommand::Transcribe(state.claim_ring()))
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
                     .unwrap();
                 starting.recv_timeout(Duration::from_secs(5)).unwrap();
                 saved(state, local_stt());

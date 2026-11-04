@@ -7,9 +7,11 @@ today, and `CHANGELOG.md` holds what has shipped.
 
 ## Next
 
-1. **Banshee checks for a text field before typing.** When nothing can take the text, it goes
-   on the clipboard and the capsule says "Copied". Text typed into the wrong place is among the
-   most common complaints.
+1. **Banshee checks for a text field before typing.** When the app in front plainly has no
+   text field, the words go on the clipboard and the capsule says "Copied". Only positive
+   evidence copies, so an unknown read types. It waits on a measured app matrix: what each app
+   reports as focused, and whether a paste lands there today. Terminals, Chromium and Electron
+   apps hide their fields from the read.
 2. **History keeps questions and their audio.** The window gets a sidebar, and History shows a
    list with the selected row beside it. An agent's question and your spoken answer are kept
    as a pair. Audio stays for 7 days by default, and a failed transcription can be retried

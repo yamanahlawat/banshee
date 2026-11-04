@@ -574,6 +574,7 @@ fn moves(show: &Show, entrance: Entrance, calm: bool) -> Vec<Move> {
         (Show::Broken(_), false) => &[Move::Strain, Move::Breaks],
         (Show::Done(_), false) => &[Move::Float, Move::FrameSink],
         (Show::Done(_), true) => &[Move::FadeOut],
+        (Show::Copied, _) => &[],
         (Show::Answering(_), calm) => opening(calm),
         (Show::Working | Show::YourTurn | Show::NothingHeard(_) | Show::Broken(_), true) => &[],
     });
@@ -1152,6 +1153,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn copied_shows_its_word_with_no_failure_move() {
+        use Move::*;
+        assert_eq!(moves(&Show::Copied, Entrance::NewWords, false), [Words]);
+        assert_eq!(moves(&Show::Copied, Entrance::Fresh, false), [Rise, Words]);
+        assert_eq!(moves(&Show::Copied, Entrance::NewWords, true), [WordsFade]);
+        assert_eq!(leaving(&Show::Copied, false), Some(FailureExit));
+    }
+
     fn failed() -> [Show; 2] {
         [
             Show::NothingHeard("Nothing heard".into()),
@@ -1169,6 +1179,7 @@ mod tests {
             nothing_heard,
             broken,
             Show::Done(Done::Typed),
+            Show::Copied,
         ]
     }
 
