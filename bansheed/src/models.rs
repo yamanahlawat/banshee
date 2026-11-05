@@ -8,6 +8,16 @@ use crate::config::{Config, Provider};
 
 pub const VAD_MODEL: &str = "silero_vad.onnx";
 
+/// ONNX Runtime allows one environment per process, even after the first is dropped.
+fn environment() -> Result<&'static ort::environment::Environment, BansheeError> {
+    static ENVIRONMENT: std::sync::OnceLock<Result<ort::environment::Environment, String>> =
+        std::sync::OnceLock::new();
+    ENVIRONMENT
+        .get_or_init(|| ort::init().build().map_err(|error| error.to_string()))
+        .as_ref()
+        .map_err(|error| BansheeError::Other(error.clone()))
+}
+
 /// One ONNX session, built the same way for every model that needs one.
 pub fn onnx_session(
     path: &std::path::Path,
@@ -17,7 +27,10 @@ pub fn onnx_session(
     fn fault(error: impl std::fmt::Display) -> BansheeError {
         BansheeError::Other(error.to_string())
     }
-    let mut builder = ort::session::Session::builder()
+    // ort's default registers CoreML on macOS, which refuses the companion's zero-length inputs
+    let mut builder = ort::session::Session::builder(environment()?)
+        .map_err(fault)?
+        .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
         .map_err(fault)?
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
         .map_err(fault)?
