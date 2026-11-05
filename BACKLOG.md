@@ -16,6 +16,12 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   while it is on keeps nothing over 4 minutes in the daemon.
 - After a revoke the problem says "the hotkey stays inert", but the hotkey keeps working.
   Only typing stops.
+- When focus is on something that takes no text, such as the Finder desktop, a sidebar or
+  Preview with no text, the paste lands nowhere and the Ready sound plays. The words are left
+  only in History. A check of the focused element was weighed and parked on 2026-11-05.
+  Terminals, Chromium and Electron apps cannot be judged by it, and Apple documents no read
+  that says an element takes text. No open dictation app holds back its paste on such a read.
+  A paste receipt, whether any app read the clipboard, is the untested alternative.
 - On X11, dictating keeps only copied text; an image or a file is lost. Not tested.
 - Whether a staged dictation or a restored copy reaches other devices through Universal
   Clipboard is not checked.
