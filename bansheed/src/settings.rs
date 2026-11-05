@@ -53,7 +53,7 @@ fn live(key: &str) -> Option<Live> {
         "audio.input_device" => Some(Live::InputDevice),
         "audio.barge_in" => Some(Live::BargeIn),
         "audio.keep_open" => Some(Live::KeepOpen),
-        "feedback.mode" | "audio.cues.enabled" => Some(Live::Feedback),
+        "feedback.mode" => Some(Live::Feedback),
         "feedback.speak_problems" => Some(Live::SpeakProblems),
         "daemon.save_history" => Some(Live::SaveHistory),
         "tts.voice" => Some(Live::Tts),
@@ -308,12 +308,12 @@ fn edit(existing: &str, assignments: &Assignments) -> Result<(String, Config), B
         .map_err(|error| BansheeError::Other(format!("config.toml does not parse: {error}")))?;
 
     for (key, value) in assignments {
-        // `[audio.cues]` is a section two deep, so only the last segment is a field
+        // `[stt.remote]` is a section two deep, so only the last segment is a field
         let (path, field) = key.rsplit_once('.').ok_or_else(|| {
             BansheeError::Rejected(format!("'{key}' must name a section, as in stt.model"))
         })?;
         if value.is_null() {
-            if !writes_without_a_row(key) && banshee_common::settings::find(key).is_none() {
+            if banshee_common::settings::find(key).is_none() {
                 return Err(not_a_setting(key));
             }
             if let Some(section) = table_along(document.as_table_mut(), path)? {
@@ -466,8 +466,8 @@ fn apply_each<'a>(
     outcome_of(keys, |variant| apply(variant, state, config))
 }
 
-/// A variant applies once however many of its keys one call carries: a null
-/// `audio.cues.enabled` beside `feedback.mode` names `Live::Feedback` twice.
+/// A variant applies once however many of its keys one call carries:
+/// `audio.hotkey` beside `audio.hotkey_mode` names `Live::Hotkey` twice.
 fn outcome_of<'a>(
     keys: impl Iterator<Item = &'a String>,
     mut apply: impl FnMut(Live) -> bool,
@@ -484,8 +484,6 @@ fn outcome_of<'a>(
                     outcome.waiting.push(key.clone());
                 }
             }
-            // Nothing reads a retired key, so its removal is in effect once written
-            None if crate::config::is_retired(key) => outcome.applied.push(key.clone()),
             // Unreachable: `edit` refuses a key with no row, and every row
             // but a secret has a `Live`
             None => outcome.waiting.push(key.clone()),
@@ -494,30 +492,8 @@ fn outcome_of<'a>(
     outcome
 }
 
-/// Replaced by `feedback.mode`, and still read from a file that holds it.
-pub const CUE_SWITCH: &str = "audio.cues.enabled";
-
-/// A key with no row that a write still takes: a null write removes it.
-pub fn writes_without_a_row(key: &str) -> bool {
-    crate::config::is_retired(key) || key == CUE_SWITCH
-}
-
 pub fn not_a_setting(key: &str) -> BansheeError {
     BansheeError::Rejected(format!("'{key}' is not a setting"))
-}
-
-// A null write passes, because it is the only way `config set` removes the key.
-fn refuse_retired_keys(assignments: &Assignments) -> Result<(), BansheeError> {
-    if assignments
-        .get(CUE_SWITCH)
-        .is_some_and(|value| !value.is_null())
-    {
-        return Err(BansheeError::Rejected(
-            "'audio.cues.enabled' is replaced by feedback.mode: set it to visual, sound, both or none"
-                .to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Pass no `state` when no daemon is running: nothing to apply live, and no
@@ -554,7 +530,6 @@ fn configure_at(
     mut assignments: Assignments,
     persist: bool,
 ) -> Result<Outcome, BansheeError> {
-    refuse_retired_keys(&assignments)?;
     refuse_sending_without_persist(&assignments, persist)?;
 
     let keys = take_api_keys(&mut assignments)?;
@@ -664,23 +639,16 @@ fn write_locked(
     Ok(outcome)
 }
 
-/// A file chose its feedback when it sets `feedback.mode`, or turns
-/// `audio.cues.enabled` off.
+/// A file chose its feedback when it sets `feedback.mode`.
 #[cfg(target_os = "macos")]
 fn chose_feedback(text: &str) -> Result<bool, BansheeError> {
     let document: DocumentMut = text
         .parse()
         .map_err(|error| BansheeError::Other(format!("config.toml does not parse: {error}")))?;
-    let mode = document
+    Ok(document
         .get("feedback")
         .and_then(|feedback| feedback.get("mode"))
-        .is_some();
-    let cues = document
-        .get("audio")
-        .and_then(|audio| audio.get("cues"))
-        .and_then(|cues| cues.get("enabled"))
-        .and_then(toml_edit::Item::as_bool);
-    Ok(mode || cues == Some(false))
+        .is_some())
 }
 
 /// True when VoiceOver is running. Off macOS this build never runs the

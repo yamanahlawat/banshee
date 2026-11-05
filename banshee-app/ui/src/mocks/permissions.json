@@ -180,10 +180,7 @@
       "hotkey": "RightOption",
       "hotkey_mode": "hold",
       "barge_in": "stop",
-      "keep_open": false,
-      "cues": {
-        "enabled": true
-      }
+      "keep_open": false
     },
     "feedback": {
       "mode": "both",

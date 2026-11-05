@@ -179,11 +179,10 @@ it('names no figure in the Both and Off notes on Linux', () => {
   expect(off.getByText("No sound. An agent's questions are still spoken aloud.")).toBeTruthy();
 });
 
-it('writes feedback.mode, never the retired cue switch', async () => {
+it('writes feedback.mode', async () => {
   const panel = render(HotkeyPanel);
   await fireEvent.click(panel.getByRole('radio', { name: 'Sound' }));
   await waitFor(() => expect(setSetting).toHaveBeenCalledWith('feedback.mode', 'sound'));
-  expect(setSetting).not.toHaveBeenCalledWith('audio.cues.enabled', expect.anything());
 });
 
 it('offers the press behaviours in the order the table lists them', () => {

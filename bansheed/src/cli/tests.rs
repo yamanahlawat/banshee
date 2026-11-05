@@ -445,7 +445,7 @@ fn no_line_names_a_restart() {
 
 #[test]
 fn an_unknown_key_is_refused_before_the_daemon_is_called() {
-    assert!(super::domain_of("stt.vadthreshold").is_none());
+    assert!(banshee_common::settings::find("stt.vadthreshold").is_none());
     assert_eq!(
         crate::settings::not_a_setting("stt.vadthreshold").to_string(),
         "'stt.vadthreshold' is not a setting"
@@ -453,7 +453,10 @@ fn an_unknown_key_is_refused_before_the_daemon_is_called() {
 }
 
 fn sent_value(key: &str, word: &str) -> serde_json::Value {
-    super::domain_of(key).unwrap().typed(word)
+    banshee_common::settings::find(key)
+        .unwrap()
+        .domain
+        .typed(word)
 }
 
 #[test]
@@ -465,16 +468,6 @@ fn a_known_key_takes_its_row_s_type() {
     assert_eq!(
         sent_value("audio.input_device", "12"),
         serde_json::json!("12")
-    );
-}
-
-#[test]
-fn a_retired_key_goes_to_the_daemon_so_a_null_removes_it() {
-    assert_eq!(sent_value("stt.preset", "null"), serde_json::Value::Null);
-    assert_eq!(
-        sent_value("audio.cues.enabled", "false"),
-        serde_json::json!(false),
-        "the daemon names what replaced it"
     );
 }
 
@@ -517,8 +510,8 @@ fn a_hotkey_the_compositor_holds_says_only_where_to_bind_it() {
 #[test]
 fn a_null_write_says_the_key_was_removed() {
     assert_eq!(
-        super::written_line("stt.preset", &serde_json::Value::Null),
-        "Removed stt.preset from config.toml."
+        super::written_line("stt.vad_threshold", &serde_json::Value::Null),
+        "Removed stt.vad_threshold from config.toml."
     );
     assert_eq!(
         super::written_line("stt.vad_threshold", &serde_json::json!(0.6)),

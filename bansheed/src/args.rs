@@ -133,19 +133,11 @@ pub enum ConfigAction {
 #[derive(Debug, Subcommand)]
 pub enum RecordAction {
     /// Begin recording (like pressing the hotkey)
-    Start {
-        // Binds written by older releases pass it; a recording dictates either way
-        #[clap(long, hide = true)]
-        dictate: bool,
-    },
+    Start,
     /// Stop recording and transcribe (like releasing the hotkey)
     Stop,
     /// Start when idle, stop when recording (one key for compositors with no release bind)
-    Toggle {
-        // Binds written by older releases pass it; a recording dictates either way
-        #[clap(long, hide = true)]
-        dictate: bool,
-    },
+    Toggle,
 }
 
 #[cfg(test)]
@@ -163,10 +155,10 @@ mod tests {
     }
 
     #[test]
-    fn a_record_bind_that_passes_dictate_still_parses() {
+    fn a_record_bind_that_passes_dictate_is_refused() {
         for action in ["start", "toggle"] {
             Cli::try_parse_from(["banshee", "record", action, "--dictate"])
-                .unwrap_or_else(|error| panic!("record {action} --dictate: {error}"));
+                .expect_err("--dictate is not a flag");
         }
     }
 }

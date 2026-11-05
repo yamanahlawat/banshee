@@ -21,9 +21,9 @@ This page lists what breaks, and the fix.
   - Run `banshee serve` and watch the `Transcribed` line; if it warns about
     slower-than-realtime, pick a smaller model: `banshee setup --list`, then
     `banshee setup --model <id>` and `banshee config set stt.model <id>`.
-- **The daemon will not start and names `stt.preset` or `stt.language`.**
-  - Those keys are gone. Run `banshee config set stt.preset null`, and the same for
-    `stt.language`.
+- **The daemon will not start and names an unknown field in `config.toml`.**
+  - A newer Banshee removed that key, for example `stt.preset` or `[audio.cues]`. Delete
+    the line the error names from `~/.banshee/config.toml`.
   - The window shows the reason too. The tray's first row runs `banshee start`
     and reads `Starting Banshee` while it runs. If it fails, the row reads
     `Start failed. Open Banshee` and the window's Start shows the reason.

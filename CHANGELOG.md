@@ -77,10 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS" and names the problem "Microphone access is not allowed".
 - **The window has a More section under Listening.** It holds the two new settings.
 - **Breaking: `preset` and `language` are gone from `[stt]`.** Delete both from
-  `config.toml`, or the daemon won't start. One error names every removed key.
-  `banshee config set stt.preset null` removes a key. The window shows why the
-  daemon refused to start. The tray's first row runs `banshee start`, and the
-  window shows the reason.
+  `config.toml`, or the daemon won't start. The error names the key and its line,
+  and the window shows it. The tray's first row runs `banshee start`.
 - **Breaking: a config that names no model moves to Parakeet Unified.** Listening
   stays silent until `banshee setup` fetches its 731 MB. The daemon stays up,
   and `banshee status` says why. Listening loads by itself when the file lands.
@@ -166,8 +164,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   You can delete `~/.banshee/tell/`.
 - **`banshee listen`, `listen_for_prompt` and Shift plus the hotkey are gone.**
   A recording always dictates. On Hyprland, run `banshee bind hyprland` again;
-  it rewrites the managed block. With Pi, run `banshee connect pi` again. Old
-  binds that pass `--dictate` still work.
+  it rewrites the managed block. With Pi, run `banshee connect pi` again. A
+  bind that passes `--dictate` now fails, so rewrite it without the flag.
 - **`banshee service uninstall` and `banshee tray --uninstall` are gone.**
   `banshee uninstall` replaces `service uninstall`. No switch stops only the
   tray yet. To stop the tray starting at login and keep the rest of Banshee,
@@ -180,6 +178,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The system voice is gone,** which was `say` on macOS and `espeak-ng` as a
   voice on Linux. If `config.toml` holds `fallback = "system"`, change it to
   `"local"` or `"none"`, or the daemon won't start.
+- **`audio.cues.enabled` is no longer read.** `feedback.mode` replaced it. A
+  `config.toml` that still holds `[audio.cues]` stops the daemon, and the error
+  names the key and its line. Delete the section. If it held `enabled = false`,
+  set `feedback.mode = "none"` to keep the silence. `banshee config set` no
+  longer takes any removed key, so delete each one from the file by hand.
 - **`espeak-ng` is no longer used or needed.** Kokoro spells a word it does not
   know by letter names instead. If you installed `espeak-ng` for Banshee, you
   can remove it. No config key changes.
