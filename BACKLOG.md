@@ -11,9 +11,12 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   the hotkey works and the speech is transcribed, but nothing types and nothing is copied.
   Switched on, it still reads missing, so the restart that should follow the grant never runs.
   Both held for over a minute on macOS 26, and a restart picked up each change at once.
-- Dictating replaces a copied image for good. Banshee saves only clipboard text to put back: with
-  a 2x2 image copied, the clipboard held no image and only the dictated words 1.5 s later. Files
-  and rich text are likely the same; not tested. The Linux path is separate and not tested.
+- On X11, dictating keeps only copied text; an image or a file is lost. Not tested.
+- Whether a staged dictation or a restored copy reaches other devices through Universal
+  Clipboard is not checked.
+- The save before a dictation asks each app for every type it promised, with no time limit. A slow
+  app or a Universal Clipboard item delays the paste. Not measured.
+- Two dictations less than 500 ms apart can lose what was copied before the first. Not seen live.
 - An upgrade can leave both login items unable to start. On 2026-10-31, `make install` over an
   installed build re-registered them, and launchd then failed every spawn with exit 78
   (`EX_CONFIG`), 6 tries for the daemon and 13 for the tray. No Banshee code exits 78. The
@@ -93,9 +96,9 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   `bansheed/src/hotkey.rs`) takes a rebind and still hears nothing. A restart is the only
   way back.
 - On X11 the app-changed check does not run. No X11 desktop was measured.
-- The copy paths have not been tried live on Hyprland: a dictation with neither `wtype` nor
-  `ydotool` on `PATH`, and a window switch after the stop and before the words land. Both pass
-  their tests on Linux; nobody has dictated through them yet.
+- On Hyprland, a recording that started as the "No typing tool is installed" line played came
+  back silent. The speaker reopened and the microphone was opened again twice during it. Seen
+  once on 2026-11-05; the cause is not measured.
 - A model download cannot be cancelled once it starts.
 - A daemon that started without the voice detection model still needs `banshee start` before it
   records.

@@ -186,6 +186,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On macOS, a dictation puts back what was on the clipboard.** An image,
+  files, styled text and several items come back, and an empty clipboard stays
+  empty. A copy you make while the words land wins. On Linux X11, only copied text comes back.
 - **On Linux, dictation types after you log in.** Banshee started at login before
   the desktop shared its display. Until you ran `banshee start`, it could not
   type, copy or hear the X11 hotkey, and `banshee status` said all was well.
