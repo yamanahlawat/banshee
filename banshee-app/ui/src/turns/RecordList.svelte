@@ -19,7 +19,6 @@
   let box: HTMLElement;
   // Nothing reads this for reactivity: `replan` is called outright when a
   // measurement lands, and a SvelteMap would suggest the block follows it.
-  // eslint-disable-next-line svelte/prefer-svelte-reactivity
   const known = new Map<HistoryRow['id'], number>();
   let head = 0;
   let w = { start: 0, end: 0, top: 0, bottom: 0 };
