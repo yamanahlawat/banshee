@@ -6,11 +6,11 @@ use enigo::{
     Enigo, Key, Keyboard, Settings,
 };
 #[cfg(target_os = "macos")]
-use objc2::{ClassType, msg_send, rc::Retained};
+use objc2::{ClassType, msg_send, rc::Retained, runtime::ProtocolObject};
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSPasteboardWriting};
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSArray, NSString};
+use objc2_foundation::{NSArray, NSData, NSString};
 use std::{thread, time::Duration};
 
 use crate::frontmost::{self, App};
@@ -78,15 +78,7 @@ fn type_text(text: &str) -> Result<(), BansheeError> {
     #[cfg(target_os = "macos")]
     ensure_accessibility()?;
 
-    let mut clipboard = Clipboard::new().map_err(|e| {
-        BansheeError::Other(format!(
-            "Clipboard access failed! Please grant permission in System Settings: {e}"
-        ))
-    })?;
-
-    let old_clipboard = clipboard.get_text().ok();
-
-    let restore = stage(clipboard, text, old_clipboard)?;
+    let restore = stage(text)?;
 
     thread::sleep(PASTE_SETTLE);
 
@@ -249,22 +241,22 @@ fn type_text_wayland(text: &str) -> Result<(), BansheeError> {
     type_with(&resolve_wayland_typers(&path), text)
 }
 
-// Stage the text, then put the old clipboard back. Two impls: macOS and
-// Windows hand contents to a system service and restore once the paste is
-// sent. X11 and Wayland keep them in a live process, which restores once the
-// paste window ends, whether or not the paste went out.
+// Stage the text, then put the old clipboard back. macOS restores the saved
+// items and Windows restores the saved text, both once the paste is sent.
+// X11 and Wayland keep the contents in a live process, which restores once
+// the paste window ends, whether or not the paste went out.
 
 // Restore only after the app has consumed the paste.
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 const CLIPBOARD_RESTORE_DELAY: Duration = Duration::from_millis(500);
 
-#[cfg(not(all(unix, not(target_os = "macos"))))]
+#[cfg(windows)]
 struct Restore {
     old: Option<String>,
     dictated: String,
 }
 
-#[cfg(not(all(unix, not(target_os = "macos"))))]
+#[cfg(windows)]
 impl Restore {
     // Off the hot path so the ready cue fires without waiting.
     fn after_paste(self) {
@@ -288,12 +280,17 @@ impl Restore {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+fn clipboard_and_old_text() -> Result<(Clipboard, Option<String>), BansheeError> {
+    let mut clipboard = Clipboard::new()
+        .map_err(|e| BansheeError::Other(format!("could not open the clipboard: {e}")))?;
+    let old = clipboard.get_text().ok();
+    Ok((clipboard, old))
+}
+
 #[cfg(windows)]
-fn stage(
-    mut clipboard: Clipboard,
-    text: &str,
-    old: Option<String>,
-) -> Result<Restore, BansheeError> {
+fn stage(text: &str) -> Result<Restore, BansheeError> {
+    let (mut clipboard, old) = clipboard_and_old_text()?;
     clipboard
         .set_text(text.to_string())
         .map_err(|e| BansheeError::Other(e.to_string()))?;
@@ -301,6 +298,61 @@ fn stage(
         old,
         dictated: text.to_string(),
     })
+}
+
+// Items from pasteboardItems go stale at the next change, so the bytes are
+// copied out here and fresh items are built from them on restore.
+#[cfg(target_os = "macos")]
+type Item = Vec<(String, Vec<u8>)>;
+
+#[cfg(target_os = "macos")]
+struct Saved(Vec<Item>);
+
+// None means the pasteboard did not answer, or held items and gave no data for
+// any of them. Only a board with no items at all is empty.
+#[cfg(target_os = "macos")]
+fn save(board: &NSPasteboard) -> Option<Saved> {
+    let started = std::time::Instant::now();
+    let items = board.pasteboardItems()?;
+    let mut skipped = 0usize;
+    let mut saved = Vec::new();
+    for item in items.iter() {
+        let mut kept = Vec::new();
+        for kind in item.types().iter() {
+            match item.dataForType(&kind) {
+                Some(data) => kept.push((kind.to_string(), data.to_vec())),
+                None => skipped += 1,
+            }
+        }
+        if !kept.is_empty() {
+            saved.push(kept);
+        }
+    }
+    if saved.is_empty() && skipped > 0 {
+        return None;
+    }
+    log::debug!(
+        "Saved {} clipboard items in {:?}, skipped {skipped} types",
+        saved.len(),
+        started.elapsed()
+    );
+    Some(Saved(saved))
+}
+
+// One writeObjects lands every item and type together.
+#[cfg(target_os = "macos")]
+fn write_items(board: &NSPasteboard, items: Vec<Item>) -> bool {
+    let fresh: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = items
+        .into_iter()
+        .map(|kinds| {
+            let item = NSPasteboardItem::new();
+            for (kind, bytes) in kinds {
+                item.setData_forType(&NSData::from_vec(bytes), &NSString::from_str(&kind));
+            }
+            ProtocolObject::from_retained(item)
+        })
+        .collect();
+    board.writeObjects(&NSArray::from_retained_slice(&fresh))
 }
 
 #[cfg(target_os = "macos")]
@@ -311,7 +363,7 @@ const AUTO_GENERATED_TYPE: &str = "org.nspasteboard.AutoGeneratedType";
 // Every type is declared in one change, before any data lands, so a clipboard
 // manager that polls mid-write never sees the text without its markers.
 #[cfg(target_os = "macos")]
-fn write_transient(board: &NSPasteboard, text: &str) -> Result<(), BansheeError> {
+fn write_transient(board: &NSPasteboard, text: &str) -> Result<isize, BansheeError> {
     // SAFETY: a framework constant, valid for the life of the process.
     let string_type = unsafe { NSPasteboardTypeString };
     let transient = NSString::from_str(TRANSIENT_TYPE);
@@ -325,7 +377,7 @@ fn write_transient(board: &NSPasteboard, text: &str) -> Result<(), BansheeError>
         && board.setString_forType(&empty, &transient)
         && board.setString_forType(&empty, &auto_generated);
     if filled {
-        Ok(())
+        Ok(board.changeCount())
     } else {
         Err(BansheeError::Other(
             "the pasteboard refused the dictated text".into(),
@@ -334,18 +386,92 @@ fn write_transient(board: &NSPasteboard, text: &str) -> Result<(), BansheeError>
 }
 
 #[cfg(target_os = "macos")]
-fn stage(_clipboard: Clipboard, text: &str, old: Option<String>) -> Result<Restore, BansheeError> {
+struct Restore {
+    saved: Option<Saved>,
+    staged: isize,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+enum Restored {
+    Put,
+    Cleared,
+    Skipped,
+    Refused,
+}
+
+// A changed count means the user copied something, even the same words, and
+// that copy wins.
+#[cfg(target_os = "macos")]
+fn restore_onto(board: &NSPasteboard, restore: Restore) -> Restored {
+    let Some(Saved(items)) = restore.saved else {
+        return Restored::Skipped;
+    };
+    if board.changeCount() != restore.staged {
+        return Restored::Skipped;
+    }
+    put_back(board, items)
+}
+
+#[cfg(target_os = "macos")]
+fn put_back(board: &NSPasteboard, items: Vec<Item>) -> Restored {
+    board.clearContents();
+    if items.is_empty() {
+        return Restored::Cleared;
+    }
+    if write_items(board, items) {
+        Restored::Put
+    } else {
+        log::warn!("The pasteboard refused the saved clipboard items");
+        Restored::Refused
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn stage_on(board: &NSPasteboard, text: &str) -> Result<Restore, BansheeError> {
+    let saved = save(board);
+    match write_transient(board, text) {
+        Ok(staged) => Ok(Restore { saved, staged }),
+        Err(e) => {
+            if let Some(Saved(items)) = saved {
+                put_back(board, items);
+            }
+            Err(e)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn general_board() -> Result<Retained<NSPasteboard>, BansheeError> {
     // generalPasteboard can be nil under launchd, which the binding does not allow for.
     let board: Option<Retained<NSPasteboard>> =
         // SAFETY: a class method with no arguments, returning an object or nil.
         unsafe { msg_send![NSPasteboard::class(), generalPasteboard] };
-    let board =
-        board.ok_or_else(|| BansheeError::Other("the general pasteboard is unavailable".into()))?;
-    write_transient(&board, text)?;
-    Ok(Restore {
-        old,
-        dictated: text.to_string(),
+    board.ok_or_else(|| BansheeError::Other("the general pasteboard is unavailable".into()))
+}
+
+#[cfg(target_os = "macos")]
+fn stage(text: &str) -> Result<Restore, BansheeError> {
+    // The consumer thread runs no run loop to drain what the reads autorelease.
+    objc2::rc::autoreleasepool(|_| {
+        let board = general_board()?;
+        stage_on(&board, text)
     })
+}
+
+#[cfg(target_os = "macos")]
+impl Restore {
+    // Off the hot path so the ready cue fires without waiting.
+    fn after_paste(self) {
+        thread::spawn(move || {
+            thread::sleep(CLIPBOARD_RESTORE_DELAY);
+            objc2::rc::autoreleasepool(|_| {
+                if let Ok(board) = general_board() {
+                    restore_onto(&board, self);
+                }
+            });
+        });
+    }
 }
 
 #[cfg(test)]
@@ -444,6 +570,9 @@ mod delivery_tests {
 #[cfg(all(test, target_os = "macos"))]
 mod macos_tests {
     use super::*;
+    use objc2::AnyThread;
+    use objc2_app_kit::NSPasteboardItemDataProvider;
+    use objc2_foundation::NSObjectProtocol;
 
     #[test]
     fn a_staged_dictation_is_transient_and_auto_generated_and_never_concealed() {
@@ -469,12 +598,235 @@ mod macos_tests {
             !types.iter().any(|t| t == "org.nspasteboard.ConcealedType"),
             "{types:?}"
         );
+        assert_eq!(text_of(&board).as_deref(), Some("hello there"));
+        release(&board);
+    }
+
+    const CONCEALED_TYPE: &str = "org.nspasteboard.ConcealedType";
+
+    fn owned(items: &[&[(&str, &[u8])]]) -> Vec<Item> {
+        items
+            .iter()
+            .map(|types| {
+                types
+                    .iter()
+                    .map(|(t, b)| (t.to_string(), b.to_vec()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn board_with(items: &[&[(&str, &[u8])]]) -> Retained<NSPasteboard> {
+        let board = NSPasteboard::pasteboardWithUniqueName();
+        board.clearContents();
+        assert!(write_items(&board, owned(items)));
+        board
+    }
+
+    fn items_of(board: &NSPasteboard) -> Vec<Item> {
+        let mut items = save(board).expect("pasteboardItems answered nil").0;
+        for item in &mut items {
+            item.sort();
+        }
+        items
+    }
+
+    fn release(board: &NSPasteboard) {
+        // SAFETY: releaseGlobally takes no arguments and returns nothing.
+        let _: () = unsafe { msg_send![board, releaseGlobally] };
+    }
+
+    fn text_of(board: &NSPasteboard) -> Option<String> {
         // SAFETY: a framework constant, valid for the life of the process.
         let string_type = unsafe { NSPasteboardTypeString };
-        let text = board.stringForType(string_type).unwrap();
-        assert_eq!(text.to_string(), "hello there");
-        // SAFETY: releaseGlobally takes no arguments and returns nothing.
-        let _: () = unsafe { msg_send![&*board, releaseGlobally] };
+        board.stringForType(string_type).map(|s| s.to_string())
+    }
+
+    fn copy_as_user(board: &NSPasteboard, text: &str) {
+        board.clearContents();
+        // SAFETY: a framework constant, valid for the life of the process.
+        let string_type = unsafe { NSPasteboardTypeString };
+        assert!(board.setString_forType(&NSString::from_str(text), string_type));
+    }
+
+    #[test]
+    fn an_image_and_its_text_come_back_byte_for_byte() {
+        let before: &[&[(&str, &[u8])]] = &[
+            &[
+                ("public.png", b"\x89PNG not decoded"),
+                ("public.utf8-plain-text", b"caption"),
+            ],
+            &[("public.file-url", b"file:///tmp/a.txt")],
+        ];
+        let board = board_with(before);
+        let expected = items_of(&board);
+        let mut literal = owned(before);
+        for item in &mut literal {
+            item.sort();
+        }
+        assert_eq!(expected, literal);
+
+        let restore = stage_on(&board, "dictated words").unwrap();
+        assert_eq!(text_of(&board).as_deref(), Some("dictated words"));
+        assert_eq!(restore_onto(&board, restore), Restored::Put);
+        assert_eq!(items_of(&board), expected);
+        release(&board);
+    }
+
+    #[test]
+    fn a_copy_during_the_window_wins() {
+        let board = board_with(&[&[("public.utf8-plain-text", b"old")]]);
+        let restore = stage_on(&board, "dictated words").unwrap();
+        copy_as_user(&board, "mine");
+        assert_eq!(restore_onto(&board, restore), Restored::Skipped);
+        assert_eq!(text_of(&board).as_deref(), Some("mine"));
+        release(&board);
+    }
+
+    #[test]
+    fn the_same_words_copied_again_still_win() {
+        let board = board_with(&[&[("public.utf8-plain-text", b"old")]]);
+        let restore = stage_on(&board, "same").unwrap();
+        copy_as_user(&board, "same");
+        assert_eq!(restore_onto(&board, restore), Restored::Skipped);
+        assert_eq!(text_of(&board).as_deref(), Some("same"));
+        release(&board);
+    }
+
+    #[test]
+    fn a_concealed_copy_comes_back_with_its_marker() {
+        let board = board_with(&[&[
+            ("public.utf8-plain-text", b"hunter2"),
+            (CONCEALED_TYPE, b""),
+        ]]);
+        let expected = items_of(&board);
+        assert!(expected[0].iter().any(|(t, _)| t == CONCEALED_TYPE));
+        let restore = stage_on(&board, "dictated words").unwrap();
+        assert_eq!(restore_onto(&board, restore), Restored::Put);
+        assert_eq!(items_of(&board), expected);
+        release(&board);
+    }
+
+    #[test]
+    fn an_empty_board_is_empty_after_the_paste() {
+        let board = NSPasteboard::pasteboardWithUniqueName();
+        board.clearContents();
+        let restore = stage_on(&board, "dictated words").unwrap();
+        assert_eq!(restore_onto(&board, restore), Restored::Cleared);
+        assert!(board.pasteboardItems().unwrap().is_empty());
+        release(&board);
+    }
+
+    objc2::define_class!(
+        #[unsafe(super(objc2_foundation::NSObject))]
+        #[name = "BansheeTestPngProvider"]
+        struct PngProvider;
+
+        unsafe impl NSObjectProtocol for PngProvider {}
+
+        unsafe impl NSPasteboardItemDataProvider for PngProvider {
+            #[unsafe(method(pasteboard:item:provideDataForType:))]
+            fn provide(
+                &self,
+                _board: Option<&NSPasteboard>,
+                item: &NSPasteboardItem,
+                kind: &NSString,
+            ) {
+                item.setData_forType(&NSData::with_bytes(b"promised png"), kind);
+            }
+        }
+    );
+
+    #[test]
+    fn a_promised_type_is_resolved_at_save() {
+        let provider: Retained<PngProvider> =
+            // SAFETY: init on a fresh allocation of a class with no ivars.
+            unsafe { msg_send![PngProvider::alloc(), init] };
+        let board = board_with_promise(ProtocolObject::from_ref(&*provider), None);
+        let saved = save(&board).unwrap().0;
+        assert_eq!(
+            saved,
+            vec![vec![("public.png".to_string(), b"promised png".to_vec())]]
+        );
+        release(&board);
+    }
+
+    objc2::define_class!(
+        #[unsafe(super(objc2_foundation::NSObject))]
+        #[name = "BansheeTestEmptyProvider"]
+        struct EmptyProvider;
+
+        unsafe impl NSObjectProtocol for EmptyProvider {}
+
+        unsafe impl NSPasteboardItemDataProvider for EmptyProvider {
+            #[unsafe(method(pasteboard:item:provideDataForType:))]
+            fn provide(
+                &self,
+                _board: Option<&NSPasteboard>,
+                _item: &NSPasteboardItem,
+                _kind: &NSString,
+            ) {
+            }
+        }
+    );
+
+    fn board_with_promise(
+        provider: &ProtocolObject<dyn NSPasteboardItemDataProvider>,
+        plain: Option<(&str, &[u8])>,
+    ) -> Retained<NSPasteboard> {
+        let board = NSPasteboard::pasteboardWithUniqueName();
+        board.clearContents();
+        let item = NSPasteboardItem::new();
+        if let Some((kind, bytes)) = plain {
+            assert!(item.setData_forType(&NSData::with_bytes(bytes), &NSString::from_str(kind)));
+        }
+        let kinds = NSArray::from_retained_slice(&[NSString::from_str("public.png")]);
+        assert!(item.setDataProvider_forTypes(provider, &kinds));
+        assert!(board.writeObjects(&NSArray::from_retained_slice(&[
+            ProtocolObject::from_retained(item)
+        ])));
+        board
+    }
+
+    fn board_with_empty_promise(plain: Option<(&str, &[u8])>) -> Retained<NSPasteboard> {
+        let provider: Retained<EmptyProvider> =
+            // SAFETY: init on a fresh allocation of a class with no ivars.
+            unsafe { msg_send![EmptyProvider::alloc(), init] };
+        board_with_promise(ProtocolObject::from_ref(&*provider), plain)
+    }
+
+    #[test]
+    fn a_type_with_no_data_is_dropped_and_the_rest_come_back() {
+        let board = board_with_empty_promise(Some(("public.utf8-plain-text", b"caption")));
+        let saved = save(&board).unwrap().0;
+        assert_eq!(
+            saved,
+            vec![vec![(
+                "public.utf8-plain-text".to_string(),
+                b"caption".to_vec()
+            )]]
+        );
+        release(&board);
+    }
+
+    #[test]
+    fn an_item_whose_only_type_gives_no_data_leaves_the_save_unknown() {
+        let board = board_with_empty_promise(None);
+        assert!(save(&board).is_none());
+        release(&board);
+    }
+
+    #[test]
+    fn an_unknown_save_never_touches_the_board() {
+        let board = board_with(&[&[("public.utf8-plain-text", b"old")]]);
+        write_transient(&board, "dictated words").unwrap();
+        let restore = Restore {
+            saved: None,
+            staged: board.changeCount(),
+        };
+        assert_eq!(restore_onto(&board, restore), Restored::Skipped);
+        assert_eq!(text_of(&board).as_deref(), Some("dictated words"));
+        release(&board);
     }
 }
 
@@ -594,9 +946,10 @@ impl Restore {
     fn after_paste(self) {}
 }
 
-// The caller's handle only ever read; ownership belongs to the thread below.
+// The thread serves the selection from its own handle; this one only reads
+// the old text.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn stage(_clipboard: Clipboard, text: &str, old: Option<String>) -> Result<Restore, BansheeError> {
+fn stage(text: &str) -> Result<Restore, BansheeError> {
     use arboard::SetExtLinux;
     use std::time::Instant;
 
@@ -607,6 +960,7 @@ fn stage(_clipboard: Clipboard, text: &str, old: Option<String>) -> Result<Resto
     // else took the clipboard.
     const SLACK: Duration = Duration::from_millis(250);
 
+    let (_clipboard, old) = clipboard_and_old_text()?;
     let dictated = text.to_string();
     thread::spawn(move || {
         let Ok(mut clipboard) = Clipboard::new() else {
