@@ -7,10 +7,15 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - SentinelOne flags every new Banshee build on a managed Mac as `persistence_deception`: the
   daemon, the window, and even `tar` unpacking the app. Each install or upgrade raises it again.
   The app is self-signed and not notarized.
-- A running daemon never sees an Accessibility change. Switched off, it still reads granted:
-  the hotkey works and the speech is transcribed, but nothing types and nothing is copied.
-  Switched on, it still reads missing, so the restart that should follow the grant never runs.
-  Both held for over a minute on macOS 26, and a restart picked up each change at once.
+- The Accessibility follow is measured on macOS 26 only; macOS 14 and 15 are not measured.
+- In the probe, System Settings would not remove a running app from the Accessibility list.
+  Whether that holds for Banshee, whose fix text says to remove and re-add it, is not checked.
+- While Accessibility is off, each read of it keeps about 0.7 KB in the daemon until it
+  restarts: measured from a shell, and seen in the daemon as one port per read. The daemon
+  reads it every 10 s while off and at each paste, so a day off keeps about 6 MB. A read
+  while it is on keeps nothing over 4 minutes in the daemon.
+- After a revoke the problem says "the hotkey stays inert", but the hotkey keeps working.
+  Only typing stops.
 - On X11, dictating keeps only copied text; an image or a file is lost. Not tested.
 - Whether a staged dictation or a restored copy reaches other devices through Universal
   Clipboard is not checked.
@@ -45,8 +50,6 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - With `audio.keep_open = true`, or during one long open such as an `ask_user` answer, a
   microphone refusal shows only at the next open or status read. Until then recordings come
   back empty.
-- An Accessibility grant revoked while Banshee runs reaches the tray, the window and the spoken
-  line only at the next state change. That is inferred from the code and not measured.
 - The voice files and the remote key are not blockers, so no surface shows them.
 - The tray's socket `call` has no timeout. That is inferred from the code and not measured.
 - A `banshee start` that hangs keeps the tray's first row on `Starting Banshee`.

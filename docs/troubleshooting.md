@@ -83,8 +83,10 @@ This page lists what breaks, and the fix.
   - A row that looks on does not cover the new copy.
   - Select the row, click the minus button, restart the daemon, and approve
     the fresh prompt.
-- **Permissions granted, but Banshee keeps asking.** Grants only apply to
-  newly started processes. Restart the daemon with `banshee start`.
+- **Permissions granted, but Banshee keeps asking.** Banshee sees an
+  Accessibility grant within about 10 s. If it started without the grant, it
+  restarts itself once nothing is in flight. If it still asks, run
+  `banshee start`.
 - **You switched the microphone off for Banshee, and nothing shows it.**
   - On macOS 13, the running daemon keeps the microphone permission it read at
     its start. Run `banshee start`, and the new daemon shows the problem.

@@ -535,6 +535,8 @@ pub struct DaemonState {
     // The last read of the microphone grant. Every read goes through its
     // setter, so a move reaches every client.
     microphone_refusal: Mutex<Option<Refusal>>,
+    #[cfg(target_os = "macos")]
+    accessibility: AtomicBool,
     // A question has played and its answer is being listened for.
     answering: AtomicBool,
     // Woken whenever `wants_mic` may have changed, and when a press's first
@@ -586,6 +588,8 @@ impl DaemonState {
         let speak_problems = config.speak_problems();
         let unload_after = config.models.unload_limit();
         let asked_listener = crate::speech_to_text::Route::of(&config.stt);
+        #[cfg(target_os = "macos")]
+        let accessibility = (machine.accessibility)();
         let facts = Facts {
             mic: Mic::Starting,
             listening: match crate::models::stt_model(&config) {
@@ -645,6 +649,8 @@ impl DaemonState {
             keep_open: AtomicBool::new(keep_open),
             speak_problems: AtomicBool::new(speak_problems),
             microphone_refusal: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            accessibility: AtomicBool::new(accessibility),
             answering: AtomicBool::new(false),
             mic_owner: std::sync::OnceLock::new(),
             unload_after: Mutex::new(unload_after),
@@ -1129,6 +1135,7 @@ impl DaemonState {
         let _ = self.downloads.send(progress);
     }
 
+    #[cfg(target_os = "macos")]
     pub fn is_downloading(&self) -> bool {
         self.downloading.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -1207,7 +1214,7 @@ impl DaemonState {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn accessibility_granted(&self) -> bool {
+    pub fn read_accessibility(&self) -> bool {
         (self.machine.accessibility)()
     }
 
@@ -1318,6 +1325,26 @@ impl DaemonState {
 
     pub fn microphone_refusal(&self) -> Option<Refusal> {
         *lock(&self.microphone_refusal)
+    }
+
+    /// Pushed, so the tray and the spoken problem line follow the switch.
+    /// Answers whether the stored grant moved.
+    #[cfg(target_os = "macos")]
+    pub fn note_accessibility(&self, granted: bool) -> bool {
+        let moved = self
+            .accessibility
+            .swap(granted, std::sync::atomic::Ordering::Relaxed)
+            != granted;
+        if moved {
+            self.publish_device_change();
+        }
+        moved
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn noted_accessibility(&self) -> bool {
+        self.accessibility
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn microphone_open(&self) -> bool {

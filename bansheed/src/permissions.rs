@@ -1,5 +1,7 @@
-// Accessibility reaches only a process started after the grant lands, so the
-// daemon restarts to pick it up. No equivalent outside macOS.
+// The key listener is built at start, so a daemon that started without
+// Accessibility restarts once it lands. No equivalent outside macOS.
+
+use std::sync::Arc;
 
 use banshee_common::error::BansheeError;
 use banshee_common::{Blocker, BlockerKind};
@@ -152,18 +154,29 @@ pub fn read_microphone(state: &DaemonState) -> Option<Refusal> {
     refusal
 }
 
-/// TCC credits this read to the process macOS holds responsible, so from a CLI
-/// arm it answers for the terminal. Every caller runs inside the daemon, and
-/// nothing but review keeps it so.
+/// The window server grants an event tap only while the switch is on, and
+/// answers afresh each time. Measured on macOS 26.7.1 in the launchd daemon,
+/// where `AXIsProcessTrusted`, `CGPreflightPostEventAccess` and
+/// `IOHIDCheckAccess` keep their first answer. A listen-only tap can stand on
+/// Input Monitoring alone, so this one filters; it watches a rare event and is
+/// gone before this returns. TCC credits it to the process macOS holds
+/// responsible, so from a CLI arm it answers for the terminal. Every caller
+/// runs inside the daemon, and nothing but review keeps it so.
 #[cfg(target_os = "macos")]
 pub fn accessibility_granted() -> bool {
-    #[link(name = "ApplicationServices", kind = "framework")]
-    unsafe extern "C" {
-        fn AXIsProcessTrusted() -> u8;
-    }
-    // SAFETY: a plain call with no arguments into a system framework. C booleans
-    // are unsigned char, so u8 keeps the call sound.
-    unsafe { AXIsProcessTrusted() != 0 }
+    use core_graphics::event::{
+        CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+        CallbackResult,
+    };
+
+    CGEventTap::new(
+        CGEventTapLocation::Session,
+        CGEventTapPlacement::HeadInsertEventTap,
+        CGEventTapOptions::Default,
+        vec![CGEventType::OtherMouseDragged],
+        |_, _, _| CallbackResult::Keep,
+    )
+    .is_ok()
 }
 
 /// Asking registers the process with TCC and draws the prompt; a read does
@@ -261,12 +274,12 @@ pub fn open_pane(id: &str) -> Result<(), BansheeError> {
 
 #[cfg(target_os = "macos")]
 pub fn blockers(state: &DaemonState) -> Vec<Blocker> {
-    grant_blockers(state.accessibility_granted(), read_microphone(state))
+    grant_blockers(state.noted_accessibility(), read_microphone(state))
 }
 
 #[cfg(target_os = "macos")]
 pub fn blockers_as_read(state: &DaemonState) -> Vec<Blocker> {
-    grant_blockers(state.accessibility_granted(), state.microphone_refusal())
+    grant_blockers(state.noted_accessibility(), state.microphone_refusal())
 }
 
 // Nothing here is a grant read into the state, so a read writes nothing.
@@ -377,64 +390,126 @@ pub fn grant_note() {
     }
 }
 
-/// Whether the daemon goes now. It has to go for the grant to reach it, and a
-/// download in flight dies with the process and starts that file over, while
-/// waiting for one costs no more than an inert hotkey for a few minutes.
+/// A daemon that started with the grant never restarts: its key listener
+/// keeps firing through a revoke, measured.
 #[cfg(target_os = "macos")]
-pub fn leaves_for_the_grant(granted: bool, downloading: bool) -> bool {
-    granted && !downloading
+pub fn restarts_for_the_grant(started_granted: bool, now: bool, busy: bool) -> bool {
+    !started_granted && now && !busy
 }
 
-/// Leaves once the grant lands, so the supervisor starts us again with it:
-/// launchd re-runs on nonzero exit (`KeepAlive`/`SuccessfulExit`), systemd on
-/// `Restart=on-failure`. `leave` ends the daemon the way a signal does, rather
-/// than by `exit`, which would leave the socket file behind for the next run
-/// to call a crash.
-pub fn restart_when_granted(
-    downloading: impl Fn() -> bool + Send + 'static,
-    leave: impl FnOnce() + Send + 'static,
-) {
-    #[cfg(target_os = "macos")]
-    {
-        use std::thread;
-        use std::time::Duration;
+/// A restart kills whatever is in flight, and a download starts its file over.
+#[cfg(target_os = "macos")]
+fn busy(state: &DaemonState) -> bool {
+    state.is_downloading()
+        || state.is_recording()
+        || state.is_transcribing()
+        || state.is_typing()
+        || state.speech().is_speaking()
+}
 
-        const POLL: Duration = Duration::from_secs(2);
+/// Polls the grant so a move reaches every client. A daemon that started
+/// without it leaves once it lands, so the supervisor starts it again with
+/// it: launchd re-runs on nonzero exit (`KeepAlive`/`SuccessfulExit`).
+/// `leave_to_restart` ends the daemon the way a signal does, rather than by
+/// `exit`, which would leave the socket file behind for the next run to call
+/// a crash.
+#[cfg(target_os = "macos")]
+pub fn follow_accessibility(state: Arc<DaemonState>) {
+    use std::thread;
+    use std::time::Duration;
 
-        if accessibility_granted() {
-            return;
-        }
+    const POLL: Duration = Duration::from_secs(2);
+    // A denied tap keeps about 0.7 KB in this process, measured, so a missing
+    // grant is read less often.
+    const POLL_WHILE_DENIED: Duration = Duration::from_secs(10);
+
+    let started_granted = state.noted_accessibility();
+    if !started_granted {
         log::warn!("the Accessibility grant is missing; the hotkey is inert until it lands");
-        thread::spawn(move || {
-            loop {
-                thread::sleep(POLL);
-                if leaves_for_the_grant(accessibility_granted(), downloading()) {
-                    log::info!("the Accessibility grant landed, restarting to pick it up");
-                    leave();
-                    return;
+    }
+    thread::spawn(move || {
+        loop {
+            thread::sleep(if state.noted_accessibility() {
+                POLL
+            } else {
+                POLL_WHILE_DENIED
+            });
+            let now = state.read_accessibility();
+            if state.note_accessibility(now) {
+                if now {
+                    log::info!("the Accessibility grant is back");
+                } else {
+                    log::warn!(
+                        "the Accessibility grant was switched off; dictation is copied until it is back"
+                    );
                 }
             }
-        });
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (downloading, leave);
-    }
+            if restarts_for_the_grant(started_granted, now, busy(&state)) {
+                log::info!("the Accessibility grant landed, restarting to pick it up");
+                state.leave_to_restart();
+                return;
+            }
+        }
+    });
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn follow_accessibility(_: Arc<DaemonState>) {}
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
-    // The grant reaches only a process started after it lands, so the daemon
-    // has to go. A download dies with it and the next run starts that file
-    // over, while waiting costs no more than an inert hotkey.
     #[test]
-    fn the_daemon_leaves_for_a_grant_but_not_through_a_download() {
-        assert!(leaves_for_the_grant(true, false));
-        assert!(!leaves_for_the_grant(true, true), "a download outranks it");
-        assert!(!leaves_for_the_grant(false, false));
-        assert!(!leaves_for_the_grant(false, true));
+    fn a_grant_restarts_only_a_daemon_that_started_without_it_and_only_when_idle() {
+        assert!(restarts_for_the_grant(false, true, false));
+        assert!(!restarts_for_the_grant(false, true, true), "busy waits");
+        assert!(!restarts_for_the_grant(false, false, false));
+        assert!(
+            !restarts_for_the_grant(true, true, false),
+            "the listener survived, so a re-grant needs no restart"
+        );
+        assert!(
+            !restarts_for_the_grant(true, false, false),
+            "a revoke never restarts"
+        );
+    }
+
+    #[test]
+    fn a_restart_waits_for_each_thing_in_flight() {
+        use crate::state::RecordingMode;
+        use std::time::{Duration, Instant};
+
+        let held = crate::test_support::daemon_state_holding_speech(
+            Duration::from_secs(5),
+            std::sync::mpsc::channel().0,
+        );
+        let state = &held.state;
+        assert!(!busy(state));
+
+        state.set_typing(true);
+        assert!(busy(state), "typing");
+        state.set_typing(false);
+
+        state.set_transcribing(true);
+        assert!(busy(state), "transcribing");
+        state.set_transcribing(false);
+
+        state.set_recording_mode(RecordingMode::Armed);
+        assert!(busy(state), "an armed question");
+        state.set_recording_mode(RecordingMode::Idle);
+
+        let download = state.start_downloading().unwrap();
+        assert!(busy(state), "downloading");
+        drop(download);
+        assert!(!busy(state));
+
+        state.speech().speak("a line", false, None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !state.speech().is_speaking() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(busy(state), "speaking");
     }
 
     #[test]

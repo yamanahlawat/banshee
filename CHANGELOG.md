@@ -14,9 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   menu row says what is wrong, for example `Accessibility is not granted`, and opens
   Banshee. When Banshee is not running, that row reads `Start Banshee` and runs
   `banshee start`. When Banshee started without Accessibility, the daemon
-  restarts as that grant lands, and the badge clears. On macOS 14 and later, a
-  microphone grant or refusal reaches Banshee at its next use, with no restart,
-  except while `audio.keep_open` holds the microphone. A problem that appears
+  restarts once that grant lands and nothing is in flight, and the badge clears.
+  On macOS 14 and later, a microphone grant or refusal reaches Banshee at its
+  next use, with no restart, except while `audio.keep_open` holds the microphone. A problem that appears
   after the daemon starts is spoken once, and never at login.
   A model file that goes missing shows at the next use.
   `feedback.speak_problems = false` turns the speech off.
@@ -186,6 +186,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On macOS, a running Banshee follows the Accessibility switch.** Switched off,
+  Banshee shows the problem within about 2 s, says it once, and copies each
+  dictation instead of losing it. Switched on, the problem clears. If Banshee
+  started without the grant, it restarts once nothing is recording, transcribing,
+  typing, speaking or downloading.
 - **On macOS, a dictation puts back what was on the clipboard.** An image,
   files, styled text and several items come back, and an empty clipboard stays
   empty. A copy you make while the words land wins. On Linux X11, only copied text comes back.
