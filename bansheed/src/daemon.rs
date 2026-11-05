@@ -190,16 +190,7 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
         daemon_state.set_last_speech_error(Some(reason));
     }
 
-    permissions::restart_when_granted(
-        {
-            let state = Arc::clone(&daemon_state);
-            move || state.is_downloading()
-        },
-        {
-            let state = Arc::clone(&daemon_state);
-            move || state.leave_to_restart()
-        },
-    );
+    permissions::follow_accessibility(Arc::clone(&daemon_state));
     // Before the speak task, so a refusal already there is part of its
     // baseline and is not spoken.
     #[cfg(target_os = "macos")]

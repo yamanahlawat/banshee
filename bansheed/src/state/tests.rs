@@ -1448,3 +1448,26 @@ fn a_dictation_the_consumer_never_reads_gives_the_ring_back() {
         "a consumer that is gone must not leave every later question waiting"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_accessibility_move_is_published_once_and_a_repeat_never() {
+    let state = test_state();
+    let mut changes = state.device_changes();
+    let start = *changes.borrow_and_update();
+    assert!(state.noted_accessibility(), "seeded from the machine read");
+
+    assert!(!state.note_accessibility(true));
+    assert!(!changes.has_changed().unwrap(), "a repeat counted");
+
+    assert!(state.note_accessibility(false));
+    assert!(!state.noted_accessibility());
+    assert_eq!(*changes.borrow_and_update(), start + 1);
+
+    assert!(!state.note_accessibility(false));
+    assert!(!changes.has_changed().unwrap(), "a repeat counted");
+
+    assert!(state.note_accessibility(true));
+    assert!(state.noted_accessibility());
+    assert_eq!(*changes.borrow_and_update(), start + 2);
+}

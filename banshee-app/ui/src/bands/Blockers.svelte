@@ -46,9 +46,9 @@
   $: leaves =
     clauses.length > 0 ? `${clauses.join(', and ')}.` : 'nothing you say leaves this machine.';
 
-  /// An Accessibility grant reaches only a process started after it lands, and the window cannot
-  /// see it, so after sending someone to System Settings it offers the restart. The daemon follows
-  /// a microphone grant live on macOS 14 and later.
+  /// The daemon follows an Accessibility grant on its own within about 10 s, and a microphone
+  /// grant live on macOS 14 and later. After sending someone to System Settings for Accessibility,
+  /// the window still offers the restart, for a stale entry the follow does not cover.
   let asked: Record<string, boolean> = {};
 
   $: suggestions = models.filter((one) => one.suggested);

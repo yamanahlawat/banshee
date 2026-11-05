@@ -410,7 +410,8 @@ fn remote_report(
 /// The `banshee.state_changed` params: what moves without a client touching it.
 /// The device fields and the pipeline move on their own, because capture opens
 /// and closes for each use and rebinds while it is open. The blockers move with
-/// the pipeline and with each read of the microphone grant. `vad_threshold`
+/// the pipeline, with each read of the microphone grant, and when the
+/// Accessibility poll sees the switch move. `vad_threshold`
 /// moves at runtime too, but only when a `configure` call asks it to, and that
 /// call already answers.
 pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
