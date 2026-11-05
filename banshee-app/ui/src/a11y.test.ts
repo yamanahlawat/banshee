@@ -13,15 +13,40 @@ const ROWS = vi.hoisted(() => {
   const now = new Date();
   const at = (hour: number) =>
     new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, 0, 0).toISOString();
+  const row = { reason: null, question: null };
   return [
-    { id: 2, text: 'Open the pull request.', timestamp: at(9) },
-    { id: 1, text: 'Yes.', timestamp: at(10) },
+    {
+      id: 3,
+      ...row,
+      kind: 'question',
+      question: 'Which branch should I use?',
+      text: 'The release branch.',
+      outcome: 'transcribed',
+      timestamp: at(11),
+    },
+    {
+      id: 2,
+      ...row,
+      kind: 'dictation',
+      text: 'Open the pull request.',
+      outcome: 'transcribed',
+      timestamp: at(9),
+    },
+    {
+      id: 1,
+      ...row,
+      kind: 'dictation',
+      text: 'Yes.',
+      outcome: 'transcribed',
+      timestamp: at(10),
+    },
   ];
 });
 
 vi.mock('./lib/tauri', async () => (await import('./lib/tauri.mock')).mockTauri());
 
 import { detectAgents, history, listen, listDevices, listVoices, status } from './lib/tauri';
+import type { HistoryRow } from './lib/tauri';
 import { agents } from './lib/agents';
 import { table as historyTable } from './lib/history';
 import { forgetKeys } from './lib/keys';
@@ -54,7 +79,7 @@ beforeEach(async () => {
   historyTable.set({ rows: [], total: 0, loaded: false, saving: null });
   forgetKeys();
   vi.mocked(status).mockResolvedValue(ready);
-  vi.mocked(history).mockResolvedValue(ROWS);
+  vi.mocked(history).mockResolvedValue(ROWS as HistoryRow[]);
   vi.mocked(listen).mockResolvedValue(() => {});
   vi.mocked(listDevices).mockResolvedValue({
     devices: [{ name: 'MacBook Pro Microphone', default: true }],

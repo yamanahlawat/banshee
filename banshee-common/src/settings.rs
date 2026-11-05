@@ -99,7 +99,7 @@ pub const SETTINGS: &[Setting] = &[
         "daemon.save_history",
         Domain::Toggle,
         "true",
-        "keep transcriptions in ~/.banshee/banshee.db",
+        "keep dictations and agent questions with your answers in ~/.banshee/banshee.db; off keeps nothing new, and what is kept stays until cleared",
     ),
     setting(
         "audio.input_device",

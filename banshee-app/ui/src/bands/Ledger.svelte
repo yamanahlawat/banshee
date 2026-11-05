@@ -26,7 +26,7 @@
 
   <SaveSwitch {saving} />
 
-  {#if saving && total > 0}
+  {#if total > 0}
     <!-- A control, not a hint: the chord alone opens search for nobody who
          never presses it. The resting rule reads as the grip, the way the
          saving switch beside it does. -->

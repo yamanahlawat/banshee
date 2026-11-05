@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **History keeps the questions agents ask you, with your answer.** A question you did
+  not answer is kept with what happened: no answer heard, closed, not transcribed, or
+  not asked aloud. A dictation that failed to transcribe is kept with the reason.
+  Status updates are not kept. With Save history off, nothing new is kept, and what is
+  there stays until you clear it. The menu bar's "Copy last dictation" works with
+  Save history off and copies only dictations.
 - **The menu bar icon shows a lasting problem, and Banshee says it once.** The idle
   figure gets an exclamation badge while a permission or model is missing. The first
   menu row says what is wrong, for example `Accessibility is not granted`, and opens

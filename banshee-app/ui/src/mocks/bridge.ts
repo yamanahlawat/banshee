@@ -205,13 +205,7 @@ const SAID = [
 
 function rows(): HistoryRow[] {
   const state = chosen();
-  if (
-    state === 'empty' ||
-    state === 'saving_off' ||
-    state === 'first-run' ||
-    state === 'downloading'
-  )
-    return [];
+  if (state === 'empty' || state === 'first-run' || state === 'downloading') return [];
   // Preview scale only: `?rows=500` repeats the fixture so a long record can
   // be looked at in a browser. Capped, so a typo cannot ask for a million.
   const asked = Number(new URLSearchParams(window.location.search).get('rows') ?? 0);
@@ -222,7 +216,11 @@ function rows(): HistoryRow[] {
   // The daemon answers oldest first.
   return Array.from({ length: total }, (_, i) => ({
     id: total - i,
+    kind: 'dictation' as const,
+    question: null,
     text: SAID[i % SAID.length],
+    outcome: 'transcribed' as const,
+    reason: null,
     timestamp: new Date(start.getTime() - i * 11 * 60_000).toISOString(),
   })).reverse();
 }
@@ -249,7 +247,7 @@ function statusNow(): unknown {
 
 const ANSWERS: Record<string, () => unknown> = {
   status: statusNow,
-  history: () => (written['daemon.save_history'] === false ? [] : rows()),
+  history: () => rows(),
   settings_table: () => settingsJson,
   set_setting: () => [],
   // A failure has no other way to be looked at: every other state is a status

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { copied, copy } from '../lib/copy';
 
-  export let text: string;
+  export let text = '';
   export let time: string;
   export let speaker: 'user' | 'agent' = 'user';
   export let lead = false;
@@ -9,6 +9,8 @@
   // True only while this row is news: a fresh lead eases in, everything else
   // is already here.
   export let arrive = false;
+  // Replaces the speaker label when set.
+  export let said = '';
 
   // The cut carries the speaker only for anyone looking, so it is said in
   // words too.
@@ -21,7 +23,7 @@
   <div class="col">
     <!-- Floated, not given a column: a column would charge 68px to every line
          of every turn for a control showing on one of them. -->
-    {#if id}
+    {#if id && text}
       <button class="copy caps" on:click={() => copy(text, id)}>
         {$copied === id ? 'Copied' : 'Copy'}
         <span class="sr"
@@ -30,7 +32,7 @@
       </button>
     {/if}
     <p class="text">
-      <span class="sr">{SAID[speaker]} at {time}.</span>{text}
+      <span class="sr">{said || SAID[speaker]} at {time}.</span>{text}
     </p>
     <slot />
   </div>

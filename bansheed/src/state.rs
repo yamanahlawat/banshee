@@ -67,6 +67,7 @@ pub struct Machine {
 pub type RingClaim = Counted;
 
 pub struct AskCommand {
+    pub question: String,
     pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     pub timeout: Duration,
     pub session: u64,
@@ -489,7 +490,8 @@ pub struct DaemonState {
     facts: Mutex<Facts>,
     recording: AtomicU8,
     started_at: Instant,
-    db_connection: Mutex<Option<rusqlite::Connection>>,
+    db_connection: Mutex<rusqlite::Connection>,
+    history_changes: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
     // Reading a model off disk can take seconds, and the listener answers
@@ -532,6 +534,7 @@ pub struct DaemonState {
     start_cue: AtomicU8,
     keep_open: AtomicBool,
     speak_problems: AtomicBool,
+    save_history: AtomicBool,
     // The last read of the microphone grant. Every read goes through its
     // setter, so a move reaches every client.
     microphone_refusal: Mutex<Option<Refusal>>,
@@ -576,7 +579,7 @@ struct Withdrawals {
 impl DaemonState {
     pub fn new(
         config: Arc<Config>,
-        db_connection: Option<rusqlite::Connection>,
+        db_connection: rusqlite::Connection,
         speech: SpeechPlayer,
         speaker: crate::text_to_speech::Speaker,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
@@ -586,6 +589,7 @@ impl DaemonState {
         let wanted_downloads = crate::models::download::wanted(&config);
         let keep_open = config.audio.keep_open;
         let speak_problems = config.speak_problems();
+        let save_history = config.daemon.save_history;
         let unload_after = config.models.unload_limit();
         let asked_listener = crate::speech_to_text::Route::of(&config.stt);
         #[cfg(target_os = "macos")]
@@ -632,6 +636,7 @@ impl DaemonState {
             last_error: watch::channel(None).0,
             last_speech_error: watch::channel(None).0,
             device_changes: watch::channel(0).0,
+            history_changes: watch::channel(0).0,
             downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
             downloading: AtomicBool::new(false),
             restart_wanted: AtomicBool::new(false),
@@ -648,6 +653,7 @@ impl DaemonState {
             start_cue: AtomicU8::new(NO_START_CUE),
             keep_open: AtomicBool::new(keep_open),
             speak_problems: AtomicBool::new(speak_problems),
+            save_history: AtomicBool::new(save_history),
             microphone_refusal: Mutex::new(None),
             #[cfg(target_os = "macos")]
             accessibility: AtomicBool::new(accessibility),
@@ -1846,28 +1852,55 @@ impl DaemonState {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Runs `job` against the history file, or answers `None` when history is
-    /// off. The one place that holds the lock, so no caller repeats the two
-    /// steps that stand between it and the table.
-    pub fn with_history<T>(&self, job: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
-        let held = self
-            .db_connection
+    fn history_file(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+        self.db_connection
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        held.as_ref().map(job)
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
+    /// Whether `daemon.save_history` is on. Only new rows depend on it: listing
+    /// and clearing work either way.
     pub fn history_enabled(&self) -> bool {
-        self.with_history(|_| ()).is_some()
+        self.save_history.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Opening and closing the file is the whole of `daemon.save_history`, so a
-    /// write between two dictations decides whether the next one is kept.
-    pub fn set_history(&self, connection: Option<rusqlite::Connection>) {
-        *self
-            .db_connection
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = connection;
+    pub fn set_save_history(&self, save: bool) {
+        self.save_history
+            .store(save, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn history_changes(&self) -> u64 {
+        *self.history_changes.borrow()
+    }
+
+    pub fn keep(&self, entry: &crate::history::NewEntry) {
+        if !self.history_enabled() {
+            return;
+        }
+        match crate::history::insert(&self.history_file(), entry) {
+            Ok(()) => self.history_changes.send_modify(|changes| *changes += 1),
+            Err(error) => log::error!("Failed to keep a history row: {error}"),
+        }
+    }
+
+    pub fn history(
+        &self,
+        limit: Option<u32>,
+        kind: Option<crate::history::Kind>,
+    ) -> rusqlite::Result<Vec<crate::history::Entry>> {
+        crate::history::list(&self.history_file(), limit, kind)
+    }
+
+    pub fn clear_history(&self) -> rusqlite::Result<()> {
+        crate::history::clear(&self.history_file())?;
+        self.history_changes.send_modify(|changes| *changes += 1);
+        Ok(())
+    }
+
+    /// Moves when a row is kept or the history is cleared. The value is a
+    /// count, not a row: the reader lists the history itself.
+    pub fn subscribe_history_changes(&self) -> watch::Receiver<u64> {
+        self.history_changes.subscribe()
     }
 
     /// Called from the real time audio thread, so it must not lock or allocate.

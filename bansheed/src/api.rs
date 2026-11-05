@@ -13,6 +13,7 @@ use banshee_common::{
 use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
 use crate::connect;
+use crate::history::{Kind, NewEntry, Outcome};
 use crate::permissions;
 use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode};
 use crate::text_to_speech::sanitizer::sanitize;
@@ -440,6 +441,7 @@ fn live_state_at(
         "pipeline": pipeline.as_str(),
         "feedback": daemon_state.cues().mode().word(),
         "blockers": blockers,
+        "history_changes": daemon_state.history_changes(),
     });
     // Ranked once, in banshee-common, so no client ranks the flags itself.
     live["activity"] = banshee_common::Activity::of(&live).word().into();
@@ -595,6 +597,20 @@ async fn question_played(
     }
 }
 
+/// Keeps a question that was never put to the owner, with the message the
+/// agent receives, and hands that refusal back.
+fn unasked(state: &DaemonState, question: &str, refusal: JsonRpcResponse) -> JsonRpcResponse {
+    if let JsonRpcResponse::Error { error, .. } = &refusal {
+        state.keep(&NewEntry::question(
+            question,
+            None,
+            Outcome::Unasked,
+            Some(&error.message),
+        ));
+    }
+    refusal
+}
+
 async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     let question = match params.str("question") {
         Ok(value) => value,
@@ -608,14 +624,17 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         return *response;
     }
 
+    let clean_question = sanitize(question);
+
     // Dropping this call is how a waiting question leaves the line. Armed
     // before the question plays, so a press while Banshee talks holds to
     // answer rather than dictates.
     let (_turn, session) = match daemon_state.arm_in_turn().await {
         Ok(armed) => armed,
         Err(pipeline) => {
-            return *not_recording(params.id(), &pipeline)
+            let refusal = *not_recording(params.id(), &pipeline)
                 .expect("arm_in_turn gives back only a pipeline that is not open");
+            return unasked(daemon_state, &clean_question, refusal);
         }
     };
 
@@ -627,17 +646,17 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         session,
     };
 
-    let clean_question = sanitize(question);
     // Queued behind what is already said. Every line after it waits for the
     // disarm that ends the session.
     let asked = match daemon_state.speech().speak_and_hold(&clean_question) {
         Ok(utterance_id) => utterance_id,
         Err(e) => {
-            return JsonRpcResponse::error(
+            let refusal = JsonRpcResponse::error(
                 params.id(),
                 rpc_code::INTERNAL,
                 format!("Failed to speak question: {e}"),
             );
+            return unasked(daemon_state, &clean_question, refusal);
         }
     };
 
@@ -653,34 +672,38 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         // A press during the wait answers before the question plays
         Asked::Unspoken if daemon_state.armed_mode(session) == Some(RecordingMode::ArmedHold) => {}
         Asked::Unspoken => {
-            return JsonRpcResponse::error(
+            let refusal = JsonRpcResponse::error(
                 params.id(),
                 rpc_code::INTERNAL,
                 "The question was not spoken.",
             );
+            return unasked(daemon_state, &clean_question, refusal);
         }
         Asked::Stalled => {
             daemon_state.speech().stop();
-            return JsonRpcResponse::error(
+            let refusal = JsonRpcResponse::error(
                 params.id(),
                 rpc_code::INTERNAL,
                 "Question playback did not finish.",
             );
+            return unasked(daemon_state, &clean_question, refusal);
         }
     }
 
     let (reply, answer) = tokio::sync::oneshot::channel();
     let command = ConsumerCommand::Ask(AskCommand {
         reply,
+        question: clean_question.clone(),
         timeout: Duration::from_millis(timeout_ms),
         session,
     });
     if daemon_state.commands().send(command).is_err() {
-        return JsonRpcResponse::error(
+        let refusal = JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
             "Audio pipeline is not running.",
         );
+        return unasked(daemon_state, &clean_question, refusal);
     }
 
     match answer.await {
@@ -856,37 +879,39 @@ fn history(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRespon
         },
         Err(response) => return *response,
     };
-    match daemon_state.with_history(|c| crate::history::TranscriptionHistory::list(c, limit)) {
-        Some(Ok(history)) => {
+    let kind = match params.optional_str("kind") {
+        Ok(None) => None,
+        Ok(Some(name)) => match serde_json::from_value::<Kind>(name.into()) {
+            Ok(kind) => Some(kind),
+            Err(_) => {
+                return JsonRpcResponse::error(
+                    params.id(),
+                    rpc_code::INVALID_PARAMS,
+                    "'kind' must be \"dictation\" or \"question\".",
+                );
+            }
+        },
+        Err(response) => return *response,
+    };
+    match daemon_state.history(limit, kind) {
+        Ok(history) => {
             JsonRpcResponse::success(params.id(), serde_json::json!({ "history": history }))
         }
-        Some(Err(e)) => JsonRpcResponse::error(
+        Err(e) => JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
             format!("Failed to retrieve history: {e}"),
-        ),
-        None => JsonRpcResponse::error(
-            params.id(),
-            rpc_code::HISTORY_OFF,
-            "History is not enabled.",
         ),
     }
 }
 
 fn clear_history(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    match daemon_state.with_history(crate::history::TranscriptionHistory::clear) {
-        Some(Ok(())) => JsonRpcResponse::success(params.id(), serde_json::json!({})),
-        // Not -32003: that code names history being off, and the
-        // listing path already answers -32603 for the same failure.
-        Some(Err(e)) => JsonRpcResponse::error(
+    match daemon_state.clear_history() {
+        Ok(()) => JsonRpcResponse::success(params.id(), serde_json::json!({})),
+        Err(e) => JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
             format!("Failed to clear history: {e}"),
-        ),
-        None => JsonRpcResponse::error(
-            params.id(),
-            rpc_code::HISTORY_OFF,
-            "History is not enabled.",
         ),
     }
 }

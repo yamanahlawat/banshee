@@ -68,8 +68,6 @@ async function readWholeTable(): Promise<void> {
   table.update((held) => ({ ...held, rows: newestFirst(all), total: all.length, loaded: true }));
 }
 
-// The daemon stores the row before it reports transcribing finished, so that
-// fall is the first moment a refetch can see the new dictation.
 export async function readNewest(): Promise<void> {
   const page = newestFirst(await history(REFRESH_ROWS));
   // After the await, not before: a `Clear all` landing mid-flight would
@@ -89,7 +87,7 @@ export async function readNewest(): Promise<void> {
 }
 
 // Empties the table without asking the daemon: `Clear all` has already emptied
-// its side, and history switched off keeps nothing to read.
+// its side.
 export function forget(): void {
   cleared += 1;
   // The read in flight will apply nothing, so a caller that asks after this
@@ -99,15 +97,14 @@ export function forget(): void {
 }
 
 // Follows what the daemon says it is keeping. The open reads the table itself,
-// so the first answer only records the switch. Off is the exception: nothing is
-// there to read.
+// so the first answer only records the switch. Rows kept earlier stay listed
+// with it off.
 export function followSaveHistory(on: boolean): void {
   const held = get(table);
   if (on === held.saving) return;
   const first = held.saving === null;
   table.update((now) => ({ ...now, saving: on }));
-  if (!on) forget();
-  else if (!first) readAll().catch(() => {});
+  if (on && !first) readAll().catch(() => {});
 }
 
 /// The read a caller wants: the whole table the first time, the newest rows

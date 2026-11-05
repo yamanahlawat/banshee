@@ -4,6 +4,7 @@ const { history } = vi.hoisted(() => ({ history: vi.fn() }));
 vi.mock('./tauri', () => ({ history }));
 
 import { get } from 'svelte/store';
+import { dictated } from './history.mock';
 import {
   countNewer,
   forget,
@@ -11,6 +12,7 @@ import {
   freshLead,
   newestFirst,
   readAll,
+  followSaveHistory,
   readNewest,
   table,
 } from './history';
@@ -18,9 +20,9 @@ import {
 describe('newestFirst', () => {
   it("puts the daemon's last row first", () => {
     const rows = [
-      { id: 1, text: 'first', timestamp: '2026-08-27T09:00:00Z' },
-      { id: 2, text: 'second', timestamp: '2026-08-27T10:00:00Z' },
-      { id: 3, text: 'third', timestamp: '2026-08-27T11:00:00Z' },
+      dictated(1, 'first', '2026-08-27T09:00:00Z'),
+      dictated(2, 'second', '2026-08-27T10:00:00Z'),
+      dictated(3, 'third', '2026-08-27T11:00:00Z'),
     ];
     expect(newestFirst(rows).map((r) => r.id)).toEqual([3, 2, 1]);
   });
@@ -28,9 +30,9 @@ describe('newestFirst', () => {
 
 describe('countNewer', () => {
   const page = [
-    { id: 3, text: 'third', timestamp: '2026-08-27T11:00:00Z' },
-    { id: 2, text: 'second', timestamp: '2026-08-27T10:00:00Z' },
-    { id: 1, text: 'first', timestamp: '2026-08-27T09:00:00Z' },
+    dictated(3, 'third', '2026-08-27T11:00:00Z'),
+    dictated(2, 'second', '2026-08-27T10:00:00Z'),
+    dictated(1, 'first', '2026-08-27T09:00:00Z'),
   ];
   it('counts the rows that landed above the newest one held', () => {
     expect(countNewer(page, 1)).toBe(2);
@@ -59,7 +61,7 @@ describe('readNewest', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     table.set({
-      rows: [{ id: 2, text: 'second', timestamp: '2026-08-27T10:00:00Z' }],
+      rows: [dictated(2, 'second', '2026-08-27T10:00:00Z')],
       total: 2,
       loaded: true,
       saving: true,
@@ -75,7 +77,7 @@ describe('readNewest', () => {
 
     const reading = readNewest();
     forget();
-    release([{ id: 2, text: 'second', timestamp: '2026-08-27T10:00:00Z' }]);
+    release([dictated(2, 'second', '2026-08-27T10:00:00Z')]);
     await reading;
 
     expect(get(table).rows).toEqual([]);
@@ -92,7 +94,7 @@ describe('readAll', () => {
 
     const reading = readAll();
     forget();
-    release([{ id: 1, text: 'gone', timestamp: '2026-08-27T09:00:00Z' }]);
+    release([dictated(1, 'gone', '2026-08-27T09:00:00Z')]);
     await reading;
 
     expect(get(table).rows).toEqual([]);
@@ -109,5 +111,16 @@ describe('freshLead', () => {
 
   it('arrives only when the lead replaces another one', () => {
     expect(freshLead(7, 8)).toBe(true);
+  });
+});
+
+describe('followSaveHistory', () => {
+  it('leaves the rows kept when saving goes off', () => {
+    const kept = [dictated(1, 'kept', '2026-08-27T09:00:00Z')];
+    table.set({ rows: kept, total: 1, loaded: true, saving: true });
+    followSaveHistory(false);
+    expect(get(table).rows).toEqual(kept);
+    expect(get(table).total).toBe(1);
+    expect(get(table).saving).toBe(false);
   });
 });

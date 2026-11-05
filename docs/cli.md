@@ -31,8 +31,8 @@
 | `banshee tray`                  | Show the tray icon, now and at every login; registers again if already on                 |
 | `banshee record start` / `stop` / `toggle` | Push-to-talk without the hotkey; `toggle` is one key that starts, then stops |
 | `banshee speak "<text>"`        | Speak some text aloud                                      |
-| `banshee history`               | List all saved transcriptions                              |
-| `banshee clear-history`         | Clear the saved transcriptions                             |
+| `banshee history`               | List your dictations and the questions agents asked you, with your answers. It works with Save history off |
+| `banshee clear-history`         | Clear them. It works with Save history off                 |
 | `banshee uninstall [--data] [--yes]` | Stop Banshee and remove its login services (on macOS, its Login Items). It lists the files it would delete and asks first; for a Homebrew install it names the `brew` command that removes the rest. `--data` also deletes `~/.banshee` and, on macOS, `~/Library/Logs/com.banshee.app`, and `--yes` skips the question |
 
 ## Following what the daemon is doing

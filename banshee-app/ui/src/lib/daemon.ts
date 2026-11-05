@@ -98,6 +98,8 @@ export type Live = {
   microphone_refused: boolean;
   last_error: string | null;
   last_speech_error: string | null;
+  /// Moves on every kept row and every clear.
+  history_changes: number;
 };
 export type Daemon = {
   status: Status | null;
@@ -142,6 +144,7 @@ export function empty(): Daemon {
       microphone_refused: false,
       last_error: null,
       last_speech_error: null,
+      history_changes: 0,
     },
     pending: new Set(),
     down: null,

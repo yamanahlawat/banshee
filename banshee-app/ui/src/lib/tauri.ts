@@ -41,7 +41,15 @@ export type PlannedChange = { path: string | null; diff: string };
 /// them, and `total` is null when the server sent no Content-Length.
 export type { Progress as DownloadProgress } from './daemon';
 export type Down = { reason: string };
-export type HistoryRow = { id: string | number; text: string; timestamp: string };
+export type HistoryRow = {
+  id: string | number;
+  kind: 'dictation' | 'question';
+  question: string | null;
+  text: string | null;
+  outcome: 'transcribed' | 'failed' | 'no_answer' | 'closed' | 'unasked';
+  reason: string | null;
+  timestamp: string;
+};
 
 export type Domain =
   | { kind: 'toggle' }

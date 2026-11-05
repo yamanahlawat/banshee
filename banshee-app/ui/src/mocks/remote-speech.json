@@ -222,6 +222,7 @@
   "pending": [],
   "last_error": null,
   "last_speech_error": null,
+  "history_changes": 0,
   "remote": {
     "stt": {
       "remote": true,

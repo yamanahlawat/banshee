@@ -120,18 +120,11 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
             state.set_speak_problems(config.speak_problems());
             true
         }
-        // Opening the file is the whole of the setting, so a failure to open
-        // one leaves the key unapplied rather than half applied
-        Live::SaveHistory => match history_for(config) {
-            Ok(connection) => {
-                state.set_history(connection);
-                true
-            }
-            Err(error) => {
-                log::error!("Failed to open the history file: {error}");
-                false
-            }
-        },
+        // Read when the next row is kept
+        Live::SaveHistory => {
+            state.set_save_history(config.daemon.save_history);
+            true
+        }
         // A voice of the loaded engine reloads nothing; one of the other engine
         // loads it. Silence takes no voice, and says so.
         Live::Tts => state.set_tts(&config.tts),
@@ -259,13 +252,6 @@ fn is_here(state: &DaemonState, model: &banshee_common::listening::ListeningMode
 pub fn reconcile_listening(state: &DaemonState) {
     let _writing = writing();
     reconcile_waiting(state, &state.config());
-}
-
-fn history_for(config: &Config) -> Result<Option<rusqlite::Connection>, BansheeError> {
-    if !config.daemon.save_history {
-        return Ok(None);
-    }
-    crate::history::open().map(Some)
 }
 
 /// The daemon serves a task per connection, so two calls can otherwise read

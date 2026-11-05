@@ -59,6 +59,7 @@ rodio = { version = "0.22.2", default-features = false, features = ["playback"] 
 rpassword = "7.5.4"
 rubato = "5.0.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite_migration = "2.6.0"
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 sha2 = "0.10.9"

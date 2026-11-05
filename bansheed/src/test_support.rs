@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
-use crate::history::TranscriptionHistory;
 use crate::state::{ConsumerCommand, DaemonState};
 use crate::text_to_speech::local::OnDemand;
 use crate::text_to_speech::output::Output;
@@ -323,7 +322,7 @@ pub fn daemon_state_holding_speech(
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
 ) -> HoldingSpeech {
     holding_speech(hold, Some(HELD_SERVER.to_string()), |speech| {
-        state(None, speech, commands)
+        state(seeded_history(&[]), speech, commands)
     })
 }
 
@@ -338,7 +337,13 @@ pub fn daemon_state_holding_speech_under(
     sends_to: Option<String>,
 ) -> HoldingSpeech {
     holding_speech(hold, sends_to, |speech| {
-        state_running(config, None, speech, speaker, std::sync::mpsc::channel().0)
+        state_running(
+            config,
+            seeded_history(&[]),
+            speech,
+            speaker,
+            std::sync::mpsc::channel().0,
+        )
     })
 }
 
@@ -476,7 +481,7 @@ pub fn daemon_state_recording_speech_for(
 ) -> (Arc<DaemonState>, SpokenLines) {
     let spoken: SpokenLines = Arc::default();
     let speech = SpeechPlayer::new(Box::new(SpeakingBackend(spoken.clone())));
-    (state(None, speech, commands), spoken)
+    (state(seeded_history(&[]), speech, commands), spoken)
 }
 
 /// A daemon caught before its pipeline stands that keeps every line it was
@@ -485,7 +490,7 @@ pub fn daemon_state_before_the_pipeline_recording_speech() -> (Arc<DaemonState>,
     let spoken: SpokenLines = Arc::default();
     let state = built(
         Config::default(),
-        None,
+        seeded_history(&[]),
         SpeechPlayer::new(Box::new(SpeakingBackend(spoken.clone()))),
         Speaker::Fallback,
         std::sync::mpsc::channel().0,
@@ -496,18 +501,21 @@ pub fn daemon_state_before_the_pipeline_recording_speech() -> (Arc<DaemonState>,
 
 /// A running daemon that speaks through `speech`.
 pub fn daemon_state_speaking_through(speech: SpeechPlayer) -> Arc<DaemonState> {
-    state(None, speech, std::sync::mpsc::channel().0)
+    state(seeded_history(&[]), speech, std::sync::mpsc::channel().0)
 }
 
 /// A daemon state whose backend keeps what it was last told to speak in.
 pub fn daemon_state_recording_tts() -> (Arc<DaemonState>, RecordedTts) {
     let recorded: RecordedTts = Arc::default();
     let speech = SpeechPlayer::new(Box::new(RecordingBackend(recorded.clone())));
-    (state(None, speech, std::sync::mpsc::channel().0), recorded)
+    (
+        state(seeded_history(&[]), speech, std::sync::mpsc::channel().0),
+        recorded,
+    )
 }
 
 fn state(
-    history: Option<rusqlite::Connection>,
+    history: rusqlite::Connection,
     speech: SpeechPlayer,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
 ) -> Arc<DaemonState> {
@@ -530,7 +538,7 @@ pub fn daemon_state_before_the_pipeline() -> Arc<DaemonState> {
 /// premise of any test that records, arms or reports a fault.
 fn state_running(
     config: Config,
-    history: Option<rusqlite::Connection>,
+    history: rusqlite::Connection,
     speech: SpeechPlayer,
     speaker: Speaker,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
@@ -551,7 +559,7 @@ pub fn daemon_state_hearing(
 ) -> Arc<DaemonState> {
     let state = built(
         Config::default(),
-        None,
+        seeded_history(&[]),
         SpeechPlayer::new(Box::new(NullBackend)),
         Speaker::Fallback,
         commands,
@@ -566,7 +574,7 @@ pub fn daemon_state_before_the_pipeline_with_cues(
 ) -> Arc<DaemonState> {
     built(
         Config::default(),
-        None,
+        seeded_history(&[]),
         SpeechPlayer::new(Box::new(NullBackend)),
         Speaker::Fallback,
         std::sync::mpsc::channel().0,
@@ -576,7 +584,7 @@ pub fn daemon_state_before_the_pipeline_with_cues(
 
 fn fresh(
     config: Config,
-    history: Option<rusqlite::Connection>,
+    history: rusqlite::Connection,
     speech: SpeechPlayer,
     speaker: Speaker,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
@@ -593,7 +601,7 @@ fn fresh(
 
 fn built(
     config: Config,
-    history: Option<rusqlite::Connection>,
+    history: rusqlite::Connection,
     speech: SpeechPlayer,
     speaker: Speaker,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
@@ -624,7 +632,7 @@ pub fn daemon_state_speaking(
 ) -> Arc<DaemonState> {
     state_running(
         config,
-        None,
+        seeded_history(&[]),
         SpeechPlayer::new(Box::new(NullBackend)),
         speaker,
         commands,
@@ -638,29 +646,52 @@ pub fn daemon_state_speaking_on(
     speaker: Speaker,
     speech: SpeechPlayer,
 ) -> Arc<DaemonState> {
-    state_running(config, None, speech, speaker, std::sync::mpsc::channel().0)
+    state_running(
+        config,
+        seeded_history(&[]),
+        speech,
+        speaker,
+        std::sync::mpsc::channel().0,
+    )
 }
 
 /// Pass a real sender only when the test reads the command receiver.
 pub fn daemon_state(commands: std::sync::mpsc::Sender<ConsumerCommand>) -> Arc<DaemonState> {
-    state(None, SpeechPlayer::new(Box::new(NullBackend)), commands)
+    state(
+        seeded_history(&[]),
+        SpeechPlayer::new(Box::new(NullBackend)),
+        commands,
+    )
 }
 
 /// A daemon state whose history holds `rows`, oldest first.
 pub fn daemon_state_with_history(rows: &[&str]) -> Arc<DaemonState> {
     state(
-        Some(seeded_history(rows)),
+        seeded_history(rows),
         SpeechPlayer::new(Box::new(NullBackend)),
+        std::sync::mpsc::channel().0,
+    )
+}
+
+/// As `daemon_state_with_history`, with `daemon.save_history` off.
+pub fn daemon_state_with_history_off(rows: &[&str]) -> Arc<DaemonState> {
+    let mut config = Config::default();
+    config.daemon.save_history = false;
+    state_running(
+        config,
+        seeded_history(rows),
+        SpeechPlayer::new(Box::new(NullBackend)),
+        Speaker::Fallback,
         std::sync::mpsc::channel().0,
     )
 }
 
 /// An in-memory history holding `rows`, oldest first.
 pub fn seeded_history(rows: &[&str]) -> rusqlite::Connection {
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
-    TranscriptionHistory::create_table(&connection).unwrap();
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    crate::history::prepare(&mut connection).unwrap();
     for text in rows {
-        TranscriptionHistory::insert(&connection, text).unwrap();
+        crate::history::insert(&connection, &crate::history::NewEntry::dictation(text)).unwrap();
     }
     connection
 }

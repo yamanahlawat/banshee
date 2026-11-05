@@ -157,7 +157,6 @@ pub mod rpc_code {
     pub const MICROPHONE: i32 = -32000;
     /// Recording is unavailable: the transcription model did not load.
     pub const MODEL: i32 = -32002;
-    pub const HISTORY_OFF: i32 = -32003;
     /// A recording or a question is already in progress.
     pub const BUSY: i32 = -32004;
     pub const DOWNLOAD_RUNNING: i32 = -32005;

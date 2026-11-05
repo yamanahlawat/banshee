@@ -58,9 +58,9 @@ pub enum CommandType {
     },
     /// Speaks a message via text-to-speech
     Speak { text: String },
-    /// List all transcriptions in the database
+    /// List your dictations and the questions agents asked you, with your answers
     History,
-    /// Clears all transcriptions in the database
+    /// Clear your dictations and the questions agents asked you, with your answers
     ClearHistory,
     /// Runs the daemon in the foreground (what the start-at-login service executes)
     Serve,
