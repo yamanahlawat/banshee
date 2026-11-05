@@ -289,7 +289,7 @@ fn an_unload_after_that_is_not_whole_minutes_is_refused_by_name() {
 #[test]
 fn a_feedback_write_reaches_the_running_daemon() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    assert_eq!(state.feedback_mode(), crate::config::FeedbackMode::Off);
+    assert_eq!(state.feedback_mode(), FeedbackMode::Off);
 
     let outcome = configure_in_scratch(
         Some(&state),
@@ -298,7 +298,7 @@ fn a_feedback_write_reaches_the_running_daemon() {
     )
     .expect("a known key and a legal value must apply");
 
-    assert_eq!(state.feedback_mode(), crate::config::FeedbackMode::Visual);
+    assert_eq!(state.feedback_mode(), FeedbackMode::Visual);
     assert_eq!(outcome.applied, vec!["feedback.mode".to_string()]);
     assert!(outcome.waiting.is_empty());
 }
@@ -321,101 +321,13 @@ fn a_speak_problems_write_reaches_the_running_daemon() {
 }
 
 #[test]
-fn the_old_cue_switch_is_refused_and_names_its_replacement() {
-    let refused = configure_in_scratch(
-        None,
-        assignments(&[("audio.cues.enabled", false.into())]),
-        true,
-    )
-    .expect_err("the retired key must be refused");
-    assert!(
-        refused.to_string().contains("feedback.mode"),
-        "the refusal must name the key that replaced it: {refused}"
-    );
-}
-
-#[test]
-fn a_null_write_removes_the_old_cue_switch() {
-    let dir = crate::test_support::unique_scratch("settings");
-    let path = dir.join("config.toml");
-    std::fs::write(&path, "[audio.cues]\nenabled = false\n").unwrap();
-
-    super::configure_at(
-        &path,
-        &dir.join("credentials.toml"),
-        None,
-        assignments(&[("audio.cues.enabled", serde_json::Value::Null)]),
-        true,
-    )
-    .expect("a null write removes the retired key");
-
-    let config = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(config.feedback_mode(), crate::config::FeedbackMode::Both);
-}
-
-#[test]
-fn a_null_write_to_the_old_cue_switch_applies_live() {
-    let dir = crate::test_support::unique_scratch("settings");
-    let path = dir.join("config.toml");
-    std::fs::write(&path, "[audio.cues]\nenabled = false\n").unwrap();
-
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    assert_eq!(state.feedback_mode(), crate::config::FeedbackMode::Off);
-
-    let outcome = super::configure_at(
-        &path,
-        state.credentials_path(),
-        Some(&state),
-        assignments(&[("audio.cues.enabled", serde_json::Value::Null)]),
-        true,
-    )
-    .expect("a null write to the retired key applies live");
-
-    assert_eq!(outcome.applied, vec!["audio.cues.enabled".to_string()]);
-    assert_eq!(state.feedback_mode(), crate::config::FeedbackMode::Both);
-}
-
-#[test]
-fn a_null_write_to_a_retired_setting_is_in_use_at_once() {
-    let dir = crate::test_support::unique_scratch("settings");
-    let path = dir.join("config.toml");
-    std::fs::write(&path, "[stt]\npreset = \"balanced\"\n").unwrap();
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-
-    let outcome = super::configure_at(
-        &path,
-        state.credentials_path(),
-        Some(&state),
-        assignments(&[("stt.preset", serde_json::Value::Null)]),
-        true,
-    )
-    .expect("a null write removes the retired key");
-
-    assert_eq!(outcome.applied, vec!["stt.preset".to_string()]);
-    assert!(outcome.waiting.is_empty(), "{:?}", outcome.waiting);
-}
-
-#[test]
-fn removing_the_feedback_mode_falls_back_to_the_old_rule() {
-    let dir = crate::test_support::unique_scratch("settings");
-    let path = dir.join("config.toml");
-    std::fs::write(
-        &path,
-        "[audio.cues]\nenabled = false\n[feedback]\nmode = \"both\"\n",
+fn removing_the_feedback_mode_falls_back_to_both() {
+    let (_, config) = edit(
+        "[feedback]\nmode = \"sound\"\n",
+        &assignments(&[("feedback.mode", serde_json::Value::Null)]),
     )
     .unwrap();
-
-    super::configure_at(
-        &path,
-        &dir.join("credentials.toml"),
-        None,
-        assignments(&[("feedback.mode", serde_json::Value::Null)]),
-        true,
-    )
-    .expect("a null write removes the key");
-
-    let config = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(config.feedback_mode(), crate::config::FeedbackMode::Off);
+    assert_eq!(config.feedback_mode(), FeedbackMode::Both);
 }
 
 // Only the off direction runs here: turning history on opens the real file
@@ -467,13 +379,6 @@ fn a_voice_write_reaches_the_running_daemon() {
     assert!(outcome.waiting.is_empty());
 }
 
-#[test]
-fn a_speed_write_is_refused_by_name() {
-    let error = configure_in_scratch(None, assignments(&[("tts.speed", 1.2.into())]), false)
-        .expect_err("tts.speed is no longer a setting");
-    assert!(error.to_string().contains("speed"), "{error}");
-}
-
 // A backend that cannot take the voice must not be reported as speaking in
 // it, or the window marks a voice nothing will ever use.
 #[test]
@@ -501,10 +406,7 @@ fn a_backend_that_refuses_the_voice_is_not_reported_as_applied() {
 
 #[test]
 fn two_keys_of_one_setting_apply_it_once() {
-    let keys = [
-        "audio.cues.enabled".to_string(),
-        "feedback.mode".to_string(),
-    ];
+    let keys = ["audio.hotkey".to_string(), "audio.hotkey_mode".to_string()];
     let mut applies = Vec::new();
 
     let outcome = super::outcome_of(keys.iter(), |variant| {
@@ -514,26 +416,6 @@ fn two_keys_of_one_setting_apply_it_once() {
 
     assert_eq!(applies.len(), 1, "one call, one apply: {}", applies.len());
     assert_eq!(outcome.applied, keys, "both keys are in effect");
-}
-
-/// A null `audio.cues.enabled` is the one write of the retired key that passes,
-/// so it is the pair that reaches `apply_each` with one setting named twice.
-#[test]
-fn a_feedback_write_that_removes_the_retired_key_is_in_effect() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-
-    let outcome = configure_in_scratch(
-        Some(&state),
-        assignments(&[
-            ("feedback.mode", "sound".into()),
-            ("audio.cues.enabled", serde_json::Value::Null),
-        ]),
-        false,
-    )
-    .expect("a mode and the removal of the old switch must apply");
-
-    assert_eq!(outcome.applied.len(), 2, "{outcome:?}");
-    assert_eq!(state.feedback_mode(), FeedbackMode::Sound);
 }
 
 #[test]
@@ -1130,39 +1012,6 @@ fn a_null_for_a_key_never_written_changes_nothing() {
 }
 
 #[test]
-fn a_null_removes_a_retired_setting() {
-    let existing = "[stt]\npreset = \"balanced\"\nvad_threshold = 0.6\n";
-    let (rendered, config) = edit(
-        existing,
-        &assignments(&[("stt.preset", serde_json::Value::Null)]),
-    )
-    .unwrap();
-    assert!(!rendered.contains("preset"), "{rendered}");
-    assert_eq!(config.stt.vad_threshold, 0.6);
-}
-
-#[test]
-fn a_null_for_one_retired_setting_names_the_ones_left() {
-    let existing = "[stt]\npreset = \"balanced\"\nlanguage = \"en\"\n";
-    let error = edit(
-        existing,
-        &assignments(&[("stt.preset", serde_json::Value::Null)]),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("`language`"), "{error}");
-    assert!(!error.contains("`preset`"), "{error}");
-}
-
-#[test]
-fn a_retired_setting_takes_no_value_but_null() {
-    let error = edit("", &assignments(&[("stt.language", "de".into())]))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("`language`"), "{error}");
-}
-
-#[test]
 fn a_null_for_an_unknown_key_is_refused() {
     let error = edit(
         "",
@@ -1485,21 +1334,16 @@ fn a_folder_that_holds_a_model_is_no_new_install() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_file_that_chose_keeps_its_choice() {
-    for text in [
-        "[feedback]\nmode = \"sound\"\n",
-        "[audio.cues]\nenabled = false\n",
-    ] {
-        let (path, wanted) = scratch_config(text);
-        assert_eq!(
-            write_first_feedback(&path, None, &wanted, &wanted, || {
-                panic!("an install that chose never reads VoiceOver")
-            })
-            .unwrap(),
-            None,
-            "{text}"
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
-    }
+    let text = "[feedback]\nmode = \"sound\"\n";
+    let (path, wanted) = scratch_config(text);
+    assert_eq!(
+        write_first_feedback(&path, None, &wanted, &wanted, || {
+            panic!("an install that chose never reads VoiceOver")
+        })
+        .unwrap(),
+        None
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
 }
 
 #[cfg(target_os = "macos")]
@@ -1532,19 +1376,14 @@ fn the_first_write_goes_through_a_symlinked_config() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_config_that_never_chose_a_mode_is_a_new_install() {
-    for text in [
-        "[tts]\nvoice = \"af_sky\"\n",
-        "[audio.cues]\nenabled = true\n",
-    ] {
-        let (path, wanted) = scratch_config(text);
-        assert_eq!(
-            write_first_feedback(&path, None, &wanted, &wanted, || false).unwrap(),
-            Some(FeedbackMode::Visual),
-            "{text}"
-        );
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(written.starts_with(text), "{written}");
-    }
+    let text = "[tts]\nvoice = \"af_sky\"\n";
+    let (path, wanted) = scratch_config(text);
+    assert_eq!(
+        write_first_feedback(&path, None, &wanted, &wanted, || false).unwrap(),
+        Some(FeedbackMode::Visual)
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(written.starts_with(text), "{written}");
 }
 
 #[cfg(target_os = "macos")]

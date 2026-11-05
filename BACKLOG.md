@@ -166,3 +166,16 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - RUSTSEC-2024-0429 flags glib 0.18, which comes with Tauri's GTK 3 stack. It affects the Linux
   window only. No Banshee or stack code calls `VariantStrIter` (checked with grep). It moves with
   Tauri's GTK 4 work, tauri-apps/tauri#12562.
+
+## Upgrade code to remove after the next release
+
+Each piece runs once on an upgraded machine. Remove it in the release after the one that ships it.
+
+- The start deletes the old Whisper files, and the voice list leaves them out
+  (`bansheed/src/models.rs`, `OLD_WHISPER_FILES`; `bansheed/src/daemon.rs`).
+- `migrate_legacy` and `bootout_legacy` remove the old launch agents on macOS
+  (`bansheed/src/service.rs`; `LEGACY_AGENTS` in `banshee-common/src/utils.rs`).
+- `banshee connect claude` replaces the old `banshee-speak-check.sh` hook entry in place and
+  deletes the script (`old_script`, `hook_script_path` and `Change::RemoveFile` in
+  `bansheed/src/connect.rs`; `is_banshee_hook` in `bansheed/src/connect/hooks.rs`). It shipped
+  in 0.16.0, so a user on 0.15 or older who skips the next release gets two Stop hooks.

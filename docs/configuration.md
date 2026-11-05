@@ -61,8 +61,6 @@ speak_problems = true  # false = never say a new problem aloud
   together, only the first is spoken. A microphone refusal is spoken at the use
   that finds it. Turn it off with
   `banshee config set feedback.speak_problems false`.
-- **`audio.cues.enabled` is replaced by `feedback.mode`.** A file that still
-  sets it to false reads as none, until it sets `feedback.mode`.
 - **`visual` draws a small Banshee figure above the Dock on macOS.** The menu
   bar icon draws it, and the window starts the icon. `visual` plays no earcons
   while the menu bar icon draws the figure, and plays every sound with no
@@ -224,9 +222,6 @@ Speak with one by: banshee config set tts.voice "<id>"
 - **`stt.vocabulary` is empty by default.** A model that takes vocabulary receives the
   words. For any other model, a corrector swaps a close-sounding word for the listed one,
   with the rule from Handy (threshold 0.10, Soundex weight 0.5).
-- **`stt.preset` and `stt.language` are gone.** The daemon refuses to start while either is
-  in `config.toml`, and one error names every removed key. `banshee config set stt.preset null`
-  removes a key.
 - **Banshee deletes the old Whisper files** `ggml-base.en.bin`,
   `ggml-large-v3-turbo-q5_0.bin` and `ggml-large-v3-q5_0.bin` from `~/.banshee/models` at start.
 
@@ -264,7 +259,7 @@ Speak with one by: banshee config set tts.voice "<id>"
 - **Any OpenAI-compatible transcription server works:** OpenAI, Groq, or a
   Whisper server you run.
 - **`stt.model` is not read.** The server's `model` is.
-- **The server gets no language hint.** `stt.language` is gone.
+- **The server gets no language hint.**
 - **The `vocabulary` list goes out with each request** as the server's prompt,
   so those words leave the machine too.
 - **`banshee config set stt.remote.api_key`** asks for the key by itself.

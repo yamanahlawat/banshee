@@ -43,7 +43,6 @@ fn written(key: &str, value: serde_json::Value) -> bool {
 #[test]
 fn every_config_field_has_one_row_and_every_row_a_field() {
     let mut expected = config_leaves();
-    expected.remove("audio.cues.enabled");
     expected.insert("stt.remote.api_key".into());
     expected.insert("tts.remote.api_key".into());
     let rows: std::collections::BTreeSet<String> =

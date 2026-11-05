@@ -542,18 +542,6 @@ fn waiting_or_now(waiting: Vec<String>) -> Written {
     }
 }
 
-/// The type `key`'s value is written as, or `None` for no setting. A retired
-/// key has no row and still goes to the daemon, which removes it on a null and
-/// names what replaced it otherwise.
-fn domain_of(key: &str) -> Option<banshee_common::settings::Domain> {
-    match banshee_common::settings::find(key) {
-        Some(row) => Some(row.domain),
-        None => {
-            settings::writes_without_a_row(key).then_some(banshee_common::settings::Domain::Words)
-        }
-    }
-}
-
 /// What to write, or `None` for nothing typed. The key is not coerced as TOML,
 /// because a coercion mangles a quoted token and refuses an all-digit one. An
 /// empty argument removes the key, and the prompt has no way to ask for that.
@@ -601,7 +589,9 @@ async fn config_api_key(
 }
 
 pub async fn config(key: String, value: Option<String>) -> Result<(), BansheeError> {
-    let domain = domain_of(&key).ok_or_else(|| settings::not_a_setting(&key))?;
+    let domain = banshee_common::settings::find(&key)
+        .ok_or_else(|| settings::not_a_setting(&key))?
+        .domain;
     if let Some(side) = crate::credentials::RemoteKey::of_setting(&key) {
         return config_api_key(side, key_change(value, || ask_key(side))?).await;
     }
@@ -1007,9 +997,9 @@ pub async fn clear_history() -> Result<(), BansheeError> {
 
 pub async fn record(action: args::RecordAction) -> Result<(), BansheeError> {
     let method = match action {
-        args::RecordAction::Start { .. } => banshee_common::BANSHEE_RECORD_START,
+        args::RecordAction::Start => banshee_common::BANSHEE_RECORD_START,
         args::RecordAction::Stop => banshee_common::BANSHEE_RECORD_STOP,
-        args::RecordAction::Toggle { .. } => banshee_common::BANSHEE_RECORD_TOGGLE,
+        args::RecordAction::Toggle => banshee_common::BANSHEE_RECORD_TOGGLE,
     };
     utils::call_daemon(method, serde_json::json!({})).await?;
     Ok(())

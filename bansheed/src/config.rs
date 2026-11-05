@@ -35,18 +35,6 @@ pub enum BargeInMode {
     None,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-#[serde(default, deny_unknown_fields)]
-pub struct AudioCuesConfig {
-    pub enabled: bool,
-}
-
-impl Default for AudioCuesConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
 pub use banshee_common::feedback::FeedbackMode;
 
 // `None` is a file that never chose, and `Config::feedback_mode` and
@@ -67,7 +55,6 @@ pub struct AudioConfig {
     pub barge_in: BargeInMode,
     /// Holds capture open for the daemon's life instead of for each use.
     pub keep_open: bool,
-    pub cues: AudioCuesConfig,
 }
 
 impl Default for AudioConfig {
@@ -78,7 +65,6 @@ impl Default for AudioConfig {
             hotkey_mode: HotkeyMode::Hold,
             barge_in: BargeInMode::Stop,
             keep_open: false,
-            cues: AudioCuesConfig::default(),
         }
     }
 }
@@ -273,109 +259,6 @@ fn api_key_setting(text: &str) -> &'static str {
     }
 }
 
-/// A setting this release refuses, with the way out.
-struct Retired {
-    section: &'static str,
-    /// `None` retires the whole section.
-    key: Option<&'static str>,
-    /// `Some` retires this one value, and every other value stays legal.
-    value: Option<&'static str>,
-    way_out: &'static str,
-}
-
-const RETIRED: [Retired; 5] = [
-    Retired {
-        section: "stt",
-        key: Some("preset"),
-        value: None,
-        way_out: "Banshee listens with stt.model now, parakeet-unified-en-0.6b unless you set another.",
-    },
-    Retired {
-        section: "stt",
-        key: Some("language"),
-        value: None,
-        way_out: "Banshee detects the language. For languages other than English, set stt.model to whisper-large-v3-turbo.",
-    },
-    Retired {
-        section: "tts",
-        key: Some("speed"),
-        value: None,
-        way_out: "The voice has no speaking rate now.",
-    },
-    Retired {
-        section: "tts",
-        key: Some("fallback"),
-        value: Some("system"),
-        way_out: "The system voice is gone. Set it to local or none.",
-    },
-    Retired {
-        section: "tell",
-        key: None,
-        value: None,
-        way_out: "banshee tell is gone.",
-    },
-];
-
-impl Retired {
-    fn held_by(&self, document: &toml::Table) -> bool {
-        let Some(section) = document.get(self.section) else {
-            return false;
-        };
-        let Some(key) = self.key else {
-            return true;
-        };
-        match (section.get(key), self.value) {
-            (None, _) => false,
-            (Some(_), None) => true,
-            (Some(held), Some(value)) => held.as_str() == Some(value),
-        }
-    }
-
-    fn instruction(&self) -> String {
-        let Retired {
-            section, way_out, ..
-        } = self;
-        match (self.key, self.value) {
-            (None, _) => format!("Delete the `{section}` section: {way_out}"),
-            (Some(key), None) => format!("Delete `{key}` under [{section}]: {way_out}"),
-            (Some(key), Some(value)) => {
-                format!("`{key}` under [{section}] cannot be `{value}`: {way_out}")
-            }
-        }
-    }
-
-    /// Whether `dotted` names this setting, so `config set` may remove it.
-    fn named_by(&self, dotted: &str) -> bool {
-        self.value.is_none()
-            && self
-                .key
-                .is_some_and(|key| dotted == format!("{}.{key}", self.section))
-    }
-}
-
-/// Every retired setting `text` holds, in one line, because serde stops at the
-/// first and a person would fix them one restart at a time.
-fn refuse_retired(text: &str) -> Result<(), BansheeError> {
-    // A file that is not TOML has its fault named by the parse that follows
-    let Ok(document) = text.parse::<toml::Table>() else {
-        return Ok(());
-    };
-    let held: Vec<String> = RETIRED
-        .iter()
-        .filter(|retired| retired.held_by(&document))
-        .map(Retired::instruction)
-        .collect();
-    if held.is_empty() {
-        return Ok(());
-    }
-    Err(BansheeError::Rejected(held.join(" ")))
-}
-
-/// A retired setting a null write may remove, though no field reads it.
-pub fn is_retired(dotted: &str) -> bool {
-    RETIRED.iter().any(|retired| retired.named_by(dotted))
-}
-
 fn api_key_refusal(setting: &str) -> String {
     format!("api_key does not belong in config.toml; set it with: banshee config set {setting}")
 }
@@ -557,7 +440,6 @@ impl Config {
 
     /// Parses a config document, and refuses an `api_key` in it.
     pub fn parse(text: &str) -> Result<Self, BansheeError> {
-        refuse_retired(text)?;
         let mut config: Config = toml::from_str(text).map_err(|error| {
             // toml renders a parse error with the offending line above it, so
             // the parser's own text would carry the key into stderr, the log and
@@ -577,11 +459,7 @@ impl Config {
     }
 
     pub fn feedback_mode(&self) -> FeedbackMode {
-        self.feedback.mode.unwrap_or(if self.audio.cues.enabled {
-            FeedbackMode::Both
-        } else {
-            FeedbackMode::Off
-        })
+        self.feedback.mode.unwrap_or(FeedbackMode::Both)
     }
 
     pub fn speak_problems(&self) -> bool {
@@ -662,34 +540,9 @@ mod tests {
         );
     }
 
-    // Nothing reads the audio cue file paths, so a config that names one must
-    // be refused rather than accepted and ignored.
-    #[test]
-    fn an_audio_cue_file_path_is_refused() {
-        let error = toml::from_str::<Config>("[audio.cues]\nstart = \"x.wav\"\n")
-            .expect_err("start must not parse");
-        assert!(
-            error.to_string().contains("start"),
-            "the error must name the offending key: {error}"
-        );
-    }
-
     #[test]
     fn an_absent_feedback_mode_keeps_both() {
         let config = Config::parse("").unwrap();
-        assert_eq!(config.feedback_mode(), FeedbackMode::Both);
-    }
-
-    #[test]
-    fn an_old_cue_switch_that_is_off_reads_as_none() {
-        let config = Config::parse("[audio.cues]\nenabled = false\n").unwrap();
-        assert_eq!(config.feedback_mode(), FeedbackMode::Off);
-    }
-
-    #[test]
-    fn the_feedback_mode_wins_over_the_old_cue_switch() {
-        let config =
-            Config::parse("[audio.cues]\nenabled = false\n[feedback]\nmode = \"both\"\n").unwrap();
         assert_eq!(config.feedback_mode(), FeedbackMode::Both);
     }
 
@@ -725,9 +578,9 @@ mod tests {
 
     #[test]
     fn a_parsed_config_serializes_the_resolved_mode() {
-        let config = Config::parse("[audio.cues]\nenabled = false\n").unwrap();
+        let config = Config::parse("").unwrap();
         let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["feedback"]["mode"], "none");
+        assert_eq!(json["feedback"]["mode"], "both");
     }
 
     #[test]
@@ -744,16 +597,6 @@ mod tests {
         assert!(
             error.to_string().contains("logging"),
             "the error must name the offending key: {error}"
-        );
-    }
-
-    #[test]
-    fn an_old_tell_section_is_refused_by_name() {
-        let error = Config::parse("[tell]\nagent = \"claude\"\n")
-            .expect_err("a removed section must not parse");
-        assert!(
-            error.to_string().contains("`tell`"),
-            "the error must name the offending section: {error}"
         );
     }
 
@@ -995,72 +838,17 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_speed_key_is_refused_by_name() {
-        let error = Config::parse("[tts]\nspeed = 1.2\n").expect_err("tts.speed is gone");
-        assert!(error.to_string().contains("`speed`"), "{error}");
-    }
-
-    #[test]
-    fn a_removed_preset_key_is_refused_by_name() {
-        let error =
-            Config::parse("[stt]\npreset = \"balanced\"\n").expect_err("stt.preset is gone");
-        assert!(error.to_string().contains("`preset`"), "{error}");
-    }
-
-    #[test]
-    fn a_removed_language_key_is_refused_by_name() {
-        let error = Config::parse("[stt]\nlanguage = \"en\"\n").expect_err("stt.language is gone");
-        assert!(error.to_string().contains("`language`"), "{error}");
-    }
-
-    #[test]
-    fn every_retired_setting_in_the_file_is_named_at_once() {
-        let error = Config::parse(
-            "[stt]\npreset = \"balanced\"\nlanguage = \"de\"\n\n[tts]\nspeed = 1.2\nfallback = \"system\"\n\n[tell]\nagent = \"claude\"\n",
-        )
-        .expect_err("retired settings are refused");
-        let error = error.to_string();
-        for named in ["`preset`", "`language`", "`speed`", "`system`", "`tell`"] {
-            assert!(error.contains(named), "{named} is missing from: {error}");
-        }
-        assert!(!error.contains('\n'), "{error}");
-    }
-
-    #[test]
-    fn the_language_refusal_names_detection_and_the_model_for_other_languages() {
-        let error = Config::parse("[stt]\nlanguage = \"de\"\n")
-            .expect_err("stt.language is gone")
-            .to_string();
-        assert!(error.contains("detects the language"), "{error}");
-        assert!(error.contains("whisper-large-v3-turbo"), "{error}");
-    }
-
-    #[test]
-    fn a_retired_setting_names_its_section() {
-        let error = Config::parse("[stt]\npreset = \"balanced\"\n")
-            .expect_err("stt.preset is gone")
-            .to_string();
-        assert!(error.contains("`preset` under [stt]"), "{error}");
-        assert!(error.contains("stt.model"), "{error}");
-    }
-
-    #[test]
-    fn a_fallback_other_than_system_is_not_retired() {
-        assert!(Config::parse("[tts]\nfallback = \"none\"\n").is_ok());
-    }
-
-    #[test]
-    fn a_retired_setting_on_disk_names_the_file() {
-        let dir = crate::test_support::unique_scratch("config-retired");
+    fn a_removed_setting_on_disk_names_the_file_and_the_line() {
+        let dir = crate::test_support::unique_scratch("config-removed");
         let path = dir.join("config.toml");
-        std::fs::write(&path, "[stt]\nlanguage = \"en\"\npreset = \"fast\"\n").unwrap();
+        std::fs::write(&path, "[stt]\npreset = \"fast\"\n").unwrap();
 
-        let error = super::Config::load_from(&path).expect_err("retired settings are refused");
+        let error = super::Config::load_from(&path).expect_err("stt.preset is gone");
         let _ = std::fs::remove_dir_all(&dir);
         let error = error.to_string();
         assert!(error.contains(&path.display().to_string()), "{error}");
         assert!(
-            error.contains("`language`") && error.contains("`preset`"),
+            error.contains("at line 2") && error.contains("`preset`"),
             "{error}"
         );
     }
@@ -1101,13 +889,6 @@ mod tests {
     #[test]
     fn the_default_model_is_parakeet() {
         assert_eq!(Config::default().stt.model, "parakeet-unified-en-0.6b");
-    }
-
-    #[test]
-    fn the_system_fallback_is_refused_by_name() {
-        let error =
-            Config::parse("[tts]\nfallback = \"system\"\n").expect_err("the system voice is gone");
-        assert!(error.to_string().contains("`system`"), "{error}");
     }
 
     #[test]
