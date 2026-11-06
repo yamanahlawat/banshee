@@ -624,8 +624,6 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         return *response;
     }
 
-    let clean_question = sanitize(question);
-
     // Dropping this call is how a waiting question leaves the line. Armed
     // before the question plays, so a press while Banshee talks holds to
     // answer rather than dictates.
@@ -634,7 +632,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         Err(pipeline) => {
             let refusal = *not_recording(params.id(), &pipeline)
                 .expect("arm_in_turn gives back only a pipeline that is not open");
-            return unasked(daemon_state, &clean_question, refusal);
+            return unasked(daemon_state, question, refusal);
         }
     };
 
@@ -646,6 +644,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         session,
     };
 
+    let clean_question = sanitize(question);
     // Queued behind what is already said. Every line after it waits for the
     // disarm that ends the session.
     let asked = match daemon_state.speech().speak_and_hold(&clean_question) {
@@ -656,7 +655,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
                 rpc_code::INTERNAL,
                 format!("Failed to speak question: {e}"),
             );
-            return unasked(daemon_state, &clean_question, refusal);
+            return unasked(daemon_state, question, refusal);
         }
     };
 
@@ -677,7 +676,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
                 rpc_code::INTERNAL,
                 "The question was not spoken.",
             );
-            return unasked(daemon_state, &clean_question, refusal);
+            return unasked(daemon_state, question, refusal);
         }
         Asked::Stalled => {
             daemon_state.speech().stop();
@@ -686,14 +685,14 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
                 rpc_code::INTERNAL,
                 "Question playback did not finish.",
             );
-            return unasked(daemon_state, &clean_question, refusal);
+            return unasked(daemon_state, question, refusal);
         }
     }
 
     let (reply, answer) = tokio::sync::oneshot::channel();
     let command = ConsumerCommand::Ask(AskCommand {
         reply,
-        question: clean_question.clone(),
+        question: question.to_string(),
         timeout: Duration::from_millis(timeout_ms),
         session,
     });
@@ -703,7 +702,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
             rpc_code::INTERNAL,
             "Audio pipeline is not running.",
         );
-        return unasked(daemon_state, &clean_question, refusal);
+        return unasked(daemon_state, question, refusal);
     }
 
     match answer.await {

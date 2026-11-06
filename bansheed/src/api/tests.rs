@@ -2380,6 +2380,54 @@ async fn a_question_that_cannot_be_asked_is_kept_as_unasked() {
 }
 
 #[tokio::test]
+async fn an_unasked_question_keeps_the_words_the_agent_sent() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_mic(crate::state::Mic::Starting);
+    dispatch(
+        request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "Run `rm -rf /` now?"})),
+        ),
+        &state,
+    )
+    .await;
+    let rows = state.history(None, None).unwrap();
+    assert_eq!(rows[0].question.as_deref(), Some("Run `rm -rf /` now?"));
+}
+
+#[tokio::test]
+async fn a_question_is_spoken_clean_and_reaches_the_listener_as_sent() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let crate::test_support::HoldingSpeech { state, spoken, .. } =
+        crate::test_support::daemon_state_holding_speech(
+            std::time::Duration::from_millis(10),
+            commands,
+        );
+    let (heard, question) = std::sync::mpsc::channel();
+
+    let session_state = Arc::clone(&state);
+    std::thread::spawn(move || {
+        let Ok(ConsumerCommand::Ask(ask)) = command_receiver.recv() else {
+            return;
+        };
+        let _ = heard.send(ask.question.clone());
+        session_state.set_recording_mode(RecordingMode::Idle);
+        let _ = ask.reply.send(Ok("no".to_string()));
+    });
+
+    dispatch(
+        request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "Run `rm -rf /` now?"})),
+        ),
+        &state,
+    )
+    .await;
+    assert_eq!(question.recv().unwrap(), "Run `rm -rf /` now?");
+    assert_eq!(*spoken.lock().unwrap(), ["Run now?"]);
+}
+
+#[tokio::test]
 async fn a_question_refused_before_the_pipeline_stands_still_counts() {
     let state = test_state(std::sync::mpsc::channel().0);
     state.set_mic(crate::state::Mic::Starting);
