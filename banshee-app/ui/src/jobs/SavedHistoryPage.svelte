@@ -2,7 +2,7 @@
   import { getContext } from 'svelte';
   import { land } from '../lib/focus';
   import { forget, formatCount, table } from '../lib/history';
-  import { PANEL, type PanelFocus } from './panel';
+  import { PAGE, type PageFocus } from '../bands/page';
   import { clearHistory } from '../lib/tauri';
   import { announce, report } from '../lib/copy';
   import SaveSwitch from '../controls/SaveSwitch.svelte';
@@ -14,7 +14,7 @@
   export let saving: boolean;
   $: total = $table.total;
 
-  const panel = getContext<PanelFocus>(PANEL);
+  const page = getContext<PageFocus>(PAGE);
 
   let keep: HTMLButtonElement;
   let clearer: HTMLButtonElement;
@@ -43,8 +43,8 @@
     try {
       await clearHistory();
       forget();
-      // A delete that works takes Clear with it, so the panel says where next.
-      panel?.refocus();
+      // A delete that works takes Clear with it, so the page says where next.
+      page?.refocus();
       announce('History cleared.');
     } catch {
       report('The record could not be cleared. Nothing was deleted.');
@@ -57,7 +57,7 @@
   {#if confirming}
     <!-- On one line with the buttons this wraps at 480 and drops the
          destructive control alone at the gutter, which is the strongest
-         reading position in the panel. -->
+         reading position on the page. -->
     <p class="warn">Delete all {formatCount(total)}? This cannot be undone.</p>
     <div class="actions">
       <button bind:this={keep} class="btn" on:click={() => show(false, () => clearer)}>

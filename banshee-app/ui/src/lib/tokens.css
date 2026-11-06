@@ -60,6 +60,10 @@
 
   --gutter: 20px;
 
+  --hilite: #dcd6cd;
+  --radius: 7px;
+  --radius-row: 9px;
+
   color-scheme: light;
 }
 
@@ -72,6 +76,7 @@
     --rule: rgba(242, 239, 233, 0.16);
     /* 6.28:1 on the dark ground. */
     --dim: #999896;
+    --hilite: #3a3f47;
     /* Without this the platform draws every select popup, scrollbar and
        caret in light chrome under a dark window. */
     color-scheme: dark;
@@ -109,7 +114,6 @@ body {
    good: a dictated URL, a package name, a path. Every class that holds text
    Banshee did not author needs this, in one rule, because four copies are four
    chances to drop one. */
-.turn .text,
 .absence .label,
 .absence .detail,
 .note {
@@ -127,7 +131,7 @@ body {
   line-height: 1.45;
 }
 
-/* Both panels stand this at their group's own left edge, so it reads as the
+/* Both pages stand this at their group's own left edge, so it reads as the
    group's failure and not as a note on whichever sub-row it follows. The
    group's own 8px flex gap adds to the margin. A pending line shares its
    colour and its size, so the weight is what tells a problem from a receipt. */
@@ -213,21 +217,13 @@ body {
   background: var(--dim);
 }
 
-/* A turn and a pending turn share this. Each held its own copy, which is how
-   two rows that must line up come to drift. */
-.turn {
-  display: grid;
-  grid-template-columns: 52px 1fr;
-  column-gap: 12px;
-  padding: 0 var(--gutter);
-  margin-bottom: 20px;
-}
-
-.turn .time {
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--accent);
-  padding-top: 3px;
+/* A line glyph drawn in the text colour of the control that holds it. */
+.icon {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .mono {
@@ -236,11 +232,10 @@ body {
   font-feature-settings: 'tnum' 1;
 }
 
-/* The type role, which names no colour. Half the controls that take it are ink
-   and half are accent, so the colour is the caller's line and this is the other
-   five. */
-.caps,
-.btn {
+/* The legend type role, which names no colour. Half the controls that take it
+   are ink and half are accent, so the colour is the caller's line and this is
+   the other five. */
+.caps {
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 500;
@@ -262,7 +257,7 @@ body {
 
 /* Native where the platform has one, so keyboard and VoiceOver come for free. */
 
-/* The native filled track paints a third of the panel in the accent. */
+/* The native filled track paints a third of the page in the accent. */
 .range {
   -webkit-appearance: none;
   appearance: none;
@@ -314,8 +309,11 @@ body {
   color: var(--ground);
   background: var(--ink);
   border: 1px solid var(--ink);
-  border-radius: 0;
-  padding: 8px 14px;
+  border-radius: var(--radius);
+  padding: 7px 14px;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
 }
 
@@ -383,6 +381,7 @@ body {
   font-size: 11px;
   color: var(--ink);
   border: 1px solid var(--rule);
+  border-radius: var(--radius);
 }
 
 .chip button {

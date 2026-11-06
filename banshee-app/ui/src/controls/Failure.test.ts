@@ -14,7 +14,7 @@ function failure(said: string) {
   });
 }
 
-// A panel keeps one id for its failure row, so the confirmation has to follow
+// A page keeps one id for its failure row, so the confirmation has to follow
 // the text. A second failure inside the held 1500 ms would otherwise leave
 // Copied standing over words nobody copied.
 it('drops the confirmation when the failure text changes', async () => {

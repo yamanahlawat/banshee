@@ -179,7 +179,7 @@
          refuses a second one while the first holds the slot. A run that ends
          having failed clears this box and returns the blocker, whose own
          Download is the way back. No disabled button either: the heading and
-         the header both carry the state, and nobody can press it. -->
+         the sidebar both carry the state, and nobody can press it. -->
     <span class="sr">Downloading</span>
     <!-- The daemon reports each percent, and a live region reads every change
          it is given, so what is said aloud steps in quarters instead. -->

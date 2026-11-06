@@ -22,8 +22,7 @@
   // A write refused after a newer one landed skips its rollback.
   let generation = 0;
 
-  // Typing owns the keyboard: otherwise Escape closes the panel and Cmd+F opens
-  // Find mid-word.
+  // Typing owns the keyboard: otherwise Cmd+F opens Find mid-word.
   function take() {
     release ??= claimKeys();
   }
@@ -90,16 +89,17 @@
       'wght' 500,
       'wdth' 100;
     font-size: 15px;
-    border-bottom: 1px solid var(--ink);
-    border-radius: 0;
-    padding: 6px 0;
+    background: transparent;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    padding: 6px 9px;
     margin: 0;
   }
 
   /* A dashed accent line is what this world draws around a thing that is not
-     there, and an underline is the form of it a control can carry. */
+     there. */
   .dashed {
-    border-bottom-style: dashed;
-    border-bottom-color: var(--accent);
+    border-style: dashed;
+    border-color: var(--accent);
   }
 </style>

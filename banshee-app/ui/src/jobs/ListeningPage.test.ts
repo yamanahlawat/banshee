@@ -34,7 +34,7 @@ import {
 import { forgetTheAsk } from '../lib/downloads';
 import { table } from '../lib/settings';
 import { commonTable, tableWith } from '../lib/tauri.mock';
-import MicrophonePanel from './MicrophonePanel.svelte';
+import ListeningPage from './ListeningPage.svelte';
 
 // The daemon's own reply under a remote listener, so each test states only what
 // it changes.
@@ -141,10 +141,10 @@ function listenerGroup(): HTMLElement {
   return screen.getByRole('radiogroup', { name: 'Listening' }).closest('.row') as HTMLElement;
 }
 
-// The panel reads the platform from the user agent, which jsdom names as neither.
+// The page reads the platform from the user agent, which jsdom names as neither.
 const agent = vi.spyOn(navigator, 'userAgent', 'get');
 
-// The panel reads the hardware as it mounts.
+// The page reads the hardware as it mounts.
 beforeEach(() => {
   table.set(commonTable);
   agent.mockReset();
@@ -159,7 +159,7 @@ beforeEach(() => {
 
 it('offers the listening models under a local listener and hides them under a remote one', () => {
   daemon.set(reduceStatus(empty(), localStatus));
-  const local = render(MicrophonePanel);
+  const local = render(ListeningPage);
   expect(local.queryByRole('radiogroup', { name: 'Listening model' })).not.toBeNull();
   local.unmount();
 
@@ -178,7 +178,7 @@ it('offers the listening models under a local listener and hides them under a re
       ),
     ),
   );
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(screen.queryByRole('radiogroup', { name: 'Listening model' })).toBeNull();
   expect((screen.getByRole('textbox', { name: 'Server' }) as HTMLInputElement).value).toBe(
     'https://api.groq.com/openai/v1',
@@ -190,7 +190,7 @@ it('offers the listening models under a local listener and hides them under a re
 
 it('lists Parakeet Unified first, then Whisper turbo, then the downloaded models', () => {
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   const group = screen.getByRole('radiogroup', { name: 'Listening model' });
   const labels = [...group.querySelectorAll('label')].map((one) => one.textContent?.trim());
   expect(labels).toEqual([
@@ -206,7 +206,7 @@ it('lists Parakeet Unified first, then Whisper turbo, then the downloaded models
 it('gives each model its size, its languages and, on macOS, whether words show as you speak', () => {
   agent.mockReturnValue('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15');
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(modelRow('Parakeet Unified').textContent).toContain(
     '731 MB. English. Shows words as you speak.',
   );
@@ -220,14 +220,14 @@ it('gives each model its size, its languages and, on macOS, whether words show a
 it('leaves live words unsaid off macOS', () => {
   agent.mockReturnValue('Mozilla/5.0 (X11; Linux x86_64)');
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(modelRow('Parakeet Unified').textContent).toContain('731 MB. English.');
   expect(screen.queryByText(/Shows words/)).toBeNull();
 });
 
 it('credits Parakeet, and opens its licence', async () => {
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   const parakeet = modelRow('Parakeet Unified');
   expect(parakeet.textContent).toContain(
     'Parakeet Unified by NVIDIA. Licensed by NVIDIA Corporation under the NVIDIA Open Model License.',
@@ -242,14 +242,14 @@ it('credits Parakeet, and opens its licence', async () => {
 
 it('shows no Language row', () => {
   daemon.set(reduceStatus(empty(), { ...localStatus, stt_translates: true }));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(screen.queryByRole('combobox', { name: 'Language' })).toBeNull();
   expect(screen.queryByText('Language')).toBeNull();
 });
 
 it('asks what to write it in only for a listener that translates', async () => {
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(screen.queryByRole('radiogroup', { name: 'Write it in' })).toBeNull();
 
   daemon.set(reduceStatus(empty(), { ...localStatus, stt_translates: true }));
@@ -260,7 +260,7 @@ it('asks what to write it in only for a listener that translates', async () => {
 
 it('writes the model chosen, and offers its download with its size', async () => {
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
 
   await fireEvent.click(screen.getByRole('radio', { name: /^Whisper turbo/ }));
@@ -275,7 +275,7 @@ it('writes the model chosen, and offers its download with its size', async () =>
 
 it('offers nothing while the chosen model is here', () => {
   daemon.set(reduceStatus(empty(), { ...localStatus, missing_downloads: [] }));
-  const { container } = render(MicrophonePanel);
+  const { container } = render(ListeningPage);
   expect(container.querySelector('.note.pending')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
 });
@@ -284,7 +284,7 @@ it('offers nothing while the chosen model is here', () => {
 // licence and the command that accepts it.
 it('names the licence a chosen model waits on, and the command that accepts it', async () => {
   daemon.set(reduceStatus(empty(), choosing(CANARY, [PARAKEET, TURBO, CANARY])));
-  render(MicrophonePanel);
+  render(ListeningPage);
 
   expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
   expect(
@@ -315,7 +315,7 @@ it('offers one licence button for a model whose licence waits', () => {
     accept_command: 'banshee setup --model moonshine-tiny-ja --accept-licence',
   };
   daemon.set(reduceStatus(empty(), choosing(moonshine, [PARAKEET, TURBO, moonshine])));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(screen.getByText(/Powered by Moonshine AI/)).toBeTruthy();
   expect(
     screen.getAllByRole('button', { name: 'Read the licence for moonshine-tiny-ja' }),
@@ -328,7 +328,7 @@ it('says where to read a licence the window could not open', async () => {
   });
   report('');
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   await fireEvent.click(
     screen.getByRole('button', { name: 'Read the licence for Parakeet Unified' }),
   );
@@ -339,14 +339,14 @@ it('says where to read a licence the window could not open', async () => {
 
 it('draws no model list while the daemon has none to offer', () => {
   daemon.set(reduceStatus(empty(), { ...localStatus, running: false, stt_models: undefined }));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(screen.queryByRole('radiogroup', { name: 'Listening model' })).toBeNull();
 });
 
 it('puts the mark back on the model in force when the daemon refuses a choice', async () => {
   vi.mocked(setSetting).mockRejectedValue({ message: 'no' });
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   const turbo = screen.getByRole('radio', { name: /^Whisper turbo/ }) as HTMLInputElement;
   await fireEvent.click(turbo);
   await waitFor(() =>
@@ -367,14 +367,14 @@ it('says nothing about the model when only a voice is missing', () => {
       missing_downloads: [{ name: 'bf_emma.bin', role: 'voice' as const, megabytes: 1 }],
     }),
   );
-  const { container } = render(MicrophonePanel);
+  const { container } = render(ListeningPage);
   expect(container.querySelector('.note.pending')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
 });
 
 it('says the remote server is set but not in use yet', () => {
   daemon.set(reduceStatus(empty(), { ...remoteStatus, pending: ['stt.remote.base_url'] }));
-  const { container } = render(MicrophonePanel);
+  const { container } = render(ListeningPage);
   const pending = container.querySelectorAll('.note.pending');
   expect(pending).toHaveLength(1);
   expect(pending[0].textContent).toBe(WAITING_SAYS);
@@ -382,7 +382,7 @@ it('says the remote server is set but not in use yet', () => {
 
 it('holds the server, the model and the key inside the listener group', () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   const group = listenerGroup();
   for (const name of ['Server', 'Model']) {
     expect(group.contains(screen.getByRole('textbox', { name }))).toBe(true);
@@ -395,7 +395,7 @@ it('holds the server, the model and the key inside the listener group', () => {
 // forms rather than one.
 it('says a key is set, and never the key', () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(screen.getByText('A key is set')).toBeTruthy();
   expect(keyField()).toBeNull();
   expect(screen.getByRole('button', { name: 'Remove the key' })).toBeTruthy();
@@ -415,7 +415,7 @@ it('draws the key as missing when the daemon holds none', () => {
       ),
     ),
   );
-  render(MicrophonePanel);
+  render(ListeningPage);
   const key = keyField() as HTMLInputElement;
   expect(key.placeholder).toBe('Paste a key');
   expect(key.value).toBe('');
@@ -427,7 +427,7 @@ it('draws the key as missing when the daemon holds none', () => {
 
 it('swaps a field in to replace the key, and takes the line back when it commits', async () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   await fireEvent.click(screen.getByRole('button', { name: 'Replace the key' }));
 
   const key = (await waitFor(() => keyField())) as HTMLInputElement;
@@ -444,10 +444,10 @@ it('swaps a field in to replace the key, and takes the line back when it commits
 
 // `copy.test.ts` pins each sentence over the pure function. This asks the one
 // thing only a render answers: that the group is read with the note the facts
-// the panel holds produce.
+// the page holds produce.
 it('describes the choice by the sentence that says where audio goes', () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   const described = screen
     .getByRole('radiogroup', { name: 'Listening' })
     .getAttribute('aria-describedby');
@@ -460,13 +460,13 @@ it('describes the choice by the sentence that says where audio goes', () => {
 // claim audio goes anywhere.
 it('says nothing is heard while the daemon is down', () => {
   daemon.set(reduceStatus(empty(), { ...remoteStatus, running: false }));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(screen.getByText('Nothing is heard until Banshee starts.')).toBeTruthy();
 });
 
 it('removes a stored key from the window and says so', async () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   await fireEvent.click(screen.getByRole('button', { name: 'Remove the key' }));
   await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('stt.remote.api_key', ''));
   await waitFor(() => expect(get(announcement)).toBe('The key is removed.'));
@@ -476,7 +476,7 @@ it('removes a stored key from the window and says so', async () => {
 // layout is the smaller half of what changed: the audio now leaves the machine.
 it('announces where audio goes at the flip, and nothing on arrival', async () => {
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(get(announcement)).toBe('');
 
   daemon.set(reduceStatus(empty(), remoteStatus));
@@ -489,7 +489,7 @@ it('announces where audio goes at the flip, and nothing on arrival', async () =>
 
 it('announces the way back, and what it leaves below', async () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
 
   daemon.set(reduceStatus(empty(), localStatus));
   await waitFor(() =>
@@ -501,7 +501,7 @@ it('announces the way back, and what it leaves below', async () => {
 
 it('agrees with the count when the quiet is one second', () => {
   daemon.set(reduceStatus(empty(), withStt({ endpoint_silence_ms: 1000 }, undefined)));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(screen.getByRole('option', { name: 'After 1 second of quiet' })).toBeTruthy();
   expect(screen.getByRole('option', { name: 'After 2.5 seconds of quiet' })).toBeTruthy();
 });
@@ -513,7 +513,7 @@ it('names the last failure inside the group that caused it', () => {
       last_error: 'the remote listener refused the key',
     }),
   );
-  render(MicrophonePanel);
+  render(ListeningPage);
   const failure = screen.getByText(/refused the key/);
   expect(listenerGroup().contains(failure)).toBe(true);
   // A live region on an element that arrives with its own content is not
@@ -528,7 +528,7 @@ it('reads the group with the failure standing under it', () => {
       last_error: 'the remote listener refused the key',
     }),
   );
-  render(MicrophonePanel);
+  render(ListeningPage);
   const described = screen
     .getByRole('radiogroup', { name: 'Listening' })
     .getAttribute('aria-describedby');
@@ -540,7 +540,7 @@ it('reads the group with the failure standing under it', () => {
 
 it('puts the key under the server it opens', () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   const names = [...listenerGroup().querySelectorAll('.sub')].map((name) => name.textContent);
   expect(names).toEqual(['server', 'key', 'model']);
 });
@@ -549,14 +549,14 @@ it('puts the key under the server it opens', () => {
 // on disk raises no blocker at all.
 it('offers the fetch while the daemon is working and nothing is blocked', () => {
   daemon.set(reduceStatus(empty(), { ...choosing(TURBO), ready: true, blockers: [] }));
-  render(MicrophonePanel);
+  render(ListeningPage);
   expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy();
 });
 
 it('sends one download however fast the button is pressed', async () => {
   vi.mocked(downloadModels).mockResolvedValue(undefined);
   daemon.set(reduceStatus(empty(), choosing(TURBO)));
-  render(MicrophonePanel);
+  render(ListeningPage);
 
   const fetch = screen.getByRole('button', { name: 'Download' });
   await fireEvent.click(fetch);
@@ -570,7 +570,7 @@ it('sends one download however fast the button is pressed', async () => {
 // uses, so a push that moves only the open flag lists nothing again.
 it('lists the devices once, however often the microphone opens and closes', async () => {
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   await waitFor(() => expect(vi.mocked(listDevices)).toHaveBeenCalledTimes(1));
 
   // Each push lands in a tick of its own, as the daemon's pushes do.
@@ -588,7 +588,7 @@ it('lists the devices once, however often the microphone opens and closes', asyn
 
 it('keeps the microphone and memory settings under More, closed until asked', async () => {
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   const more = screen.getByRole('button', { name: 'More listening settings' });
   expect(more.textContent?.trim()).toBe('More');
   expect(more.getAttribute('aria-expanded')).toBe('false');
@@ -602,7 +602,7 @@ it('keeps the microphone and memory settings under More, closed until asked', as
 
 it('offers the microphone held open, off by default, and says what each choice does', async () => {
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   await fireEvent.click(screen.getByRole('button', { name: 'More listening settings' }));
 
   const group = screen.getByRole('radiogroup', { name: 'Microphone' });
@@ -636,7 +636,7 @@ it('offers the microphone held open, off by default, and says what each choice d
 
 it('offers Never and the idle times Handy offers for freeing memory', async () => {
   daemon.set(reduceStatus(empty(), localStatus));
-  render(MicrophonePanel);
+  render(ListeningPage);
   await fireEvent.click(screen.getByRole('button', { name: 'More listening settings' }));
 
   const picker = screen.getByRole('combobox', { name: 'Free memory' }) as HTMLSelectElement;
@@ -666,7 +666,7 @@ it('keeps a hand-edited idle time among the choices', async () => {
       config: { ...localStatus.config, models: { unload_after: 30 } },
     }),
   );
-  render(MicrophonePanel);
+  render(ListeningPage);
   await fireEvent.click(screen.getByRole('button', { name: 'More listening settings' }));
 
   const picker = screen.getByRole('combobox', { name: 'Free memory' }) as HTMLSelectElement;
@@ -677,7 +677,7 @@ it('keeps a hand-edited idle time among the choices', async () => {
 it('shows the quiet length the table states when the daemon sends none', () => {
   table.set(tableWith('stt.endpoint_silence_ms', { default: '1500' }));
   daemon.set(reduceStatus(empty(), withStt({ endpoint_silence_ms: undefined }, undefined)));
-  render(MicrophonePanel);
+  render(ListeningPage);
   const shown = screen.getByRole('option', { name: 'After 1.5 seconds of quiet' });
   expect((shown as HTMLOptionElement).selected).toBe(true);
 });

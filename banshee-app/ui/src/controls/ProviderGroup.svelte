@@ -1,5 +1,5 @@
 <script lang="ts">
-  // One decision with dependents, so one group. Both panels use it, so the
+  // One decision with dependents, so one group. Both pages use it, so the
   // listener and the speaker cannot drift apart in shape or in wording.
   import Row from './Row.svelte';
   import Segmented from './Segmented.svelte';
@@ -38,7 +38,7 @@
     padding-top: 6px;
   }
 
-  /* A panel that opens on the group has no row above, and the space would move
+  /* A page that opens on the group has no row above, and the space would move
      its first label. */
   .apart:first-child {
     padding-top: 0;

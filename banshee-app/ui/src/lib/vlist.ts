@@ -17,8 +17,7 @@ export function plan(
   const heights: number[] = [];
   let total = 0;
   for (let i = 0; i < count; i++) {
-    const h = heightAt(i) ?? estimate;
-    heights.push(h > 0 ? h : estimate);
+    heights.push(heightOf(heightAt, estimate, i));
     total += heights[i];
   }
   let start = 0;
@@ -40,4 +39,61 @@ export function plan(
   let shown = 0;
   for (let i = start; i < end; i++) shown += heights[i];
   return { start, end, top, bottom: Math.max(0, total - top - shown) };
+}
+
+function heightOf(heightAt: (index: number) => number | null, estimate: number, i: number): number {
+  const h = heightAt(i) ?? estimate;
+  return h > 0 ? h : estimate;
+}
+
+/// The height of the rows from `from` up to `to`, with the estimate standing in
+/// for any not yet measured.
+export function span(
+  heightAt: (index: number) => number | null,
+  estimate: number,
+  from: number,
+  to: number,
+): number {
+  let sum = 0;
+  for (let i = from; i < to; i++) sum += heightOf(heightAt, estimate, i);
+  return sum;
+}
+
+export type Segment = { spacer: number } | { rows: [start: number, end: number] };
+
+// The window as the parts a list mounts. A kept index outside it, such as the
+// focused row scrolled out of view, mounts at its true place between spacers.
+export function segments(
+  win: Window,
+  kept: number | null,
+  count: number,
+  heightAt: (index: number) => number | null,
+  estimate: number,
+): Segment[] {
+  const sum = (from: number, to: number) => span(heightAt, estimate, from, to);
+  const parts: Segment[] = [];
+  const spacer = (height: number) => {
+    if (height > 0) parts.push({ spacer: height });
+  };
+  const mounted = (start: number, end: number): Segment => ({ rows: [start, end] });
+  const outside =
+    kept !== null && kept >= 0 && kept < count && (kept < win.start || kept >= win.end);
+  if (!outside) {
+    spacer(win.top);
+    parts.push(mounted(win.start, win.end));
+    spacer(win.bottom);
+  } else if (kept < win.start) {
+    spacer(sum(0, kept));
+    parts.push(mounted(kept, kept + 1));
+    spacer(sum(kept + 1, win.start));
+    parts.push(mounted(win.start, win.end));
+    spacer(win.bottom);
+  } else {
+    spacer(win.top);
+    parts.push(mounted(win.start, win.end));
+    spacer(sum(win.end, kept));
+    parts.push(mounted(kept, kept + 1));
+    spacer(sum(kept + 1, count));
+  }
+  return parts;
 }

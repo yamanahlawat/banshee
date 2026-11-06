@@ -5,7 +5,7 @@ vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTaur
 
 import { applyConnect, detectAgents, planConnect, type AgentRow } from '../lib/tauri';
 import { agents } from '../lib/agents';
-import AgentsPanel from './AgentsPanel.svelte';
+import AgentsPage from './AgentsPage.svelte';
 
 const CLAUDE: AgentRow = {
   id: 'claude',
@@ -22,11 +22,11 @@ beforeEach(() => {
 });
 
 // A read that failed is not a machine with no agents. Left saying it is still
-// looking, the panel reports a green check the daemon never gave, and this
+// looking, the page reports a green check the daemon never gave, and this
 // audience has no terminal to fall back to.
 it('says the list could not be read, and offers to read it again', async () => {
   vi.mocked(detectAgents).mockRejectedValueOnce(new Error('no daemon'));
-  const { getByRole, getByText, queryByText } = render(AgentsPanel);
+  const { getByRole, getByText, queryByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText(/could not read which agents/i)).toBeTruthy());
   expect(queryByText(/Looking for agents/)).toBeNull();
@@ -41,19 +41,19 @@ it('says the list could not be read, and offers to read it again', async () => {
 // An empty list after a read that landed is a real answer, and a different one.
 it('says the machine has no agents once a read has landed', async () => {
   vi.mocked(detectAgents).mockResolvedValueOnce([]);
-  const { getByText, queryByText } = render(AgentsPanel);
+  const { getByText, queryByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText(/No coding agent is installed/i)).toBeTruthy());
   expect(queryByText(/Looking for agents/)).toBeNull();
 });
 
-// The write landed, so the panel may not report a failure. Only the list it
+// The write landed, so the page may not report a failure. Only the list it
 // draws is doubtful, and it says which of the two happened.
 it('states that the agent connected when the list cannot be read afterwards', async () => {
   vi.mocked(detectAgents).mockResolvedValueOnce([CLAUDE]);
   vi.mocked(planConnect).mockResolvedValue([{ path: '~/.claude.json', diff: '+ banshee' }]);
   vi.mocked(applyConnect).mockResolvedValue(null);
-  const { getByRole, getByText } = render(AgentsPanel);
+  const { getByRole, getByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText('Claude Code')).toBeTruthy());
   await fireEvent.click(getByRole('button', { name: 'Connect' }));
@@ -73,7 +73,7 @@ const CONNECTED: AgentRow = { ...CLAUDE, presence: 'connected', note: '' };
 it('moves focus into the review when the plan opens', async () => {
   vi.mocked(detectAgents).mockResolvedValueOnce([CLAUDE]);
   vi.mocked(planConnect).mockResolvedValue([{ path: '~/.claude.json', diff: '+ banshee' }]);
-  const { getByRole, getByText } = render(AgentsPanel);
+  const { getByRole, getByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText('Claude Code')).toBeTruthy());
   await fireEvent.click(getByRole('button', { name: 'Connect' }));
@@ -84,7 +84,7 @@ it('moves focus into the review when the plan opens', async () => {
 it('puts focus back on the connect button the cancel came from', async () => {
   vi.mocked(detectAgents).mockResolvedValueOnce([CLAUDE]);
   vi.mocked(planConnect).mockResolvedValue([{ path: '~/.claude.json', diff: '+ banshee' }]);
-  const { getByRole, getByText } = render(AgentsPanel);
+  const { getByRole, getByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText('Claude Code')).toBeTruthy());
   await fireEvent.click(getByRole('button', { name: 'Connect' }));
@@ -101,7 +101,7 @@ it('moves focus onto the row an apply just changed', async () => {
   vi.mocked(detectAgents).mockResolvedValueOnce([CLAUDE]);
   vi.mocked(planConnect).mockResolvedValue([{ path: '~/.claude.json', diff: '+ banshee' }]);
   vi.mocked(applyConnect).mockResolvedValue(null);
-  const { getByRole, getByText } = render(AgentsPanel);
+  const { getByRole, getByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText('Claude Code')).toBeTruthy());
   await fireEvent.click(getByRole('button', { name: 'Connect' }));
@@ -111,7 +111,7 @@ it('moves focus onto the row an apply just changed', async () => {
   await fireEvent.click(getByRole('button', { name: 'Apply' }));
 
   await waitFor(() => expect(getByText('Connected')).toBeTruthy());
-  // `body` holds the whole panel, so its text matches anything: name the node.
+  // `body` holds the whole page, so its text matches anything: name the node.
   const landed = document.activeElement as HTMLElement;
   expect(landed).not.toBe(document.body);
   expect(landed.classList.contains('agent')).toBe(true);
@@ -133,7 +133,7 @@ it('shows what is left to do after a connect that needs a step', async () => {
     .mockResolvedValueOnce([{ ...CODEX, presence: 'connected', note: 'Connected' }]);
   vi.mocked(planConnect).mockResolvedValue([{ path: '~/.codex/hooks.json', diff: '+ turn-end' }]);
   vi.mocked(applyConnect).mockResolvedValue(TRUST);
-  const { getByRole, getByText } = render(AgentsPanel);
+  const { getByRole, getByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText('Codex')).toBeTruthy());
   await fireEvent.click(getByRole('button', { name: /Connect/ }));
@@ -147,7 +147,7 @@ it('shows no step after a connect that failed', async () => {
   vi.mocked(detectAgents).mockResolvedValue([CODEX]);
   vi.mocked(planConnect).mockResolvedValue([{ path: '~/.codex/hooks.json', diff: '+ turn-end' }]);
   vi.mocked(applyConnect).mockRejectedValue(new Error('config.toml changed after the plan'));
-  const { getByRole, getByText, queryByText } = render(AgentsPanel);
+  const { getByRole, getByText, queryByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText('Codex')).toBeTruthy());
   await fireEvent.click(getByRole('button', { name: /Connect/ }));
@@ -166,7 +166,7 @@ it('drops the step when a later connect fails', async () => {
   vi.mocked(applyConnect)
     .mockResolvedValueOnce(TRUST)
     .mockRejectedValueOnce(new Error('config.toml changed after the plan'));
-  const { getByRole, getByText, queryByText } = render(AgentsPanel);
+  const { getByRole, getByText, queryByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText('Codex')).toBeTruthy());
   await fireEvent.click(getByRole('button', { name: /Connect/ }));
@@ -189,7 +189,7 @@ it('lets the keyboard reach each change in the review by its name', async () => 
     { path: '~/.codex/hooks.json', diff: '+ turn-end' },
     { path: null, diff: '$ codex mcp add banshee' },
   ]);
-  const { getByRole, getByText } = render(AgentsPanel);
+  const { getByRole, getByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText('Codex')).toBeTruthy());
   await fireEvent.click(getByRole('button', { name: /Connect/ }));
@@ -215,7 +215,7 @@ it("marks a new file beside its path and drops both diff's headers", async () =>
   };
   vi.mocked(detectAgents).mockResolvedValueOnce([CODEX]);
   vi.mocked(planConnect).mockResolvedValue([created, changed]);
-  const { getByRole, getByText, queryByText } = render(AgentsPanel);
+  const { getByRole, getByText, queryByText } = render(AgentsPage);
 
   await waitFor(() => expect(getByText('Codex')).toBeTruthy());
   await fireEvent.click(getByRole('button', { name: /Connect/ }));

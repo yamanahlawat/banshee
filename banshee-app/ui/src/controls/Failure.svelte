@@ -5,7 +5,7 @@
   export let label: string;
   export let said: string;
 
-  /// The panel keeps one `id` for its failure row, so a second failure arriving
+  /// The page keeps one `id` for its failure row, so a second failure arriving
   /// inside the held confirmation would leave Copied over text nobody copied.
   $: copyId = `${id}:${said}`;
 </script>
