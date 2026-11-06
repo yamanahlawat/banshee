@@ -77,7 +77,11 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 ## Listening and speaking
 
 - A dictated password lands in History in plain text, since History stores every dictation
-  before it is typed (`store` in `Pipeline::deliver`, `bansheed/src/hotkey.rs`).
+  before it is typed (`keep` in `Pipeline::deliver`, `bansheed/src/hotkey.rs`).
+- `sanitize` may not be needed for speech. Both tools tell agents to use spoken names, not paths
+  or code. It changed none of 276 questions and 952 updates in this repo's Claude Code sessions,
+  3 October to 6 November 2026. Codex, Pi and other projects are not measured. History keeps
+  each question as sent, so its rows can settle this for questions. Updates are not kept.
 - `BANSHEE_LOG=debug` writes every transcription to the log, a dictated password included
   (the `Transcription:` and `Dictating:` debug lines in `Pipeline::deliver`).
 - Any process running as the user can start a recording through the daemon's socket, and can

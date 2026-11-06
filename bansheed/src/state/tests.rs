@@ -87,21 +87,24 @@ fn a_model_change_with_no_listener_is_not_reported_as_taken() {
     assert!(!state.load_stt_model(turbo()));
 }
 
-// The off direction alone would pass a `set_history` that always stores
-// nothing, so this asks whether a reopened file is reached.
 #[test]
-fn history_turned_back_on_is_written_to_again() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    assert!(!state.history_enabled(), "this state starts with none");
+fn keeping_a_row_moves_the_counter_and_off_keeps_nothing() {
+    let on = crate::test_support::daemon_state_with_history(&[]);
+    let changes = on.subscribe_history_changes();
+    let before = *changes.borrow();
+    on.keep(&crate::history::NewEntry::dictation("kept"));
+    assert_eq!(*changes.borrow(), before + 1);
+    assert_eq!(on.history(None, None).unwrap().len(), 1);
 
-    state.set_history(Some(crate::test_support::seeded_history(&["kept"])));
+    on.clear_history().unwrap();
+    assert_eq!(*changes.borrow(), before + 2);
 
-    assert!(state.history_enabled());
-    let rows = state
-        .with_history(|c| crate::history::TranscriptionHistory::list(c, None))
-        .expect("history is on, so the job must run")
-        .expect("the table must be readable");
-    assert_eq!(rows.len(), 1, "the reopened file must be the one read");
+    let off = crate::test_support::daemon_state_with_history_off(&[]);
+    let changes = off.subscribe_history_changes();
+    let before = *changes.borrow();
+    off.keep(&crate::history::NewEntry::dictation("dropped"));
+    assert_eq!(*changes.borrow(), before);
+    assert!(off.history(None, None).unwrap().is_empty());
 }
 
 use super::*;
@@ -491,7 +494,7 @@ fn state_on(machine: Machine) -> (DaemonState, std::sync::mpsc::Receiver<Consume
     let (commands, requests) = std::sync::mpsc::channel();
     let state = DaemonState::new(
         std::sync::Arc::new(Config::default()),
-        None,
+        crate::test_support::seeded_history(&[]),
         crate::test_support::quiet_speech(),
         crate::text_to_speech::Speaker::Fallback,
         commands,
@@ -1199,7 +1202,7 @@ fn the_watchdog_does_not_expire_a_press_whose_start_is_still_running() {
     }));
     let state = std::sync::Arc::new(DaemonState::new(
         std::sync::Arc::new(Config::default()),
-        None,
+        crate::test_support::seeded_history(&[]),
         speech,
         crate::text_to_speech::Speaker::Fallback,
         std::sync::mpsc::channel().0,

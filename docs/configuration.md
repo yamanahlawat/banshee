@@ -9,7 +9,7 @@ The defaults:
 
 ```toml
 [daemon]
-save_history = true    # keep transcriptions in ~/.banshee/banshee.db
+save_history = true    # keep dictations and agent questions in ~/.banshee/banshee.db
 
 [stt]
 provider = "local"       # local | remote; see "A remote listener" below

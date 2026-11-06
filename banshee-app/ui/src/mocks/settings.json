@@ -6,7 +6,7 @@
     },
     "default": "true",
     "sends_out": false,
-    "description": "keep transcriptions in ~/.banshee/banshee.db"
+    "description": "keep dictations and agent questions with your answers in ~/.banshee/banshee.db; off keeps nothing new, and what is kept stays until cleared"
   },
   {
     "key": "audio.input_device",

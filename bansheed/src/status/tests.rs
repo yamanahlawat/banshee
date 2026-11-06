@@ -180,7 +180,7 @@ fn a_status_read_stores_the_microphone_refusal() {
     use crate::state::Refusal;
     let state = crate::state::DaemonState::new(
         std::sync::Arc::new(crate::config::Config::default()),
-        None,
+        crate::test_support::seeded_history(&[]),
         crate::test_support::quiet_speech(),
         crate::text_to_speech::Speaker::Fallback,
         std::sync::mpsc::channel().0,

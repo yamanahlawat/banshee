@@ -2,9 +2,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum BansheeError {
-    #[error("History is not enabled. Please enable it in the configuration.")]
-    HistoryNotEnabled,
-
     #[error("Transcription failed: {0}")]
     Transcription(String),
 
@@ -62,7 +59,6 @@ impl BansheeError {
     pub fn rpc_code(&self) -> i32 {
         use crate::rpc_code;
         match self {
-            BansheeError::HistoryNotEnabled => rpc_code::HISTORY_OFF,
             BansheeError::Rpc { code, .. } => *code,
             BansheeError::Rejected(_) => rpc_code::INVALID_PARAMS,
             BansheeError::Transcription(_)

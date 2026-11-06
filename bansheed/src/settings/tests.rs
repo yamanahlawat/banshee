@@ -330,9 +330,6 @@ fn removing_the_feedback_mode_falls_back_to_both() {
     assert_eq!(config.feedback_mode(), FeedbackMode::Both);
 }
 
-// Only the off direction runs here: turning history on opens the real file
-// under the home directory, which a test must not create. The on direction
-// is verified against a running daemon.
 #[test]
 fn a_save_history_write_reaches_the_running_daemon() {
     let state = crate::test_support::daemon_state_with_history(&["one"]);
@@ -341,7 +338,7 @@ fn a_save_history_write_reaches_the_running_daemon() {
     let outcome = configure_in_scratch(
         Some(&state),
         assignments(&[("daemon.save_history", false.into())]),
-        false,
+        true,
     )
     .expect("a known key and a legal value must apply");
 
@@ -349,8 +346,25 @@ fn a_save_history_write_reaches_the_running_daemon() {
         !state.history_enabled(),
         "the next dictation must not be kept"
     );
+    assert_eq!(state.history(None, None).unwrap().len(), 1);
     assert_eq!(outcome.applied, vec!["daemon.save_history".to_string()]);
     assert!(outcome.waiting.is_empty());
+}
+
+#[test]
+fn an_unpersisted_save_history_write_still_stops_the_next_row() {
+    let state = crate::test_support::daemon_state_with_history(&[]);
+
+    configure_in_scratch(
+        Some(&state),
+        assignments(&[("daemon.save_history", false.into())]),
+        false,
+    )
+    .unwrap();
+
+    assert!(!state.history_enabled());
+    state.keep(&crate::history::NewEntry::dictation("dropped"));
+    assert!(state.history(None, None).unwrap().is_empty());
 }
 
 #[test]

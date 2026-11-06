@@ -68,26 +68,64 @@ async fn a_flag_that_is_not_a_boolean_is_refused() {
     }
 }
 
-/// `-32003` names one cause: history is off. NOT COVERED: the database
-/// failure beside it, which needs a database that refuses a clear, and the
-/// harness cannot build one.
 #[tokio::test]
-async fn only_history_being_off_answers_its_own_code() {
+async fn history_filters_by_kind() {
+    let state = crate::test_support::daemon_state_with_history(&["dictated"]);
+    state.keep(&crate::history::NewEntry::question(
+        "Open the pull request?",
+        Some("Yes"),
+        crate::history::Outcome::Transcribed,
+        None,
+    ));
+
+    let request = request(
+        BANSHEE_HISTORY,
+        Some(serde_json::json!({ "kind": "question" })),
+    );
+    let JsonRpcResponse::Success { result, .. } = dispatch(request, &state).await else {
+        panic!("expected success response");
+    };
+    let history = result["history"].as_array().expect("a history array");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["question"], "Open the pull request?");
+}
+
+#[tokio::test]
+async fn an_unknown_kind_is_refused() {
     let state = test_state(std::sync::mpsc::channel().0);
 
-    for method in [BANSHEE_HISTORY, BANSHEE_CLEAR_HISTORY] {
-        let request = JsonRpcRequest {
-            jsonrpc: banshee_common::Version::V2,
-            method: method.to_string(),
-            params: Some(serde_json::json!({})),
-            id: Some(serde_json::json!(1)),
-        };
-        let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
-            panic!("{method} must refuse when nothing is kept");
-        };
-        assert_eq!(error.code, -32003, "{method}");
-        assert!(error.message.contains("not enabled"), "{}", error.message);
-    }
+    let request = request(
+        BANSHEE_HISTORY,
+        Some(serde_json::json!({ "kind": "update" })),
+    );
+    let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
+        panic!("an unknown kind must be refused");
+    };
+    assert_eq!(error.code, rpc_code::INVALID_PARAMS);
+    assert!(error.message.contains("kind"), "{}", error.message);
+}
+
+async fn listed_rows(state: &Arc<DaemonState>) -> usize {
+    let JsonRpcResponse::Success { result, .. } =
+        dispatch(request(BANSHEE_HISTORY, Some(serde_json::json!({}))), state).await
+    else {
+        panic!("expected success response");
+    };
+    result["history"].as_array().expect("a history array").len()
+}
+
+#[tokio::test]
+async fn history_lists_and_clears_while_saving_is_off() {
+    let state = crate::test_support::daemon_state_with_history_off(&["kept"]);
+    assert_eq!(listed_rows(&state).await, 1);
+
+    let cleared = dispatch(
+        request(BANSHEE_CLEAR_HISTORY, Some(serde_json::json!({}))),
+        &state,
+    )
+    .await;
+    assert!(matches!(cleared, JsonRpcResponse::Success { .. }));
+    assert_eq!(listed_rows(&state).await, 0);
 }
 
 #[tokio::test]
@@ -1604,7 +1642,7 @@ fn slow_voiceover() -> bool {
 async fn a_first_download_writes_the_mode_into_the_daemons_own_config_after_the_reply() {
     let state = Arc::new(DaemonState::new(
         Arc::new(crate::config::Config::default()),
-        None,
+        crate::test_support::seeded_history(&[]),
         crate::test_support::quiet_speech(),
         crate::text_to_speech::Speaker::Fallback,
         std::sync::mpsc::channel().0,
@@ -1791,7 +1829,7 @@ async fn speak_passes_the_voice_parameter_to_the_backend() {
         crate::text_to_speech::SpeechPlayer::new(Box::new(VoiceCapture(Arc::clone(&captured))));
     let state = Arc::new(DaemonState::new(
         Arc::new(crate::config::Config::default()),
-        None,
+        crate::test_support::seeded_history(&[]),
         speech,
         crate::text_to_speech::Speaker::Fallback,
         std::sync::mpsc::channel().0,
@@ -2315,6 +2353,78 @@ async fn a_speech_from_an_agent_counts_for_that_agent_only() {
         state.spoken().turn_ended(42),
         banshee_common::TurnVerdict::Speak
     );
+}
+
+#[tokio::test]
+async fn a_question_that_cannot_be_asked_is_kept_as_unasked() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_mic(crate::state::Mic::Starting);
+    let response = dispatch(
+        request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "Deploy now?"})),
+        ),
+        &state,
+    )
+    .await;
+    let JsonRpcResponse::Error { error, .. } = response else {
+        panic!("expected the microphone refusal");
+    };
+    let rows = state.history(None, None).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, crate::history::Kind::Question);
+    assert_eq!(rows[0].question.as_deref(), Some("Deploy now?"));
+    assert_eq!(rows[0].text, None);
+    assert_eq!(rows[0].outcome, crate::history::Outcome::Unasked);
+    assert_eq!(rows[0].reason.as_deref(), Some(error.message.as_str()));
+}
+
+#[tokio::test]
+async fn an_unasked_question_keeps_the_words_the_agent_sent() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_mic(crate::state::Mic::Starting);
+    dispatch(
+        request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "Run `rm -rf /` now?"})),
+        ),
+        &state,
+    )
+    .await;
+    let rows = state.history(None, None).unwrap();
+    assert_eq!(rows[0].question.as_deref(), Some("Run `rm -rf /` now?"));
+}
+
+#[tokio::test]
+async fn a_question_is_spoken_clean_and_reaches_the_listener_as_sent() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let crate::test_support::HoldingSpeech { state, spoken, .. } =
+        crate::test_support::daemon_state_holding_speech(
+            std::time::Duration::from_millis(10),
+            commands,
+        );
+    let (heard, question) = std::sync::mpsc::channel();
+
+    let session_state = Arc::clone(&state);
+    std::thread::spawn(move || {
+        let Ok(ConsumerCommand::Ask(ask)) = command_receiver.recv() else {
+            return;
+        };
+        let _ = heard.send(ask.question.clone());
+        session_state.set_recording_mode(RecordingMode::Idle);
+        let _ = ask.reply.send(Ok("no".to_string()));
+    });
+
+    dispatch(
+        request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "Run `rm -rf /` now?"})),
+        ),
+        &state,
+    )
+    .await;
+    assert_eq!(question.recv().unwrap(), "Run `rm -rf /` now?");
+    assert_eq!(*spoken.lock().unwrap(), ["Run now?"]);
 }
 
 #[tokio::test]

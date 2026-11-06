@@ -15,6 +15,7 @@ use crate::binding::{Hotkey, HotkeyAction, HotkeyTracker};
 use crate::config::{HotkeyMode, Provider, STTConfig};
 use crate::dictation::{Delivered, deliver_text};
 use crate::frontmost::App;
+use crate::history::{NewEntry, Outcome};
 use crate::speech_to_text::vad::{Detector, VAD_CHUNK};
 use crate::speech_to_text::{Listener, Route, SAMPLE_RATE, Speech, Transcriber};
 use crate::state::{
@@ -950,6 +951,7 @@ impl Pipeline {
     }
 
     fn dictation_failed(&self, why: String) {
+        self.state.keep(&NewEntry::failed_dictation(&why));
         self.state.set_last_error(Some(why));
         self.cues.emit(Signal::Error {
             reason: Reason::new(ReasonCode::TranscriptionFailed, None),
@@ -1135,9 +1137,13 @@ impl Pipeline {
         log::debug!("Transcribing...");
         let transcribe_started = Instant::now();
         let transcribed = self.transcribe(final_data);
-        // A client refetches its history when `transcribing` falls, so the
-        // row has to be stored before the guard drops.
-        store(&self.state, transcribed.as_deref().ok());
+        match &transcribed {
+            Ok(text) if !text.is_empty() => self.state.keep(&NewEntry::dictation(text)),
+            Ok(_) => self
+                .state
+                .keep(&NewEntry::failed_dictation("The model returned no text.")),
+            Err(error) => self.state.keep(&NewEntry::failed_dictation(&reason(error))),
+        }
         match transcribed {
             Ok(transcription) => {
                 self.state.set_last_error(None);
@@ -1228,7 +1234,9 @@ impl Pipeline {
         self.speech_to_text.cancel_stream();
         let state = Arc::clone(&self.state);
         let cues = self.cues.clone();
-        let text = settle_answer(&state, &cues, listened, |audio| self.transcribe(audio));
+        let text = settle_answer(&state, &cues, &ask.question, listened, |audio| {
+            self.transcribe(audio)
+        });
         let _ = ask.reply.send(text);
     }
 
@@ -1390,17 +1398,25 @@ impl Pipeline {
 fn settle_answer(
     state: &DaemonState,
     cues: &Cues,
+    question: &str,
     listened: Result<Heard, String>,
     transcribe: impl FnOnce(&[f32]) -> Result<String, BansheeError>,
 ) -> Result<String, String> {
+    let keep = |text: Option<&str>, outcome: Outcome, reason: Option<&str>| {
+        state.keep(&NewEntry::question(question, text, outcome, reason));
+    };
     match listened {
         Ok(Heard::Audio(audio)) => {
             let transcribing = Raised::on(state, DaemonState::set_transcribing);
             let transcribed = transcribe(&audio);
-            store(state, transcribed.as_deref().ok());
             drop(transcribing);
             match transcribed {
                 Ok(text) => {
+                    if text.is_empty() {
+                        keep(None, Outcome::NoAnswer, None);
+                    } else {
+                        keep(Some(&text), Outcome::Transcribed, None);
+                    }
                     state.set_last_error(None);
                     log::debug!("Answer: {text}");
                     cues.emit(Signal::Answered {
@@ -1410,6 +1426,7 @@ fn settle_answer(
                 }
                 Err(e) => {
                     let why = reason(&e);
+                    keep(None, Outcome::Failed, Some(&why));
                     log::error!("Transcription failed: {why}");
                     state.set_last_error(Some(why.clone()));
                     cues.emit(Signal::Error {
@@ -1423,11 +1440,12 @@ fn settle_answer(
         Ok(heard @ (Heard::Silence | Heard::Closed)) => {
             // last_error is left alone: silence is not a transcription, so
             // it neither clears the last failure nor is one
-            let code = if matches!(heard, Heard::Silence) {
-                ReasonCode::Silence
+            let (code, outcome) = if matches!(heard, Heard::Silence) {
+                (ReasonCode::Silence, Outcome::NoAnswer)
             } else {
-                ReasonCode::Closed
+                (ReasonCode::Closed, Outcome::Closed)
             };
+            keep(None, outcome, None);
             cues.emit(Signal::Error {
                 reason: Reason::new(code, None),
                 target: Some(Target::Answer),
@@ -1435,6 +1453,7 @@ fn settle_answer(
             Ok(String::new())
         }
         Err(why) => {
+            keep(None, Outcome::Failed, Some(&why));
             state.set_last_error(Some(why.clone()));
             cues.emit(Signal::Error {
                 reason: Reason::new(ReasonCode::ListenFailed, None),
@@ -1442,24 +1461,6 @@ fn settle_answer(
             });
             Err(why)
         }
-    }
-}
-
-/// Stores an utterance worth keeping. The model can answer an empty string
-/// for noise, and that is not a dictation.
-fn store(state: &DaemonState, transcription: Option<&str>) {
-    if let Some(text) = transcription
-        && !text.is_empty()
-    {
-        save_history(state, text);
-    }
-}
-
-fn save_history(state: &DaemonState, transcription: &str) {
-    let stored =
-        state.with_history(|c| crate::history::TranscriptionHistory::insert(c, transcription));
-    if let Some(Err(e)) = stored {
-        log::error!("Failed to insert transcription into database: {e}");
     }
 }
 
@@ -1504,7 +1505,7 @@ mod answer_tests {
         let (cues, sounds) = Cues::recording();
         let mut signals = cues.subscribe_signals();
         let state = crate::test_support::daemon_state_with_cues(cues.clone());
-        let text = super::settle_answer(&state, &cues, listened, |_| transcribed);
+        let text = super::settle_answer(&state, &cues, "Ship it?", listened, |_| transcribed);
         let signal = signals.try_recv().expect("the answer sends one signal");
         (text, signal, sounds.try_iter().collect(), state)
     }
@@ -1547,6 +1548,62 @@ mod answer_tests {
             assert_eq!(target, Some(Target::Answer), "{code:?}");
             assert_eq!(sounds, vec![Cue::Error], "{code:?}");
         }
+    }
+
+    #[test]
+    fn an_answer_is_kept_with_its_question() {
+        let (_, _, _, state) = settled(Ok(Heard::Audio(vec![0.0; 16])), Ok("Yes".to_string()));
+        let rows = state.history(None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, crate::history::Kind::Question);
+        assert_eq!(rows[0].question.as_deref(), Some("Ship it?"));
+        assert_eq!(rows[0].text.as_deref(), Some("Yes"));
+        assert_eq!(rows[0].outcome, Outcome::Transcribed);
+        assert_eq!(rows[0].reason, None);
+    }
+
+    #[test]
+    fn silence_and_a_closed_session_keep_the_question_with_no_answer() {
+        for (heard, outcome) in [
+            (Heard::Silence, Outcome::NoAnswer),
+            (Heard::Closed, Outcome::Closed),
+        ] {
+            let (_, _, _, state) = settled(Ok(heard), Ok("unused".to_string()));
+            let rows = state.history(None, None).unwrap();
+            assert_eq!(rows.len(), 1, "{outcome:?}");
+            assert_eq!(rows[0].question.as_deref(), Some("Ship it?"));
+            assert_eq!(rows[0].text, None);
+            assert_eq!(rows[0].outcome, outcome);
+        }
+    }
+
+    #[test]
+    fn an_answer_the_model_hears_as_nothing_is_kept_as_no_answer() {
+        let (_, _, _, state) = settled(Ok(Heard::Audio(vec![0.0; 16])), Ok(String::new()));
+        let rows = state.history(None, None).unwrap();
+        assert_eq!(rows[0].outcome, Outcome::NoAnswer);
+        assert_eq!(rows[0].text, None);
+    }
+
+    #[test]
+    fn a_failed_transcription_keeps_the_question_and_the_reason() {
+        let error = banshee_common::error::BansheeError::Other("model gone".to_string());
+        let why = reason(&error);
+        let (_, _, _, state) = settled(Ok(Heard::Audio(vec![0.0; 16])), Err(error));
+        let rows = state.history(None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].question.as_deref(), Some("Ship it?"));
+        assert_eq!(rows[0].text, None);
+        assert_eq!(rows[0].outcome, Outcome::Failed);
+        assert_eq!(rows[0].reason.as_deref(), Some(why.as_str()));
+    }
+
+    #[test]
+    fn a_broken_listen_keeps_the_question_and_the_reason() {
+        let (_, _, _, state) = settled(Err("the mic left".to_string()), Ok(String::new()));
+        let rows = state.history(None, None).unwrap();
+        assert_eq!(rows[0].outcome, Outcome::Failed);
+        assert_eq!(rows[0].reason.as_deref(), Some("the mic left"));
     }
 
     #[test]
@@ -2060,6 +2117,51 @@ mod utterance_tests {
     }
 
     #[test]
+    fn a_dictation_that_could_not_be_typed_keeps_its_words() {
+        let handled = handle(
+            &crate::speech_to_text::vad::test_speech(),
+            Ok("hello there"),
+            |_, _| Err(BansheeError::Other("no accessibility grant".to_string())),
+        );
+        let rows = handled.state.history(None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, crate::history::Kind::Dictation);
+        assert_eq!(rows[0].text.as_deref(), Some("hello there"));
+        assert_eq!(rows[0].outcome, Outcome::Transcribed);
+    }
+
+    #[test]
+    fn a_failed_transcription_keeps_a_row_with_its_reason() {
+        let handled = handle(
+            &crate::speech_to_text::vad::test_speech(),
+            Err("the model is gone"),
+            untyped,
+        );
+        let why = reason(&BansheeError::Transcription(
+            "the model is gone".to_string(),
+        ));
+        let rows = handled.state.history(None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, None);
+        assert_eq!(rows[0].outcome, Outcome::Failed);
+        assert_eq!(rows[0].reason.as_deref(), Some(why.as_str()));
+    }
+
+    #[test]
+    fn an_empty_transcript_and_a_silent_clip_differ_in_what_they_keep() {
+        let empty = handle(&crate::speech_to_text::vad::test_speech(), Ok(""), untyped);
+        let rows = empty.state.history(None, None).unwrap();
+        assert_eq!(rows[0].outcome, Outcome::Failed);
+        assert_eq!(
+            rows[0].reason.as_deref(),
+            Some("The model returned no text.")
+        );
+
+        let quiet = handle(&vec![0.0; SAMPLE_RATE as usize], Ok("unused"), untyped);
+        assert!(quiet.state.history(None, None).unwrap().is_empty());
+    }
+
+    #[test]
     fn the_flag_stays_up_while_the_words_are_typed() {
         let mut up_while_typing = false;
         let handled = handle(
@@ -2462,6 +2564,7 @@ mod utterance_tests {
                 let (reply, answer) = tokio::sync::oneshot::channel();
                 pipeline.ask(AskCommand {
                     reply,
+                    question: String::new(),
                     timeout,
                     session,
                 });
@@ -3068,6 +3171,7 @@ mod utterance_tests {
         let (reply, answer) = tokio::sync::oneshot::channel();
         pipeline.ask(AskCommand {
             reply,
+            question: String::new(),
             timeout: Duration::from_millis(100),
             session,
         });
@@ -3496,6 +3600,7 @@ mod utterance_tests {
         let (reply, _answer) = tokio::sync::oneshot::channel();
         pipeline.ask(AskCommand {
             reply,
+            question: String::new(),
             timeout: Duration::from_secs(10),
             session,
         });

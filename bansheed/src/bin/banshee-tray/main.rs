@@ -255,7 +255,6 @@ mod tray {
         // One message for the pair, so user_event drops an unchanged picture
         // before it costs a redraw
         Device(Device),
-        History(bool),
         Remote(Remote),
         Chip(chip::Input),
         Level(f32),
@@ -355,13 +354,6 @@ mod tray {
                 refused: banshee_common::microphone_refused(state),
             }
         }
-    }
-
-    fn history_enabled_of(status: &Value) -> bool {
-        status
-            .get("history_enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
     }
 
     /// A daemon older than the `feedback` field, or one that sends a mode this
@@ -473,16 +465,11 @@ mod tray {
         problem.map(|problem| Row::Action(PROBLEM_ID, problem.name.clone(), true))
     }
 
-    fn copy_last_enabled(indicator: Indicator, history_enabled: bool) -> bool {
-        indicator != Indicator::NotRunning && history_enabled
-    }
-
     fn menu_rows(
         indicator: Indicator,
         problem: Option<&Problem>,
         start: Start,
         device: &Device,
-        history_enabled: bool,
         remote: &Remote,
     ) -> Vec<Row> {
         let mut rows = Vec::new();
@@ -499,7 +486,7 @@ mod tray {
         rows.push(Row::Action(
             COPY_LAST_ID,
             "Copy last dictation".to_string(),
-            copy_last_enabled(indicator, history_enabled),
+            indicator != Indicator::NotRunning,
         ));
         rows.push(Row::Action(OPEN_ID, "Open Banshee".to_string(), true));
         rows.push(Row::Separator);
@@ -513,10 +500,9 @@ mod tray {
         problem: Option<&Problem>,
         start: Start,
         device: &Device,
-        history_enabled: bool,
         remote: &Remote,
     ) -> Vec<String> {
-        menu_rows(indicator, problem, start, device, history_enabled, remote)
+        menu_rows(indicator, problem, start, device, remote)
             .into_iter()
             .map(|row| match row {
                 Row::Info(_, text) | Row::Action(_, text, _) => text,
@@ -588,7 +574,6 @@ mod tray {
         indicator: Indicator,
         problem: Option<Problem>,
         device: Device,
-        history_enabled: bool,
         remote: Remote,
         chip: chip::Chip,
         drawing: bool,
@@ -608,7 +593,6 @@ mod tray {
                 indicator: Indicator::NotRunning,
                 problem: None,
                 device: Device::default(),
-                history_enabled: false,
                 remote: Remote::default(),
                 chip: chip::Chip::default(),
                 drawing: false,
@@ -722,9 +706,6 @@ mod tray {
                 Message::Device(device) => {
                     std::mem::replace(&mut self.device, device) != self.device
                 }
-                Message::History(enabled) => {
-                    std::mem::replace(&mut self.history_enabled, enabled) != self.history_enabled
-                }
                 Message::Remote(remote) => {
                     std::mem::replace(&mut self.remote, remote) != self.remote
                 }
@@ -785,7 +766,6 @@ mod tray {
                 problem,
                 self.starting,
                 &self.device,
-                self.history_enabled,
                 &self.remote,
             );
             let Some(ui) = &mut self.ui else { return };
@@ -882,7 +862,6 @@ mod tray {
                 if !send(Message::Device(Device::of(&status)))
                     || !send(Message::State(Indicator::of(Some(&status))))
                     || !send(Message::Problem(problem_of(&status)))
-                    || !send(Message::History(history_enabled_of(&status)))
                     || !send(Message::Remote(Remote::of(&status)))
                     || !send(Message::Draws(draws(&status)))
                     || !send(Message::Chip(chip::Input::Seed(chip::Live::of(&status))))
@@ -952,7 +931,10 @@ mod tray {
             let reply = runtime.block_on(async {
                 tokio::time::timeout(
                     COPY_WAIT,
-                    utils::call_daemon(BANSHEE_HISTORY, serde_json::json!({ "limit": 1 })),
+                    utils::call_daemon(
+                        BANSHEE_HISTORY,
+                        serde_json::json!({ "limit": 1, "kind": "dictation" }),
+                    ),
                 )
                 .await
             });
@@ -1361,7 +1343,6 @@ mod tray {
                 problem,
                 start,
                 &device(Some("MacBook Pro Microphone"), None),
-                true,
                 &Remote::default(),
             )
         }
@@ -1379,7 +1360,6 @@ mod tray {
                 None,
                 start,
                 &Device::default(),
-                false,
                 &Remote::default(),
             )
         }
@@ -1612,7 +1592,6 @@ mod tray {
                         Some(&wrong),
                         start,
                         &Device::default(),
-                        true,
                         &Remote::default(),
                     )
                     .iter()
@@ -1625,14 +1604,13 @@ mod tray {
         }
 
         #[test]
-        fn the_copy_row_is_disabled_when_history_is_off() {
-            fn copy_enabled(indicator: Indicator, history_enabled: bool) -> bool {
+        fn copy_last_is_offered_whenever_the_daemon_runs() {
+            fn copy_enabled(indicator: Indicator) -> bool {
                 let rows = menu_rows(
                     indicator,
                     None,
                     Start::Ready,
                     &Device::default(),
-                    history_enabled,
                     &Remote::default(),
                 );
                 action(rows, COPY_LAST_ID)
@@ -1640,8 +1618,21 @@ mod tray {
                     .1
             }
 
-            assert!(!copy_enabled(Indicator::Idle, false));
-            assert!(copy_enabled(Indicator::Idle, true));
+            assert!(copy_enabled(Indicator::Idle));
+            assert!(!copy_enabled(Indicator::NotRunning));
+        }
+
+        #[test]
+        fn a_failed_dictation_has_nothing_to_copy() {
+            let failed = serde_json::json!({ "history": [
+                { "kind": "dictation", "text": "kept", "outcome": "transcribed" },
+                { "kind": "dictation", "text": null, "outcome": "failed" },
+            ]});
+            let kept = serde_json::json!({ "history": [
+                { "kind": "dictation", "text": "kept", "outcome": "transcribed" },
+            ]});
+            assert_eq!(last_history_entry(&failed), None);
+            assert_eq!(last_history_entry(&kept), Some("kept"));
         }
 
         // A stopped daemon is the state the window has most to say about: it
@@ -1654,7 +1645,6 @@ mod tray {
                     None,
                     Start::Ready,
                     &Device::default(),
-                    false,
                     &Remote::default(),
                 );
                 let open = action(rows, OPEN_ID).expect("menu_rows must include the open action");

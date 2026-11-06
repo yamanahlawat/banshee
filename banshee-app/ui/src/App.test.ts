@@ -3,6 +3,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import ready from './mocks/ready.json';
 import permissions from './mocks/permissions.json';
 import remote from './mocks/remote.json';
+import { dictated } from './lib/history.mock';
 
 // Local noon, because the history helpers read the local calendar day.
 const NOW = new Date(2026, 7, 27, 12, 0, 0);
@@ -11,10 +12,21 @@ function stamp(minutesAgo: number): string {
   return `${new Date(NOW.getTime() - minutesAgo * 60_000).toISOString().slice(0, 19)}Z`;
 }
 
+const asked = (id: number, row: Partial<HistoryRow>): HistoryRow => ({
+  id,
+  kind: 'question',
+  question: 'Which branch should I use?',
+  text: null,
+  outcome: 'no_answer',
+  reason: null,
+  timestamp: stamp(1),
+  ...row,
+});
+
 // The daemon answers oldest first, so the newest row is last.
 const rows = [
-  { id: 1, text: 'the older one', timestamp: stamp(9) },
-  { id: 2, text: 'Yes, open the pull request.', timestamp: stamp(1) },
+  dictated(1, 'the older one', stamp(9)),
+  dictated(2, 'Yes, open the pull request.', stamp(1)),
 ];
 
 vi.mock('./lib/tauri', async () => (await import('./lib/tauri.mock')).mockTauri());
@@ -35,6 +47,7 @@ import {
   status,
 } from './lib/tauri';
 import { get } from 'svelte/store';
+import type { HistoryRow } from './lib/tauri';
 import { agents } from './lib/agents';
 import { table as historyTable } from './lib/history';
 import { daemon, empty, reduceStatus, type Blocker } from './lib/daemon';
@@ -183,11 +196,9 @@ it('asks before it deletes the record', async () => {
 });
 
 it('mounts the whole record where nothing is measurable, with no paging controls', async () => {
-  const many = Array.from({ length: 95 }, (_, i) => ({
-    id: i + 1,
-    text: `dictation ${i + 1}`,
-    timestamp: stamp(95 - i),
-  }));
+  const many = Array.from({ length: 95 }, (_, i) =>
+    dictated(i + 1, `dictation ${i + 1}`, stamp(95 - i)),
+  );
   vi.mocked(history).mockResolvedValue(many);
 
   const { container } = render(App);
@@ -517,7 +528,7 @@ it('reads the voices and the agents the strip needs', async () => {
   expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
 });
 
-it('empties the record when the daemon says it is no longer saving', async () => {
+it('keeps the rows listed when the daemon says it is no longer saving', async () => {
   render(App);
   await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
 
@@ -528,9 +539,83 @@ it('empties the record when the daemon says it is no longer saving', async () =>
     config: { ...ready.config, daemon: { save_history: false } },
   };
   daemon.update((s) => reduceStatus(s, off));
-  // The daemon refuses the read outright while this is off.
-  await waitFor(() => expect(screen.getByText('Nothing is kept')).toBeTruthy());
-  expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start saving' })).toBeTruthy());
+  expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
+  expect(screen.queryByText('Nothing new is kept')).toBeNull();
+});
+
+it('says what stays when saving is off and rows exist', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, history_enabled: false });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: /open what Banshee keeps/ }));
+  await waitFor(() =>
+    expect(screen.getByText(/What it kept stays until you clear it/)).toBeTruthy(),
+  );
+  expect(panelHeading('What Banshee keeps').textContent).toBe(
+    'Banshee is keeping nothing new you say.',
+  );
+});
+
+it('a question with no answer reaches the record without a transcription', async () => {
+  render(App);
+  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+
+  vi.mocked(history).mockResolvedValue([
+    ...rows,
+    asked(3, { question: 'Which branch should I use?', outcome: 'no_answer' }),
+  ]);
+  pushes.get('daemon:state')?.({ payload: { history_changes: 1 } });
+
+  await waitFor(() => expect(screen.getByText('Which branch should I use?')).toBeTruthy());
+  expect(screen.getByText('No answer heard.')).toBeTruthy();
+});
+
+it('an answered question reads as the agent asking and you answering', async () => {
+  vi.mocked(history).mockResolvedValue([
+    asked(1, { question: 'Which branch?', text: 'The release branch.', outcome: 'transcribed' }),
+  ]);
+  const { container } = render(App);
+  await waitFor(() => expect(screen.getByText('The release branch.')).toBeTruthy());
+
+  const turns = container.querySelectorAll('article.turn');
+  expect(turns.length).toBe(2);
+  expect(turns[0].textContent).toMatch(/Agent asked at .*Which branch\?/);
+  expect(turns[1].textContent).toMatch(/You answered at .*The release branch\./);
+});
+
+it('draws each unanswered outcome as a note under the question', async () => {
+  vi.mocked(history).mockResolvedValue([
+    asked(1, { outcome: 'closed' }),
+    asked(2, { outcome: 'failed', reason: 'the model is missing' }),
+    asked(3, { outcome: 'unasked', reason: 'no speaker' }),
+  ]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Closed before you answered.')).toBeTruthy());
+  expect(screen.getByText('Not transcribed: the model is missing')).toBeTruthy();
+  expect(screen.getByText('Not asked aloud: no speaker')).toBeTruthy();
+});
+
+it('a failed dictation shows its reason', async () => {
+  vi.mocked(history).mockResolvedValue([
+    { ...dictated(1, '', stamp(1)), text: null, outcome: 'failed', reason: 'the model is missing' },
+  ]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Transcription failed')).toBeTruthy());
+  expect(screen.getByText('the model is missing')).toBeTruthy();
+});
+
+it('search finds a question by its question', async () => {
+  vi.mocked(history).mockResolvedValue([
+    ...rows,
+    asked(3, { question: 'Which branch should I use?', outcome: 'no_answer' }),
+  ]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Which branch should I use?')).toBeTruthy());
+  await fireEvent.keyDown(window, { key: 'f', metaKey: true });
+  await fireEvent.input(screen.getByRole('searchbox'), { target: { value: 'branch' } });
+  await waitFor(() => expect(screen.queryByText('Yes, open the pull request.')).toBeNull());
+  expect(screen.getByText('Which branch should I use?')).toBeTruthy();
 });
 
 it('says no stream is open, rather than that there is no microphone', async () => {
@@ -756,11 +841,12 @@ it('offers nothing to stop before anything has been said', async () => {
   expect(screen.queryByText(/Nothing saved yet/)).toBeNull();
 });
 
-it('still says so when it is keeping nothing, which is the claim', async () => {
+it('still says so when it is keeping nothing new and holds nothing', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, history_enabled: false });
   vi.mocked(history).mockResolvedValue([]);
   render(App);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start saving' })).toBeTruthy());
+  expect(screen.getByText('Nothing new is kept')).toBeTruthy();
 });
 
 it('offers no command to copy, because every fix is a button', async () => {

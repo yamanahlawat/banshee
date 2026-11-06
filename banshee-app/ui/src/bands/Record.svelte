@@ -77,10 +77,7 @@
   <p class="note">It lives in a file only you can read. Nothing is sent anywhere.</p>
 
   {#if !saving}
-    <p class="note">
-      Banshee is not keeping what you say. Dictation still works and still lands in the app you are
-      using.
-    </p>
+    <p class="note">Banshee is not keeping anything new. What it kept stays until you clear it.</p>
   {/if}
 </div>
 

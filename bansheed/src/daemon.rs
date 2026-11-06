@@ -116,11 +116,7 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
         log::info!("Deleted {}, which nothing loads now", deleted.display());
     }
     permissions::ask_for_accessibility();
-    let db_connection = if config.daemon.save_history {
-        Some(history::open()?)
-    } else {
-        None
-    };
+    let db_connection = history::open()?;
 
     // Created before the backend, because the backend holds the sender and the
     // drain holds the state the backend must not see
@@ -415,6 +411,7 @@ struct StateWatches {
     last_error: watch::Receiver<Option<String>>,
     last_speech_error: watch::Receiver<Option<String>>,
     feedback: watch::Receiver<crate::config::FeedbackMode>,
+    history: watch::Receiver<u64>,
 }
 
 impl StateWatches {
@@ -429,6 +426,7 @@ impl StateWatches {
             last_error: state.subscribe_last_error(),
             last_speech_error: state.subscribe_last_speech_error(),
             feedback: state.subscribe_feedback(),
+            history: state.subscribe_history_changes(),
         }
     }
 
@@ -445,6 +443,7 @@ impl StateWatches {
             woken = self.last_error.changed() => woken,
             woken = self.last_speech_error.changed() => woken,
             woken = self.feedback.changed() => woken,
+            woken = self.history.changed() => woken,
         }
     }
 }

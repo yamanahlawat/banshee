@@ -69,6 +69,7 @@
   import Ledger from './bands/Ledger.svelte';
   import TheRecord from './bands/Record.svelte';
   import Turn from './turns/Turn.svelte';
+  import Kept from './turns/Kept.svelte';
   import RecordList from './turns/RecordList.svelte';
   import Absence from './turns/Absence.svelte';
   import Pending from './turns/Pending.svelte';
@@ -77,7 +78,7 @@
   import VoicePanel from './jobs/VoicePanel.svelte';
   import AgentsPanel from './jobs/AgentsPanel.svelte';
 
-  let wasTranscribing = false;
+  let seenChanges: number | null = null;
   let wasLoadingModel = false;
   let voices: Voices = { voices: [], current: null };
   let voicesRead = false;
@@ -262,7 +263,7 @@
     Record: {
       name: 'What Banshee keeps',
       lead: !savingHistory
-        ? 'Banshee is keeping nothing you say.'
+        ? 'Banshee is keeping nothing new you say.'
         : $table.total === 0
           ? 'Banshee is keeping what you say, and you have not said anything yet.'
           : `Banshee is keeping ${formatCount($table.total)} things you have said, on this machine.`,
@@ -271,7 +272,9 @@
 
   $: rows = $table.rows;
   $: needle = query.trim().toLowerCase();
-  $: shown = needle ? rows.filter((r) => r.text.toLowerCase().includes(needle)) : rows;
+  $: shown = needle
+    ? rows.filter((r) => [r.question, r.text].some((part) => part?.toLowerCase().includes(needle)))
+    : rows;
   // The record windows itself over any length, so no page control counts it.
   // Find still reads every one of the rows above.
   let body: HTMLElement;
@@ -428,12 +431,20 @@
     }
   }
 
+  // Every kept row and every clear moves the count, whatever the activity was.
+  function noteChanges(now: number | undefined) {
+    if (now === undefined) return;
+    const moved = seenChanges !== null && now !== seenChanges;
+    seenChanges = now;
+    if (moved) readNewest().catch(() => {});
+  }
+
   /// andStart is off for the restart poll: launchd is already bringing the daemon back.
   async function readStatus(andStart = true): Promise<boolean> {
     try {
       await refreshStatus(status);
       startRefusal = '';
-      wasTranscribing = $daemon.live.transcribing;
+      noteChanges($daemon.live.history_changes);
       wasLoadingModel = $daemon.live.loading_model;
       return true;
     } catch (error) {
@@ -501,8 +512,7 @@
       listen<Partial<Live> & Pick<Status, 'pipeline'>>('daemon:state', (e) => {
         if (readinessIsStale($daemon, e.payload)) readStatus(false);
         applyPush(e.payload);
-        if (e.payload.transcribing === false && wasTranscribing) readNewest().catch(() => {});
-        if (e.payload.transcribing !== undefined) wasTranscribing = e.payload.transcribing;
+        noteChanges(e.payload.history_changes);
         // `stt_model` and `stt_translates` come only with a full status, and the
         // read a write does happens before the file lands, so this is the only
         // word that the model in force moved. Held rather than read off the
@@ -680,13 +690,11 @@
       {#if shown.length > 0}
         <RecordList rows={shown} {scrollTop} viewport={viewportH} container={body}>
           <svelte:fragment let:row let:index>
-            <Turn
+            <Kept
+              {row}
               lead={index === 0 && !waiting}
               arrive={index === 0 && !waiting && leadArrives}
-              speaker="user"
-              id={String(row.id)}
               time={formatWhen(row.timestamp, now)}
-              text={row.text}
             />
           </svelte:fragment>
         </RecordList>
@@ -711,8 +719,8 @@
       {:else if !savingHistory}
         <Absence
           inRecord
-          label="Nothing is kept"
-          detail="Dictation still works and still lands in whatever app has focus. Banshee is simply not writing any of it down."
+          label="Nothing new is kept"
+          detail="Dictation still works and still lands in whatever app has focus. Banshee is not writing any of it down."
         />
       {:else if nothingYet && blockers.length === 0}
         <Absence
