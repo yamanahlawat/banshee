@@ -112,9 +112,29 @@ export type View = { query: string; chosen: HistoryRow['id'] | null };
 
 export const view: Writable<View> = writable({ query: '', chosen: null });
 
+// One pattern finds and marks, so a listed row always shows why it matched.
+// Kept for the last needle: every row asks with the same one.
+let held: { needle: string; pattern: RegExp } | null = null;
+function patternOf(needle: string): RegExp {
+  if (held?.needle !== needle) {
+    const literal = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    held = { needle, pattern: new RegExp(`(${literal})`, 'iu') };
+  }
+  return held.pattern;
+}
+
 export function matches(row: HistoryRow, needle: string): boolean {
-  const lower = needle.toLowerCase();
-  return [row.question, row.text].some((part) => (part ?? '').toLowerCase().includes(lower));
+  const pattern = patternOf(needle);
+  return pattern.test(row.question ?? '') || pattern.test(row.text ?? '');
+}
+
+/// The text in runs, each a match for the needle or not, for drawing marks.
+export function marked(text: string, needle: string): { text: string; hit: boolean }[] {
+  if (needle === '') return [{ text, hit: false }];
+  return text
+    .split(patternOf(needle))
+    .map((part, i) => ({ text: part, hit: i % 2 === 1 }))
+    .filter((part) => part.text !== '');
 }
 
 export function rowFlag(row: HistoryRow): string | null {
@@ -164,7 +184,7 @@ export function selected(shown: HistoryRow[], chosen: HistoryRow['id'] | null): 
 }
 
 // A store of its own, so a new selection does not filter the table again.
-const needle: Readable<string> = derived(view, (now) => now.query.trim());
+export const needle: Readable<string> = derived(view, (now) => now.query.trim());
 
 /// The rows the search leaves, newest first.
 export const listed: Readable<HistoryRow[]> = derived([table, needle], ([held, query]) =>

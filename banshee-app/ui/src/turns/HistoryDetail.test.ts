@@ -24,8 +24,8 @@ const asked = (outcome: HistoryRow['outcome'], extra: Partial<HistoryRow> = {}):
   ...extra,
 });
 
-const show = (row: HistoryRow, goListening = vi.fn()) =>
-  render(HistoryDetail, { row, now: NOW, goListening });
+const show = (row: HistoryRow, goListening = vi.fn(), query = '') =>
+  render(HistoryDetail, { row, now: NOW, goListening, query });
 
 // The first child is the label; a copy button's second is the hidden width holder.
 const buttons = () =>
@@ -144,6 +144,26 @@ describe('a question', () => {
     const { container } = show(asked('unasked'));
     expect(screen.getByText('Not asked aloud')).toBeTruthy();
     expect(container.querySelector('.note')).toBeNull();
+  });
+});
+
+describe('under a search', () => {
+  it('marks the matches in the question and the answer', () => {
+    const { container } = show(
+      asked('transcribed', { text: 'The release branch.' }),
+      vi.fn(),
+      'branch',
+    );
+    expect([...container.querySelectorAll('mark')].map((mark) => mark.textContent)).toEqual([
+      'branch',
+      'branch',
+    ]);
+    expect(container.querySelector('.agent')?.textContent).toBe('Which branch should I use?');
+  });
+
+  it('marks nothing with no search', () => {
+    const { container } = show(asked('transcribed', { text: 'The release branch.' }));
+    expect(container.querySelector('mark')).toBeNull();
   });
 });
 

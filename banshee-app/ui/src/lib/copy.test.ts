@@ -7,6 +7,8 @@ import {
   CHOICE_LABELS,
   copy,
   copied,
+  feedbackInForce,
+  feedbackLead,
   listeningLead,
   listeningNote,
   problem,
@@ -237,6 +239,41 @@ const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
 
 it.each(SPEECH_LEADS)('the voice lead, when %s', (_, over, says) => {
   expect(speechLead({ ...SPOKEN, ...over })).toBe(says);
+});
+
+const FEEDBACK_LEADS: [string, boolean, string][] = [
+  [
+    'both',
+    true,
+    'Banshee shows the figure above the Dock and plays a sound when it starts and stops listening.',
+  ],
+  ['visual', true, 'Banshee shows the figure above the Dock and plays no sound.'],
+  ['sound', true, 'Banshee plays a sound when it starts and stops listening, and shows nothing.'],
+  ['none', true, 'Banshee shows nothing and plays no sound.'],
+  ['both', false, 'Banshee plays a sound when it starts and stops listening.'],
+  ['visual', false, 'Banshee plays a sound when it starts and stops listening.'],
+  ['sound', false, 'Banshee plays a sound when it starts and stops listening.'],
+  ['none', false, 'Banshee plays no sound.'],
+];
+
+it.each(FEEDBACK_LEADS)('the feedback lead for %s, on macOS %s', (mode, mac, says) => {
+  expect(feedbackLead(mode, true, mac)).toBe(says);
+});
+
+it('says the feedback lead of a stopped daemon whatever the mode', () => {
+  expect(feedbackLead(null, false, true)).toBe(
+    'Banshee is not running, so it shows and plays nothing.',
+  );
+});
+
+it('says no feedback lead before the daemon names the cues in force', () => {
+  expect(feedbackLead(null, true, true)).toBeNull();
+});
+
+it('reads visual as both where no figure draws', () => {
+  expect(feedbackInForce('visual', false)).toBe('both');
+  expect(feedbackInForce('visual', true)).toBe('visual');
+  expect(feedbackInForce('none', false)).toBe('none');
 });
 
 const SPEECH_NOTES: [string, Partial<Speech>, string][] = [

@@ -56,9 +56,7 @@ it('points the feedback radiogroup at its note', () => {
   ready({ mode: 'sound' });
   const page = render(FeedbackPage);
   const group = page.getByRole('radiogroup', { name: 'Feedback' });
-  const note = page.getByText(
-    'A short sound when Banshee starts and stops listening, and when it fails.',
-  );
+  const note = page.getByText('A failure plays a sound too.');
   expect(group.getAttribute('aria-describedby')).toBe(note.id);
 });
 
@@ -68,13 +66,15 @@ it('offers On screen on macOS and writes visual', async () => {
   await waitFor(() => expect(setSetting).toHaveBeenCalledWith('feedback.mode', 'visual'));
 });
 
-it('selects On screen for a daemon set to visual, with no sounds and the VoiceOver advice', () => {
+it('selects On screen for a daemon set to visual, with the VoiceOver advice', () => {
   const page = renderPage({ userAgent: MAC_UA, feedback: { mode: 'visual' } });
   const chosen = page.getByRole('radio', { name: 'On screen' });
   expect(chosen.getAttribute('aria-checked')).toBe('true');
-  expect(page.getByText(/shows what Banshee does, with no sounds/)).toBeTruthy();
-  expect(page.getByText(/An agent's questions are still spoken aloud/)).toBeTruthy();
-  expect(page.getByText(/Using VoiceOver\? Choose Both/)).toBeTruthy();
+  expect(
+    page.getByText(
+      "An agent's questions are still spoken aloud. Using VoiceOver? Choose Both, so you hear when recording starts.",
+    ),
+  ).toBeTruthy();
 });
 
 it('offers no On screen where no figure draws', () => {
@@ -84,13 +84,14 @@ it('offers no On screen where no figure draws', () => {
   expect(chosen.getAttribute('aria-checked')).toBe('true');
 });
 
-it('names no figure in the Both and Off notes on Linux', () => {
+// The lead says what shows and what plays, so the note says only the rest.
+it('notes the failure sound under Both, and the spoken questions under Off', () => {
   const both = renderPage({ userAgent: LINUX_UA, feedback: { mode: 'both' } });
-  expect(both.getByText('Every sound.')).toBeTruthy();
+  expect(both.getByText('A failure plays a sound too.')).toBeTruthy();
   both.unmount();
 
-  const off = renderPage({ userAgent: LINUX_UA, feedback: { mode: 'none' } });
-  expect(off.getByText("No sound. An agent's questions are still spoken aloud.")).toBeTruthy();
+  const off = renderPage({ userAgent: MAC_UA, feedback: { mode: 'none' } });
+  expect(off.getByText("An agent's questions are still spoken aloud.")).toBeTruthy();
 });
 
 it('writes feedback.mode', async () => {

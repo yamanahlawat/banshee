@@ -7,6 +7,7 @@
   import type { HistoryRow } from '../lib/tauri';
   import { formatTime, sameLocalDay, toDate } from '../lib/time';
   import { plan, segments, span, type Segment } from '../lib/vlist';
+  import Marked from './Marked.svelte';
 
   type Id = HistoryRow['id'];
 
@@ -265,17 +266,20 @@
         {#if row.kind === 'dictation' && row.outcome === 'failed'}
           <p class="words failed">Transcription failed{@render when()}</p>
         {:else if row.kind === 'dictation'}
-          <p class="words user">{row.text ?? ''}{@render when()}</p>
+          <p class="words user"><Marked text={row.text ?? ''} needle={query} />{@render when()}</p>
         {:else if row.outcome === 'transcribed'}
-          <p class="words agent one"><span class="sr">Agent asked</span> {row.question ?? ''}</p>
+          <p class="words agent one">
+            <span class="sr">Agent asked</span>
+            <Marked text={row.question ?? ''} needle={query} />
+          </p>
           <p class="words user one">
             <span class="sr">You answered</span>
-            {row.text ?? ''}{@render when()}
+            <Marked text={row.text ?? ''} needle={query} />{@render when()}
           </p>
         {:else}
           <p class="words agent">
             <span class="sr">Agent asked</span>
-            {row.question ?? ''}{@render when()}
+            <Marked text={row.question ?? ''} needle={query} />{@render when()}
           </p>
         {/if}
         <span class="meta" aria-hidden="true">
