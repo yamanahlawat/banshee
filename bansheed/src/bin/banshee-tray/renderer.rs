@@ -1,5 +1,5 @@
-//! What the capsule shows from moment to moment: the scene logic the macOS
-//! panel keeps in its layers, with time passed in and no Wayland types.
+//! What the capsule shows from moment to moment, with time passed in and no
+//! Wayland types.
 
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,6 @@ pub enum Order {
     Destroy,
 }
 
-/// The scene logic the macOS panel keeps in its layers, with time passed in.
 pub struct Renderer {
     /// On the surface, through its leave too.
     scene: Option<Scene>,
@@ -170,8 +169,8 @@ impl Renderer {
         moving || easing || self.transition(now).is_some()
     }
 
-    /// The pose part way from the one before the last sample to the last, at
-    /// the linear pace Core Animation gives the macOS panel's level.
+    /// The pose part way from the one before the last sample to the last, at a
+    /// linear pace.
     fn pose_at(&self, now: Instant) -> Pose {
         let Some(heard) = self.heard else {
             return self.pose;

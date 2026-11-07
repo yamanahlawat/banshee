@@ -54,8 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The old clipboard is not put back.
 - **A dictation is copied when you switch apps before it lands.** If the app in
   front when the words arrive is not the one you were in when you stopped
-  recording, Banshee copies them and plays the two-note sound. On macOS the
-  capsule also says "Copied". This works on macOS and on Hyprland. Elsewhere,
+  recording, Banshee copies them and plays the two-note sound. The capsule
+  also says "Copied". This works on macOS and on Hyprland. Elsewhere,
   and whenever Banshee cannot tell, it types as before. A wrong field inside the
   same app still gets the words.
 

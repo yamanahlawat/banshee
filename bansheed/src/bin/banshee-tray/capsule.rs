@@ -269,7 +269,10 @@ impl Stage {
     fn carry_out(&mut self, orders: Vec<Order>, now: Instant) {
         for order in orders {
             self.surface = match order {
-                Order::Destroy => None,
+                Order::Destroy => {
+                    self.entered = None;
+                    None
+                }
                 Order::Create => self.create(now),
             };
         }

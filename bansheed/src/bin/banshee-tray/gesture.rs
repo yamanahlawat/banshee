@@ -456,6 +456,12 @@ mod tests {
     }
 
     #[test]
+    fn ease_follows_settles_curve_between_the_ends() {
+        let eased = ease(SETTLE, 0.5);
+        assert!((eased - 0.97178).abs() < 0.001, "{eased}");
+    }
+
+    #[test]
     fn ease_solves_for_the_curves_parameter_before_reading_its_height() {
         assert!(close(ease(LINEAR, 0.25), 0.25), "{}", ease(LINEAR, 0.25));
     }

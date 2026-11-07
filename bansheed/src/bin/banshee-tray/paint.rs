@@ -1,5 +1,4 @@
-//! One capsule frame in tiny-skia: the macOS layer tree's shapes, order and
-//! alphas, with each live move read at `elapsed`.
+//! One capsule frame in tiny-skia, with each live move read at `elapsed`.
 
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect,
@@ -108,7 +107,6 @@ pub fn paint(frame: &Frame) -> Pixmap {
     pixmap
 }
 
-/// The voice layer's sublayers, in Core Animation's stacking order.
 fn paint_figure(canvas: &mut Pixmap, frame: &Frame, live: &Live, capsule: Transform, clip: &Mask) {
     let show = frame.show;
     let pose = pose_of(frame);
@@ -367,8 +365,8 @@ impl Live {
     }
 }
 
-/// The layers each move animates, as the macOS panel plays it. `outline`,
-/// `light` and `words` are the lengths its tracks run over.
+/// The layers each move animates. `outline`, `light` and `words` are the
+/// lengths its tracks run over.
 fn tracks(step: Move, outline: f64, light: f64, words: f64) -> Vec<(Layer, Vec<Track>)> {
     let (layer, tracks) = match step {
         Move::Rise => (Layer::Capsule, gesture::chip_rise()),
@@ -544,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn every_show_paints_rust_at_the_capsule_centre_and_leaves_the_corners_clear() {
+    fn every_show_paints_rust_at_the_capsule_left_end_and_leaves_the_corners_clear() {
         for show in every_show() {
             let line = line_of(&show);
             let frame = frame(&show, line.as_ref(), &[]);
