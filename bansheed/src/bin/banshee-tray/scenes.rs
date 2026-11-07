@@ -1,6 +1,7 @@
 //! Which moves each scene plays, independent of what draws them.
 
 use crate::chip::{Show, words_of};
+use crate::figure::CAPSULE;
 
 /// What a scene plays. Each names one gesture, or the fade that stands in
 /// for it under Reduce Motion.
@@ -108,10 +109,52 @@ pub fn leaving(show: &Show, calm: bool) -> Option<Move> {
     }
 }
 
+/// A surface holds the capsule at its top, the clear space below it, and room
+/// on both sides during a width transition. Only a point in the rounded shape
+/// of the centred capsule, `capsule` wide, counts. `y` runs down from the top.
+pub fn in_capsule(view_width: f64, capsule: f64, x: f64, y: f64) -> bool {
+    let radius = CAPSULE / 2.0;
+    let x = x - (view_width - capsule) / 2.0;
+    let centre_x = x.clamp(radius, (capsule - radius).max(radius));
+    (x - centre_x).hypot(y - radius) <= radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::chip::Done;
+    use crate::figure::TRAVEL;
+
+    #[test]
+    fn a_click_lands_only_inside_the_capsules_rounded_shape() {
+        for (x, y) in [(2.0, 22.0), (98.0, 22.0), (50.0, 22.0)] {
+            assert!(in_capsule(100.0, 100.0, x, y), "({x}, {y})");
+        }
+        for (x, y) in [(0.0, 0.0), (100.0, 0.0), (0.0, 44.0), (100.0, 44.0)] {
+            assert!(!in_capsule(100.0, 100.0, x, y), "({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn a_click_in_the_clear_space_below_the_capsule_misses() {
+        for y in [
+            CAPSULE + 1.0,
+            CAPSULE + TRAVEL / 2.0,
+            CAPSULE + TRAVEL - 1.0,
+        ] {
+            assert!(!in_capsule(100.0, 100.0, 50.0, y), "y {y}");
+        }
+    }
+
+    #[test]
+    fn a_click_beside_a_narrower_centred_capsule_misses() {
+        for x in [2.0, 18.0, 122.0, 138.0] {
+            assert!(!in_capsule(140.0, 100.0, x, 22.0), "x {x}");
+        }
+        for x in [22.0, 70.0, 118.0] {
+            assert!(in_capsule(140.0, 100.0, x, 22.0), "x {x}");
+        }
+    }
 
     #[test]
     fn copied_shows_its_word_with_no_failure_move() {

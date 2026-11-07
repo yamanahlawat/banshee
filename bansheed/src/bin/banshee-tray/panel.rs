@@ -41,7 +41,9 @@ use super::figure::{
     RING_STRENGTH, RUST, Segment, TRAVEL, Voice, WORDS_BLEED, WORDS_GAP, WORDS_SIZE, WORDS_TAIL,
     WORDS_TRACKING, WORDS_WEIGHT, WORDS_WIDTH, WORKING_DEPTH,
 };
-use super::scenes::{Entrance, Move, answer_opens, centred, holds_the_voice, leaving, moves};
+use super::scenes::{
+    Entrance, Move, answer_opens, centred, holds_the_voice, in_capsule, leaving, moves,
+};
 
 mod motion;
 
@@ -419,17 +421,6 @@ fn scale_tree(layer: &CALayer, scale: CGFloat) {
     }
 }
 
-/// The panel holds the capsule, the clear space below it, and room on both
-/// sides during a width transition. Any of it may take a click, so only a
-/// point in the rounded shape of the centred capsule, `capsule` points wide,
-/// counts.
-fn in_capsule(view: CGSize, capsule: CGFloat, at: CGPoint) -> bool {
-    let radius = CAPSULE / 2.0;
-    let x = at.x - (view.width - capsule) / 2.0;
-    let centre_x = x.clamp(radius, (capsule - radius).max(radius));
-    (x - centre_x).hypot(at.y - TRAVEL - radius) <= radius
-}
-
 struct Clicks {
     open: Box<dyn Fn()>,
     capsule: Retained<CALayer>,
@@ -453,7 +444,9 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let capsule = self.ivars().capsule.bounds().size.width;
-            if in_capsule(self.bounds().size, capsule, event.locationInWindow()) {
+            let view = self.bounds().size;
+            let at = event.locationInWindow();
+            if in_capsule(view.width, capsule, at.x, view.height - at.y) {
                 (self.ivars().open)();
             }
         }
@@ -977,37 +970,5 @@ mod tests {
         // SAFETY: a null transform means none.
         unsafe { CGMutablePath::add_ellipse_in_rect(Some(&path), ptr::null(), oval) };
         assert_eq!(ink_of(&path), Some(oval));
-    }
-
-    #[test]
-    fn a_click_lands_only_inside_the_capsules_rounded_shape() {
-        let view = CGSize::new(100.0, 44.0 + TRAVEL);
-        let at = |x, y| CGPoint::new(x, TRAVEL + y);
-        for (x, y) in [(2.0, 22.0), (98.0, 22.0), (50.0, 22.0)] {
-            assert!(in_capsule(view, 100.0, at(x, y)), "({x}, {y})");
-        }
-        for (x, y) in [(0.0, 0.0), (100.0, 0.0), (0.0, 44.0), (100.0, 44.0)] {
-            assert!(!in_capsule(view, 100.0, at(x, y)), "({x}, {y})");
-        }
-    }
-
-    #[test]
-    fn a_click_in_the_clear_space_below_the_capsule_misses() {
-        let view = CGSize::new(100.0, 44.0 + TRAVEL);
-        for y in [0.0, TRAVEL / 2.0, TRAVEL - 1.0] {
-            assert!(!in_capsule(view, 100.0, CGPoint::new(50.0, y)), "y {y}");
-        }
-    }
-
-    #[test]
-    fn a_click_beside_a_narrower_centred_capsule_misses() {
-        let view = CGSize::new(140.0, 44.0 + TRAVEL);
-        let at = |x| CGPoint::new(x, TRAVEL + 22.0);
-        for x in [2.0, 18.0, 122.0, 138.0] {
-            assert!(!in_capsule(view, 100.0, at(x)), "x {x}");
-        }
-        for x in [22.0, 70.0, 118.0] {
-            assert!(in_capsule(view, 100.0, at(x)), "x {x}");
-        }
     }
 }

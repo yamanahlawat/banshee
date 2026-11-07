@@ -4,10 +4,10 @@
 use std::time::{Duration, Instant};
 
 use crate::chip::{Scene, Show, words_of};
-use crate::figure::{self, FIGURE, INSET, LEVEL_STEP, Pose, Voice, WORDS_GAP, WORDS_TAIL};
+use crate::figure::{self, CAPSULE, FIGURE, INSET, LEVEL_STEP, Pose, Voice, WORDS_GAP, WORDS_TAIL};
 use crate::gesture;
 use crate::paint::{self, Frame};
-use crate::scenes::{Entrance, Move, answer_opens, holds_the_voice, leaving, moves};
+use crate::scenes::{Entrance, Move, answer_opens, holds_the_voice, in_capsule, leaving, moves};
 use crate::words::{self, Line};
 
 const SIDE_MARGIN: f64 = 12.0;
@@ -219,6 +219,36 @@ impl Renderer {
         }))
     }
 
+    /// The capsule's rectangle as `(x, y, width, height)` in surface logical
+    /// pixels, while a failure shows and takes clicks.
+    pub fn input_region(&self, now: Instant) -> Option<(i32, i32, i32, i32)> {
+        let (span, width) = self.clickable(now)?;
+        let x = ((span - width) / 2.0).floor();
+        Some((x as i32, 0, width.ceil() as i32, CAPSULE as i32))
+    }
+
+    /// Whether a press at `(x, y)`, surface logical pixels, lands on a
+    /// capsule that takes clicks.
+    pub fn opens_at(&self, x: f64, y: f64, now: Instant) -> bool {
+        self.clickable(now)
+            .is_some_and(|(span, width)| in_capsule(span, width, x, y))
+    }
+
+    /// The surface's span and the capsule's width, while a failure shows and
+    /// is not on its way out.
+    fn clickable(&self, now: Instant) -> Option<(f64, f64)> {
+        let broken = self
+            .scene
+            .as_ref()
+            .is_some_and(|scene| matches!(scene.show, Show::Broken(_)));
+        if !broken || self.leave_ends.is_some() {
+            return None;
+        }
+        self.picture(now, 1, |frame| {
+            (f64::from(paint::size(frame).0), paint::shown_width(frame))
+        })
+    }
+
     pub fn clear(&mut self) {
         self.scene = None;
         self.moves.clear();
@@ -384,6 +414,75 @@ mod tests {
         let between = lift(1016);
         assert!(heard.lift < between && between < rest.lift, "{between}");
         assert_eq!(lift(1040), heard.lift);
+    }
+
+    #[test]
+    fn only_a_broken_scene_takes_clicks() {
+        let t0 = Instant::now();
+        let others = [
+            Show::Recording("hi".into()),
+            Show::Working,
+            Show::YourTurn,
+            Show::Answering("ok".into()),
+            Show::NothingHeard("Nothing heard".into()),
+            Show::Done(Done::Typed),
+            Show::Copied,
+        ];
+        for show in others {
+            let mut renderer = Renderer::new();
+            renderer.show(Some(&scene(show.clone(), 1)), t0);
+            assert_eq!(renderer.input_region(at(t0, 500)), None, "{show:?}");
+            assert!(!renderer.opens_at(20.0, 22.0, at(t0, 500)), "{show:?}");
+        }
+        let mut renderer = Renderer::new();
+        assert_eq!(renderer.input_region(t0), None, "nothing shows");
+        renderer.show(Some(&scene(Show::Broken("No microphone".into()), 1)), t0);
+        let (x, y, width, height) = renderer.input_region(at(t0, 500)).expect("a failure");
+        assert_eq!((x, y, height), (0, 0, CAPSULE as i32));
+        assert_eq!(f64::from(width), paint::width(renderer.line.as_ref()));
+    }
+
+    #[test]
+    fn a_press_inside_a_broken_capsule_opens_the_window() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&scene(Show::Broken("No microphone".into()), 1)), t0);
+        let width = paint::width(renderer.line.as_ref());
+        let now = at(t0, 500);
+        assert!(renderer.opens_at(width / 2.0, 22.0, now));
+        assert!(!renderer.opens_at(width / 2.0, CAPSULE + 4.0, now), "below");
+        assert!(!renderer.opens_at(width + 4.0, 22.0, now), "beside");
+        assert!(!renderer.opens_at(1.0, 1.0, now), "the corner");
+    }
+
+    #[test]
+    fn a_failure_on_its_way_out_takes_no_clicks() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&scene(Show::Broken("No microphone".into()), 1)), t0);
+        renderer.show(None, at(t0, 1000));
+        assert_eq!(renderer.input_region(at(t0, 1010)), None);
+        assert!(!renderer.opens_at(20.0, 22.0, at(t0, 1010)));
+    }
+
+    #[test]
+    fn the_region_follows_a_growing_capsule_centred_in_its_span() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&scene(Show::Broken("No microphone".into()), 1)), t0);
+        let narrow = renderer.input_region(at(t0, 500)).expect("a failure");
+        renderer.show(
+            Some(&scene(
+                Show::Broken("No microphone, check the device".into()),
+                1,
+            )),
+            at(t0, 500),
+        );
+        let start = renderer.input_region(at(t0, 500)).expect("a failure");
+        let end = renderer.input_region(at(t0, 5000)).expect("a failure");
+        assert_eq!(start.2, narrow.2, "it grows from the width it shows");
+        assert!(end.2 > start.2);
+        assert!(start.0 > 0 && end.0 == 0, "{start:?} {end:?}");
     }
 
     #[test]

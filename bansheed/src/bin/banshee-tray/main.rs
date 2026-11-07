@@ -348,9 +348,15 @@ mod tray {
 
     #[cfg(target_os = "linux")]
     fn build_surface(postbox: impl Postbox) -> Option<Box<dyn Surface>> {
-        let capsule = super::capsule::Capsule::open(move || {
-            postbox.post(Message::Lost);
-        })?;
+        let opener = postbox.clone();
+        let capsule = super::capsule::Capsule::open(
+            move || {
+                opener.post(Message::Open);
+            },
+            move || {
+                postbox.post(Message::Lost);
+            },
+        )?;
         Some(Box::new(capsule))
     }
 

@@ -14,9 +14,15 @@ use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::reexports::calloop::{self, EventLoop, channel};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
-use smithay_client_toolkit::reexports::client::protocol::{wl_output, wl_shm, wl_surface};
+use smithay_client_toolkit::reexports::client::protocol::{
+    wl_output, wl_pointer, wl_seat, wl_shm, wl_surface,
+};
 use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
+use smithay_client_toolkit::seat::pointer::{
+    BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler,
+};
+use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
@@ -45,18 +51,26 @@ pub struct Capsule {
 }
 
 impl Capsule {
-    /// `None` when the desktop has no layer shell to draw on. `lost` runs on
-    /// the capsule's thread once the connection ends.
-    pub fn open(lost: impl FnOnce() + Send + 'static) -> Option<Self> {
-        Self::open_on(std::env::var_os("WAYLAND_DISPLAY"), lost)
+    /// `None` when the desktop has no layer shell to draw on. `open` runs on
+    /// the capsule's thread when a click lands on a failure, and `lost` once
+    /// the connection ends.
+    pub fn open(
+        open: impl Fn() + Send + 'static,
+        lost: impl FnOnce() + Send + 'static,
+    ) -> Option<Self> {
+        Self::open_on(std::env::var_os("WAYLAND_DISPLAY"), open, lost)
     }
 
-    fn open_on(display: Option<OsString>, lost: impl FnOnce() + Send + 'static) -> Option<Self> {
+    fn open_on(
+        display: Option<OsString>,
+        open: impl Fn() + Send + 'static,
+        lost: impl FnOnce() + Send + 'static,
+    ) -> Option<Self> {
         let (reply, opened) = mpsc::sync_channel(0);
         let (commands, received) = channel::channel();
         let spawned = std::thread::Builder::new()
             .name("banshee-capsule".into())
-            .spawn(move || match connect(display, received) {
+            .spawn(move || match connect(display, Box::new(open), received) {
                 Err(failure) => {
                     let _ = reply.send(Err(failure));
                 }
@@ -139,6 +153,7 @@ impl fmt::Display for Failure {
 
 fn connect(
     display: Option<OsString>,
+    open: Box<dyn Fn() + Send>,
     commands: channel::Channel<Command>,
 ) -> Result<(EventLoop<'static, Stage>, Stage), Failure> {
     if display.is_none() {
@@ -150,12 +165,16 @@ fn connect(
     let qh = queue.handle();
     let compositor = CompositorState::bind(&globals, &qh).map_err(|error| failed(&error))?;
     let shm = Shm::bind(&globals, &qh).map_err(|error| failed(&error))?;
+    let seats = SeatState::new(&globals, &qh);
     let layer_shell = LayerShell::bind(&globals, &qh).map_err(|_| Failure::NoLayerShell)?;
     let bare = (CAPSULE * (TRAVEL + CAPSULE)) as usize * 4;
     let pool = SlotPool::new(bare, &shm).map_err(|error| failed(&error))?;
     let stage = Stage {
         registry: RegistryState::new(&globals),
         outputs: OutputState::new(&globals, &qh),
+        seats,
+        pointer: None,
+        open,
         compositor,
         shm,
         layer_shell,
@@ -192,13 +211,21 @@ struct Shown {
     ready: bool,
     /// A frame callback is pending.
     waiting: bool,
+    /// The input region last committed, where `None` is empty.
+    clickable: Option<Rect>,
 }
+
+type Rect = (i32, i32, i32, i32);
 
 /// The capsule thread's state, which every Wayland event reaches.
 struct Stage {
     registry: RegistryState,
     compositor: CompositorState,
     outputs: OutputState,
+    seats: SeatState,
+    /// The seat with the pointer, and the pointer.
+    pointer: Option<(wl_seat::WlSeat, wl_pointer::WlPointer)>,
+    open: Box<dyn Fn() + Send>,
     shm: Shm,
     layer_shell: LayerShell,
     pool: SlotPool,
@@ -265,10 +292,7 @@ impl Stage {
         layer.set_exclusive_zone(0);
         layer.set_margin(0, 0, BOTTOM_MARGIN, 0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        match Region::new(&self.compositor) {
-            Ok(nowhere) => layer.set_input_region(Some(nowhere.wl_region())),
-            Err(error) => log::error!("the capsule may catch the pointer: {error}"),
-        }
+        set_clickable(&self.compositor, &layer, None);
         layer.set_size(asked.0, asked.1);
         layer.commit();
         Some(Shown {
@@ -276,6 +300,7 @@ impl Stage {
             asked,
             ready: false,
             waiting: false,
+            clickable: None,
         })
     }
 
@@ -318,6 +343,20 @@ impl Stage {
         if self.owed || self.renderer.stale {
             self.draw(now);
         }
+        self.sync_clickable(now);
+    }
+
+    /// Commits the input region when the capsule's rectangle moved.
+    fn sync_clickable(&mut self, now: Instant) {
+        let Some(shown) = self.surface.as_mut() else {
+            return;
+        };
+        let wanted = self.renderer.input_region(now);
+        if wanted != shown.clickable {
+            set_clickable(&self.compositor, &shown.layer, wanted);
+            shown.layer.commit();
+            shown.clickable = wanted;
+        }
     }
 
     fn draw(&mut self, now: Instant) {
@@ -355,6 +394,18 @@ impl Stage {
                 }
             }
         }
+    }
+}
+
+fn set_clickable(compositor: &CompositorState, layer: &LayerSurface, rect: Option<Rect>) {
+    match Region::new(compositor) {
+        Ok(region) => {
+            if let Some((x, y, width, height)) = rect {
+                region.add(x, y, width, height);
+            }
+            layer.set_input_region(Some(region.wl_region()));
+        }
+        Err(error) => log::error!("the capsule's clicks are not as drawn: {error}"),
     }
 }
 
@@ -493,6 +544,82 @@ impl LayerShellHandler for Stage {
     }
 }
 
+impl SeatHandler for Stage {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seats
+    }
+
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+
+    fn new_capability(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability != Capability::Pointer || self.pointer.is_some() {
+            return;
+        }
+        match self.seats.get_pointer(qh, &seat) {
+            Ok(pointer) => self.pointer = Some((seat, pointer)),
+            Err(error) => log::error!("the capsule cannot read the pointer: {error}"),
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer
+            && self.pointer.as_ref().is_some_and(|(s, _)| *s == seat)
+        {
+            self.release_pointer();
+        }
+    }
+
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        if self.pointer.as_ref().is_some_and(|(s, _)| *s == seat) {
+            self.release_pointer();
+        }
+    }
+}
+
+impl Stage {
+    fn release_pointer(&mut self) {
+        if let Some((_, pointer)) = self.pointer.take() {
+            if pointer.version() >= 3 {
+                pointer.release();
+            }
+        }
+    }
+}
+
+impl PointerHandler for Stage {
+    fn pointer_frame(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        let now = Instant::now();
+        for event in events {
+            let PointerEventKind::Press { button, .. } = event.kind else {
+                continue;
+            };
+            let (x, y) = event.position;
+            if button == BTN_LEFT && self.owns(&event.surface) && self.renderer.opens_at(x, y, now)
+            {
+                (self.open)();
+            }
+        }
+    }
+}
+
 impl ShmHandler for Stage {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
@@ -504,7 +631,7 @@ impl ProvidesRegistryState for Stage {
         &mut self.registry
     }
 
-    registry_handlers![OutputState];
+    registry_handlers![OutputState, SeatState];
 }
 
 delegate_registry!(Stage);
@@ -516,7 +643,7 @@ mod tests {
 
     #[test]
     fn without_a_wayland_display_the_capsule_does_not_open() {
-        assert!(Capsule::open_on(None, || {}).is_none());
+        assert!(Capsule::open_on(None, || {}, || {}).is_none());
     }
 
     fn ending_on_a_thread(
