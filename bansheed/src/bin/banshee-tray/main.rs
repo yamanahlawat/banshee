@@ -21,6 +21,8 @@ mod gesture;
 mod panel;
 #[cfg(any(target_os = "macos", test))]
 mod scenes;
+#[cfg(test)]
+mod words;
 
 mod tray {
     use std::collections::HashMap;

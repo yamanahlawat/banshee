@@ -96,6 +96,11 @@ enigo = "0.6.1"
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2.189"
 
+# The Linux capsule: paths painted with tiny-skia, words shaped from the bundled Archivo.
+[target.'cfg(target_os = "linux")'.dependencies]
+tiny-skia = "0.12.0"
+rustybuzz = "0.20.1"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # The menu bar indicator's loop. winit runs it because tray-icon tests against
 # it and it commits to no toolkit. KSNI runs its own thread everywhere else.
@@ -123,6 +128,8 @@ transcribe-cpp = { version = "0.4.1", default-features = false, features = ["met
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false }
 hound = "3.5"
+tiny-skia = "0.12.0"
+rustybuzz = "0.20.1"
 
 [[bench]]
 name = "speech_out"
