@@ -1,6 +1,8 @@
 //! The capsule's words on Linux: one line shaped from the bundled Archivo,
 //! cut to fit, and returned as an outline in logical pixels.
 
+use std::sync::OnceLock;
+
 use harfrust::{Buffer, ShapeOptions, ShaperFont, font::Font};
 use skrifa::{DrawMemory, GlyphId, PathSink, ScalerFont};
 use tiny_skia::{Path, PathBuilder};
@@ -20,13 +22,13 @@ pub struct Line {
 }
 
 pub fn line(text: &str, cut: Cut, room: f32) -> Line {
-    let font = font(WORDS_WEIGHT as f32, WORDS_WIDTH as f32);
-    let scale = scale_of(&font);
+    let font = capsule_font();
+    let scale = scale_of(font);
     let metrics = font.metrics();
     let h_line = metrics.h_line().unwrap_or_default();
     let ascent = h_line.ascender.to_f32() * scale;
     let descent = -h_line.descender.to_f32() * scale;
-    let text = fit(&font, text, cut, room);
+    let text = fit(font, text, cut, room);
 
     let scaler = ScalerFont::unhinted(font.clone(), None);
     let mut pen = Pen {
@@ -35,7 +37,7 @@ pub fn line(text: &str, cut: Cut, room: f32) -> Line {
         ascent,
         x: 0.0,
     };
-    for (glyph, advance) in shape(&font, &text) {
+    for (glyph, advance) in shape(font, &text) {
         if let Some(outline) = scaler.outline(glyph) {
             // A glyph that fails to draw leaves a gap; the advance still holds its place.
             let _ = outline.draw(DrawMemory::Scratch, &mut pen);
@@ -48,6 +50,12 @@ pub fn line(text: &str, cut: Cut, room: f32) -> Line {
         ascent,
         descent,
     }
+}
+
+/// The bundled Archivo at the capsule's weight and width, parsed once.
+fn capsule_font() -> &'static Font {
+    static FONT: OnceLock<Font> = OnceLock::new();
+    FONT.get_or_init(|| font(WORDS_WEIGHT as f32, WORDS_WIDTH as f32))
 }
 
 /// The bundled Archivo at one weight and width. Shaping and outlines both read
@@ -169,23 +177,19 @@ impl PathSink for Pen {
 mod tests {
     use super::*;
 
-    fn capsule_font() -> Font {
-        font(WORDS_WEIGHT as f32, WORDS_WIDTH as f32)
-    }
-
     const LONG: &str = "this sentence runs well past the room the capsule has for it";
 
     #[test]
     fn your_turn_shapes_one_glyph_per_letter() {
         let font = capsule_font();
-        assert_eq!(shape(&font, "Your turn").len(), 9);
-        assert!(width_of(&font, "Your turn") > 0.0);
+        assert_eq!(shape(font, "Your turn").len(), 9);
+        assert!(width_of(font, "Your turn") > 0.0);
     }
 
     #[test]
     fn a_long_live_line_keeps_its_newest_end() {
         let font = capsule_font();
-        let kept = fit(&font, LONG, Cut::Start, 100.0);
+        let kept = fit(font, LONG, Cut::Start, 100.0);
         let tail = kept
             .strip_prefix(ELLIPSIS)
             .expect("the cut starts with an ellipsis");
@@ -196,7 +200,7 @@ mod tests {
     #[test]
     fn a_long_reason_keeps_its_start() {
         let font = capsule_font();
-        let kept = fit(&font, LONG, Cut::End, 100.0);
+        let kept = fit(font, LONG, Cut::End, 100.0);
         let head = kept
             .strip_suffix(ELLIPSIS)
             .expect("the cut ends in an ellipsis");
@@ -207,13 +211,13 @@ mod tests {
     #[test]
     fn a_line_that_fits_is_left_whole() {
         let font = capsule_font();
-        assert_eq!(fit(&font, "Your turn", Cut::End, 1000.0), "Your turn");
+        assert_eq!(fit(font, "Your turn", Cut::End, 1000.0), "Your turn");
     }
 
     #[test]
     fn the_width_axis_widens_the_line() {
         let default = font(WORDS_WEIGHT as f32, 100.0);
-        assert!(width_of(&capsule_font(), "Your turn") > width_of(&default, "Your turn"));
+        assert!(width_of(capsule_font(), "Your turn") > width_of(&default, "Your turn"));
     }
 
     #[test]

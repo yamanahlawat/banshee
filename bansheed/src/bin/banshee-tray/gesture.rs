@@ -325,10 +325,21 @@ pub fn fade_out() -> Vec<Track> {
     )
 }
 
+/// How long `tracks` take to end once added. `None` for a gesture that repeats.
+#[cfg(target_os = "linux")]
+pub fn lasts(tracks: &[Track]) -> Option<f64> {
+    tracks
+        .iter()
+        .try_fold(0.0, |longest: f64, track| match track.end {
+            End::Repeat => None,
+            End::Hold | End::Release => Some(longest.max(track.delay + track.duration)),
+        })
+}
+
 /// The value `track` gives `elapsed` seconds after it was added, over a layer
 /// whose own value is `model`. Before the delay a held track shows the model
 /// and any other shows its first value, as Core Animation's fill modes do.
-#[cfg(test)]
+#[cfg(any(target_os = "linux", test))]
 pub fn at(track: &Track, elapsed: f64, model: f64) -> f64 {
     let values = &track.values;
     let mut t = elapsed - track.delay;
@@ -358,7 +369,7 @@ pub fn at(track: &Track, elapsed: f64, model: f64) -> f64 {
 
 /// The eased progress at `x` along `curve`: Newton's method finds the curve's
 /// parameter for `x`, and bisection takes over where Newton stalls.
-#[cfg(test)]
+#[cfg(any(target_os = "linux", test))]
 pub fn ease([x1, y1, x2, y2]: Bezier, x: f64) -> f64 {
     const CLOSE: f64 = 1e-7;
     let along = |p1: f64, p2: f64, t: f64| {

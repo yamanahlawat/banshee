@@ -40,17 +40,21 @@ pub fn size(frame: &Frame) -> (u32, u32) {
     (span as u32, (TRAVEL + CAPSULE) as u32)
 }
 
-/// The width the scene's words give the capsule once any transition ends.
-fn target_width(frame: &Frame) -> f64 {
-    words(frame)
-        .map_or(CAPSULE, |(line, _)| {
+/// The width `line` gives the capsule once any transition ends.
+pub fn width(line: Option<&Line>) -> f64 {
+    line.filter(|line| line.path.is_some())
+        .map_or(CAPSULE, |line| {
             INSET + FIGURE + WORDS_GAP + f64::from(line.width) + WORDS_TAIL
         })
         .ceil()
 }
 
+fn target_width(frame: &Frame) -> f64 {
+    width(frame.line)
+}
+
 /// The capsule's width as it shows now, part way through a transition or not.
-fn shown_width(frame: &Frame) -> f64 {
+pub fn shown_width(frame: &Frame) -> f64 {
     let to = target_width(frame);
     frame.width_from.map_or(to, |(from, seconds)| {
         let [width] = &gesture::chip_width(from, to)[..] else {
@@ -394,6 +398,17 @@ fn tracks(step: Move, outline: f64, light: f64, words: f64) -> Vec<(Layer, Vec<T
         Move::FadeOut => (Layer::Capsule, gesture::fade_out()),
     };
     vec![(layer, tracks)]
+}
+
+/// How long `step` runs before its frames stop changing. `None` for a move that
+/// repeats.
+#[cfg(target_os = "linux")]
+pub fn lasts(step: Move) -> Option<f64> {
+    tracks(step, 0.0, 0.0, 0.0)
+        .iter()
+        .try_fold(0.0, |longest: f64, (_, tracks)| {
+            Some(longest.max(gesture::lasts(tracks)?))
+        })
 }
 
 fn ink(hex: u32, alpha: f64) -> Paint<'static> {

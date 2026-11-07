@@ -12,18 +12,20 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod capsule;
 mod chip;
-#[cfg_attr(not(target_os = "macos"), expect(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), expect(dead_code))]
 mod figure;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod gesture;
-#[cfg(test)]
+#[cfg(any(target_os = "linux", test))]
 mod paint;
 #[cfg(target_os = "macos")]
 mod panel;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod scenes;
-#[cfg(test)]
+#[cfg(any(target_os = "linux", test))]
 mod words;
 
 mod tray {
@@ -282,14 +284,19 @@ mod tray {
         Quit,
         Open,
         Start,
-        StartFinished { succeeded: bool },
+        StartFinished {
+            succeeded: bool,
+        },
         CopyLast,
         Copied(String),
         Choices(Choices),
         Pick(Pick),
+        /// The capsule's Wayland connection closed.
+        #[cfg(target_os = "linux")]
+        Lost,
     }
 
-    /// Draws a scene. The panel is macOS only; elsewhere there is nothing to draw.
+    /// Draws a scene: the panel on macOS, the layer-shell capsule on Linux.
     trait Surface {
         fn show(&mut self, scene: Option<&chip::Scene>);
         fn level(&mut self, level: f32);
@@ -324,7 +331,28 @@ mod tray {
         Some(Box::new(super::panel::Panel::new(mtm, open)))
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    impl Surface for super::capsule::Capsule {
+        fn show(&mut self, scene: Option<&chip::Scene>) {
+            super::capsule::Capsule::show(self, scene);
+        }
+
+        fn level(&mut self, level: f32) {
+            super::capsule::Capsule::level(self, level);
+        }
+
+        fn announce(&self, _words: &str) {}
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_surface(postbox: impl Postbox) -> Option<Box<dyn Surface>> {
+        let capsule = super::capsule::Capsule::open(move || {
+            postbox.post(Message::Lost);
+        })?;
+        Some(Box::new(capsule))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn build_surface(_postbox: impl Postbox) -> Option<Box<dyn Surface>> {
         None
     }
@@ -355,6 +383,8 @@ mod tray {
     enum Flow {
         Stay,
         Exit,
+        #[cfg(target_os = "linux")]
+        Lost,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -362,6 +392,8 @@ mod tray {
         Show,
         Stay,
         Exit,
+        #[cfg(target_os = "linux")]
+        Lost,
     }
 
     #[derive(Debug, Default, PartialEq, Eq)]
@@ -975,6 +1007,8 @@ mod tray {
                 }
                 Step::Stay => Flow::Stay,
                 Step::Exit => Flow::Exit,
+                #[cfg(target_os = "linux")]
+                Step::Lost => Flow::Lost,
             }
         }
 
@@ -1052,6 +1086,8 @@ mod tray {
                     };
                     std::mem::replace(&mut self.starting, finished) != self.starting
                 }
+                #[cfg(target_os = "linux")]
+                Message::Lost => return Step::Lost,
                 Message::Open => {
                     open_the_window().unwrap_or_else(|error| log::error!("{error}"));
                     return Step::Stay;
@@ -1601,7 +1637,14 @@ mod tray {
 
         let mut app = App::new(sender);
         app.start();
+        serve(&mut app, &receiver)
+    }
 
+    #[cfg(not(target_os = "macos"))]
+    fn serve<P: Postbox>(
+        app: &mut App<P>,
+        receiver: &std::sync::mpsc::Receiver<Message>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             let message = match app.chip.deadline() {
                 Some(deadline) => {
@@ -1620,8 +1663,11 @@ mod tray {
                     Err(_) => break,
                 },
             };
-            if let Flow::Exit = app.handle(message) {
-                break;
+            match app.handle(message) {
+                Flow::Stay => {}
+                Flow::Exit => break,
+                #[cfg(target_os = "linux")]
+                Flow::Lost => return Err("the Wayland connection closed".into()),
             }
         }
         Ok(())
@@ -1663,6 +1709,16 @@ mod tray {
                 app.start_with(|| Err("no menu bar".into()), |_| begun += 1);
             }
             assert_eq!(begun, 1);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_lost_connection_ends_the_tray_with_an_error() {
+            let (sender, receiver) = std::sync::mpsc::channel::<Message>();
+            let mut app = App::new(sender.clone());
+            sender.post(Message::Lost);
+            let ended = serve(&mut app, &receiver).map_err(|error| error.to_string());
+            assert_eq!(ended, Err("the Wayland connection closed".to_string()));
         }
 
         #[test]

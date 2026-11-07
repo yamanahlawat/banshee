@@ -47,7 +47,7 @@ impl Done {
 }
 
 /// Which end of a line too long for the capsule gives way.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cut {
     Start,
@@ -56,7 +56,7 @@ pub enum Cut {
 
 /// The line a scene shows, and the end cut when it does not fit. Live words
 /// keep their newest end; every other line keeps its start.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub fn words_of(show: &Show) -> Option<(&str, Cut)> {
     match show {
         Show::Recording(words) | Show::Answering(words) if !words.is_empty() => {

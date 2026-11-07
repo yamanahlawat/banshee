@@ -98,6 +98,7 @@ libc = "0.2.189"
 
 # The Linux capsule: paths painted with tiny-skia, words shaped and outlined from the bundled Archivo.
 [target.'cfg(target_os = "linux")'.dependencies]
+smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["calloop"] }
 tiny-skia = "0.12.0"
 harfrust = "0.15.0"
 skrifa = "0.49.0"
