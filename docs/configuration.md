@@ -194,8 +194,8 @@ Speak with one by: banshee config set tts.voice "<id>"
   for example `af_bella`, `am_michael`, or `bf_emma`.
 - **The prefix is accent and gender:** `a`merican/`b`ritish, `f`emale/`m`ale.
 - **After a change to `voice`,** run `banshee setup` to fetch the new file.
-- **The window's Voice panel** lists every voice Banshee can name and fetches
-  the one you pick, and its Microphone panel fetches a listening model you choose
+- **The window's Speaking page** lists every voice Banshee can name and fetches
+  the one you pick, and its Listening page fetches a listening model you choose
   and do not have.
 
 ## Tuning the listener
@@ -320,7 +320,7 @@ Speak with one by: banshee config set tts.voice "<id>"
 - **`sample_rate` changes that rate,** for a server that answers `pcm` at
   another one. Banshee sends the field to the server only when you set it,
   and never under `wav`, where the header states the rate.
-- **The Voice panel sets both.** It shows the rate only under `pcm`, and an
+- **The Speaking page sets both.** It shows the rate only under `pcm`, and an
   empty rate field goes back to 24000 Hz.
 - **The type the server declares names the format.** A type that names none,
   such as `application/octet-stream`, leaves the format Banshee asked for.
@@ -344,7 +344,7 @@ Speak with one by: banshee config set tts.voice "<id>"
 - **A question asked through `ask_user`** still opens the microphone after it,
   so you hear the tone and then silence while Banshee waits for your answer.
 - **Either way three places say why:** `banshee status`, the status reply's
-  `last_speech_error` and the window's Voice panel.
+  `last_speech_error` and the window's Speaking page.
 - **A reply that fails after its first words ends where it stopped.** A restart
   in another voice mid-sentence is worse than a stop.
 - **A speaker that will not start never stops the daemon,** so dictation goes

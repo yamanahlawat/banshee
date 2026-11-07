@@ -1,5 +1,6 @@
-import { get, writable, type Writable } from 'svelte/store';
+import { derived, get, writable, type Readable, type Writable } from 'svelte/store';
 import { history, type HistoryRow } from './tauri';
+import { sameLocalDay, toDate } from './time';
 
 // A refresh that cannot find the row it last held reads the whole table again,
 // so too few here is not a wrong answer.
@@ -16,13 +17,6 @@ export function countNewer(page: HistoryRow[], newestId: HistoryRow['id'] | null
   if (newestId === null) return null;
   const at = page.findIndex((row) => row.id === newestId);
   return at === -1 ? null : at;
-}
-
-export function freshLead(
-  debuted: HistoryRow['id'] | null,
-  lead: HistoryRow['id'] | null,
-): boolean {
-  return debuted !== null && lead !== null && debuted !== lead;
 }
 
 export function formatCount(n: number): string {
@@ -93,6 +87,7 @@ export function forget(): void {
   // The read in flight will apply nothing, so a caller that asks after this
   // must get its own rather than be handed the one already emptied.
   reading = null;
+  view.set({ query: '', chosen: null });
   table.update((held) => ({ ...held, rows: [], total: 0, loaded: true }));
 }
 
@@ -111,4 +106,88 @@ export function followSaveHistory(on: boolean): void {
 /// after that. Which one is the table's own business, not each caller's.
 export function readLatest(): Promise<void> {
   return (get(table).loaded ? readNewest() : readAll()).catch(() => {});
+}
+
+export type View = { query: string; chosen: HistoryRow['id'] | null };
+
+export const view: Writable<View> = writable({ query: '', chosen: null });
+
+export function matches(row: HistoryRow, needle: string): boolean {
+  const lower = needle.toLowerCase();
+  return [row.question, row.text].some((part) => (part ?? '').toLowerCase().includes(lower));
+}
+
+export function rowFlag(row: HistoryRow): string | null {
+  if (row.kind === 'dictation') return row.outcome === 'failed' ? row.reason : null;
+  switch (row.outcome) {
+    case 'no_answer':
+      return 'No answer heard';
+    case 'closed':
+      return 'Closed before you answered';
+    case 'failed':
+      return 'Not transcribed';
+    case 'unasked':
+      return 'Not asked aloud';
+    default:
+      return null;
+  }
+}
+
+const MONTHS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+// Counted back by the calendar, so a clock change cannot skip a day.
+export function dayLabel(timestamp: string, now: Date): string {
+  const at = toDate(timestamp);
+  if (sameLocalDay(at, now)) return 'Today';
+  if (sameLocalDay(at, new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))) {
+    return 'Yesterday';
+  }
+  const day = `${at.getDate()} ${MONTHS[at.getMonth()]}`;
+  return at.getFullYear() === now.getFullYear() ? day : `${day} ${at.getFullYear()}`;
+}
+
+export function selected(shown: HistoryRow[], chosen: HistoryRow['id'] | null): HistoryRow | null {
+  return shown.find((row) => row.id === chosen) ?? shown[0] ?? null;
+}
+
+// A store of its own, so a new selection does not filter the table again.
+const needle: Readable<string> = derived(view, (now) => now.query.trim());
+
+/// The rows the search leaves, newest first.
+export const listed: Readable<HistoryRow[]> = derived([table, needle], ([held, query]) =>
+  query === '' ? held.rows : held.rows.filter((row) => matches(row, query)),
+);
+
+/// Empties the search and keeps the row it had selected. Selection goes on
+/// following the newest row only if it was doing so and still lands there.
+export function clearSearch(): void {
+  const newest = get(table).rows[0]?.id ?? null;
+  const held = selected(get(listed), get(view).chosen);
+  view.update(({ chosen }) => ({
+    query: '',
+    chosen: held === null || (chosen === null && held.id === newest) ? chosen : held.id,
+  }));
+}
+
+/// What Cmd+C takes from a row: the answer or the text, else the question.
+/// `which` names the detail's copy button that shows it was copied.
+export function copyOf(
+  row: HistoryRow,
+): { text: string; which: 'text' | 'answer' | 'question' } | null {
+  if (row.text) return { text: row.text, which: row.kind === 'dictation' ? 'text' : 'answer' };
+  if (row.question) return { text: row.question, which: 'question' };
+  return null;
 }

@@ -12,7 +12,7 @@
   /// caveat, because the accent is the colour of something being wrong.
   let listNote: { text: string; failed: boolean } | null = null;
   /// Whether a read has answered at all. An empty list before the first answer
-  /// is a panel still looking; after one, it is a machine with no agents.
+  /// is a page still looking; after one, it is a machine with no agents.
   let looked = false;
 
   let applyButton: HTMLButtonElement;
@@ -21,7 +21,7 @@
 
   onMount(look);
 
-  /// Detection answering `false` is not an empty machine. A panel that keeps
+  /// Detection answering `false` is not an empty machine. A page that keeps
   /// saying it is looking would report a green check the daemon never gave.
   async function look() {
     listNote = null;

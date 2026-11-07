@@ -32,27 +32,31 @@ const browser = await puppeteer.launch({
 });
 
 const states = ['ready', 'first-run', 'downloading', 'armed', 'stt-failed'];
-for (const scheme of ['light', 'dark']) {
-  for (const state of states) {
-    // Downloading only animates in light once; dark covers steady states.
-    if (scheme === 'dark' && (state === 'downloading' || state === 'armed')) continue;
-    const page = await browser.newPage();
-    const errors = [];
-    page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
-    page.on('console', (m) => {
-      if (m.type() === 'error') errors.push(`console: ${m.text()}`);
-    });
-    await page.setViewport({ width: 480, height: 900, deviceScaleFactor: 2 });
-    await page.emulateMediaFeatures([
-      { name: 'prefers-color-scheme', value: scheme },
-      { name: 'prefers-reduced-motion', value: 'reduce' },
-    ]);
-    await page.goto(`http://localhost:5173/?state=${state}`, { waitUntil: 'networkidle0' });
-    await new Promise((r) => setTimeout(r, state === 'downloading' ? 2500 : 1200));
-    const file = path.join(DIR, `${state}-${scheme}.png`);
-    await page.screenshot({ path: file });
-    console.log(file, errors.length ? JSON.stringify(errors) : 'clean');
-    await page.close();
+// The opening width, one between the two folds, and the minimum.
+const widths = [1040, 720, 480];
+for (const width of widths) {
+  for (const scheme of ['light', 'dark']) {
+    for (const state of states) {
+      // Downloading only animates in light once; dark covers steady states.
+      if (scheme === 'dark' && (state === 'downloading' || state === 'armed')) continue;
+      const page = await browser.newPage();
+      const errors = [];
+      page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+      page.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`console: ${m.text()}`);
+      });
+      await page.setViewport({ width, height: 900, deviceScaleFactor: 2 });
+      await page.emulateMediaFeatures([
+        { name: 'prefers-color-scheme', value: scheme },
+        { name: 'prefers-reduced-motion', value: 'reduce' },
+      ]);
+      await page.goto(`http://localhost:5173/?state=${state}`, { waitUntil: 'networkidle0' });
+      await new Promise((r) => setTimeout(r, state === 'downloading' ? 2500 : 1200));
+      const file = path.join(DIR, `${state}-${scheme}-${width}.png`);
+      await page.screenshot({ path: file });
+      console.log(file, errors.length ? JSON.stringify(errors) : 'clean');
+      await page.close();
+    }
   }
 }
 await browser.close();

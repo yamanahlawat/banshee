@@ -12,13 +12,13 @@ export function waitingSays(key: string): string {
 export const SPEECH_FAILED = 'The last spoken reply failed.';
 export const DICTATION_FAILED = 'The last dictation failed.';
 
-/// The element that carries each one, named by the panel's group and by the
-/// header notice that lands the reader on it.
+/// The element that carries each one, named by the page's group and by the
+/// failure note that lands the reader on it.
 export const SPEECH_FAILURE = 'speech-failure';
 export const DICTATION_FAILURE = 'dictation-failure';
 
 /// The whole failure as one line, for the window to speak and for Copy to hand
-/// over. The panel draws the two parts itself.
+/// over. The page draws the two parts itself.
 export function failureSays(label: string, said: string): string {
   return `${label} ${said}`;
 }
@@ -121,6 +121,12 @@ export function listeningNote(facts: Listening): string {
   return facts.keyPresent
     ? 'Audio stays on this machine. The server and key you set are still saved.'
     : 'Audio stays on this machine.';
+}
+
+/// The host audio leaves for, while a remote listener is in use.
+export function audioGoesTo(facts: Listening): string | null {
+  if (!facts.live || !facts.remote || facts.stoppedBy !== null) return null;
+  return facts.host ?? A_TRANSCRIPTION_SERVER;
 }
 
 // A started speaker's name comes off the config table, which a later write may

@@ -78,7 +78,7 @@ export type Status = Record<string, unknown> & {
 };
 export type Live = {
   /// Which of the daemon's five activities is in force. The flags below stay
-  /// because a panel names them one by one; only the ranking is the daemon's.
+  /// because a page names them one by one; only the ranking is the daemon's.
   activity: 'idle' | 'recording' | 'speaking' | 'listening' | 'busy';
   recording: boolean;
   speaking: boolean;
@@ -339,7 +339,7 @@ export const waiting = derived(daemon, (state) => {
   return new Set(keys);
 });
 
-// What one side of the pipeline is doing, read once so the panel that
+// What one side of the pipeline is doing, read once so the page that
 // configures it and the line that reports it cannot state a different truth.
 // `host` is the side in force.
 type Side = {

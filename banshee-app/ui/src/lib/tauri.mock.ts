@@ -3,7 +3,7 @@ import mockTable from '../mocks/settings.json';
 // Type only: a value import of './tauri' would load the module this file mocks.
 import type { Setting } from './tauri';
 
-/// The table the common crate holds, as the panels read it.
+/// The table the common crate holds, as the pages read it.
 export const commonTable = mockTable as Setting[];
 
 /// The common table with one row changed.

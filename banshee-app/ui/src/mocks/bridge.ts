@@ -203,6 +203,8 @@ const SAID = [
   'commit that with a message about the timeout',
 ];
 
+const ASKED = { kind: 'question' as const, question: 'Which branch should I use?' };
+
 function rows(): HistoryRow[] {
   const state = chosen();
   if (state === 'empty' || state === 'first-run' || state === 'downloading') return [];
@@ -213,15 +215,37 @@ function rows(): HistoryRow[] {
     Number.isFinite(asked) && asked > 0 ? Math.min(Math.floor(asked), 5000) : SAID.length;
   const start = new Date();
   start.setHours(21, 58, 0, 0);
+  const at = (i: number) => new Date(start.getTime() - i * 11 * 60_000).toISOString();
+  // The newest rows show each kind the detail can draw. The preview-scale
+  // repeat below stays plain dictations.
+  const kinds: Omit<HistoryRow, 'id' | 'timestamp'>[] = [
+    { ...ASKED, text: 'The release branch.', outcome: 'transcribed', reason: null },
+    { ...ASKED, text: null, outcome: 'no_answer', reason: null },
+    { ...ASKED, text: null, outcome: 'closed', reason: null },
+    { ...ASKED, text: null, outcome: 'failed', reason: 'The audio was empty.' },
+    { ...ASKED, text: null, outcome: 'unasked', reason: 'Banshee was not listening.' },
+    {
+      kind: 'dictation',
+      question: null,
+      text: null,
+      outcome: 'failed',
+      reason: 'The transcription server refused the key.',
+    },
+  ];
+  const lead = Math.min(kinds.length, total);
   // The daemon answers oldest first.
   return Array.from({ length: total }, (_, i) => ({
     id: total - i,
-    kind: 'dictation' as const,
-    question: null,
-    text: SAID[i % SAID.length],
-    outcome: 'transcribed' as const,
-    reason: null,
-    timestamp: new Date(start.getTime() - i * 11 * 60_000).toISOString(),
+    timestamp: at(i),
+    ...(i < lead
+      ? kinds[i]
+      : {
+          kind: 'dictation' as const,
+          question: null,
+          text: SAID[i % SAID.length],
+          outcome: 'transcribed' as const,
+          reason: null,
+        }),
   })).reverse();
 }
 

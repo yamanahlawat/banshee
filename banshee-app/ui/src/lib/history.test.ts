@@ -9,13 +9,21 @@ import {
   countNewer,
   forget,
   formatCount,
-  freshLead,
   newestFirst,
   readAll,
   followSaveHistory,
   readNewest,
   table,
+  dayLabel,
+  matches,
+  rowFlag,
+  selected,
+  view,
+  listed,
+  clearSearch,
+  copyOf,
 } from './history';
+import type { HistoryRow } from './tauri';
 
 describe('newestFirst', () => {
   it("puts the daemon's last row first", () => {
@@ -102,18 +110,6 @@ describe('readAll', () => {
   });
 });
 
-describe('freshLead', () => {
-  it('stays still on first paint and on a repeated id', () => {
-    expect(freshLead(null, 7)).toBe(false);
-    expect(freshLead(7, 7)).toBe(false);
-    expect(freshLead(7, null)).toBe(false);
-  });
-
-  it('arrives only when the lead replaces another one', () => {
-    expect(freshLead(7, 8)).toBe(true);
-  });
-});
-
 describe('followSaveHistory', () => {
   it('leaves the rows kept when saving goes off', () => {
     const kept = [dictated(1, 'kept', '2026-08-27T09:00:00Z')];
@@ -122,5 +118,164 @@ describe('followSaveHistory', () => {
     expect(get(table).rows).toEqual(kept);
     expect(get(table).total).toBe(1);
     expect(get(table).saving).toBe(false);
+  });
+});
+
+const row = (over: Partial<HistoryRow>): HistoryRow => ({
+  id: 1,
+  kind: 'question',
+  question: null,
+  text: null,
+  outcome: 'transcribed',
+  reason: null,
+  timestamp: '2026-08-27T09:00:00Z',
+  ...over,
+});
+
+describe('matches', () => {
+  it('finds the needle in a question, ignoring case', () => {
+    expect(matches(row({ question: 'What is the Time', text: 'noon' }), 'time')).toBe(true);
+  });
+  it('finds the needle in an answer', () => {
+    expect(matches(row({ question: 'what', text: 'It is Noon' }), 'noon')).toBe(true);
+  });
+  it('reads a null text as empty', () => {
+    expect(matches(row({ question: 'what', text: null }), 'noon')).toBe(false);
+    expect(matches(row({ question: null, text: null }), 'a')).toBe(false);
+  });
+  it('matches every row for an empty needle', () => {
+    expect(matches(row({}), '')).toBe(true);
+  });
+});
+
+describe('rowFlag', () => {
+  it('names a question nobody answered', () => {
+    expect(rowFlag(row({ outcome: 'no_answer' }))).toBe('No answer heard');
+  });
+  it('names a question closed unanswered', () => {
+    expect(rowFlag(row({ outcome: 'closed' }))).toBe('Closed before you answered');
+  });
+  it('names a question whose answer failed', () => {
+    expect(rowFlag(row({ outcome: 'failed', reason: 'model down' }))).toBe('Not transcribed');
+  });
+  it('names a question never asked aloud', () => {
+    expect(rowFlag(row({ outcome: 'unasked' }))).toBe('Not asked aloud');
+  });
+  it('gives a failed dictation its reason', () => {
+    expect(rowFlag(row({ kind: 'dictation', outcome: 'failed', reason: 'model down' }))).toBe(
+      'model down',
+    );
+  });
+  it('flags nothing for a transcribed row', () => {
+    expect(rowFlag(row({}))).toBeNull();
+    expect(rowFlag(row({ kind: 'dictation' }))).toBeNull();
+  });
+});
+
+describe('dayLabel', () => {
+  const now = new Date(2026, 10, 6, 15, 0);
+  const at = (y: number, m: number, d: number) => new Date(y, m, d, 23, 58).toISOString();
+  it('names today and yesterday', () => {
+    expect(dayLabel(at(2026, 10, 6), now)).toBe('Today');
+    expect(dayLabel(at(2026, 10, 5), now)).toBe('Yesterday');
+  });
+  it('spells the month for an older day this year', () => {
+    expect(dayLabel(at(2026, 7, 27), now)).toBe('27 August');
+  });
+  it('adds the year for an earlier year', () => {
+    expect(dayLabel(at(2025, 11, 31), now)).toBe('31 December 2025');
+  });
+  it('counts back by the calendar, so a clock change cannot skip a day', () => {
+    const firstOfMarch = new Date(2026, 2, 1, 0, 30, 0);
+    expect(dayLabel(new Date(2026, 1, 28, 22, 0).toISOString(), firstOfMarch)).toBe('Yesterday');
+  });
+});
+
+describe('selected', () => {
+  const shown = [row({ id: 3 }), row({ id: 2 }), row({ id: 1 })];
+  it('is the chosen row while it is shown', () => {
+    expect(selected(shown, 2)?.id).toBe(2);
+  });
+  it('falls to the first shown row when the choice is gone', () => {
+    expect(selected(shown, 9)?.id).toBe(3);
+    expect(selected(shown, null)?.id).toBe(3);
+  });
+  it('is null when nothing is shown', () => {
+    expect(selected([], 2)).toBeNull();
+  });
+});
+
+describe('view', () => {
+  it('is cleared by forget', () => {
+    view.set({ query: 'time', chosen: 4 });
+    forget();
+    expect(get(view)).toEqual({ query: '', chosen: null });
+  });
+});
+
+describe('listed', () => {
+  const rows = [row({ id: 3, text: 'Open it' }), row({ id: 2, text: 'close it' }), row({ id: 1 })];
+  beforeEach(() => {
+    table.set({ rows, total: 3, loaded: true, saving: true });
+    view.set({ query: '', chosen: null });
+  });
+  it('is every row while the search is empty or blank', () => {
+    expect(get(listed)).toEqual(rows);
+    view.set({ query: '   ', chosen: null });
+    expect(get(listed)).toEqual(rows);
+  });
+  it('is the rows that match the trimmed search', () => {
+    view.set({ query: ' CLOSE ', chosen: null });
+    expect(get(listed).map((one) => one.id)).toEqual([2]);
+  });
+});
+
+describe('clearSearch', () => {
+  const rows = [row({ id: 3, text: 'newest' }), row({ id: 2, text: 'middle' }), row({ id: 1 })];
+  beforeEach(() => table.set({ rows, total: 3, loaded: true, saving: true }));
+
+  it('keeps the row the search had selected', () => {
+    view.set({ query: 'middle', chosen: null });
+    clearSearch();
+    expect(get(view)).toEqual({ query: '', chosen: 2 });
+  });
+  it('keeps the first match when the chosen row was hidden', () => {
+    view.set({ query: 'middle', chosen: 1 });
+    clearSearch();
+    expect(get(view)).toEqual({ query: '', chosen: 2 });
+  });
+  it('keeps following the newest when the newest was selected and nothing was chosen', () => {
+    view.set({ query: 'newest', chosen: null });
+    clearSearch();
+    expect(get(view)).toEqual({ query: '', chosen: null });
+  });
+  it('keeps the choice when nothing matched', () => {
+    view.set({ query: 'nothing', chosen: 1 });
+    clearSearch();
+    expect(get(view)).toEqual({ query: '', chosen: 1 });
+  });
+});
+
+describe('copyOf', () => {
+  it('copies a dictation as its text', () => {
+    expect(copyOf(row({ kind: 'dictation', text: 'said' }))).toEqual({
+      text: 'said',
+      which: 'text',
+    });
+  });
+  it('copies an answered question as its answer', () => {
+    expect(copyOf(row({ question: 'asked', text: 'answered' }))).toEqual({
+      text: 'answered',
+      which: 'answer',
+    });
+  });
+  it('copies an unanswered question as its question', () => {
+    expect(copyOf(row({ question: 'asked', outcome: 'no_answer' }))).toEqual({
+      text: 'asked',
+      which: 'question',
+    });
+  });
+  it('copies nothing from a failed dictation', () => {
+    expect(copyOf(row({ kind: 'dictation', outcome: 'failed', reason: 'x' }))).toBeNull();
   });
 });

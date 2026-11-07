@@ -84,7 +84,7 @@ This is the step that closes the voice loop: the agent speaks, and you answer ou
 - Antigravity, Claude Code, Copilot, OpenCode and Pi are verified on a real install. Codex and Cursor follow their published formats, and wait for a report.
 - Pi has its own extension API, so it gets a [native extension](integrations/pi) instead.
 
-<p align="center"><img src="assets/agents.png" width="360" alt="The Agents panel: Claude Code and OpenCode are connected, and Codex and Cursor are installed with a Connect button beside each."></p>
+<p align="center"><img src="assets/agents.png" width="360" alt="The Agents page: Claude Code and OpenCode are connected, and Codex and Cursor are installed with a Connect button beside each."></p>
 
 **From the terminal,** the same work:
 
@@ -134,7 +134,7 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 ## Use it
 
 - **Talk over it.** The hotkey stops whatever Banshee says. `barge_in = "none"` lets it finish.
-- **The window.** `Open Banshee` in the menu bar: the last dictation with a copy button, the day's history, every setting. Quit it and dictation carries on.
+- **The window.** `Open Banshee` in the menu bar. A sidebar reaches History, Agents and every setting. History lists your dictations and the questions agents asked you, newest first, with the selected one beside the list and a copy button. Quit it and dictation carries on.
 - **The figure above the Dock.** On macOS, a small rust capsule shows while Banshee records, works, waits for your answer, copies or fails. Nothing shows at rest. `feedback.mode` picks the figure, the earcons or both. [Feedback](docs/configuration.md)
 
 <p align="center"><img src="assets/window.png" width="360" alt="The Banshee window: the last dictation in large type with a copy button, the day's earlier dictations beneath it, and a footer naming the microphone, hotkey, voice and connected agents."></p>

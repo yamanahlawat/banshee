@@ -51,7 +51,7 @@
     color: var(--ink);
     background: transparent;
     border: 0;
-    border-radius: 0;
+    border-radius: var(--radius);
     padding: 6px 22px 6px 0;
     margin: 0;
   }

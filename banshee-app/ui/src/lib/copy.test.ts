@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./tauri', () => ({ copyText: vi.fn().mockResolvedValue(null) }));
 import {
   announcement,
+  audioGoesTo,
   CHOICE_LABELS,
   copy,
   copied,
@@ -175,6 +176,18 @@ it.each(LISTENING_NOTES)('the listening note, when %s', (_, over, says) => {
   expect(listeningNote({ ...HEARD, ...over })).toBe(says);
 });
 
+const AUDIO_GOES_TO: [string, Partial<Listening>, string | null][] = [
+  ['a remote listener is in force', {}, 'api.openai.com'],
+  ['the daemon cannot name the host', { host: null }, 'a transcription server'],
+  ['the listener is local', { remote: false }, null],
+  ['the daemon is down', { live: false }, null],
+  ['the remote listener never started', { stoppedBy: 'provider' }, null],
+];
+
+it.each(AUDIO_GOES_TO)('the host audio goes to, when %s', (_, over, host) => {
+  expect(audioGoesTo({ ...HEARD, ...over })).toBe(host);
+});
+
 const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
   [
     'a stopped daemon speaks nothing',
@@ -310,8 +323,8 @@ describe('modelCost', () => {
   });
 });
 
-// No panel shows tts.fallback: the CLI sets it.
-it('names every choice a panel offers', () => {
+// No page shows tts.fallback: the CLI sets it.
+it('names every choice a page offers', () => {
   for (const row of mockTable as Setting[]) {
     if (row.domain.kind !== 'choice' || row.key === 'tts.fallback') continue;
     for (const value of row.domain.values) {

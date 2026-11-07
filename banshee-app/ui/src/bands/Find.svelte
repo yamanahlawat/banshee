@@ -1,65 +1,122 @@
 <script lang="ts">
-  export let query = '';
-  export let matches = 0;
-  export let close: () => void;
+  import { land } from '../lib/focus';
+  import { clearSearch, listed, view } from '../lib/history';
+  import { listAndDetail } from '../lib/layout';
 
   let field: HTMLInputElement | undefined;
+  let reveal: HTMLButtonElement | undefined;
+  let revealed = false;
 
-  // Revealed by a keystroke, so it has to take the caret with it. Nobody
-  // presses a shortcut and then reaches for the mouse.
-  $: if (field) field.focus();
+  $: shown = $listAndDetail || revealed || $view.query !== '';
+
+  export async function open() {
+    revealed = true;
+    await land(() => field);
+  }
+
+  function onKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    clearSearch();
+    if ($listAndDetail) return;
+    revealed = false;
+    land(() => reveal);
+  }
+
+  function onBlur() {
+    if ($view.query === '') revealed = false;
+  }
+
+  // Runs before the DOM swaps the field for the icon or back, so focus is read
+  // while the control holding it still exists.
+  function refit(wide: boolean) {
+    if (wide && reveal && document.activeElement === reveal) land(() => field);
+    else if (!wide && field && document.activeElement === field) revealed = true;
+  }
+  $: refit($listAndDetail);
 </script>
 
+{#snippet glass()}
+  <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <circle cx="7" cy="7" r="4.5" />
+    <path d="M10.5 10.5 L14 14" />
+  </svg>
+{/snippet}
+
 <div class="find">
-  <input
-    bind:this={field}
-    bind:value={query}
-    class="field mono"
-    type="search"
-    placeholder="Find in what was said"
-    aria-label="Find in what was said"
-  />
-  <span class="readout" aria-live="polite">
-    {query.trim() === '' ? '' : `${matches} found`}
+  {#if shown}
+    <label class="search">
+      {@render glass()}
+      <span class="sr">Search</span>
+      <input
+        bind:this={field}
+        bind:value={$view.query}
+        type="search"
+        placeholder="Search"
+        on:keydown={onKeydown}
+        on:blur={onBlur}
+      />
+    </label>
+  {:else}
+    <button class="btn btn-ghost reveal" bind:this={reveal} on:click={open}>
+      <span class="sr">Search</span>
+      {@render glass()}
+    </button>
+  {/if}
+  <span class="sr" aria-live="polite">
+    {$view.query.trim() === '' ? '' : `${$listed.length} found`}
   </span>
-  <button class="dismiss caps" aria-label="Close find" on:click={close}>Esc</button>
 </div>
 
 <style>
   .find {
     display: flex;
+    margin-left: auto;
+    min-width: 0;
+  }
+
+  .search {
+    display: flex;
     align-items: center;
-    gap: 12px;
-    margin: 0 var(--gutter) 22px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--accent);
+    gap: 6px;
+    width: 220px;
+    max-width: 100%;
+    padding: 5px 10px;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    color: var(--dim);
   }
 
-  .field {
-    /* A pointer's height, stated rather than derived: padding plus the font's
-       own line box came to 23.55px, which reads as 24 in any rounded output and
-       is not. */
-    min-height: 24px;
-    padding: 3px 0;
+  .search:focus-within {
+    border-color: var(--ink);
+  }
+
+  input {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
     font-size: 13px;
+    line-height: 1.45;
+    outline: none;
   }
 
-  .field::-webkit-search-cancel-button {
+  input::-webkit-search-cancel-button {
     -webkit-appearance: none;
     appearance: none;
   }
 
-  .dismiss {
-    color: var(--ink);
-    background: transparent;
-    border: 1px solid var(--rule);
-    border-radius: 0;
-    padding: 4px 8px;
-    cursor: pointer;
+  svg {
     flex: none;
+    width: 16px;
+    height: 16px;
   }
 
-  .dismiss:hover {
-    border-color: var(--ink);
+  .reveal {
+    display: flex;
+    padding: 7px;
   }
 </style>

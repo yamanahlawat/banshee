@@ -3,7 +3,7 @@
   import { daemon, hotkeyListens } from '../lib/daemon';
   import { defaultOf, optionsOf, table, write } from '../lib/settings';
   import { hotkeyFrom, humanize, isModifier } from '../lib/hotkey';
-  import { claimKeys, onMac } from '../lib/keys';
+  import { claimKeys } from '../lib/keys';
   import Row from '../controls/Row.svelte';
   import Segmented from '../controls/Segmented.svelte';
 
@@ -30,33 +30,6 @@
   $: key = String(audio.hotkey ?? '');
   $: mode = String(audio.hotkey_mode ?? defaultOf($table, 'audio.hotkey_mode'));
   $: bargeIn = String(audio.barge_in ?? defaultOf($table, 'audio.barge_in'));
-  $: feedbackConfig = ($daemon.status?.config?.feedback ?? {}) as Record<string, unknown>;
-  $: feedback = String(feedbackConfig.mode ?? defaultOf($table, 'feedback.mode'));
-  // The menu bar icon draws the figure only on macOS, so only there does the
-  // row offer On screen. Read once: the platform does not change under this window.
-  const mac = onMac();
-  $: FEEDBACK_OPTIONS = optionsOf($table, 'feedback.mode').filter(
-    (option) => mac || option.value !== 'visual',
-  );
-  // Off macOS the row has no On screen radio, so a daemon set to visual still needs a selection.
-  $: visualWithoutFigure = feedback === 'visual' && !mac;
-  $: feedbackSelected = visualWithoutFigure ? 'both' : feedback;
-  const FEEDBACK_NOTE = 'feedback-note';
-  const FEEDBACK_NOTES: Record<string, string> = {
-    ...(mac && {
-      visual:
-        "A small Banshee figure above the Dock shows what Banshee does, with no sounds. An agent's questions are still spoken aloud. Using VoiceOver? Choose Both, so you hear when recording starts.",
-    }),
-    sound: 'A short sound when Banshee starts and stops listening, and when it fails.',
-    both: mac ? 'The Banshee figure and every sound.' : 'Every sound.',
-    none: mac
-      ? "No figure and no sound. An agent's questions are still spoken aloud."
-      : "No sound. An agent's questions are still spoken aloud.",
-  };
-  $: feedbackNote = visualWithoutFigure
-    ? 'Set to visual outside this window. Without the on-screen figure, Banshee plays every sound.'
-    : (FEEDBACK_NOTES[feedback] ?? '');
-
   function stop() {
     recording = false;
     heldModifier = null;
@@ -112,10 +85,13 @@
 
 {#if listens}
   <Row name="The key" setting="audio.hotkey">
-    <button class="key" on:click={() => (recording ? stop() : begin())}>
-      {recording ? 'Press a key' : humanize(key) || 'Not set'}
-      <span class="sr">— change the hotkey</span>
-    </button>
+    <span class="capture">
+      <button class="key" on:click={() => (recording ? stop() : begin())}>
+        {recording ? 'Press a key' : humanize(key) || 'Not set'}<span class="sr"
+          >, change the hotkey</span
+        >
+      </button>
+    </span>
     <button class="btn" on:click={() => (recording ? stop() : begin())}>
       {recording ? 'Cancel' : 'Change'}
     </button>
@@ -156,16 +132,6 @@ banshee record stop</pre>
   />
 </Row>
 
-<Row name="Feedback" note={feedbackNote} noteId={FEEDBACK_NOTE} setting="feedback.mode">
-  <Segmented
-    label="Feedback"
-    value={feedbackSelected}
-    options={FEEDBACK_OPTIONS}
-    describedBy={FEEDBACK_NOTE}
-    change={(next) => write('feedback.mode', next)}
-  />
-</Row>
-
 <style>
   .compositor {
     margin: 0 0 12px;
@@ -178,32 +144,41 @@ banshee record stop</pre>
     margin: 0 0 12px;
     padding: 10px 12px;
     background: var(--foot);
-    border-radius: 4px;
+    border-radius: var(--radius);
     font-family: var(--mono);
-    font-size: 12px;
+    font-size: 11px;
     color: var(--ink);
     overflow-x: auto;
   }
 
-  /* A button, because this underline is the one the pickers wear and it has to
-     mean the same thing on both: press here to change what it says. */
+  /* The underline the pickers wear, on a wrapper as theirs is, so it means the
+     same thing on both: press here to change what it says. */
+  .capture {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    border-bottom: 1px solid var(--ink);
+  }
+
+  .capture:hover {
+    border-bottom-color: var(--accent);
+  }
+
   .key {
+    flex: 1;
     font-family: var(--mono);
     font-size: 13px;
     text-align: left;
     color: var(--ink);
     background: transparent;
     border: 0;
-    border-bottom: 1px solid var(--ink);
-    border-radius: 0;
+    border-radius: var(--radius);
     padding: 6px 0;
-    flex: 1;
     cursor: pointer;
   }
 
   .key:hover {
     color: var(--accent);
-    border-bottom-color: var(--accent);
   }
 
   .refusal {

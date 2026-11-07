@@ -64,7 +64,7 @@
   let devices: Devices = { devices: [], current: null };
   let adding = false;
   let field: HTMLInputElement | undefined;
-  // Typing a word owns the keyboard; otherwise Escape would close the panel and Cmd+F open Find mid-word.
+  // Typing a word owns the keyboard; otherwise Cmd+F would open Find mid-word.
   let release: (() => void) | null = null;
 
   function beginAdding() {
@@ -110,7 +110,7 @@
   $: band = BANDS.find((b) => threshold < b.upTo)?.word ?? 'High';
   $: silence = Number(stt.endpoint_silence_ms ?? defaultOf($table, 'stt.endpoint_silence_ms'));
   // Keyed by word below, and a duplicate in a hand-edited config raises
-  // Svelte's `each_key_duplicate` and renders no panel.
+  // Svelte's `each_key_duplicate` and renders no page.
   $: vocabulary = [...new Set((stt.vocabulary ?? []) as string[])];
   $: models = $daemon.status?.stt_models ?? [];
   $: chosenId = String(stt.model ?? '');
@@ -362,12 +362,7 @@
         on:blur={(e) => addWord(e.currentTarget.value)}
         on:keydown={(e) => {
           if (e.key === 'Enter') addWord(e.currentTarget.value);
-          if (e.key === 'Escape') {
-            // The window's own Escape closes the panel, and this event still
-            // reaches it: the claim is gone by the time it bubbles.
-            e.stopPropagation();
-            stopAdding();
-          }
+          if (e.key === 'Escape') stopAdding();
         }}
       />
     {:else}
