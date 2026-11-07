@@ -63,9 +63,9 @@ speak_problems = true  # false = never say a new problem aloud
   that finds it. Turn it off with
   `banshee config set feedback.speak_problems false`.
 - **`visual` draws a small Banshee figure at the bottom of the screen.** The tray
-  draws it. On Linux the desktop needs layer shell. The window starts the tray. `visual` plays no earcons
-  while the menu bar icon draws the figure, and plays every sound with no
-  menu bar icon running.
+  draws it, and the window starts the tray. On Linux the desktop needs layer
+  shell. `visual` plays no earcons while the figure draws, and plays every sound
+  when nothing draws it.
 - **`input_device` is a case-insensitive substring** of the microphone name, so
   `"yeti"` matches `Blue Yeti Stereo Microphone`.
 - **An exact name wins** over a longer name that contains it, so a `Yeti` next

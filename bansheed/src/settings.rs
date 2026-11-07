@@ -635,7 +635,6 @@ fn write_locked(
 }
 
 /// A file chose its feedback when it sets `feedback.mode`.
-#[cfg(target_os = "macos")]
 fn chose_feedback(text: &str) -> Result<bool, BansheeError> {
     let document: DocumentMut = text
         .parse()
