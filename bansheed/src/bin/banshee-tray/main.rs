@@ -23,6 +23,8 @@ mod gesture;
 mod paint;
 #[cfg(target_os = "macos")]
 mod panel;
+#[cfg(any(target_os = "linux", test))]
+mod renderer;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod scenes;
 #[cfg(any(target_os = "linux", test))]

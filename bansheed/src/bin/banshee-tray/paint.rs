@@ -402,7 +402,7 @@ fn tracks(step: Move, outline: f64, light: f64, words: f64) -> Vec<(Layer, Vec<T
 
 /// How long `step` runs before its frames stop changing. `None` for a move that
 /// repeats.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub fn lasts(step: Move) -> Option<f64> {
     tracks(step, 0.0, 0.0, 0.0)
         .iter()

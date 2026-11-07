@@ -45,7 +45,6 @@ pub const WORKING_DEPTH: f64 = 0.3;
 pub const PIVOT: (f64, f64) = (50.0, 88.0);
 pub const KINDLE_AFTER: f64 = 0.2;
 /// The daemon samples the level every 33ms, so each sample eases into the next.
-#[cfg(target_os = "macos")]
 pub const LEVEL_STEP: f64 = 0.033;
 
 /// MacBook Pro Microphone, sample 2 (1029 frames) p10: 0.016, the room between words.

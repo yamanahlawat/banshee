@@ -326,7 +326,7 @@ pub fn fade_out() -> Vec<Track> {
 }
 
 /// How long `tracks` take to end once added. `None` for a gesture that repeats.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub fn lasts(tracks: &[Track]) -> Option<f64> {
     tracks
         .iter()
