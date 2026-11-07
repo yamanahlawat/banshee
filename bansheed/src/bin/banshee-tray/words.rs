@@ -1,7 +1,8 @@
 //! The capsule's words on Linux: one line shaped from the bundled Archivo,
 //! cut to fit, and returned as an outline in logical pixels.
 
-use rustybuzz::{Face, UnicodeBuffer, Variation, ttf_parser};
+use harfrust::{Buffer, ShapeOptions, ShaperFont, font::Font};
+use skrifa::{DrawMemory, GlyphId, PathSink, ScalerFont};
 use tiny_skia::{Path, PathBuilder};
 
 use crate::chip::Cut;
@@ -19,20 +20,26 @@ pub struct Line {
 }
 
 pub fn line(text: &str, cut: Cut, room: f32) -> Line {
-    let face = face(WORDS_WEIGHT as f32, WORDS_WIDTH as f32);
-    let scale = scale_of(&face);
-    let ascent = f32::from(face.ascender()) * scale;
-    let descent = -f32::from(face.descender()) * scale;
-    let text = fit(&face, text, cut, room);
+    let font = font(WORDS_WEIGHT as f32, WORDS_WIDTH as f32);
+    let scale = scale_of(&font);
+    let metrics = font.metrics();
+    let h_line = metrics.h_line().unwrap_or_default();
+    let ascent = h_line.ascender.to_f32() * scale;
+    let descent = -h_line.descender.to_f32() * scale;
+    let text = fit(&font, text, cut, room);
 
+    let scaler = ScalerFont::unhinted(font.clone(), None);
     let mut pen = Pen {
         builder: PathBuilder::new(),
         scale,
         ascent,
         x: 0.0,
     };
-    for (glyph, advance) in shape(&face, &text) {
-        face.outline_glyph(glyph, &mut pen);
+    for (glyph, advance) in shape(&font, &text) {
+        if let Some(outline) = scaler.outline(glyph) {
+            // A glyph that fails to draw leaves a gap; the advance still holds its place.
+            let _ = outline.draw(DrawMemory::Scratch, &mut pen);
+        }
         pen.x += advance;
     }
     Line {
@@ -43,57 +50,56 @@ pub fn line(text: &str, cut: Cut, room: f32) -> Line {
     }
 }
 
-fn face(weight: f32, width: f32) -> Face<'static> {
-    let mut face = Face::from_slice(ARCHIVO, 0).expect("the bundled Archivo parses");
-    face.set_variations(&[
-        Variation {
-            tag: ttf_parser::Tag::from_bytes(b"wght"),
-            value: weight,
-        },
-        Variation {
-            tag: ttf_parser::Tag::from_bytes(b"wdth"),
-            value: width,
-        },
-    ]);
-    face
+/// The bundled Archivo at one weight and width. Shaping and outlines both read
+/// this instance, so they share one variation location.
+fn font(weight: f32, width: f32) -> Font {
+    Font::new(ARCHIVO, 0)
+        .expect("the bundled Archivo parses")
+        .instance_builder()
+        .variations([("wght", weight), ("wdth", width)])
+        .build()
 }
 
-fn scale_of(face: &Face) -> f32 {
-    WORDS_SIZE as f32 / face.units_per_em() as f32
+fn scale_of(font: &Font) -> f32 {
+    WORDS_SIZE as f32 / f32::from(font.units_per_em())
 }
 
 /// Each glyph the text shapes to, with its advance in pixels. A glyph the
 /// font lacks is dropped.
-fn shape(face: &Face, text: &str) -> Vec<(ttf_parser::GlyphId, f32)> {
-    let mut buffer = UnicodeBuffer::new();
+fn shape(font: &Font, text: &str) -> Vec<(GlyphId, f32)> {
+    let mut buffer = Buffer::new();
     buffer.push_str(text);
-    let shaped = rustybuzz::shape(face, &[], buffer);
+    buffer.guess_segment_properties();
+    let shaper = ShaperFont::new(font);
+    if harfrust::shape(&shaper, &mut buffer, ShapeOptions::new()).is_err() {
+        return Vec::new();
+    }
     let tracking = (WORDS_TRACKING * WORDS_SIZE) as f32;
-    let scale = scale_of(face);
-    shaped
+    let scale = scale_of(font);
+    buffer
         .glyph_infos()
         .iter()
-        .zip(shaped.glyph_positions())
+        .zip(buffer.glyph_positions())
         .filter(|(info, _)| info.glyph_id != 0)
         .map(|(info, position)| {
-            let id = ttf_parser::GlyphId(info.glyph_id as u16);
+            let id = GlyphId::new(info.glyph_id);
             (id, position.x_advance as f32 * scale + tracking)
         })
         .collect()
 }
 
-fn width_of(face: &Face, text: &str) -> f32 {
-    shape(face, text).iter().map(|(_, advance)| advance).sum()
+fn width_of(font: &Font, text: &str) -> f32 {
+    shape(font, text).iter().map(|(_, advance)| advance).sum()
 }
 
 /// The text cut to `room` pixels, with an ellipsis where the cut fell.
-fn fit(face: &Face, text: &str, cut: Cut, room: f32) -> String {
+fn fit(font: &Font, text: &str, cut: Cut, room: f32) -> String {
     let chars: Vec<char> = text
         .chars()
-        .filter(|&c| face.glyph_index(c).is_some())
+        .filter(|&c| font.charmap().map_unicode(c).is_some())
         .collect();
     let whole: String = chars.iter().collect();
-    if width_of(face, &whole) <= room {
+    if width_of(font, &whole) <= room {
         return whole;
     }
     let keeping = |count: usize| match cut {
@@ -109,7 +115,7 @@ fn fit(face: &Face, text: &str, cut: Cut, room: f32) -> String {
     let (mut fits, mut over) = (0, chars.len());
     while over - fits > 1 {
         let middle = fits + (over - fits) / 2;
-        if width_of(face, &keeping(middle)) <= room {
+        if width_of(font, &keeping(middle)) <= room {
             fits = middle;
         } else {
             over = middle;
@@ -133,7 +139,7 @@ impl Pen {
     }
 }
 
-impl ttf_parser::OutlineBuilder for Pen {
+impl PathSink for Pen {
     fn move_to(&mut self, x: f32, y: f32) {
         let (x, y) = self.at(x, y);
         self.builder.move_to(x, y);
@@ -163,29 +169,23 @@ impl ttf_parser::OutlineBuilder for Pen {
 mod tests {
     use super::*;
 
-    fn capsule_face() -> Face<'static> {
-        face(WORDS_WEIGHT as f32, WORDS_WIDTH as f32)
-    }
-
-    fn glyph_count(face: &Face, text: &str) -> usize {
-        let mut buffer = UnicodeBuffer::new();
-        buffer.push_str(text);
-        rustybuzz::shape(face, &[], buffer).len()
+    fn capsule_font() -> Font {
+        font(WORDS_WEIGHT as f32, WORDS_WIDTH as f32)
     }
 
     const LONG: &str = "this sentence runs well past the room the capsule has for it";
 
     #[test]
     fn your_turn_shapes_one_glyph_per_letter() {
-        let face = capsule_face();
-        assert_eq!(glyph_count(&face, "Your turn"), 9);
-        assert!(width_of(&face, "Your turn") > 0.0);
+        let font = capsule_font();
+        assert_eq!(shape(&font, "Your turn").len(), 9);
+        assert!(width_of(&font, "Your turn") > 0.0);
     }
 
     #[test]
     fn a_long_live_line_keeps_its_newest_end() {
-        let face = capsule_face();
-        let kept = fit(&face, LONG, Cut::Start, 100.0);
+        let font = capsule_font();
+        let kept = fit(&font, LONG, Cut::Start, 100.0);
         let tail = kept
             .strip_prefix(ELLIPSIS)
             .expect("the cut starts with an ellipsis");
@@ -195,8 +195,8 @@ mod tests {
 
     #[test]
     fn a_long_reason_keeps_its_start() {
-        let face = capsule_face();
-        let kept = fit(&face, LONG, Cut::End, 100.0);
+        let font = capsule_font();
+        let kept = fit(&font, LONG, Cut::End, 100.0);
         let head = kept
             .strip_suffix(ELLIPSIS)
             .expect("the cut ends in an ellipsis");
@@ -206,14 +206,14 @@ mod tests {
 
     #[test]
     fn a_line_that_fits_is_left_whole() {
-        let face = capsule_face();
-        assert_eq!(fit(&face, "Your turn", Cut::End, 1000.0), "Your turn");
+        let font = capsule_font();
+        assert_eq!(fit(&font, "Your turn", Cut::End, 1000.0), "Your turn");
     }
 
     #[test]
     fn the_width_axis_widens_the_line() {
-        let default = face(WORDS_WEIGHT as f32, 100.0);
-        assert!(width_of(&capsule_face(), "Your turn") > width_of(&default, "Your turn"));
+        let default = font(WORDS_WEIGHT as f32, 100.0);
+        assert!(width_of(&capsule_font(), "Your turn") > width_of(&default, "Your turn"));
     }
 
     #[test]
@@ -230,5 +230,20 @@ mod tests {
         assert!(bounds.top() >= 0.0);
         assert!(bounds.bottom() <= drawn.ascent + drawn.descent);
         assert!(line("", Cut::End, 1000.0).path.is_none());
+    }
+
+    #[test]
+    fn the_outline_spans_the_shaped_width() {
+        let drawn = line("Your turn", Cut::End, 1000.0);
+        let right = drawn
+            .path
+            .expect("letters have an outline")
+            .bounds()
+            .right();
+        assert!(
+            (drawn.width - right).abs() < 2.0,
+            "{} vs {right}",
+            drawn.width
+        );
     }
 }
