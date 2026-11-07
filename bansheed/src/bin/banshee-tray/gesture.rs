@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use crate::figure::OUTLINE_DASH;
+use crate::figure::outline_dash;
 
 /// A CSS cubic bezier's control points: x1, y1, x2, y2.
 pub type Bezier = [f64; 4];
@@ -215,7 +215,7 @@ pub fn strain() -> Vec<Track> {
 /// From solid to dashes, on an outline `length` units round. The two tracks
 /// are the dash pattern's dash and gap.
 pub fn outline_breaks(length: f64) -> Vec<Track> {
-    let [dash, gap] = OUTLINE_DASH.map(|share| share * length);
+    let [dash, gap] = outline_dash(length);
     gesture(
         [
             ("dash", ENDS, Cow::Owned(vec![length, dash]), &[DROP]),

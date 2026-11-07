@@ -17,6 +17,8 @@ mod chip;
 mod figure;
 #[cfg(any(target_os = "macos", test))]
 mod gesture;
+#[cfg(test)]
+mod paint;
 #[cfg(target_os = "macos")]
 mod panel;
 #[cfg(any(target_os = "macos", test))]

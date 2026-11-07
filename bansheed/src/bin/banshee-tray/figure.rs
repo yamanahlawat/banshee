@@ -23,9 +23,11 @@ pub const RING_STRENGTH: f64 = 0.45;
 pub const OUTLINE: f64 = 9.0;
 pub const OUTLINE_CONTRAST: f64 = 12.0;
 /// A broken outline's dash and gap, as shares of the outline's length.
-pub const OUTLINE_DASH: [f64; 2] = [0.088, 0.056];
+const OUTLINE_DASH: [f64; 2] = [0.088, 0.056];
 pub const RING: f64 = 6.0;
 pub const LIGHT: f64 = 7.0;
+/// The halo light's dash and gap, as shares of the halo's length.
+const LIGHT_DASH: [f64; 2] = [0.22, 0.78];
 pub const BEHIND: f64 = 15.0;
 pub const HALO: (f64, f64, f64, f64) = (50.0, 40.0, 42.0, 16.0);
 pub const CUPS: [(f64, f64); 2] = [(15.0, 46.0), (85.0, 46.0)];
@@ -170,6 +172,14 @@ pub fn path_length(segments: &[Segment]) -> f64 {
         }
     }
     length
+}
+
+pub fn outline_dash(length: f64) -> [f64; 2] {
+    OUTLINE_DASH.map(|share| share * length)
+}
+
+pub fn light_dash(length: f64) -> [f64; 2] {
+    LIGHT_DASH.map(|share| share * length)
 }
 
 /// Ramanujan's second approximation.

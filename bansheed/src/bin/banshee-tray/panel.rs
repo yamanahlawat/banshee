@@ -37,9 +37,9 @@ use objc2_quartz_core::{
 use super::chip::{Cut, Scene, Show, words_of};
 use super::figure::{
     self, BAND, BAND_GAP, BEHIND, BONE, CAPSULE, CUP_GAP, CUP_RADII, CUPS, FIGURE, HALO, HEADBAND,
-    INSET, KINDLE_AFTER, LEVEL_STEP, LIGHT, OUTLINE, OUTLINE_CONTRAST, OUTLINE_DASH, PIVOT, Pose,
-    RING, RING_STRENGTH, RUST, Segment, TRAVEL, Voice, WORDS_BLEED, WORDS_GAP, WORDS_SIZE,
-    WORDS_TAIL, WORDS_TRACKING, WORDS_WEIGHT, WORDS_WIDTH, WORKING_DEPTH,
+    INSET, KINDLE_AFTER, LEVEL_STEP, LIGHT, OUTLINE, OUTLINE_CONTRAST, PIVOT, Pose, RING,
+    RING_STRENGTH, RUST, Segment, TRAVEL, Voice, WORDS_BLEED, WORDS_GAP, WORDS_SIZE, WORDS_TAIL,
+    WORDS_TRACKING, WORDS_WEIGHT, WORDS_WIDTH, WORKING_DEPTH,
 };
 use super::scenes::{Entrance, Move, answer_opens, centred, holds_the_voice, leaving, moves};
 
@@ -299,7 +299,7 @@ impl Layers {
             if lit {
                 // SAFETY: Core Animation defines the cap names as immutable constants.
                 layer.setLineCap(unsafe { kCALineCapRound });
-                layer.setLineDashPattern(Some(&dashes([0.22 * light_length, 0.78 * light_length])));
+                layer.setLineDashPattern(Some(&dashes(figure::light_dash(light_length))));
             }
             let half = if near {
                 rect(-40.0, HALO.1, 180.0, 100.0)
@@ -557,7 +557,7 @@ impl Panel {
             font,
             text_attributes,
             ellipsis,
-            outline_dash: dashes(OUTLINE_DASH.map(|share| share * rest)),
+            outline_dash: dashes(figure::outline_dash(rest)),
             outline_length: rest,
             place: None,
             on_screen: None,
