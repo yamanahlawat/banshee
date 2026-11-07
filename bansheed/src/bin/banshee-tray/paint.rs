@@ -13,7 +13,7 @@ use crate::figure::{
     WORDS_BLEED, WORDS_GAP, WORDS_TAIL, WORKING_DEPTH,
 };
 use crate::gesture::{self, Track};
-use crate::scenes::{Move, holds_the_voice};
+use crate::scenes::{self, Move, holds_the_voice};
 use crate::words::Line;
 
 /// The figure's own 100-unit square has its centre here.
@@ -21,26 +21,56 @@ const CENTRE: (f64, f64) = (50.0, 50.0);
 
 pub struct Frame<'a> {
     pub show: &'a Show,
-    /// The scene's moves, each added `elapsed` seconds ago.
-    pub moves: &'a [Move],
-    pub elapsed: f64,
+    /// Each live move with the seconds since it started.
+    pub moves: &'a [(Move, f64)],
+    /// The microphone's pose. Only a show that holds the voice reads it.
     pub pose: Pose,
     pub line: Option<&'a Line>,
+    /// The width the capsule grows or shrinks from, with the seconds since
+    /// the change. `None` once no width transition runs.
+    pub width_from: Option<(f64, f64)>,
     pub scale: u32,
 }
 
-/// The capsule's width and the height of the capsule with the clear space
-/// below it, in logical pixels.
+/// The span the capsule may reach during a width transition, and the height
+/// of the capsule with the clear space below it, in logical pixels.
 pub fn size(frame: &Frame) -> (u32, u32) {
-    (capsule_width(frame) as u32, (TRAVEL + CAPSULE) as u32)
+    let from = frame.width_from.map_or(0.0, |(from, _)| from);
+    let span = target_width(frame).max(from).ceil();
+    (span as u32, (TRAVEL + CAPSULE) as u32)
 }
 
-fn capsule_width(frame: &Frame) -> f64 {
+/// The width the scene's words give the capsule once any transition ends.
+fn target_width(frame: &Frame) -> f64 {
     words(frame)
         .map_or(CAPSULE, |(line, _)| {
             INSET + FIGURE + WORDS_GAP + f64::from(line.width) + WORDS_TAIL
         })
         .ceil()
+}
+
+/// The capsule's width as it shows now, part way through a transition or not.
+fn shown_width(frame: &Frame) -> f64 {
+    let to = target_width(frame);
+    frame.width_from.map_or(to, |(from, seconds)| {
+        let [width] = &gesture::chip_width(from, to)[..] else {
+            unreachable!("a width transition moves the width alone");
+        };
+        gesture::at(width, seconds, to)
+    })
+}
+
+/// The rest pose outside the voice states, and the deeper hem while Working.
+fn pose_of(frame: &Frame) -> Pose {
+    let rest = figure::pose(0.0, 0.0, false);
+    match frame.show {
+        show if holds_the_voice(show) => frame.pose,
+        Show::Working => Pose {
+            depth: WORKING_DEPTH,
+            ..rest
+        },
+        _ => rest,
+    }
 }
 
 fn words<'a>(frame: &Frame<'a>) -> Option<(&'a Line, &'a Path)> {
@@ -54,9 +84,11 @@ pub fn paint(frame: &Frame) -> Pixmap {
     let mut pixmap =
         Pixmap::new(width * scale, height * scale).expect("a frame at a scale of 1 or more");
     let live = Live::of(frame);
+    let shown = shown_width(frame);
+    let left = scenes::centred(f64::from(width) / 2.0, shown);
     let capsule = Transform::from_scale(scale as f32, scale as f32)
-        .pre_translate(0.0, -live.capsule.y as f32);
-    let shape = stadium(capsule_width(frame) as f32);
+        .pre_translate(left as f32, -live.capsule.y as f32);
+    let shape = stadium(shown as f32);
     let mut clip = Mask::new(pixmap.width(), pixmap.height()).expect("the size of the frame");
     clip.fill_path(&shape, FillRule::Winding, true, capsule);
     group(&mut pixmap, live.capsule.opacity, |canvas| {
@@ -75,7 +107,7 @@ pub fn paint(frame: &Frame) -> Pixmap {
 /// The voice layer's sublayers, in Core Animation's stacking order.
 fn paint_figure(canvas: &mut Pixmap, frame: &Frame, live: &Live, capsule: Transform, clip: &Mask) {
     let show = frame.show;
-    let pose = frame.pose;
+    let pose = pose_of(frame);
     let working = matches!(show, Show::Working);
     let figure = capsule
         .pre_translate((INSET + FIGURE / 2.0) as f32, (CAPSULE / 2.0) as f32)
@@ -89,8 +121,7 @@ fn paint_figure(canvas: &mut Pixmap, frame: &Frame, live: &Live, capsule: Transf
     };
     let voice = held.about(live.gesture.about(entry, PIVOT), PIVOT);
 
-    let depth = if working { WORKING_DEPTH } else { pose.depth };
-    let body = path(&figure::shroud(depth, pose.sway));
+    let body = path(&figure::shroud(pose.depth, pose.sway));
     let halo = oval((HALO.0, HALO.1), (HALO.2, HALO.3));
     let light_length = figure::ellipse_length(HALO.2, HALO.3);
     let halo_half = |canvas: &mut Pixmap, near: bool| {
@@ -295,11 +326,11 @@ impl Live {
             },
         };
         let light = figure::ellipse_length(HALO.2, HALO.3);
-        for &step in frame.moves {
+        for &(step, seconds) in frame.moves {
             for (layer, tracks) in tracks(step, outline, light, words_width) {
                 for track in &tracks {
                     let value = live.slot(layer, track.property);
-                    *value = gesture::at(track, frame.elapsed, *value);
+                    *value = gesture::at(track, seconds, *value);
                 }
             }
         }
@@ -449,18 +480,13 @@ mod tests {
         words_of(show).map(|(text, cut)| words::line(text, cut, 1000.0))
     }
 
-    fn frame<'a>(
-        show: &'a Show,
-        line: Option<&'a Line>,
-        moves: &'a [Move],
-        elapsed: f64,
-    ) -> Frame<'a> {
+    fn frame<'a>(show: &'a Show, line: Option<&'a Line>, moves: &'a [(Move, f64)]) -> Frame<'a> {
         Frame {
             show,
             moves,
-            elapsed,
             pose: pose(0.0, 0.0, false),
             line,
+            width_from: None,
             scale: 1,
         }
     }
@@ -506,7 +532,7 @@ mod tests {
     fn every_show_paints_rust_at_the_capsule_centre_and_leaves_the_corners_clear() {
         for show in every_show() {
             let line = line_of(&show);
-            let frame = frame(&show, line.as_ref(), &[], 0.0);
+            let frame = frame(&show, line.as_ref(), &[]);
             let pixmap = paint(&frame);
             let (width, height) = size(&frame);
             let middle = CAPSULE as u32 / 2;
@@ -523,9 +549,9 @@ mod tests {
     fn the_shroud_is_bone_while_recording_and_rust_while_working() {
         let centre = (CAPSULE / 2.0) as u32;
         let recording = Show::Recording(String::new());
-        let pixmap = paint(&frame(&recording, None, &[], 0.0));
+        let pixmap = paint(&frame(&recording, None, &[]));
         assert!(near(rgba(&pixmap, centre, centre), BONE));
-        let pixmap = paint(&frame(&Show::Working, None, &[], 0.0));
+        let pixmap = paint(&frame(&Show::Working, None, &[]));
         assert!(near(rgba(&pixmap, centre, centre), RUST));
     }
 
@@ -569,7 +595,7 @@ mod tests {
         let line = line_of(show);
         let pixmap = paint(&Frame {
             scale,
-            ..frame(show, line.as_ref(), &[], 0.0)
+            ..frame(show, line.as_ref(), &[])
         });
         let inks: Vec<_> = along_the_outline(scale)
             .into_iter()
@@ -594,11 +620,11 @@ mod tests {
         let span = INSET + FIGURE + WORDS_GAP + f64::from(line.width) + WORDS_TAIL;
         let height = (TRAVEL + CAPSULE) as u32;
         assert_eq!(
-            size(&frame(&show, Some(&line), &[], 0.0)),
+            size(&frame(&show, Some(&line), &[])),
             (span.ceil() as u32, height)
         );
         assert_eq!(
-            size(&frame(&Show::Working, None, &[], 0.0)),
+            size(&frame(&Show::Working, None, &[])),
             (CAPSULE as u32, height)
         );
     }
@@ -607,25 +633,25 @@ mod tests {
     fn scale_two_doubles_the_pixmap() {
         let show = Show::YourTurn;
         let line = line_of(&show);
-        let one = paint(&frame(&show, line.as_ref(), &[], 0.0));
+        let one = paint(&frame(&show, line.as_ref(), &[]));
         let two = paint(&Frame {
             scale: 2,
-            ..frame(&show, line.as_ref(), &[], 0.0)
+            ..frame(&show, line.as_ref(), &[])
         });
         assert_eq!(
             (two.width(), two.height()),
             (2 * one.width(), 2 * one.height())
         );
         assert_eq!(
-            size(&frame(&show, line.as_ref(), &[], 0.0)),
+            size(&frame(&show, line.as_ref(), &[])),
             (one.width(), one.height())
         );
     }
 
     #[test]
     fn the_rise_starts_below_the_capsules_rest() {
-        let rest = paint(&frame(&Show::Working, None, &[], 0.0));
-        let rising = paint(&frame(&Show::Working, None, &[Move::Rise], 0.05));
+        let rest = paint(&frame(&Show::Working, None, &[]));
+        let rising = paint(&frame(&Show::Working, None, &[(Move::Rise, 0.05)]));
         assert!(alpha_centre_y(&rising) > alpha_centre_y(&rest) + 2.0);
     }
 
@@ -639,8 +665,8 @@ mod tests {
             (&broken, Move::Strain, 0.315, true),
             (&done, Move::Float, 0.25, true),
         ] {
-            let (_, rest) = bone_centre(&paint(&frame(show, None, &[], 0.0)));
-            let (_, moved) = bone_centre(&paint(&frame(show, None, &[step], elapsed)));
+            let (_, rest) = bone_centre(&paint(&frame(show, None, &[])));
+            let (_, moved) = bone_centre(&paint(&frame(show, None, &[(step, elapsed)])));
             assert_eq!(moved < rest - 1.0, rises, "{step:?}: {rest} then {moved}");
             assert_eq!(moved > rest + 1.0, !rises, "{step:?}: {rest} then {moved}");
         }
@@ -649,8 +675,8 @@ mod tests {
     #[test]
     fn the_answer_tilts_the_head_to_the_left() {
         let show = Show::Answering(String::new());
-        let (rest, _) = bone_centre(&paint(&frame(&show, None, &[], 0.0)));
-        let (tilted, _) = bone_centre(&paint(&frame(&show, None, &[Move::Tilt], 1.0)));
+        let (rest, _) = bone_centre(&paint(&frame(&show, None, &[])));
+        let (tilted, _) = bone_centre(&paint(&frame(&show, None, &[(Move::Tilt, 1.0)])));
         assert!(tilted < rest - 1.0, "{rest} then {tilted}");
     }
 
@@ -658,15 +684,98 @@ mod tests {
     fn the_words_reveal_from_nothing() {
         let show = Show::Copied;
         let line = line_of(&show);
-        let words_bone = |moves: &[Move], elapsed| {
-            let pixmap = paint(&frame(&show, line.as_ref(), moves, elapsed));
+        let words_bone = |moves: &[(Move, f64)]| {
+            let pixmap = paint(&frame(&show, line.as_ref(), moves));
             let left = (INSET + FIGURE + WORDS_GAP) as u32;
             (left..pixmap.width())
                 .flat_map(|x| (0..CAPSULE as u32).map(move |y| (x, y)))
                 .filter(|&(x, y)| near(rgba(&pixmap, x, y), BONE))
                 .count()
         };
-        assert_eq!(words_bone(&[Move::Words], 0.0), 0);
-        assert!(words_bone(&[], 0.0) > 0);
+        assert_eq!(words_bone(&[(Move::Words, 0.0)]), 0);
+        assert!(words_bone(&[]) > 0);
+    }
+
+    #[test]
+    fn the_size_spans_the_wider_of_the_two_widths() {
+        let show = Show::Copied;
+        let line = line_of(&show);
+        let settled = size(&frame(&show, line.as_ref(), &[])).0;
+        let from = |width| Frame {
+            width_from: Some((width, 0.1)),
+            ..frame(&show, line.as_ref(), &[])
+        };
+        assert_eq!(size(&from(f64::from(settled) + 40.5)).0, settled + 41);
+        assert_eq!(size(&from(CAPSULE)).0, settled);
+    }
+
+    #[test]
+    fn a_width_transition_starts_at_its_from_width_and_ends_centred_in_its_span() {
+        let show = Show::Copied;
+        let line = line_of(&show);
+        let settled = size(&frame(&show, line.as_ref(), &[])).0;
+        let shrinking = |seconds| {
+            paint(&Frame {
+                width_from: Some((f64::from(settled + 60), seconds)),
+                ..frame(&show, line.as_ref(), &[])
+            })
+        };
+        let middle = CAPSULE as u32 / 2;
+        let starting = shrinking(0.0);
+        assert!(near(rgba(&starting, 2, middle), RUST));
+        let halfway = shrinking(0.06);
+        assert_eq!(rgba(&halfway, 2, middle)[3], 0);
+        assert!(near(rgba(&halfway, 29, middle), RUST));
+        let ended = shrinking(1.0);
+        assert_eq!(rgba(&ended, 29, middle)[3], 0);
+        assert!(near(rgba(&ended, 33, middle), RUST));
+        assert_eq!(rgba(&ended, settled + 30, middle)[3], 0);
+    }
+
+    #[test]
+    fn only_a_voice_show_follows_the_pose() {
+        let loud = pose(1.0, 300.0, false);
+        let at = |show: &Show, pose| {
+            paint(&Frame {
+                pose,
+                ..frame(show, None, &[])
+            })
+            .take()
+        };
+        for show in [Show::Working, Show::YourTurn, Show::Done(Done::Typed)] {
+            assert!(
+                at(&show, loud) == at(&show, pose(0.0, 0.0, false)),
+                "{show:?}"
+            );
+        }
+        let recording = Show::Recording(String::new());
+        assert!(at(&recording, loud) != at(&recording, pose(0.0, 0.0, false)));
+    }
+
+    #[test]
+    fn every_scene_and_its_leaving_paint_at_any_clock() {
+        use crate::scenes::{Entrance, leaving, moves};
+        let clocks = [0.0, 0.05, 0.15, 0.3, 0.5, 0.9, 1.5, 3.0];
+        for show in every_show() {
+            let line = line_of(&show);
+            for entrance in [Entrance::Fresh, Entrance::SameWords, Entrance::NewWords] {
+                for calm in [false, true] {
+                    let steps = moves(&show, entrance, calm);
+                    for (index, &clock) in clocks.iter().enumerate() {
+                        let mut timed: Vec<_> = steps.iter().map(|&step| (step, clock)).collect();
+                        if let Some(leave) = leaving(&show, calm) {
+                            timed.push((leave, clock / 2.0));
+                        }
+                        let frame = Frame {
+                            pose: pose(0.5, clock * 1000.0, calm),
+                            width_from: (index % 2 == 0).then_some((CAPSULE + 50.0, clock)),
+                            ..frame(&show, line.as_ref(), &timed)
+                        };
+                        let pixmap = paint(&frame);
+                        assert_eq!((pixmap.width(), pixmap.height()), size(&frame));
+                    }
+                }
+            }
+        }
     }
 }
