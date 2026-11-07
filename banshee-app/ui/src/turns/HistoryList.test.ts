@@ -24,6 +24,7 @@ const asked = (
   outcome,
   reason: null,
   timestamp,
+  audio: null,
   ...extra,
 });
 
@@ -79,6 +80,7 @@ function list(rows: HistoryRow[], props: Partial<Record<string, unknown>> = {}) 
     selectedId: rows[0]?.id ?? null,
     choose,
     open,
+    play: vi.fn(),
     scrolled,
     follow: false,
     opensOnClick: false,

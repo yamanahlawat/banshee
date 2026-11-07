@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { copied, copy } from '../lib/copy';
-  import { dayLabel, rowFlag } from '../lib/history';
-  import type { HistoryRow } from '../lib/tauri';
+  import { announce, asSentence, copied, copy, report, serverHost } from '../lib/copy';
+  import { daemon, listeningFacts } from '../lib/daemon';
+  import { dayLabel, keptAudio, keptUntil, replaceRow, retrying, rowFlag } from '../lib/history';
+  import { retry, type HistoryRow } from '../lib/tauri';
   import { formatTime } from '../lib/time';
   import Marked from './Marked.svelte';
+  import Player from './Player.svelte';
 
   export let row: HistoryRow;
   export let now: Date;
@@ -12,13 +14,52 @@
   export let query = '';
 
   let heading: HTMLElement;
+  let player: Player | undefined;
 
   export function focus() {
     heading?.focus();
   }
 
+  export function togglePlay() {
+    player?.toggle();
+  }
+
+  const wider = (one: string, other: string) => (one.length > other.length ? one : other);
+
   $: flag = rowFlag(row);
   $: failedDictation = row.kind === 'dictation' && row.outcome === 'failed';
+  // A fresh clock per row: `now` moves only when the day does.
+  $: audio = keptAudio(row, new Date());
+  $: retryable = audio !== null && row.kind === 'dictation';
+  $: busy = $retrying.has(row.id);
+  $: listening = listeningFacts($daemon);
+  $: model = $daemon.status?.stt_models?.find((one) => one.id === $daemon.status?.stt_model);
+  $: retryLabel = listening.remote
+    ? 'Retry with the transcription server'
+    : model
+      ? `Retry with ${model.label}`
+      : 'Retry';
+  // Read off the listener in force, not off dictation working: a retry goes
+  // to the server even while the microphone is broken.
+  $: sendsTo = listening.remote ? serverHost(listening) : null;
+
+  async function retryRow() {
+    const was = row;
+    if ($retrying.has(was.id)) return;
+    retrying.update((ids) => new Set(ids).add(was.id));
+    try {
+      replaceRow(await retry(was.id));
+      announce(was.outcome === 'failed' ? 'Transcribed.' : 'Text replaced.');
+    } catch (error) {
+      const reason = (error as { message?: string })?.message?.trim();
+      // A failed row has no text to keep.
+      const kept = was.outcome === 'failed' ? null : 'The text is unchanged.';
+      report(['The retry failed.', reason && asSentence(reason), kept].filter(Boolean).join(' '));
+    } finally {
+      retrying.update((ids) => new Set([...ids].filter((id) => id !== was.id)));
+    }
+  }
+
   $: note =
     row.kind === 'dictation'
       ? null
@@ -34,25 +75,26 @@
     {dayLabel(row.timestamp, now)} at <span class="mono time">{formatTime(row.timestamp)}</span>
   </h2>
 
+  {#snippet labelled(shown: string, widest: string)}
+    <span>{shown}</span>
+    <!-- Holds the button at the wider of its two labels. -->
+    <span class="held" aria-hidden="true">{widest}</span>
+  {/snippet}
+
   {#snippet copyButton(label: string, text: string, which: string)}
-    <button class="btn btn-ghost copy" on:click={() => copy(text, `${row.id}:${which}`)}>
-      <span>{$copied === `${row.id}:${which}` ? 'Copied' : label}</span>
-      <!-- Holds the button at the wider of its two labels. -->
-      <span class="held" aria-hidden="true"
-        >{label.length > 'Copied'.length ? label : 'Copied'}</span
-      >
+    <button class="btn btn-ghost holds" on:click={() => copy(text, `${row.id}:${which}`)}>
+      {@render labelled(
+        $copied === `${row.id}:${which}` ? 'Copied' : label,
+        wider(label, 'Copied'),
+      )}
     </button>
   {/snippet}
 
   {#if failedDictation}
-    <p class="words failed">Transcription failed</p>
+    <p class="words failed" class:pending={busy}>Transcription failed</p>
     {#if flag}<p class="note">{flag}</p>{/if}
-    <div class="actions">
-      <button class="btn" on:click={goListening}>Open Listening</button>
-    </div>
   {:else if row.kind === 'dictation'}
-    <p class="words user"><Marked text={row.text ?? ''} needle={query} /></p>
-    <div class="actions">{@render copyButton('Copy', row.text ?? '', 'text')}</div>
+    <p class="words user" class:pending={busy}><Marked text={row.text ?? ''} needle={query} /></p>
   {:else}
     <p class="words agent"><Marked text={row.question ?? ''} needle={query} /></p>
     <hr />
@@ -62,12 +104,43 @@
       {#if flag}<p class="flag">{flag}</p>{/if}
       {#if note}<p class="note">{note}</p>{/if}
     {/if}
-    <div class="actions">
+  {/if}
+  {#if audio}
+    {#key row.id}
+      <Player bind:this={player} id={row.id} seconds={audio.seconds} />
+    {/key}
+    <p class="kept">{keptUntil(audio.until)}</p>
+  {/if}
+  {#if failedDictation && !audio}
+    <p class="kept">No audio was kept, so there is nothing to retry.</p>
+  {/if}
+  <!-- One row for every kind, so Retry stays the same element when a failed
+       dictation turns into a transcribed one, and focus stays on it. -->
+  <div class="actions">
+    {#if row.kind === 'question'}
       {#if row.outcome === 'transcribed'}
         {@render copyButton('Copy answer', row.text ?? '', 'answer')}
       {/if}
       {@render copyButton('Copy question', row.question ?? '', 'question')}
-    </div>
+    {:else if !failedDictation}
+      {@render copyButton('Copy', row.text ?? '', 'text')}
+    {/if}
+    {#if retryable}
+      <button
+        class="btn holds"
+        class:btn-ghost={!failedDictation}
+        aria-describedby={sendsTo ? 'retry-sends' : undefined}
+        on:click={retryRow}
+      >
+        {@render labelled(busy ? 'Retrying' : retryLabel, wider(retryLabel, 'Retrying'))}
+      </button>
+    {/if}
+    {#if failedDictation}
+      <button class="btn" class:btn-ghost={retryable} on:click={goListening}>Open Listening</button>
+    {/if}
+  </div>
+  {#if retryable && sendsTo}
+    <p class="kept" id="retry-sends">Sends this recording to {sendsTo}.</p>
   {/if}
 </div>
 
@@ -101,6 +174,9 @@
     letter-spacing: -0.01em;
     overflow-wrap: anywhere;
     text-wrap: pretty;
+  }
+  .words.pending {
+    color: var(--dim);
   }
   .user {
     font-variation-settings:
@@ -136,16 +212,22 @@
     max-width: 460px;
     color: var(--dim);
   }
+  .kept {
+    margin: 8px 0 0;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--dim);
+  }
   .actions {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
     margin-top: 24px;
   }
-  .copy {
+  .holds {
     display: inline-grid;
   }
-  .copy > * {
+  .holds > * {
     grid-area: 1 / 1;
   }
   .held {

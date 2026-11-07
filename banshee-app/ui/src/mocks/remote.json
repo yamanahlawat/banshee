@@ -165,7 +165,8 @@
   "blockers": [],
   "config": {
     "daemon": {
-      "save_history": true
+      "save_history": true,
+      "keep_audio": "7d"
     },
     "audio": {
       "input_device": "default",

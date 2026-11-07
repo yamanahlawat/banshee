@@ -1,4 +1,4 @@
-use banshee_common::utils::{banshee_dir, socket_path};
+use banshee_common::utils::{banshee_dir, make_owner_only, socket_path};
 use banshee_common::{
     BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED,
     BANSHEE_SUBSCRIBE, BANSHEE_WORDS, JsonRpcNotification, JsonRpcRequest, error::BansheeError,
@@ -28,6 +28,8 @@ pub fn claim() -> Result<(std::path::PathBuf, UnixListener, fs::File), BansheeEr
     })?;
 
     if let Some(dir) = banshee_dir() {
+        // `banshee start`, the tray and a config write can create the directory
+        // first, at the default mode.
         make_owner_only(&dir).map_err(|e| BansheeError::file(&dir, e))?;
     }
     if let Some(parent_dir) = socket_path.parent() {
@@ -116,7 +118,7 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
         log::info!("Deleted {}, which nothing loads now", deleted.display());
     }
     permissions::ask_for_accessibility();
-    let db_connection = history::open()?;
+    let history = history::open(config.daemon.keep_audio)?;
 
     // Created before the backend, because the backend holds the sender and the
     // drain holds the state the backend must not see
@@ -156,7 +158,7 @@ pub async fn start(config: Config) -> Result<u8, BansheeError> {
     speech_player.set_builder(build_speaker);
     let daemon_state = Arc::new(DaemonState::new(
         Arc::clone(&config),
-        db_connection,
+        history,
         speech_player,
         speech.speaker,
         commands,
@@ -268,7 +270,8 @@ pub async fn run(
 
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
-    // Coarse tick: the ceiling it enforces is measured in minutes
+    // Coarse tick: the ceiling it enforces is measured in minutes. The first
+    // tick fires at once, so the purge also runs at start.
     let mut watchdog = tokio::time::interval(Duration::from_secs(30));
 
     loop {
@@ -277,6 +280,8 @@ pub async fn run(
             _ = sigterm.recv() => break,
             _ = watchdog.tick() => {
                 daemon_state.expire_stuck_recording();
+                let state = Arc::clone(daemon_state);
+                tokio::task::spawn_blocking(move || state.purge_audio());
             }
             // Stop RPC: wait a beat so the client task can flush its response
             _ = daemon_state.shutdown().notified() => {
@@ -647,13 +652,6 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
 
 pub fn socket_answers(socket_path: &Path) -> bool {
     banshee_common::utils::listens(socket_path).unwrap_or(false)
-}
-
-/// `banshee start`, the tray and a config write can create the directory
-/// first, at the default mode.
-fn make_owner_only(dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 fn claim_socket(socket_path: &Path) -> io::Result<(UnixListener, fs::File)> {

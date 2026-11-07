@@ -55,6 +55,14 @@ export function readAll(): Promise<void> {
   return reading;
 }
 
+/// A whole-table read that begins after this call, for a caller that has just
+/// changed what the daemon answers: a read already in flight may hold the old
+/// answer.
+export async function readAfter(): Promise<void> {
+  if (reading !== null) await reading.catch(() => {});
+  return readAll();
+}
+
 async function readWholeTable(): Promise<void> {
   const was = cleared;
   const all = await history();
@@ -90,6 +98,19 @@ export function forget(): void {
   view.set({ query: '', chosen: null });
   table.update((held) => ({ ...held, rows: [], total: 0, loaded: true }));
 }
+
+/// Puts a row the daemon changed in place of the one held with its id. The
+/// table keeps as many rows as before, so the total stands.
+export function replaceRow(row: HistoryRow): void {
+  table.update((held) => ({
+    ...held,
+    rows: held.rows.map((one) => (one.id === row.id ? row : one)),
+  }));
+}
+
+/// The rows whose retry is in flight. Held here, not in the detail, so a
+/// detail mounted again mid-retry still reads it.
+export const retrying: Writable<ReadonlySet<HistoryRow['id']>> = writable(new Set());
 
 // Follows what the daemon says it is keeping. The open reads the table itself,
 // so the first answer only records the switch. Rows kept earlier stay listed
@@ -175,8 +196,44 @@ export function dayLabel(timestamp: string, now: Date): string {
   if (sameLocalDay(at, new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))) {
     return 'Yesterday';
   }
-  const day = `${at.getDate()} ${MONTHS[at.getMonth()]}`;
+  const day = dayAndMonth(at);
   return at.getFullYear() === now.getFullYear() ? day : `${day} ${at.getFullYear()}`;
+}
+
+function dayAndMonth(at: Date): string {
+  return `${at.getDate()} ${MONTHS[at.getMonth()]}`;
+}
+
+/// The row's audio while it is still kept at `now`.
+export function keptAudio(row: HistoryRow, now: Date): HistoryRow['audio'] {
+  const audio = row.audio;
+  if (audio === null || (audio.until !== null && toDate(audio.until) <= now)) return null;
+  return audio;
+}
+
+const DAY_MS = 86_400_000;
+
+const KEEP_DAYS: Record<string, number> = {
+  off: 0,
+  '1d': 1,
+  '7d': 7,
+  '30d': 30,
+  forever: Infinity,
+};
+
+/// How many rows keep audio that `period` would put past its end at `now`.
+export function wouldDelete(rows: HistoryRow[], period: string, now: Date): number {
+  const days = KEEP_DAYS[period] ?? Infinity;
+  const limit = now.getTime() - days * DAY_MS;
+  return rows.filter(
+    (row) => keptAudio(row, now) !== null && toDate(row.timestamp).getTime() <= limit,
+  ).length;
+}
+
+export function keptUntil(until: string | null): string {
+  return until === null
+    ? 'Audio kept until you clear it'
+    : `Audio kept until ${dayAndMonth(toDate(until))}`;
 }
 
 export function selected(shown: HistoryRow[], chosen: HistoryRow['id'] | null): HistoryRow | null {

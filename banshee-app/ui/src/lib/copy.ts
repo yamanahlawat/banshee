@@ -29,6 +29,14 @@ export function failureReads(label: string, said: string): string {
   return `${label.replace(/\.+$/, '')}: ${said.trim().replace(/\.+$/, '')}.`;
 }
 
+/// A message as a sentence of its own. Socket messages arrive lower case and
+/// unterminated; the daemon's own already read as one.
+export function asSentence(said: string): string {
+  const text = said.trim();
+  const opened = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(opened) ? opened : `${opened}.`;
+}
+
 /// The languages a listening model hears: the names up to three, and a count
 /// beyond that.
 export function languagesHeard(codes: string[]): string {
@@ -85,10 +93,14 @@ import { WAITS_ON_A_FILE, type Listening, type ListeningModel, type Speech } fro
 const A_TRANSCRIPTION_SERVER = 'a transcription server';
 const A_VOICE_SERVER = 'a voice server';
 
+export function serverHost(facts: Listening): string {
+  return facts.host ?? A_TRANSCRIPTION_SERVER;
+}
+
 export function listeningLead(facts: Listening): string {
   if (!facts.live) return 'Banshee is not running, so no microphone is open.';
   if (facts.remote) {
-    const host = facts.host ?? A_TRANSCRIPTION_SERVER;
+    const host = serverHost(facts);
     if (facts.stoppedBy === 'keyfile') return `Banshee cannot read the key file for ${host}.`;
     if (facts.stoppedBy !== null) return `Banshee cannot reach ${host} to hear you.`;
     // A remote listener loads no model of its own, only the detector.
@@ -110,7 +122,7 @@ export function listeningLead(facts: Listening): string {
 
 export function listeningNote(facts: Listening): string {
   if (!facts.live) return 'Nothing is heard until Banshee starts.';
-  const host = facts.host ?? A_TRANSCRIPTION_SERVER;
+  const host = serverHost(facts);
   if (facts.remote) {
     if (facts.stoppedBy === 'keyfile') {
       return `Nothing goes to ${host} until the key file is removed and the key is set again.`;
@@ -126,7 +138,7 @@ export function listeningNote(facts: Listening): string {
 /// The host audio leaves for, while a remote listener is in use.
 export function audioGoesTo(facts: Listening): string | null {
   if (!facts.live || !facts.remote || facts.stoppedBy !== null) return null;
-  return facts.host ?? A_TRANSCRIPTION_SERVER;
+  return serverHost(facts);
 }
 
 // A started speaker's name comes off the config table, which a later write may
@@ -208,10 +220,15 @@ export const announcement = writable('');
 /// So it holds until dismissed.
 export const problem = writable('');
 
+/// One more on every report. The page redraws the problem on each, because a
+/// live region speaks a change and the same failure twice is no change.
+export const reports = writable(0);
+
 /// Announced from the element that draws it rather than from a second hidden
 /// copy, so a screen reader hears it once and finds it where it was spoken.
 export function report(message: string): void {
   problem.set(message);
+  reports.update((count) => count + 1);
 }
 
 let timer: ReturnType<typeof setTimeout> | undefined;
@@ -273,6 +290,13 @@ export async function copy(text: string, id: string): Promise<void> {
 export const CHOICE_LABELS: Record<string, Record<string, string>> = {
   'audio.hotkey_mode': { hold: 'Hold', toggle: 'Tap' },
   'audio.barge_in': { stop: 'Stop', none: 'Carry on' },
+  'daemon.keep_audio': {
+    off: 'Off',
+    '1d': '1 day',
+    '7d': '7 days',
+    '30d': '30 days',
+    forever: 'Forever',
+  },
   'feedback.mode': { visual: 'On screen', sound: 'Sound', both: 'Both', none: 'Off' },
   'stt.provider': { local: 'On this machine', remote: 'A transcription server' },
   'tts.provider': { local: 'On this machine', remote: 'A voice server' },

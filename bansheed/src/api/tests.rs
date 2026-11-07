@@ -2572,3 +2572,301 @@ async fn a_configure_reply_names_the_keys_still_waiting() {
     assert_eq!(result["waiting"], serde_json::json!(["stt.model"]));
     assert!(result.get("restart_required").is_none());
 }
+
+/// Keeps `entry` and answers its id.
+fn kept_row(state: &DaemonState, entry: &NewEntry) -> i64 {
+    state.keep(entry);
+    state.history(None, None).unwrap().last().unwrap().id
+}
+
+const A_TENTH_OF_A_SECOND: [f32; 1600] = [0.25; 1600];
+
+async fn refusal(
+    state: &Arc<DaemonState>,
+    method: &str,
+    params: serde_json::Value,
+) -> (i32, String) {
+    let JsonRpcResponse::Error { error, .. } = dispatch(request(method, Some(params)), state).await
+    else {
+        panic!("{method} must be refused");
+    };
+    (error.code, error.message)
+}
+
+/// Answers the first retry the consumer gets with `answer`, and hands back
+/// the command's row id and samples.
+fn retry_consumer(
+    commands: std::sync::mpsc::Receiver<ConsumerCommand>,
+    answer: Result<&str, &str>,
+) -> std::thread::JoinHandle<(i64, Vec<f32>)> {
+    let answer = answer.map(str::to_string).map_err(str::to_string);
+    std::thread::spawn(move || {
+        let Ok(ConsumerCommand::Retry(retry)) = commands.recv() else {
+            panic!("the consumer gets a retry");
+        };
+        let _ = retry.reply.send(answer);
+        (retry.id, retry.samples)
+    })
+}
+
+#[tokio::test]
+async fn history_audio_answers_the_path_of_a_kept_row() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let id = kept_row(
+        &state,
+        &NewEntry::dictation("hello").with_audio(&A_TENTH_OF_A_SECOND),
+    );
+
+    let response = dispatch(
+        request(BANSHEE_HISTORY_AUDIO, Some(serde_json::json!({"id": id}))),
+        &state,
+    )
+    .await;
+
+    let JsonRpcResponse::Success { result, .. } = response else {
+        panic!("a kept row answers its audio");
+    };
+    let path = std::path::PathBuf::from(result["path"].as_str().unwrap());
+    assert_eq!(Some(path.clone()), state.audio_path(id));
+    assert!(path.is_file());
+}
+
+#[tokio::test]
+async fn history_audio_refuses_a_row_without_audio() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let id = kept_row(&state, &NewEntry::dictation("hello"));
+
+    let refused = refusal(&state, BANSHEE_HISTORY_AUDIO, serde_json::json!({"id": id})).await;
+
+    assert_eq!(
+        refused,
+        (
+            rpc_code::INVALID_PARAMS,
+            "No audio is kept for this row.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn history_audio_refuses_a_missing_or_non_integer_id() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    for method in [BANSHEE_HISTORY_AUDIO, BANSHEE_RETRY] {
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"id": "1"}),
+            serde_json::json!({"id": 1.5}),
+        ] {
+            let (code, message) = refusal(&state, method, params.clone()).await;
+            assert_eq!(code, rpc_code::INVALID_PARAMS, "{method} {params}");
+            assert!(message.contains("'id'"), "{method} {params}: {message}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_row_is_refused_by_name() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    for method in [BANSHEE_HISTORY_AUDIO, BANSHEE_RETRY] {
+        let refused = refusal(&state, method, serde_json::json!({"id": 41})).await;
+        assert_eq!(
+            refused,
+            (rpc_code::INVALID_PARAMS, "No row has id 41.".to_string()),
+            "{method}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn retry_refuses_a_question_row() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let id = kept_row(
+        &state,
+        &NewEntry::question("Ship it?", Some("Yes"), Outcome::Transcribed, None)
+            .with_audio(&A_TENTH_OF_A_SECOND),
+    );
+
+    let refused = refusal(&state, BANSHEE_RETRY, serde_json::json!({"id": id})).await;
+
+    assert_eq!(
+        refused,
+        (
+            rpc_code::INVALID_PARAMS,
+            "Only a dictation can be retried.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn retry_refuses_a_row_without_audio() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let id = kept_row(&state, &NewEntry::dictation("hello"));
+
+    let refused = refusal(&state, BANSHEE_RETRY, serde_json::json!({"id": id})).await;
+
+    assert_eq!(
+        refused,
+        (
+            rpc_code::INVALID_PARAMS,
+            "No audio is kept for this row.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_retry_whose_model_will_not_load_answers_the_consumers_reason() {
+    let (commands, consumer) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let id = kept_row(
+        &state,
+        &NewEntry::dictation("hello").with_audio(&A_TENTH_OF_A_SECOND),
+    );
+    state.set_mic(crate::state::Mic::Faulted(RecordingError::Model(
+        "missing file".to_string(),
+    )));
+    let consumer = retry_consumer(consumer, Err("The listening model would not load."));
+
+    let refused = refusal(&state, BANSHEE_RETRY, serde_json::json!({"id": id})).await;
+
+    assert_eq!(
+        refused,
+        (
+            rpc_code::LISTENING_FAILED,
+            "The listening model would not load.".to_string()
+        )
+    );
+    assert_eq!(consumer.join().unwrap().0, id);
+}
+
+#[tokio::test]
+async fn a_retry_with_no_consumer_answers_at_the_send() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let id = kept_row(
+        &state,
+        &NewEntry::dictation("hello").with_audio(&A_TENTH_OF_A_SECOND),
+    );
+
+    let refused = refusal(&state, BANSHEE_RETRY, serde_json::json!({"id": id})).await;
+
+    assert_eq!(
+        refused,
+        (
+            rpc_code::INTERNAL,
+            "Audio pipeline is not running.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn retry_replaces_the_text_and_answers_the_row() {
+    let (commands, consumer) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let id = kept_row(
+        &state,
+        &NewEntry::failed_dictation("The server did not answer.").with_audio(&A_TENTH_OF_A_SECOND),
+    );
+    let consumer = retry_consumer(consumer, Ok("hello"));
+
+    let response = dispatch(
+        request(BANSHEE_RETRY, Some(serde_json::json!({"id": id}))),
+        &state,
+    )
+    .await;
+
+    let JsonRpcResponse::Success { result, .. } = response else {
+        panic!("a kept dictation retries: {response:?}");
+    };
+    assert_eq!(result["row"]["id"], id);
+    assert_eq!(result["row"]["outcome"], "transcribed");
+    assert_eq!(result["row"]["text"], "hello");
+    assert!(result["row"]["reason"].is_null());
+    let row = state.history_entry(id).unwrap().unwrap();
+    assert_eq!(row.text.as_deref(), Some("hello"));
+    let (asked_for, samples) = consumer.join().unwrap();
+    assert_eq!(asked_for, id);
+    assert_eq!(samples.len(), A_TENTH_OF_A_SECOND.len());
+    assert!(
+        samples
+            .iter()
+            .all(|sample| (sample - 0.25).abs() <= 1.0 / f32::from(i16::MAX)),
+        "the consumer hears the kept audio"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_retry_leaves_the_row_unchanged() {
+    let (commands, consumer) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let id = kept_row(
+        &state,
+        &NewEntry::failed_dictation("The server did not answer.").with_audio(&A_TENTH_OF_A_SECOND),
+    );
+    let before = serde_json::to_value(state.history_entry(id).unwrap()).unwrap();
+    let _consumer = retry_consumer(consumer, Err("The model returned no text."));
+
+    let refused = refusal(&state, BANSHEE_RETRY, serde_json::json!({"id": id})).await;
+
+    assert_eq!(
+        refused,
+        (
+            rpc_code::LISTENING_FAILED,
+            "The model returned no text.".to_string()
+        )
+    );
+    let after = serde_json::to_value(state.history_entry(id).unwrap()).unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn a_retry_needs_no_microphone() {
+    for fault in [
+        RecordingError::Microphone("no device".to_string()),
+        RecordingError::MicrophoneRefused(crate::state::Refusal::Denied),
+    ] {
+        let (commands, consumer) = std::sync::mpsc::channel();
+        let state = test_state(commands);
+        let id = kept_row(
+            &state,
+            &NewEntry::failed_dictation("The server did not answer.")
+                .with_audio(&A_TENTH_OF_A_SECOND),
+        );
+        state.set_mic(crate::state::Mic::Faulted(fault.clone()));
+        let consumer = retry_consumer(consumer, Ok("hello"));
+
+        let response = dispatch(
+            request(BANSHEE_RETRY, Some(serde_json::json!({"id": id}))),
+            &state,
+        )
+        .await;
+
+        let JsonRpcResponse::Success { result, .. } = response else {
+            panic!("{fault:?} must not refuse a retry: {response:?}");
+        };
+        assert_eq!(result["row"]["text"], "hello", "{fault:?}");
+        assert_eq!(consumer.join().unwrap().0, id);
+    }
+}
+
+#[tokio::test]
+async fn a_retry_whose_row_was_cleared_meanwhile_names_the_row() {
+    let (commands, consumer) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let id = kept_row(
+        &state,
+        &NewEntry::failed_dictation("The server did not answer.").with_audio(&A_TENTH_OF_A_SECOND),
+    );
+    let clearing = Arc::clone(&state);
+    std::thread::spawn(move || {
+        let Ok(ConsumerCommand::Retry(retry)) = consumer.recv() else {
+            panic!("the consumer gets a retry");
+        };
+        clearing.clear_history().unwrap();
+        let _ = retry.reply.send(Ok("hello".to_string()));
+    });
+
+    let refused = refusal(&state, BANSHEE_RETRY, serde_json::json!({"id": id})).await;
+
+    assert_eq!(
+        refused,
+        (rpc_code::INVALID_PARAMS, format!("No row has id {id}."))
+    );
+}

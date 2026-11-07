@@ -24,6 +24,7 @@
     listeningLead,
     problem,
     report,
+    reports,
     speechLead,
     DICTATION_FAILED,
     DICTATION_FAILURE,
@@ -510,9 +511,11 @@
           <HostLine {host} inset />
         {/if}
         <div aria-live="polite">
-          {#if $problem}
-            <Absence label={$problem} action="Dismiss" act={() => problem.set('')} />
-          {/if}
+          {#key $reports}
+            {#if $problem}
+              <Absence label={$problem} action="Dismiss" act={() => problem.set('')} />
+            {/if}
+          {/key}
         </div>
       </svelte:fragment>
 

@@ -111,6 +111,11 @@ pub const BANSHEE_STATUS: &str = "banshee.status";
 pub const BANSHEE_CONFIGURE: &str = "banshee.configure";
 pub const BANSHEE_HISTORY: &str = "banshee.history";
 pub const BANSHEE_CLEAR_HISTORY: &str = "banshee.clear_history";
+/// `{"id": integer}`, answers `{"path": string}`: where that row's kept audio is.
+pub const BANSHEE_HISTORY_AUDIO: &str = "banshee.history_audio";
+pub const NO_AUDIO: &str = "No audio is kept for this row.";
+/// `{"id": integer}`, answers `{"row": ...}`: the dictation transcribed again from its kept audio.
+pub const BANSHEE_RETRY: &str = "banshee.retry";
 pub const BANSHEE_ASK_USER: &str = "banshee.ask_user";
 pub const BANSHEE_TURN_ENDED: &str = "banshee.turn_ended";
 

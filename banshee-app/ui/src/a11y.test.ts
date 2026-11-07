@@ -13,7 +13,7 @@ const ROWS = vi.hoisted(() => {
   const now = new Date();
   const at = (hour: number) =>
     new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, 0, 0).toISOString();
-  const row = { reason: null, question: null };
+  const row = { reason: null, question: null, audio: null };
   return [
     {
       id: 3,

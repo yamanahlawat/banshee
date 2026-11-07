@@ -52,6 +52,8 @@ export type Status = Record<string, unknown> & {
   /// Whether the listener in use can write what it hears in English.
   stt_translates?: boolean;
   stt_models?: ListeningModel[];
+  /// The id of the listening model in force, null under a remote listener.
+  stt_model?: string | null;
   download_megabytes?: number;
   missing_downloads?: MissingFile[];
   running: boolean;

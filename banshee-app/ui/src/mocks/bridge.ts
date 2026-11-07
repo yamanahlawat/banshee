@@ -71,6 +71,7 @@ const STATES: Record<string, Status> = {
   'not-running': notRunning,
   'no-agents': ready,
   'copy-fails': ready,
+  'retry-fails': ready,
   // A real first run: blocked, and nothing ever said.
   'first-run': permissions,
   downloading: permissions,
@@ -215,38 +216,102 @@ function rows(): HistoryRow[] {
     Number.isFinite(asked) && asked > 0 ? Math.min(Math.floor(asked), 5000) : SAID.length;
   const start = new Date();
   start.setHours(21, 58, 0, 0);
-  const at = (i: number) => new Date(start.getTime() - i * 11 * 60_000).toISOString();
+  const at = (i: number) => new Date(start.getTime() - i * 11 * 60_000);
+  const week = (i: number) => new Date(at(i).getTime() + 7 * 86_400_000).toISOString();
   // The newest rows show each kind the detail can draw. The preview-scale
-  // repeat below stays plain dictations.
-  const kinds: Omit<HistoryRow, 'id' | 'timestamp'>[] = [
-    { ...ASKED, text: 'The release branch.', outcome: 'transcribed', reason: null },
-    { ...ASKED, text: null, outcome: 'no_answer', reason: null },
-    { ...ASKED, text: null, outcome: 'closed', reason: null },
-    { ...ASKED, text: null, outcome: 'failed', reason: 'The audio was empty.' },
-    { ...ASKED, text: null, outcome: 'unasked', reason: 'Banshee was not listening.' },
-    {
+  // repeat below stays plain dictations, kept forever, kept a week, or from
+  // before audio was kept.
+  const kinds: ((i: number) => Omit<HistoryRow, 'id' | 'timestamp'>)[] = [
+    (i) => ({
+      ...ASKED,
+      text: 'The release branch.',
+      outcome: 'transcribed',
+      reason: null,
+      audio: { seconds: 4, until: week(i) },
+    }),
+    () => ({ ...ASKED, text: null, outcome: 'no_answer', reason: null, audio: null }),
+    () => ({ ...ASKED, text: null, outcome: 'closed', reason: null, audio: null }),
+    (i) => ({
+      ...ASKED,
+      text: null,
+      outcome: 'failed',
+      reason: 'The audio was empty.',
+      audio: { seconds: 3, until: week(i) },
+    }),
+    () => ({
+      ...ASKED,
+      text: null,
+      outcome: 'unasked',
+      reason: 'Banshee was not listening.',
+      audio: null,
+    }),
+    (i) => ({
       kind: 'dictation',
       question: null,
       text: null,
       outcome: 'failed',
       reason: 'The transcription server refused the key.',
-    },
+      audio: { seconds: 11, until: week(i) },
+    }),
+    () => ({
+      kind: 'dictation',
+      question: null,
+      text: null,
+      outcome: 'failed',
+      reason: 'The transcription server refused the key.',
+      audio: null,
+    }),
   ];
   const lead = Math.min(kinds.length, total);
+  const kept = [
+    () => ({ seconds: 6, until: null }),
+    (i: number) => ({ seconds: 2.4, until: week(i) }),
+    () => null,
+  ];
   // The daemon answers oldest first.
   return Array.from({ length: total }, (_, i) => ({
     id: total - i,
-    timestamp: at(i),
+    timestamp: at(i).toISOString(),
     ...(i < lead
-      ? kinds[i]
+      ? kinds[i](i)
       : {
           kind: 'dictation' as const,
           question: null,
           text: SAID[i % SAID.length],
           outcome: 'transcribed' as const,
           reason: null,
+          audio: kept[i % kept.length](i),
         }),
   })).reverse();
+}
+
+// A soft tone of the row's length, in the daemon's format: 16 kHz mono 16-bit PCM.
+function wav(seconds: number): ArrayBuffer {
+  const rate = 16_000;
+  const samples = Math.round(seconds * rate);
+  const buffer = new ArrayBuffer(44 + samples * 2);
+  const view = new DataView(buffer);
+  const text = (at: number, word: string) =>
+    [...word].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+  text(0, 'RIFF');
+  view.setUint32(4, 36 + samples * 2, true);
+  text(8, 'WAVE');
+  text(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  text(36, 'data');
+  view.setUint32(40, samples * 2, true);
+  for (let n = 0; n < samples; n += 1) {
+    const t = n / rate;
+    const fade = Math.min(1, t * 20, (seconds - t) * 20);
+    view.setInt16(44 + n * 2, Math.round(Math.sin(2 * Math.PI * 330 * t) * 4000 * fade), true);
+  }
+  return buffer;
 }
 
 function statusNow(): unknown {
@@ -269,9 +334,20 @@ function statusNow(): unknown {
   return { ...base, config };
 }
 
-const ANSWERS: Record<string, () => unknown> = {
+const ANSWERS: Record<string, (args?: Record<string, unknown>) => unknown> = {
   status: statusNow,
   history: () => rows(),
+  history_audio: (args) => {
+    const audio = rows().find((row) => row.id === args?.id)?.audio;
+    if (!audio) throw new Error('No audio is kept for this row.');
+    return wav(audio.seconds);
+  },
+  retry: (args) => {
+    const row = rows().find((one) => one.id === args?.id);
+    if (!row?.audio) throw new Error('No audio is kept for this row.');
+    if (chosen() === 'retry-fails') throw new Error('The model returned no text.');
+    return { ...row, text: SAID[0], outcome: 'transcribed', reason: null };
+  },
   settings_table: () => settingsJson,
   set_setting: () => [],
   // A failure has no other way to be looked at: every other state is a status
@@ -377,7 +453,7 @@ export function answer<T>(command: string, args?: Record<string, unknown>): Prom
   }
   const reply = ANSWERS[command];
   try {
-    return Promise.resolve((reply ? reply() : undefined) as T);
+    return Promise.resolve((reply ? reply(args) : undefined) as T);
   } catch (refused) {
     return Promise.reject(refused);
   }

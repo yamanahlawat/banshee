@@ -94,6 +94,11 @@
     detail?.focus();
   }
 
+  async function play(id: Id) {
+    if (!wide && opened !== id) await open(id);
+    detail?.togglePlay();
+  }
+
   export async function back() {
     opened = null;
     await list?.focus();
@@ -174,6 +179,7 @@
             selectedId={row?.id ?? null}
             {choose}
             {open}
+            {play}
             scrolled={hold}
             follow={$view.chosen === null}
             opensOnClick={!wide}

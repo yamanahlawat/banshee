@@ -76,6 +76,17 @@ impl Registration {
     }
 }
 
+/// Creates the folder and any missing parent as 0700, and tightens one that
+/// already exists.
+pub fn make_owner_only(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
 /// Writes `bytes` to `path` through a staged file and a rename, so a partial
 /// write never truncates a file the user hand-edits, and the bytes reach the
 /// disk before the rename, so a power loss leaves the old file or the new one.
@@ -232,6 +243,10 @@ pub fn credentials_path() -> Option<PathBuf> {
 
 pub fn db_path() -> Option<PathBuf> {
     Some(banshee_dir()?.join("banshee.db"))
+}
+
+pub fn audio_dir() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("audio"))
 }
 
 pub fn oov_log_path() -> Option<PathBuf> {

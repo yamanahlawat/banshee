@@ -214,6 +214,18 @@ pub fn on_demand(
     )
 }
 
+pub use crate::config::DAY;
+
+/// Sets the file's modified time, as a file written at `at` would carry.
+pub fn set_modified(path: &Path, at: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+}
+
 /// Makes a fresh temp directory. Deletes a leftover from a killed run first.
 pub fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("banshee-{name}-{}", std::process::id()));
@@ -515,7 +527,7 @@ pub fn daemon_state_recording_tts() -> (Arc<DaemonState>, RecordedTts) {
 }
 
 fn state(
-    history: rusqlite::Connection,
+    history: crate::history::Store,
     speech: SpeechPlayer,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
 ) -> Arc<DaemonState> {
@@ -538,7 +550,7 @@ pub fn daemon_state_before_the_pipeline() -> Arc<DaemonState> {
 /// premise of any test that records, arms or reports a fault.
 fn state_running(
     config: Config,
-    history: rusqlite::Connection,
+    history: crate::history::Store,
     speech: SpeechPlayer,
     speaker: Speaker,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
@@ -584,7 +596,7 @@ pub fn daemon_state_before_the_pipeline_with_cues(
 
 fn fresh(
     config: Config,
-    history: rusqlite::Connection,
+    history: crate::history::Store,
     speech: SpeechPlayer,
     speaker: Speaker,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
@@ -601,7 +613,7 @@ fn fresh(
 
 fn built(
     config: Config,
-    history: rusqlite::Connection,
+    history: crate::history::Store,
     speech: SpeechPlayer,
     speaker: Speaker,
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
@@ -686,14 +698,16 @@ pub fn daemon_state_with_history_off(rows: &[&str]) -> Arc<DaemonState> {
     )
 }
 
-/// An in-memory history holding `rows`, oldest first.
-pub fn seeded_history(rows: &[&str]) -> rusqlite::Connection {
+/// An in-memory history holding `rows`, oldest first, with an audio folder of its own.
+pub fn seeded_history(rows: &[&str]) -> crate::history::Store {
     let mut connection = rusqlite::Connection::open_in_memory().unwrap();
     crate::history::prepare(&mut connection).unwrap();
     for text in rows {
         crate::history::insert(&connection, &crate::history::NewEntry::dictation(text)).unwrap();
     }
-    connection
+    let audio = unique_scratch("history-audio");
+    crate::history::audio::prepare(&audio).unwrap();
+    crate::history::Store::new(connection, audio, crate::config::KeepAudio::default())
 }
 
 /// What a bench of microphones was asked, in order.

@@ -7,12 +7,12 @@ import type { HistoryRow } from '../lib/tauri';
 
 vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTauri());
 
-import { copyText } from '../lib/tauri';
+import { copyText, historyAudio } from '../lib/tauri';
 import { clearSearch, table, view } from '../lib/history';
 import { forgetCopy } from '../lib/copy';
 import { onMac } from '../lib/keys';
 import { LIST_AND_DETAIL_FROM, SIDEBAR_FOLDS_BELOW } from '../lib/layout';
-import { stubMatchMedia } from '../lib/media.mock';
+import { stubMatchMedia, stubMedia } from '../lib/media.mock';
 import HistoryPage from './HistoryPage.svelte';
 
 const NOW = new Date(2026, 10, 6, 15, 0);
@@ -26,6 +26,7 @@ const asked = (id: number, question: string, row: Partial<HistoryRow> = {}): His
   outcome: 'no_answer',
   reason: null,
   timestamp: at(8),
+  audio: null,
   ...row,
 });
 
@@ -271,6 +272,94 @@ describe('beside the list', () => {
 
     await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     await waitFor(() => expect(document.activeElement).toBe(option('Open the pull request')));
+  });
+});
+
+describe('Space', () => {
+  const HEARD: HistoryRow[] = [
+    { ...dictated(2, 'Open the pull request.', at(10)), audio: { seconds: 4, until: null } },
+    { ...dictated(1, 'Push it.', at(9)), audio: { seconds: 2, until: null } },
+  ];
+  let media: ReturnType<typeof stubMedia>;
+
+  beforeEach(() => {
+    media = stubMedia();
+    vi.mocked(historyAudio).mockReset();
+    vi.mocked(historyAudio).mockResolvedValue(new ArrayBuffer(8));
+  });
+
+  afterEach(() => media.restore());
+
+  it('space on a list option plays the selected row', async () => {
+    show(HEARD);
+    option('Push it').focus();
+    await fireEvent.click(option('Push it'));
+    expect(await fireEvent.keyDown(option('Push it'), { key: ' ' })).toBe(false);
+    await waitFor(() => expect(media.play).toHaveBeenCalledOnce());
+    expect(historyAudio).toHaveBeenCalledWith(1);
+    expect(within(detail()!).getByRole('button', { name: 'Pause audio' })).toBeTruthy();
+
+    await fireEvent.keyDown(option('Push it'), { key: ' ' });
+    expect(within(detail()!).getByRole('button', { name: 'Play audio, 2 seconds' })).toBeTruthy();
+  });
+
+  it('space on a row without audio does nothing and leaves the key alone', async () => {
+    show(ROWS);
+    option('Open the pull request').focus();
+    expect(await fireEvent.keyDown(option('Open the pull request'), { key: ' ' })).toBe(true);
+    expect(historyAudio).not.toHaveBeenCalled();
+  });
+
+  it('a held Space does not repeat the press', async () => {
+    show(HEARD);
+    option('Open the pull request').focus();
+    await fireEvent.keyDown(option('Open the pull request'), { key: ' ', repeat: true });
+    expect(historyAudio).not.toHaveBeenCalled();
+    expect(media.play).not.toHaveBeenCalled();
+  });
+
+  it('a non-option element keeps Space', async () => {
+    show(HEARD);
+    const field = document.createElement('input');
+    field.type = 'search';
+    document.body.append(field);
+    field.focus();
+    expect(await fireEvent.keyDown(field, { key: ' ' })).toBe(true);
+    field.remove();
+    expect(historyAudio).not.toHaveBeenCalled();
+  });
+
+  it('space on a button keeps its own press', async () => {
+    show(HEARD);
+    const copy = within(detail()!).getByRole('button', { name: 'Copy' });
+    copy.focus();
+    expect(await fireEvent.keyDown(copy, { key: ' ' })).toBe(true);
+    expect(historyAudio).not.toHaveBeenCalled();
+  });
+
+  describe('below the width the list and detail share', () => {
+    beforeEach(() => {
+      stubMatchMedia({ [WIDE]: false, [SIDEBAR]: true });
+    });
+
+    it('opens the row as Return does, and plays it', async () => {
+      show(HEARD);
+      expect(detail()).toBeNull();
+      option('Open the pull request').focus();
+      expect(await fireEvent.keyDown(option('Open the pull request'), { key: ' ' })).toBe(false);
+      await waitFor(() => expect(media.play).toHaveBeenCalledOnce());
+      expect(historyAudio).toHaveBeenCalledWith(2);
+      expect(document.activeElement).toBe(within(detail()!).getByRole('heading'));
+      expect(within(detail()!).getByRole('button', { name: 'Pause audio' })).toBeTruthy();
+    });
+
+    it('leaves Space alone on a row without audio', async () => {
+      show(ROWS);
+      option('Which branch').focus();
+      expect(await fireEvent.keyDown(option('Which branch'), { key: ' ' })).toBe(true);
+      expect(detail()).toBeNull();
+      expect(historyAudio).not.toHaveBeenCalled();
+    });
   });
 });
 

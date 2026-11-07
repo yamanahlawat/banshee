@@ -13,11 +13,45 @@ use crate::credentials::RemoteKey;
 #[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
     pub save_history: bool,
+    pub keep_audio: KeepAudio,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
-        Self { save_history: true }
+        Self {
+            save_history: true,
+            keep_audio: KeepAudio::default(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum KeepAudio {
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "1d")]
+    OneDay,
+    #[default]
+    #[serde(rename = "7d")]
+    SevenDays,
+    #[serde(rename = "30d")]
+    ThirtyDays,
+    #[serde(rename = "forever")]
+    Forever,
+}
+
+pub const DAY: std::time::Duration = std::time::Duration::from_secs(86_400);
+
+impl KeepAudio {
+    /// How long a file lives. `None` is forever; `Off` is no time at all.
+    pub fn period(self) -> Option<std::time::Duration> {
+        Some(match self {
+            Self::Off => std::time::Duration::ZERO,
+            Self::OneDay => DAY,
+            Self::SevenDays => 7 * DAY,
+            Self::ThirtyDays => 30 * DAY,
+            Self::Forever => return None,
+        })
     }
 }
 
@@ -498,6 +532,29 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keep_audio_defaults_to_seven_days() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.daemon.keep_audio, KeepAudio::SevenDays);
+    }
+
+    #[test]
+    fn keep_audio_reads_each_choice() {
+        let day = crate::test_support::DAY.as_secs();
+        for (word, period) in [
+            ("off", Some(0)),
+            ("1d", Some(day)),
+            ("7d", Some(7 * day)),
+            ("30d", Some(30 * day)),
+            ("forever", None),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[daemon]\nkeep_audio = \"{word}\"\n")).unwrap();
+            let seconds = config.daemon.keep_audio.period().map(|d| d.as_secs());
+            assert_eq!(seconds, period, "{word}");
+        }
+    }
 
     // `hotkey_mode` under `[tts]` is valid TOML, so only `deny_unknown_fields`
     // stands between a misplaced key and a silent default
