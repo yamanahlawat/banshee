@@ -101,6 +101,7 @@ bind = , F9, exec, banshee record toggle
 
 - **`text`** shows.
 - **`alt`** picks a `format-icons` entry.
+- **`alt` reads `problem`** while Banshee is idle with a problem, and the tooltip names it.
 - **`class`** is the CSS hook.
 - **Put this** in your Waybar config:
 
@@ -110,7 +111,7 @@ bind = , F9, exec, banshee record toggle
     "return-type": "json",
     "restart-interval": 5,
     "format": "{icon}",
-    "format-icons": { "idle": "mic", "recording": "REC", "busy": "...", "speaking": "spk" }
+    "format-icons": { "idle": "mic", "recording": "REC", "busy": "...", "speaking": "spk", "problem": "!" }
 }
 ```
 

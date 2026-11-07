@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Waybar module shows a lasting problem.** While Banshee is idle with a problem, the
+  module's `alt` reads `problem` and the tooltip leads with the problem's name, the same
+  words the tray shows.
 - **The menu bar switches the listening model and the voice.** `Listening model` and
   `Voice` list the models and voices already on this machine, mark the one chosen, and
   switch with no restart. Downloads stay in the window. Under a transcription or speech

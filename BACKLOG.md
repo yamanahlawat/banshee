@@ -65,7 +65,6 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - Every recording pipeline fault shares one id. When one fault turns into another without
   clearing, Banshee does not say the new one.
 - A second Copied within the capsule's hold gets no second VoiceOver announcement.
-- Waybar shows no problem until the Linux capsule item lands.
 - An agent's question loads the listening model only after it has played, so the first answer
   after an idle unload waits for the load. Dictation overlaps its load with the press. The
   wait is not measured.

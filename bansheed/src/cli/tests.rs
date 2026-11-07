@@ -1,4 +1,4 @@
-use super::{failure_line, progress_line, state_word, watch_line, waybar_line};
+use super::{failure_line, problem_name, progress_line, state_word, watch_line, waybar_line};
 use banshee_common::InputDevice;
 use banshee_common::error::BansheeError;
 
@@ -20,7 +20,7 @@ fn a_download_line_names_the_file_and_its_place_in_the_run() {
 
 #[test]
 fn a_waybar_line_is_one_parseable_object() {
-    let line = waybar_line("recording", Some("Blue Yeti"), None, true, false);
+    let line = waybar_line("recording", Some("Blue Yeti"), None, true, false, None);
     assert!(
         !line.contains('\n'),
         "Waybar reads one object per line: {line}"
@@ -40,7 +40,7 @@ fn a_waybar_line_is_one_parseable_object() {
 // escaped rather than pasted into the line
 #[test]
 fn a_quote_in_the_device_name_does_not_break_the_line() {
-    let line = waybar_line("idle", Some("Bob\"s \\ Mic"), None, false, false);
+    let line = waybar_line("idle", Some("Bob\"s \\ Mic"), None, false, false, None);
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
     assert!(
         parsed["tooltip"]
@@ -52,7 +52,7 @@ fn a_quote_in_the_device_name_does_not_break_the_line() {
 
 #[test]
 fn an_unknown_device_is_left_out_rather_than_named_empty() {
-    let line = waybar_line("idle", None, None, false, false);
+    let line = waybar_line("idle", None, None, false, false, None);
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
     let tooltip = parsed["tooltip"].as_str().unwrap();
     assert!(
@@ -72,6 +72,7 @@ fn a_waybar_tooltip_names_what_the_config_still_waits_for() {
         Some("Yeti Nano"),
         false,
         false,
+        None,
     );
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
     assert_eq!(
@@ -85,7 +86,14 @@ fn a_waybar_tooltip_names_what_the_config_still_waits_for() {
 #[test]
 fn a_waybar_tooltip_says_whether_the_microphone_is_open() {
     let tooltip = |open, refused| {
-        let line = waybar_line("idle", Some("MacBook Pro Microphone"), None, open, refused);
+        let line = waybar_line(
+            "idle",
+            Some("MacBook Pro Microphone"),
+            None,
+            open,
+            refused,
+            None,
+        );
         serde_json::from_str::<serde_json::Value>(&line).expect("valid JSON")["tooltip"]
             .as_str()
             .unwrap()
@@ -109,7 +117,7 @@ fn a_waybar_tooltip_says_whether_the_microphone_is_open() {
 // cannot see the device, so the same word twice would be noise.
 #[test]
 fn a_device_change_alone_moves_the_line_only_where_the_device_shows() {
-    let plain_bound = watch_line(false, "idle", Some("Yeti Nano"), None, false, false);
+    let plain_bound = watch_line(false, "idle", Some("Yeti Nano"), None, false, false, None);
     let plain_substituted = watch_line(
         false,
         "idle",
@@ -117,13 +125,14 @@ fn a_device_change_alone_moves_the_line_only_where_the_device_shows() {
         Some("Yeti Nano"),
         false,
         false,
+        None,
     );
     assert_eq!(
         plain_bound, plain_substituted,
         "plain mode prints the word alone"
     );
 
-    let waybar_bound = watch_line(true, "idle", Some("Yeti Nano"), None, false, false);
+    let waybar_bound = watch_line(true, "idle", Some("Yeti Nano"), None, false, false, None);
     let waybar_substituted = watch_line(
         true,
         "idle",
@@ -131,6 +140,7 @@ fn a_device_change_alone_moves_the_line_only_where_the_device_shows() {
         Some("Yeti Nano"),
         false,
         false,
+        None,
     );
     assert_ne!(
         waybar_bound, waybar_substituted,
@@ -742,4 +752,66 @@ fn a_hotkey_the_compositor_holds_names_the_bind_command() {
             .contains("banshee bind hyprland")
     );
     assert_eq!(super::hotkey_hint(true), None);
+}
+
+#[test]
+fn an_idle_bar_with_a_problem_picks_the_problem_icon_and_names_it_first() {
+    let line: serde_json::Value = serde_json::from_str(&waybar_line(
+        "idle",
+        Some("Blue Yeti"),
+        None,
+        false,
+        false,
+        Some("Accessibility is not granted"),
+    ))
+    .unwrap();
+    assert_eq!(line["text"], "idle");
+    assert_eq!(line["alt"], "problem");
+    assert_eq!(line["class"], "idle");
+    assert!(
+        line["tooltip"]
+            .as_str()
+            .unwrap()
+            .starts_with("Accessibility is not granted. Banshee is idle. Microphone: ")
+    );
+}
+
+#[test]
+fn a_problem_while_recording_leaves_the_bar_on_the_state() {
+    let line: serde_json::Value = serde_json::from_str(&waybar_line(
+        "recording",
+        Some("Blue Yeti"),
+        None,
+        true,
+        false,
+        Some("Accessibility is not granted"),
+    ))
+    .unwrap();
+    assert_eq!(line["alt"], "recording");
+    assert!(
+        line["tooltip"]
+            .as_str()
+            .unwrap()
+            .starts_with("Banshee is recording")
+    );
+}
+
+#[test]
+fn a_status_with_a_blocker_reaches_the_waybar_line_as_a_problem() {
+    let state = serde_json::json!({
+        "blockers": [{"name": "Accessibility is not granted"}],
+    });
+    let line: serde_json::Value = serde_json::from_str(&watch_line(
+        true,
+        "idle",
+        None,
+        None,
+        false,
+        false,
+        problem_name(&state),
+    ))
+    .unwrap();
+    assert_eq!(line["alt"], "problem");
+    assert_eq!(problem_name(&serde_json::json!({"blockers": []})), None);
+    assert_eq!(problem_name(&serde_json::json!({})), None);
 }
