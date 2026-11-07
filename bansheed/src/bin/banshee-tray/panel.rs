@@ -35,21 +35,16 @@ use objc2_quartz_core::{
 };
 
 use super::chip::{Cut, Scene, Show, words_of};
-use super::figure::{self, Pose, Segment, Voice};
+use super::figure::{
+    self, BAND, BAND_GAP, BEHIND, BONE, CAPSULE, CUP_GAP, CUP_RADII, CUPS, FIGURE, HALO, HEADBAND,
+    INSET, KINDLE_AFTER, LEVEL_STEP, LIGHT, OUTLINE, OUTLINE_CONTRAST, OUTLINE_DASH, PIVOT, Pose,
+    RING, RING_STRENGTH, RUST, Segment, TRAVEL, Voice, WORDS_BLEED, WORDS_GAP, WORDS_SIZE,
+    WORDS_TAIL, WORDS_TRACKING, WORDS_WEIGHT, WORDS_WIDTH, WORKING_DEPTH,
+};
+use super::scenes::{Entrance, Move, answer_opens, centred, holds_the_voice, leaving, moves};
 
 mod motion;
 
-const FIGURE: CGFloat = 32.0;
-const CAPSULE: CGFloat = 44.0;
-const INSET: CGFloat = (CAPSULE - FIGURE) / 2.0;
-/// Clear space below the capsule, so the rise and the sinks travel without a cut.
-const TRAVEL: CGFloat = 12.0;
-const WORDS_GAP: CGFloat = 4.0;
-const WORDS_TAIL: CGFloat = 16.0;
-const WORDS_SIZE: CGFloat = 16.0;
-const WORDS_TRACKING: CGFloat = -0.015;
-const WORDS_WEIGHT: CGFloat = 750.0;
-const WORDS_WIDTH: CGFloat = 106.0;
 /// Unmeasured.
 const ABOVE_DOCK: CGFloat = 12.0;
 const SCREEN_MARGIN: CGFloat = 12.0;
@@ -57,33 +52,6 @@ const SCREEN_MARGIN: CGFloat = 12.0;
 const DOCK_ABOVE_TILE: CGFloat = 26.0;
 /// Unmeasured: the tile size the Dock uses before anyone sets one.
 const DOCK_TILE_DEFAULT: CGFloat = 48.0;
-
-const RUST: u32 = 0x8A2A0D;
-const BONE: u32 = 0xF2EFE9;
-const RING_STRENGTH: CGFloat = 0.45;
-const OUTLINE: CGFloat = 9.0;
-const OUTLINE_CONTRAST: CGFloat = 12.0;
-const RING: CGFloat = 6.0;
-const LIGHT: CGFloat = 7.0;
-const BEHIND: CGFloat = 15.0;
-const HALO: (CGFloat, CGFloat, CGFloat, CGFloat) = (50.0, 40.0, 42.0, 16.0);
-const CUPS: [(CGFloat, CGFloat); 2] = [(15.0, 46.0), (85.0, 46.0)];
-const CUP_RADII: (CGFloat, CGFloat) = (12.0, 17.0);
-const CUP_GAP: CGFloat = 10.0;
-const HEADBAND: [Segment; 2] = [
-    Segment::Move(15.0, 32.0),
-    Segment::Cubic([15.0, -4.0, 85.0, -4.0, 85.0, 32.0]),
-];
-const BAND: CGFloat = 6.0;
-const BAND_GAP: CGFloat = 14.0;
-const WORKING_DEPTH: f64 = 0.3;
-/// The gesture, voice and fill layers turn and scale about the figure's feet.
-const PIVOT: (CGFloat, CGFloat) = (50.0, 88.0);
-const KINDLE_AFTER: f64 = 0.2;
-/// The daemon samples the level every 33ms, so each sample eases into the next.
-const LEVEL_STEP: f64 = 0.033;
-/// Antialiased glyph edges reach past the outlines' box.
-const WORDS_BLEED: CGFloat = 1.0;
 
 fn rect(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
@@ -515,112 +483,6 @@ struct Words {
     descent: CGFloat,
 }
 
-/// What a scene plays. Each names one function in `motion`, or the fade that
-/// stands in for it under Reduce Motion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Move {
-    Rise,
-    FadeIn,
-    Emerge,
-    Kindle,
-    KindleFade,
-    Hover,
-    Orbit,
-    Tilt,
-    Open,
-    OpenFade,
-    Cups,
-    Shake,
-    Strain,
-    Breaks,
-    Words,
-    WordsFade,
-    Float,
-    FrameSink,
-    FailureExit,
-    FadeOut,
-}
-
-/// How a scene's moves join what showed before it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Entrance {
-    /// The panel had nothing on screen.
-    Fresh,
-    /// A scene already on screen, and its words carry over unchanged.
-    SameWords,
-    /// A scene already on screen; this one starts its own words from nothing.
-    NewWords,
-}
-
-/// The moves a scene plays as its serial moves. `calm` is Reduce Motion.
-fn moves(show: &Show, entrance: Entrance, calm: bool) -> Vec<Move> {
-    let mut moves = Vec::new();
-    if entrance == Entrance::Fresh {
-        moves.push(if calm { Move::FadeIn } else { Move::Rise });
-        if !calm && matches!(show, Show::Recording(_)) {
-            moves.push(Move::Emerge);
-        }
-    }
-    if entrance == Entrance::SameWords {
-        moves.extend_from_slice(opening(calm));
-        return moves;
-    }
-    moves.extend_from_slice(match (show, calm) {
-        (Show::Recording(_), false) => &[Move::Kindle][..],
-        (Show::Recording(_), true) => &[Move::KindleFade],
-        (Show::Working, false) => &[Move::Hover, Move::Orbit],
-        (Show::YourTurn, false) => &[Move::Cups],
-        (Show::NothingHeard(_), false) => &[Move::Shake, Move::Breaks],
-        (Show::Broken(_), false) => &[Move::Strain, Move::Breaks],
-        (Show::Done(_), false) => &[Move::Float, Move::FrameSink],
-        (Show::Done(_), true) => &[Move::FadeOut],
-        (Show::Copied, _) => &[],
-        (Show::Answering(_), calm) => opening(calm),
-        (Show::Working | Show::YourTurn | Show::NothingHeard(_) | Show::Broken(_), true) => &[],
-    });
-    if words_of(show).is_some() {
-        moves.push(if calm { Move::WordsFade } else { Move::Words });
-    }
-    moves
-}
-
-/// What the answer plays as it opens: the fill, and the head tilting in to
-/// listen.
-fn opening(calm: bool) -> &'static [Move] {
-    if calm {
-        &[Move::OpenFade]
-    } else {
-        &[Move::Open, Move::Tilt]
-    }
-}
-
-/// Your turn becomes the answer in place: the capsule and the words stay.
-fn answer_opens(before: Option<&Show>, after: &Show) -> bool {
-    matches!((before, after), (Some(Show::YourTurn), Show::Answering(_)))
-}
-
-/// The states whose figure fills and moves with the microphone level.
-fn holds_the_voice(show: &Show) -> bool {
-    matches!(show, Show::Recording(_) | Show::Answering(_))
-}
-
-fn centred(midline: CGFloat, width: CGFloat) -> CGFloat {
-    midline - width / 2.0
-}
-
-/// How a scene leaves when none follows it. `None` for Done: its float has
-/// already carried it out.
-fn leaving(show: &Show, calm: bool) -> Option<Move> {
-    match show {
-        Show::Done(_) => None,
-        _ => Some(if calm {
-            Move::FadeOut
-        } else {
-            Move::FailureExit
-        }),
-    }
-}
-
 pub struct Panel {
     mtm: MainThreadMarker,
     window: Retained<NSPanel>,
@@ -695,7 +557,7 @@ impl Panel {
             font,
             text_attributes,
             ellipsis,
-            outline_dash: dashes([0.088 * rest, 0.056 * rest]),
+            outline_dash: dashes(OUTLINE_DASH.map(|share| share * rest)),
             outline_length: rest,
             place: None,
             on_screen: None,
@@ -879,10 +741,7 @@ impl Panel {
             }
             Move::Shake => add(&layers.gesture, motion::head_shake()),
             Move::Strain => add(&layers.gesture, motion::strain()),
-            Move::Breaks => add(
-                &layers.outline,
-                motion::outline_breaks(self.outline_length, &self.outline_dash),
-            ),
+            Move::Breaks => add(&layers.outline, motion::outline_breaks(self.outline_length)),
             Move::Words => add(
                 &layers.words_mask,
                 motion::words_reveal(layers.words_mask.bounds().size.width),
@@ -1105,7 +964,6 @@ fn ink_of(path: &CGPath) -> Option<CGRect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chip::Done;
 
     #[test]
     fn a_path_with_no_ink_is_no_words() {
@@ -1150,182 +1008,6 @@ mod tests {
         }
         for x in [22.0, 70.0, 118.0] {
             assert!(in_capsule(view, 100.0, at(x)), "x {x}");
-        }
-    }
-
-    #[test]
-    fn copied_shows_its_word_with_no_failure_move() {
-        use Move::*;
-        assert_eq!(moves(&Show::Copied, Entrance::NewWords, false), [Words]);
-        assert_eq!(moves(&Show::Copied, Entrance::Fresh, false), [Rise, Words]);
-        assert_eq!(moves(&Show::Copied, Entrance::NewWords, true), [WordsFade]);
-        assert_eq!(leaving(&Show::Copied, false), Some(FailureExit));
-    }
-
-    fn failed() -> [Show; 2] {
-        [
-            Show::NothingHeard("Nothing heard".into()),
-            Show::Broken("Microphone blocked".into()),
-        ]
-    }
-
-    fn every_show() -> Vec<Show> {
-        let [nothing_heard, broken] = failed();
-        vec![
-            Show::Recording(String::new()),
-            Show::Working,
-            Show::YourTurn,
-            Show::Answering(String::new()),
-            nothing_heard,
-            broken,
-            Show::Done(Done::Typed),
-            Show::Copied,
-        ]
-    }
-
-    #[test]
-    fn only_a_scene_from_none_rises_and_only_recording_emerges() {
-        for show in every_show() {
-            let entering = moves(&show, Entrance::Fresh, false);
-            let staying = moves(&show, Entrance::NewWords, false);
-            assert_eq!(entering.first(), Some(&Move::Rise), "{show:?}");
-            assert!(!staying.contains(&Move::Rise), "{show:?}");
-            assert_eq!(
-                entering.contains(&Move::Emerge),
-                matches!(show, Show::Recording(_)),
-                "{show:?}"
-            );
-            assert!(!staying.contains(&Move::Emerge), "{show:?}");
-        }
-    }
-
-    #[test]
-    fn each_state_plays_its_own_gesture() {
-        use Move::*;
-        assert_eq!(
-            moves(&Show::YourTurn, Entrance::NewWords, false),
-            [Cups, Words]
-        );
-        assert_eq!(
-            moves(&Show::Answering(String::new()), Entrance::NewWords, false),
-            [Open, Tilt, Words]
-        );
-        let [nothing_heard, broken] = failed();
-        assert_eq!(
-            moves(&nothing_heard, Entrance::NewWords, false),
-            [Shake, Breaks, Words]
-        );
-        assert_eq!(
-            moves(&broken, Entrance::NewWords, false),
-            [Strain, Breaks, Words]
-        );
-        let done = Show::Done(Done::Typed);
-        assert_eq!(moves(&done, Entrance::NewWords, false), [Float, FrameSink]);
-    }
-
-    #[test]
-    fn the_answer_tilts_the_head_in_as_it_fills_and_calm_only_fills() {
-        use Move::*;
-        assert_eq!(opening(false), [Open, Tilt]);
-        assert_eq!(opening(true), [OpenFade]);
-    }
-
-    #[test]
-    fn answering_in_place_only_opens_and_drops_the_words_reveal() {
-        use Move::*;
-        assert_eq!(
-            moves(&Show::Answering(String::new()), Entrance::SameWords, false),
-            [Open, Tilt]
-        );
-        assert_eq!(
-            moves(&Show::Answering(String::new()), Entrance::SameWords, true),
-            [OpenFade]
-        );
-    }
-
-    #[test]
-    fn only_your_turn_opens_into_the_answer() {
-        assert!(answer_opens(
-            Some(&Show::YourTurn),
-            &Show::Answering(String::new())
-        ));
-        for (before, after) in [
-            (None, Show::Answering(String::new())),
-            (Some(Show::Working), Show::Answering(String::new())),
-            (
-                Some(Show::Recording(String::new())),
-                Show::Answering(String::new()),
-            ),
-            (
-                Some(Show::Answering(String::new())),
-                Show::Answering(String::new()),
-            ),
-            (Some(Show::YourTurn), Show::YourTurn),
-            (Some(Show::YourTurn), Show::Recording(String::new())),
-        ] {
-            assert!(
-                !answer_opens(before.as_ref(), &after),
-                "{before:?} to {after:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn only_a_recording_and_an_answer_hold_the_voice() {
-        for show in every_show() {
-            assert_eq!(
-                holds_the_voice(&show),
-                matches!(show, Show::Recording(_) | Show::Answering(_)),
-                "{show:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_capsule_is_centred_on_the_midline() {
-        assert_eq!(centred(500.0, 44.0), 478.0);
-        assert_eq!(centred(500.0, 120.0), 440.0);
-    }
-
-    #[test]
-    fn reduce_motion_keeps_only_the_fades() {
-        use Move::*;
-        assert_eq!(
-            moves(&Show::Recording(String::new()), Entrance::Fresh, true),
-            [FadeIn, KindleFade]
-        );
-        assert_eq!(moves(&Show::Working, Entrance::NewWords, true), []);
-        assert_eq!(
-            moves(&Show::YourTurn, Entrance::Fresh, true),
-            [FadeIn, WordsFade]
-        );
-        assert_eq!(
-            moves(&Show::Answering(String::new()), Entrance::NewWords, true),
-            [OpenFade, WordsFade]
-        );
-        for fault in failed() {
-            assert_eq!(moves(&fault, Entrance::NewWords, true), [WordsFade]);
-        }
-        assert_eq!(
-            moves(&Show::Done(Done::Sent), Entrance::NewWords, true),
-            [FadeOut]
-        );
-    }
-
-    #[test]
-    fn done_leaves_by_its_float_and_everything_else_sinks() {
-        assert_eq!(leaving(&Show::Done(Done::Typed), false), None);
-        for show in [
-            Show::Recording(String::new()),
-            Show::Working,
-            Show::YourTurn,
-            Show::Answering(String::new()),
-        ]
-        .into_iter()
-        .chain(failed())
-        {
-            assert_eq!(leaving(&show, false), Some(Move::FailureExit), "{show:?}");
-            assert_eq!(leaving(&show, true), Some(Move::FadeOut), "{show:?}");
         }
     }
 }

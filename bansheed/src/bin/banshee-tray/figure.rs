@@ -1,6 +1,48 @@
-//! The Banshee shroud in the mark's own 100-unit square, y down.
+//! The Banshee shroud in the mark's own 100-unit square, y down, and the
+//! capsule around it in points.
 
 use std::time::Instant;
+
+pub const FIGURE: f64 = 32.0;
+pub const CAPSULE: f64 = 44.0;
+pub const INSET: f64 = (CAPSULE - FIGURE) / 2.0;
+/// Clear space below the capsule, so the rise and the sinks travel without a cut.
+pub const TRAVEL: f64 = 12.0;
+pub const WORDS_GAP: f64 = 4.0;
+pub const WORDS_TAIL: f64 = 16.0;
+pub const WORDS_SIZE: f64 = 16.0;
+pub const WORDS_TRACKING: f64 = -0.015;
+pub const WORDS_WEIGHT: f64 = 750.0;
+pub const WORDS_WIDTH: f64 = 106.0;
+/// Antialiased glyph edges reach past the outlines' box.
+pub const WORDS_BLEED: f64 = 1.0;
+
+pub const RUST: u32 = 0x8A2A0D;
+pub const BONE: u32 = 0xF2EFE9;
+pub const RING_STRENGTH: f64 = 0.45;
+pub const OUTLINE: f64 = 9.0;
+pub const OUTLINE_CONTRAST: f64 = 12.0;
+/// A broken outline's dash and gap, as shares of the outline's length.
+pub const OUTLINE_DASH: [f64; 2] = [0.088, 0.056];
+pub const RING: f64 = 6.0;
+pub const LIGHT: f64 = 7.0;
+pub const BEHIND: f64 = 15.0;
+pub const HALO: (f64, f64, f64, f64) = (50.0, 40.0, 42.0, 16.0);
+pub const CUPS: [(f64, f64); 2] = [(15.0, 46.0), (85.0, 46.0)];
+pub const CUP_RADII: (f64, f64) = (12.0, 17.0);
+pub const CUP_GAP: f64 = 10.0;
+pub const HEADBAND: [Segment; 2] = [
+    Segment::Move(15.0, 32.0),
+    Segment::Cubic([15.0, -4.0, 85.0, -4.0, 85.0, 32.0]),
+];
+pub const BAND: f64 = 6.0;
+pub const BAND_GAP: f64 = 14.0;
+pub const WORKING_DEPTH: f64 = 0.3;
+/// The gesture, voice and fill layers turn and scale about the figure's feet.
+pub const PIVOT: (f64, f64) = (50.0, 88.0);
+pub const KINDLE_AFTER: f64 = 0.2;
+/// The daemon samples the level every 33ms, so each sample eases into the next.
+pub const LEVEL_STEP: f64 = 0.033;
 
 /// MacBook Pro Microphone, sample 2 (1029 frames) p10: 0.016, the room between words.
 const FLOOR: f64 = 0.016;

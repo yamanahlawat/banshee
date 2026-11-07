@@ -13,10 +13,14 @@ fn main() {
 }
 
 mod chip;
-#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(target_os = "macos"), expect(dead_code))]
 mod figure;
+#[cfg(any(target_os = "macos", test))]
+mod gesture;
 #[cfg(target_os = "macos")]
 mod panel;
+#[cfg(any(target_os = "macos", test))]
+mod scenes;
 
 mod tray {
     use std::collections::HashMap;
