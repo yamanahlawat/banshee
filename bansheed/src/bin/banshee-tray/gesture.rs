@@ -445,6 +445,18 @@ mod tests {
     }
 
     #[test]
+    fn ease_solves_for_the_curves_parameter_before_reading_its_height() {
+        assert!(close(ease(LINEAR, 0.25), 0.25), "{}", ease(LINEAR, 0.25));
+    }
+
+    #[test]
+    fn at_eases_between_key_times() {
+        let width = one(chip_width(0.0, 1.0));
+        let halfway = at(&width, width.delay + width.duration / 2.0, 99.0);
+        assert!(close(halfway, ease(SETTLE, 0.5)), "{halfway}");
+    }
+
+    #[test]
     fn at_holds_the_model_before_the_delay() {
         let sink = one(frame_sink());
         assert_eq!(at(&sink, 0.0, 0.7), 0.7);
