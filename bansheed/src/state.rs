@@ -73,6 +73,12 @@ pub struct AskCommand {
     pub session: u64,
 }
 
+pub struct RetryCommand {
+    pub id: i64,
+    pub samples: Vec<f32>,
+    pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+}
+
 pub enum ConsumerCommand {
     // A push-to-talk began, numbered so a refusal ends this press and no
     // later one. The consumer reads the ring while the key is held and ends
@@ -84,6 +90,7 @@ pub enum ConsumerCommand {
     // the next transcription
     Discard,
     Ask(AskCommand),
+    Retry(RetryCommand),
     // The listener owns the engine, so these reach it the way a rebind does.
     // One that lands while a dictation streams waits until the dictation ends,
     // so a model never changes under the stream that uses it.
@@ -490,7 +497,7 @@ pub struct DaemonState {
     facts: Mutex<Facts>,
     recording: AtomicU8,
     started_at: Instant,
-    db_connection: Mutex<rusqlite::Connection>,
+    history: Mutex<crate::history::Store>,
     history_changes: watch::Sender<u64>,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
@@ -579,7 +586,7 @@ struct Withdrawals {
 impl DaemonState {
     pub fn new(
         config: Arc<Config>,
-        db_connection: rusqlite::Connection,
+        history: crate::history::Store,
         speech: SpeechPlayer,
         speaker: crate::text_to_speech::Speaker,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
@@ -629,7 +636,7 @@ impl DaemonState {
             facts: Mutex::new(facts),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
-            db_connection: Mutex::new(db_connection),
+            history: Mutex::new(history),
             recording_active: watch::channel(false).0,
             transcribing: watch::channel(false).0,
             loading_model: watch::channel(false).0,
@@ -1852,8 +1859,8 @@ impl DaemonState {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn history_file(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
-        self.db_connection
+    fn history_store(&self) -> std::sync::MutexGuard<'_, crate::history::Store> {
+        self.history
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
@@ -1877,10 +1884,32 @@ impl DaemonState {
         if !self.history_enabled() {
             return;
         }
-        match crate::history::insert(&self.history_file(), entry) {
-            Ok(()) => self.history_changes.send_modify(|changes| *changes += 1),
+        let kept = self.history_store().keep(entry);
+        match kept {
+            Ok(_) => self.history_changes.send_modify(|changes| *changes += 1),
             Err(error) => log::error!("Failed to keep a history row: {error}"),
         }
+    }
+
+    #[cfg(test)]
+    pub fn keep_audio(&self) -> crate::config::KeepAudio {
+        self.history_store().keep_audio()
+    }
+
+    /// Purges at once, so a shorter period deletes what it no longer covers.
+    pub fn set_keep_audio(&self, keep: crate::config::KeepAudio) {
+        let folder = {
+            let mut store = self.history_store();
+            store.set_keep_audio(keep);
+            store.audio_folder()
+        };
+        folder.purge(std::time::SystemTime::now());
+    }
+
+    /// Runs whether or not Save history is on.
+    pub fn purge_audio(&self) {
+        let folder = self.history_store().audio_folder();
+        folder.purge(std::time::SystemTime::now());
     }
 
     pub fn history(
@@ -1888,11 +1917,36 @@ impl DaemonState {
         limit: Option<u32>,
         kind: Option<crate::history::Kind>,
     ) -> rusqlite::Result<Vec<crate::history::Entry>> {
-        crate::history::list(&self.history_file(), limit, kind)
+        let (rows, folder) = {
+            let store = self.history_store();
+            (store.list(limit, kind)?, store.audio_folder())
+        };
+        Ok(folder.described(rows))
     }
 
-    pub fn clear_history(&self) -> rusqlite::Result<()> {
-        crate::history::clear(&self.history_file())?;
+    #[cfg(test)]
+    pub fn history_entry(&self, id: i64) -> rusqlite::Result<Option<crate::history::Entry>> {
+        self.history_store().get(id)
+    }
+
+    #[cfg(test)]
+    pub fn audio_path(&self, id: i64) -> Option<std::path::PathBuf> {
+        self.history_store().audio_path(id)
+    }
+
+    pub fn kind_and_audio_file(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<(crate::history::Kind, std::path::PathBuf)>> {
+        self.history_store().kind_and_audio_file(id)
+    }
+
+    pub fn retried(&self, id: i64, text: &str) -> rusqlite::Result<crate::history::Entry> {
+        self.history_store().retried(id, text)
+    }
+
+    pub fn clear_history(&self) -> Result<(), banshee_common::error::BansheeError> {
+        self.history_store().clear()?;
         self.history_changes.send_modify(|changes| *changes += 1);
         Ok(())
     }

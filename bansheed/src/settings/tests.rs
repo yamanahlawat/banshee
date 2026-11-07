@@ -352,6 +352,23 @@ fn a_save_history_write_reaches_the_running_daemon() {
 }
 
 #[test]
+fn a_keep_audio_write_reaches_the_running_daemon() {
+    let state = crate::test_support::daemon_state_with_history(&[]);
+    assert_eq!(state.keep_audio(), crate::config::KeepAudio::SevenDays);
+
+    let outcome = configure_in_scratch(
+        Some(&state),
+        assignments(&[("daemon.keep_audio", "1d".into())]),
+        true,
+    )
+    .expect("a known key and a legal value must apply");
+
+    assert_eq!(state.keep_audio(), crate::config::KeepAudio::OneDay);
+    assert_eq!(outcome.applied, vec!["daemon.keep_audio".to_string()]);
+    assert!(outcome.waiting.is_empty());
+}
+
+#[test]
 fn an_unpersisted_save_history_write_still_stops_the_next_row() {
     let state = crate::test_support::daemon_state_with_history(&[]);
 

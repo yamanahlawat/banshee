@@ -4,12 +4,13 @@
 use crate::socket::{Client, RpcError};
 use banshee_common::{
     AgentRow, BANSHEE_AGENTS, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_CONNECT_APPLY,
-    BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES,
-    BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_SPEAK, BANSHEE_STATUS, InputDevice,
-    PlannedChange, Voice, rpc_code,
+    BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY, BANSHEE_HISTORY_AUDIO,
+    BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RETRY,
+    BANSHEE_SPEAK, BANSHEE_STATUS, InputDevice, PlannedChange, Voice, rpc_code,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 const PREVIEW_SENTENCE: &str = "The quick brown fox jumps over the lazy dog, while five brave friends quietly pack their bags for a bright Sunday morning walk by the river.";
 
@@ -193,6 +194,31 @@ pub async fn clear_history(client: &mut Client) -> Result<(), CommandError> {
         .await
         .map_err(CommandError::from)?;
     Ok(())
+}
+
+pub async fn history_audio(client: &mut Client, id: i64) -> Result<PathBuf, CommandError> {
+    let result = client
+        .call(BANSHEE_HISTORY_AUDIO, json!({"id": id}))
+        .await
+        .map_err(CommandError::from)?;
+    serde_json::from_value(result["path"].clone()).map_err(shape_mismatch)
+}
+
+/// The daemon queues a retry behind a dictation or an open question, which can take minutes.
+pub async fn retry(client: &mut Client, id: i64) -> Result<Value, CommandError> {
+    let result = client
+        .call_unbounded(BANSHEE_RETRY, json!({"id": id}))
+        .await
+        .map_err(CommandError::from)?;
+    result
+        .get("row")
+        .filter(|row| row.is_object())
+        .cloned()
+        .ok_or_else(|| {
+            shape_mismatch(serde::de::Error::custom(
+                "the retry reply holds no row object",
+            ))
+        })
 }
 
 pub async fn open_permission_pane(client: &mut Client, id: &str) -> Result<(), CommandError> {

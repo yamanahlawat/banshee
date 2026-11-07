@@ -107,6 +107,69 @@ fn keeping_a_row_moves_the_counter_and_off_keeps_nothing() {
     assert!(off.history(None, None).unwrap().is_empty());
 }
 
+const ONE_SECOND: &[f32] = &[0.0; 16_000];
+
+/// Keeps one dictation with a second of audio, and answers its file aged by `by`.
+fn kept_and_aged(state: &DaemonState, by: std::time::Duration) -> std::path::PathBuf {
+    state.keep(&crate::history::NewEntry::dictation("kept").with_audio(ONE_SECOND));
+    let id = state.history(None, None).unwrap().last().unwrap().id;
+    let path = state.audio_path(id).expect("the keep wrote a file");
+    crate::test_support::set_modified(&path, std::time::SystemTime::now() - by);
+    path
+}
+
+#[test]
+fn save_history_off_keeps_no_row_and_no_file() {
+    let state = crate::test_support::daemon_state_with_history_off(&[]);
+    state.keep(&crate::history::NewEntry::dictation("dropped").with_audio(ONE_SECOND));
+    assert!(state.history(None, None).unwrap().is_empty());
+    assert!(
+        state.audio_path(1).is_none(),
+        "the first row's id holds no file"
+    );
+}
+
+#[test]
+fn the_purge_runs_with_save_history_off() {
+    let state = crate::test_support::daemon_state_with_history(&[]);
+    let path = kept_and_aged(&state, 8 * crate::test_support::DAY);
+    state.set_save_history(false);
+
+    state.purge_audio();
+
+    assert!(!path.exists());
+    assert_eq!(state.history(None, None).unwrap().len(), 1, "the row stays");
+}
+
+#[test]
+fn a_shorter_keep_audio_purges_at_once() {
+    let state = crate::test_support::daemon_state_with_history(&[]);
+    let path = kept_and_aged(&state, 2 * crate::test_support::DAY);
+
+    state.set_keep_audio(crate::config::KeepAudio::OneDay);
+
+    assert_eq!(state.keep_audio(), crate::config::KeepAudio::OneDay);
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_retried_row_reads_back() {
+    let state = crate::test_support::daemon_state_with_history(&[]);
+    state.keep(
+        &crate::history::NewEntry::failed_dictation("The server did not answer.")
+            .with_audio(ONE_SECOND),
+    );
+
+    let row = state.retried(1, "Ship it.").unwrap();
+
+    assert_eq!(row.text.as_deref(), Some("Ship it."));
+    let read = state.history_entry(1).unwrap().expect("row 1");
+    assert_eq!(read.text.as_deref(), Some("Ship it."));
+    assert_eq!(read.outcome, crate::history::Outcome::Transcribed);
+    assert!(read.audio.is_some());
+    assert!(state.history_entry(2).unwrap().is_none());
+}
+
 use super::*;
 use crate::frontmost::App;
 use crate::text_to_speech::lock;

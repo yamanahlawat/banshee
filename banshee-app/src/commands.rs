@@ -1,6 +1,6 @@
 use crate::calls::{self, CommandError, Devices, Voices};
 use crate::socket::Client;
-use banshee_common::{AgentRow, PlannedChange, rpc_code, utils};
+use banshee_common::{AgentRow, NO_AUDIO, PlannedChange, rpc_code, utils};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -45,6 +45,13 @@ impl Daemon {
         let path = self.path_or_error()?;
         let mut client = self.client.lock().await;
         retrying(path, &mut client, body).await
+    }
+
+    /// Over a connection of its own: a retry has no deadline, and on the shared
+    /// connection it would hold every other call until the daemon answered.
+    async fn retry(&self, id: i64) -> Result<serde_json::Value, CommandError> {
+        let path = self.path_or_error()?;
+        retrying(path, &mut None, |client| Box::pin(calls::retry(client, id))).await
     }
 
     /// Asks the daemon to restart, then drops the connection. The daemon keeps
@@ -176,6 +183,64 @@ mod tests {
             "the next call must reach the daemon launchd starts, not this one"
         );
         drop(leaving.join().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_retry_waiting_on_the_daemon_leaves_the_shared_connection_free() {
+        use banshee_common::{BANSHEE_RETRY, JsonRpcRequest, JsonRpcResponse};
+        use std::io::{BufRead, BufReader, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("banshee.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let (held_tx, mut held) = tokio::sync::mpsc::unbounded_channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Arc::new(std::sync::Mutex::new(released));
+        // Holds a retry until released, as a daemon busy with a dictation does, and answers
+        // anything else at once.
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let held_tx = held_tx.clone();
+                let released = released.clone();
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let request: JsonRpcRequest = serde_json::from_str(&line).unwrap();
+                    let result = if request.method == BANSHEE_RETRY {
+                        held_tx.send(()).unwrap();
+                        released.lock().unwrap().recv().unwrap();
+                        serde_json::json!({"row": {"id": 7}})
+                    } else {
+                        serde_json::json!({"running": true})
+                    };
+                    let reply = JsonRpcResponse::success(request.id, result);
+                    writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+                });
+            }
+        });
+        let daemon = daemon(Some(path.to_str().unwrap()));
+
+        let retry = daemon.retry(7);
+        tokio::pin!(retry);
+        tokio::select! {
+            _ = &mut retry => panic!("the retry answered before the daemon let it go"),
+            _ = held.recv() => {}
+        }
+        assert!(
+            daemon.client.try_lock().is_ok(),
+            "a retry the daemon holds must not hold every other call with it"
+        );
+        let status = daemon
+            .call(|client| Box::pin(crate::calls::status(client)))
+            .await
+            .unwrap();
+        release.send(()).unwrap();
+
+        assert_eq!(status["running"], true);
+        assert_eq!(retry.await.unwrap(), serde_json::json!({"id": 7}));
     }
 
     #[test]
@@ -425,6 +490,28 @@ pub async fn clear_history(daemon: State<'_, Daemon>) -> Result<(), CommandError
     daemon
         .call(|client| Box::pin(calls::clear_history(client)))
         .await
+}
+
+#[tauri::command]
+pub async fn history_audio(
+    daemon: State<'_, Daemon>,
+    id: i64,
+) -> Result<tauri::ipc::Response, CommandError> {
+    let path = daemon
+        .call(|client| Box::pin(calls::history_audio(client, id)))
+        .await?;
+    let bytes = tokio::fs::read(path).await.map_err(|_| CommandError {
+        code: rpc_code::INVALID_PARAMS,
+        message: NO_AUDIO.to_string(),
+        transport: false,
+        sent: true,
+    })?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+pub async fn retry(daemon: State<'_, Daemon>, id: i64) -> Result<serde_json::Value, CommandError> {
+    daemon.retry(id).await
 }
 
 #[tauri::command]

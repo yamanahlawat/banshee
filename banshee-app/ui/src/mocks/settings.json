@@ -9,6 +9,16 @@
     "description": "keep dictations and agent questions with your answers in ~/.banshee/banshee.db; off keeps nothing new, and what is kept stays until cleared"
   },
   {
+    "key": "daemon.keep_audio",
+    "domain": {
+      "kind": "choice",
+      "values": ["off", "1d", "7d", "30d", "forever"]
+    },
+    "default": "\"7d\"",
+    "sends_out": false,
+    "description": "how long History keeps the audio of each row: off, 1d, 7d, 30d or forever; a shorter period deletes older audio at once"
+  },
+  {
     "key": "audio.input_device",
     "domain": {
       "kind": "text",

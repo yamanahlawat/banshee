@@ -102,6 +102,14 @@ pub const SETTINGS: &[Setting] = &[
         "keep dictations and agent questions with your answers in ~/.banshee/banshee.db; off keeps nothing new, and what is kept stays until cleared",
     ),
     setting(
+        "daemon.keep_audio",
+        Domain::Choice {
+            values: &["off", "1d", "7d", "30d", "forever"],
+        },
+        "\"7d\"",
+        "how long History keeps the audio of each row: off, 1d, 7d, 30d or forever; a shorter period deletes older audio at once",
+    ),
+    setting(
         "audio.input_device",
         Domain::Text {
             empty_allowed: true,
@@ -295,7 +303,19 @@ pub fn find(key: &str) -> Option<&'static Setting> {
 
 #[cfg(test)]
 mod tests {
-    use super::find;
+    use super::{Domain, find};
+
+    #[test]
+    fn keep_audio_is_a_choice_of_five_defaulting_to_seven_days() {
+        let setting = find("daemon.keep_audio").unwrap();
+        assert_eq!(setting.default, Some("\"7d\""));
+        match setting.domain {
+            Domain::Choice { values } => {
+                assert_eq!(values, &["off", "1d", "7d", "30d", "forever"]);
+            }
+            _ => panic!("not a choice"),
+        }
+    }
 
     #[test]
     fn a_word_is_typed_by_its_setting() {

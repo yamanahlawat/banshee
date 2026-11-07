@@ -21,6 +21,7 @@ const asked = (id: number, row: Partial<HistoryRow>): HistoryRow => ({
   outcome: 'no_answer',
   reason: null,
   timestamp: stamp(1),
+  audio: null,
   ...row,
 });
 
@@ -56,6 +57,7 @@ import { forgetTheAsk } from './lib/downloads';
 import {
   announcement,
   forgetCopy,
+  report,
   waitingSays,
   DICTATION_FAILURE,
   WAITING_SAYS,
@@ -1366,7 +1368,7 @@ it('makes keeping the record the primary, and names what would be lost', async (
   await choose('Saved history');
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
 
-  expect(screen.getByText(/Delete all 2\?/)).toBeTruthy();
+  expect(screen.getByText(/Delete all 2 rows\?/)).toBeTruthy();
   const buttons = screen.getAllByRole('button').map((b) => b.textContent?.trim());
   expect(buttons.indexOf('Keep it')).toBeLessThan(buttons.indexOf('Delete everything'));
 });
@@ -1428,6 +1430,27 @@ it('lets a failure be dismissed', async () => {
   await waitFor(() => expect(screen.getByText(/could not be cleared/)).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
   await waitFor(() => expect(screen.queryByText(/could not be cleared/)).toBeNull());
+});
+
+// A live region speaks a change, so the same failure again has to leave the
+// region and come back for a reader to hear it.
+it('speaks the same failure a second time', async () => {
+  render(App);
+  await listed();
+  report('The audio did not play.');
+  const first = await screen.findByText('The audio did not play.');
+  report('The audio did not play.');
+  await waitFor(() => expect(screen.getByText('The audio did not play.')).not.toBe(first));
+});
+
+it('speaks the same failure reported three times in a row', async () => {
+  render(App);
+  await listed();
+  report('The audio did not play.');
+  const first = await screen.findByText('The audio did not play.');
+  report('The audio did not play.');
+  report('The audio did not play.');
+  await waitFor(() => expect(screen.getByText('The audio did not play.')).not.toBe(first));
 });
 
 it('opens search on Cmd+F whatever Caps Lock says', async () => {

@@ -23,6 +23,11 @@
     options.findIndex((option) => option.value === value),
   );
 
+  export function focus(option: string) {
+    const at = options.findIndex((one) => one.value === option);
+    (group.children[at] as HTMLElement | undefined)?.focus();
+  }
+
   function pick(to: number) {
     stop = to;
     change(options[to].value);

@@ -11,6 +11,7 @@ import {
   formatCount,
   newestFirst,
   readAll,
+  readAfter,
   followSaveHistory,
   readNewest,
   table,
@@ -23,6 +24,8 @@ import {
   listed,
   clearSearch,
   copyOf,
+  replaceRow,
+  wouldDelete,
 } from './history';
 import type { HistoryRow } from './tauri';
 
@@ -111,6 +114,38 @@ describe('readAll', () => {
   });
 });
 
+describe('readAfter', () => {
+  beforeEach(() => {
+    history.mockReset();
+    forget();
+  });
+
+  it('reads again once a read already in flight lands', async () => {
+    let land: (rows: HistoryRow[]) => void = () => {};
+    history.mockReturnValueOnce(new Promise<HistoryRow[]>((resolve) => (land = resolve)));
+    history.mockResolvedValueOnce([dictated(1, 'fresh', '2026-08-27T09:00:00Z')]);
+
+    const old = readAll();
+    const fresh = readAfter();
+    land([dictated(1, 'stale', '2026-08-27T09:00:00Z')]);
+    await Promise.all([old, fresh]);
+
+    expect(history).toHaveBeenCalledTimes(2);
+    expect(get(table).rows[0].text).toBe('fresh');
+  });
+});
+
+describe('replaceRow', () => {
+  it('replace_row_swaps_the_held_row_and_keeps_the_total', () => {
+    const first = dictated(2, 'newer', '2026-08-27T09:05:00Z');
+    const second = dictated(1, 'older', '2026-08-27T09:00:00Z');
+    table.set({ rows: [first, second], total: 40, loaded: true, saving: true });
+    replaceRow({ ...second, text: 'retried' });
+    expect(get(table).rows).toEqual([first, { ...second, text: 'retried' }]);
+    expect(get(table).total).toBe(40);
+  });
+});
+
 describe('followSaveHistory', () => {
   it('leaves the rows kept when saving goes off', () => {
     const kept = [dictated(1, 'kept', '2026-08-27T09:00:00Z')];
@@ -130,6 +165,7 @@ const row = (over: Partial<HistoryRow>): HistoryRow => ({
   outcome: 'transcribed',
   reason: null,
   timestamp: '2026-08-27T09:00:00Z',
+  audio: null,
   ...over,
 });
 
@@ -310,5 +346,35 @@ describe('copyOf', () => {
   });
   it('copies nothing from a failed dictation', () => {
     expect(copyOf(row({ kind: 'dictation', outcome: 'failed', reason: 'x' }))).toBeNull();
+  });
+});
+
+describe('wouldDelete', () => {
+  const now = new Date('2026-11-07T12:00:00Z');
+  const kept = (id: number, timestamp: string, until: string | null): HistoryRow => ({
+    ...dictated(id, 'said', timestamp),
+    audio: { seconds: 2, until },
+  });
+  const rows = [
+    kept(1, '2026-11-07T10:00:00Z', '2026-11-14T10:00:00Z'),
+    kept(2, '2026-11-06T12:00:00Z', '2026-11-13T12:00:00Z'),
+    kept(3, '2026-11-05T12:00:00Z', '2026-11-12T12:00:00Z'),
+    kept(4, '2026-10-20T12:00:00Z', null),
+    dictated(5, 'no audio', '2026-09-01T12:00:00Z'),
+    // Past its own end, so the daemon has already let it go.
+    kept(6, '2026-10-01T12:00:00Z', '2026-10-08T12:00:00Z'),
+  ];
+
+  it('counts the rows whose audio the new period puts past its end', () => {
+    expect(wouldDelete(rows, 'off', now)).toBe(4);
+    expect(wouldDelete(rows, '1d', now)).toBe(3);
+    expect(wouldDelete(rows, '7d', now)).toBe(1);
+    expect(wouldDelete(rows, '30d', now)).toBe(0);
+    expect(wouldDelete(rows, 'forever', now)).toBe(0);
+  });
+
+  // Each reads as a number of days to a parser, so a guess would count rows.
+  it.each(['2d', '1w'])('counts nothing for a period it does not know, %j', (period) => {
+    expect(wouldDelete(rows, period, now)).toBe(0);
   });
 });

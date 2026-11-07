@@ -73,7 +73,7 @@ fn every_choice_parses_and_a_value_outside_is_refused() {
         }
         assert!(!written(row.key, json!("not-a-choice")), "{}", row.key);
     }
-    assert_eq!(choices, 7);
+    assert_eq!(choices, 8);
 }
 
 /// The values serde's unknown-variant refusal lists, which are every value the

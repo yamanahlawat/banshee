@@ -129,15 +129,18 @@ bind = , F9, exec, banshee record toggle
 
 - **The window** is a Tauri app. It needs WebKitGTK, GTK 3 and Node: 22 from
   22.22.2, 24 from 24.15, or 26 or newer.
+- **Playing a kept recording** needs GStreamer's good plugins, for
+  `autoaudiosink` and `wavparse`. Without them WebKit's web process crashes on
+  play.
 - **The daemon, the CLI and the tray** need none of them.
 
 ```bash
 # Arch
-sudo pacman -S --needed webkit2gtk-4.1
+sudo pacman -S --needed webkit2gtk-4.1 gst-plugins-good
 # Debian and Ubuntu
-sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev gstreamer1.0-plugins-good
 # Fedora (untested)
-sudo dnf install webkit2gtk4.1-devel gtk3-devel librsvg2-devel
+sudo dnf install webkit2gtk4.1-devel gtk3-devel librsvg2-devel gstreamer1-plugins-good
 ```
 
 Then:

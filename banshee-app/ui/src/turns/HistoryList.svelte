@@ -3,7 +3,7 @@
 
   import { land } from '../lib/focus';
 
-  import { dayLabel, rowFlag } from '../lib/history';
+  import { dayLabel, keptAudio, rowFlag } from '../lib/history';
   import type { HistoryRow } from '../lib/tauri';
   import { formatTime, sameLocalDay, toDate } from '../lib/time';
   import { plan, segments, span, type Segment } from '../lib/vlist';
@@ -15,6 +15,8 @@
   export let selectedId: Id | null;
   export let choose: (id: Id) => void;
   export let open: (id: Id) => void;
+  /// Called on Space when the focused row's audio is still kept.
+  export let play: (id: Id) => void;
   /// Called when the person moves the list off its top.
   export let scrolled: () => void;
   /// Rows that arrive stay in view at the top, rather than above it.
@@ -200,6 +202,11 @@
     if (event.key === 'Enter') {
       event.preventDefault();
       open(rows[index].id);
+    } else if (event.key === ' ' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (event.repeat || !keptAudio(rows[index], new Date())) return;
+      // The list would page on Space.
+      event.preventDefault();
+      play(rows[index].id);
     } else if (event.key in to) {
       event.preventDefault();
       move(to[event.key]);

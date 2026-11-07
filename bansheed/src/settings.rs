@@ -36,6 +36,7 @@ enum Live {
     Feedback,
     SpeakProblems,
     SaveHistory,
+    KeepAudio,
     Tts,
     Vocabulary,
     Model,
@@ -56,6 +57,7 @@ fn live(key: &str) -> Option<Live> {
         "feedback.mode" => Some(Live::Feedback),
         "feedback.speak_problems" => Some(Live::SpeakProblems),
         "daemon.save_history" => Some(Live::SaveHistory),
+        "daemon.keep_audio" => Some(Live::KeepAudio),
         "tts.voice" => Some(Live::Tts),
         "stt.vocabulary" => Some(Live::Vocabulary),
         // Read per utterance, so it moves no model.
@@ -123,6 +125,10 @@ fn apply(variant: Live, state: &DaemonState, config: &Config) -> bool {
         // Read when the next row is kept
         Live::SaveHistory => {
             state.set_save_history(config.daemon.save_history);
+            true
+        }
+        Live::KeepAudio => {
+            state.set_keep_audio(config.daemon.keep_audio);
             true
         }
         // A voice of the loaded engine reloads nothing; one of the other engine

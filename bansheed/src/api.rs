@@ -6,16 +6,19 @@ use banshee_common::listening::ListeningModel;
 use banshee_common::{
     BANSHEE_AGENTS, BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE,
     BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY,
-    BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START,
-    BANSHEE_RECORD_STOP, BANSHEE_RECORD_TOGGLE, BANSHEE_RESTART, BANSHEE_SPEAK, BANSHEE_STATUS,
-    BANSHEE_STOP, BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE, BANSHEE_TURN_ENDED,
+    BANSHEE_HISTORY_AUDIO, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES,
+    BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_RECORD_TOGGLE,
+    BANSHEE_RESTART, BANSHEE_RETRY, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP,
+    BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE, BANSHEE_TURN_ENDED, NO_AUDIO,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
 use crate::connect;
 use crate::history::{Kind, NewEntry, Outcome};
 use crate::permissions;
-use crate::state::{AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode};
+use crate::state::{
+    AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, RetryCommand,
+};
 use crate::text_to_speech::sanitizer::sanitize;
 use crate::{readiness, settings};
 
@@ -26,6 +29,8 @@ const MAX_ASK_WAIT_MS: u64 = 120_000;
 const PLAYBACK_BASE_MS: u64 = 15_000;
 const PLAYBACK_PER_WORD_MS: u64 = 700;
 const MAX_PLAYBACK_WAIT_MS: u64 = 120_000;
+
+const NO_PIPELINE: &str = "Audio pipeline is not running.";
 
 fn from_error(id: Option<serde_json::Value>, error: BansheeError) -> JsonRpcResponse {
     JsonRpcResponse::error(id, error.rpc_code(), error.rpc_message())
@@ -39,14 +44,25 @@ async fn off_the_worker(
     id: Option<serde_json::Value>,
     work: impl FnOnce() -> Result<serde_json::Value, BansheeError> + Send + 'static,
 ) -> JsonRpcResponse {
+    match on_a_blocking_thread(id.clone(), work).await {
+        Ok(result) => JsonRpcResponse::success(id, result),
+        Err(response) => *response,
+    }
+}
+
+/// As `off_the_worker`, for a handler that goes on with the answer.
+async fn on_a_blocking_thread<T: Send + 'static>(
+    id: Option<serde_json::Value>,
+    work: impl FnOnce() -> Result<T, BansheeError> + Send + 'static,
+) -> Result<T, Box<JsonRpcResponse>> {
     match tokio::task::spawn_blocking(work).await {
-        Ok(Ok(result)) => JsonRpcResponse::success(id, result),
-        Ok(Err(error)) => from_error(id, error),
-        Err(_) => JsonRpcResponse::error(
+        Ok(Ok(answer)) => Ok(answer),
+        Ok(Err(error)) => Err(Box::new(from_error(id, error))),
+        Err(_) => Err(Box::new(JsonRpcResponse::error(
             id,
             rpc_code::INTERNAL,
             "The task stopped before it answered.",
-        ),
+        ))),
     }
 }
 
@@ -130,14 +146,18 @@ impl<'a> Params<'a> {
         })
     }
 
+    fn required(&self, key: &str, more: &str) -> Box<JsonRpcResponse> {
+        Box::new(JsonRpcResponse::error(
+            self.id(),
+            rpc_code::INVALID_PARAMS,
+            format!("'{key}' is required{more}."),
+        ))
+    }
+
     fn str(&self, key: &str) -> Result<&'a str, Box<JsonRpcResponse>> {
-        self.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
-            Box::new(JsonRpcResponse::error(
-                self.id(),
-                rpc_code::INVALID_PARAMS,
-                format!("'{key}' is required and must be a string."),
-            ))
-        })
+        self.get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| self.required(key, " and must be a string"))
     }
 
     // absent → default; present but not a u64 → -32602 naming the field
@@ -162,6 +182,11 @@ impl<'a> Params<'a> {
     fn flag(&self, key: &str) -> Result<bool, Box<JsonRpcResponse>> {
         self.typed(key, serde_json::Value::as_bool, "a boolean")
             .map(|value| value.unwrap_or(false))
+    }
+
+    fn required_i64(&self, key: &str) -> Result<i64, Box<JsonRpcResponse>> {
+        self.typed(key, serde_json::Value::as_i64, "an integer")?
+            .ok_or_else(|| self.required(key, ""))
     }
 
     fn optional_u64(&self, key: &str) -> Result<Option<u64>, Box<JsonRpcResponse>> {
@@ -697,11 +722,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         session,
     });
     if daemon_state.commands().send(command).is_err() {
-        let refusal = JsonRpcResponse::error(
-            params.id(),
-            rpc_code::INTERNAL,
-            "Audio pipeline is not running.",
-        );
+        let refusal = JsonRpcResponse::error(params.id(), rpc_code::INTERNAL, NO_PIPELINE);
         return unasked(daemon_state, question, refusal);
     }
 
@@ -896,12 +917,12 @@ fn history(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRespon
         Ok(history) => {
             JsonRpcResponse::success(params.id(), serde_json::json!({ "history": history }))
         }
-        Err(e) => JsonRpcResponse::error(
-            params.id(),
-            rpc_code::INTERNAL,
-            format!("Failed to retrieve history: {e}"),
-        ),
+        Err(e) => from_error(params.id(), history_failed(e)),
     }
+}
+
+fn history_failed(e: rusqlite::Error) -> BansheeError {
+    BansheeError::Other(format!("Failed to retrieve history: {e}"))
 }
 
 fn clear_history(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
@@ -911,6 +932,93 @@ fn clear_history(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpc
             params.id(),
             rpc_code::INTERNAL,
             format!("Failed to clear history: {e}"),
+        ),
+    }
+}
+
+fn no_row(id: i64) -> BansheeError {
+    BansheeError::Rejected(format!("No row has id {id}."))
+}
+
+fn history_audio(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+    let id = match params.required_i64("id") {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let path = match daemon_state.kind_and_audio_file(id) {
+        Ok(Some((_, file))) if file.is_file() => Ok(file),
+        Ok(Some(_)) => Err(BansheeError::Rejected(NO_AUDIO.to_string())),
+        Ok(None) => Err(no_row(id)),
+        Err(e) => Err(history_failed(e)),
+    };
+    match path {
+        Ok(path) => JsonRpcResponse::success(
+            params.id(),
+            serde_json::json!({ "path": path.to_string_lossy() }),
+        ),
+        Err(error) => from_error(params.id(), error),
+    }
+}
+
+fn dictation_samples(state: &DaemonState, id: i64) -> Result<Vec<f32>, BansheeError> {
+    let file = match state.kind_and_audio_file(id) {
+        Ok(Some((Kind::Dictation, file))) => file,
+        Ok(Some((Kind::Question, _))) => {
+            return Err(BansheeError::Rejected(
+                "Only a dictation can be retried.".to_string(),
+            ));
+        }
+        Ok(None) => return Err(no_row(id)),
+        Err(e) => return Err(history_failed(e)),
+    };
+    crate::history::audio::read(&file).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => BansheeError::Rejected(NO_AUDIO.to_string()),
+        _ => BansheeError::Other(format!("Failed to read the kept audio: {error}")),
+    })
+}
+
+/// The consumer gets the samples, never the file, and the row changes only
+/// once it answers with text.
+async fn retry(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+    let id = match params.required_i64("id") {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let state = Arc::clone(daemon_state);
+    let samples =
+        match on_a_blocking_thread(params.id(), move || dictation_samples(&state, id)).await {
+            Ok(samples) => samples,
+            Err(response) => return *response,
+        };
+    // No pipeline check: a retry needs no microphone, the consumer refuses
+    // while its model is not ready, and a daemon with no consumer answers at
+    // the send.
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let command = ConsumerCommand::Retry(RetryCommand { id, samples, reply });
+    if daemon_state.commands().send(command).is_err() {
+        return JsonRpcResponse::error(params.id(), rpc_code::INTERNAL, NO_PIPELINE);
+    }
+    let text = match answer.await {
+        Ok(Ok(text)) => text,
+        Ok(Err(reason)) => {
+            return JsonRpcResponse::error(params.id(), rpc_code::LISTENING_FAILED, reason);
+        }
+        Err(_) => {
+            return JsonRpcResponse::error(
+                params.id(),
+                rpc_code::INTERNAL,
+                "The retry ended before it answered.",
+            );
+        }
+    };
+    match daemon_state.retried(id, &text) {
+        Ok(row) => JsonRpcResponse::success(params.id(), serde_json::json!({ "row": row })),
+        // A clear landed while the retry transcribed
+        Err(rusqlite::Error::QueryReturnedNoRows) => from_error(params.id(), no_row(id)),
+        Err(e) => JsonRpcResponse::error(
+            params.id(),
+            rpc_code::INTERNAL,
+            format!("Failed to keep the retried text: {e}"),
         ),
     }
 }
@@ -984,6 +1092,8 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_STATUS | BANSHEE_SUBSCRIBE => status(params, daemon_state),
         BANSHEE_HISTORY => history(params, daemon_state),
         BANSHEE_CLEAR_HISTORY => clear_history(params, daemon_state),
+        BANSHEE_HISTORY_AUDIO => history_audio(params, daemon_state),
+        BANSHEE_RETRY => retry(params, daemon_state).await,
         BANSHEE_AGENTS => agents(params).await,
         BANSHEE_CONNECT_PLAN => connect(params, read_the_plan).await,
         BANSHEE_CONNECT_APPLY => connect(params, write_the_plan).await,

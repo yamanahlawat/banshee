@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Status updates are not kept. With Save history off, nothing new is kept, and what is
   there stays until you clear it. The menu bar's "Copy last dictation" works with
   Save history off and copies only dictations.
+- **History keeps the audio of each dictation and answer, for 7 days by default.**
+  Keep audio on Saved history chooses Off, 1 day, 7 days, 30 days or Forever, and
+  `daemon.keep_audio` sets the same. A shorter period deletes older audio at once,
+  so the window asks first when it would. Play a row's audio from its detail. A
+  dictation can be retried from its audio, and a retry through a transcription
+  server sends the recording there.
 - **The menu bar icon shows a lasting problem, and Banshee says it once.** The idle
   figure gets an exclamation badge while a permission or model is missing. The first
   menu row says what is wrong, for example `Accessibility is not granted`, and opens

@@ -65,6 +65,7 @@ const MAX_ANSWER: Duration = Duration::from_secs(60);
 const SLOW_TRANSCRIBE_FACTOR: f32 = 2.0;
 /// 160 ms at 16 kHz, the chunk the stream window takes.
 const FEED: usize = 2560;
+const NO_TEXT: &str = "The model returned no text.";
 
 /// The sentence a person reads. `Transcription` already says "Transcription
 /// failed", so its reason stands alone.
@@ -641,7 +642,11 @@ impl Pipeline {
                 | ConsumerCommand::Discard
                 | ConsumerCommand::Ask(_)
         );
-        let uses_a_model = records || matches!(command, ConsumerCommand::Reload(_));
+        let uses_a_model = records
+            || matches!(
+                command,
+                ConsumerCommand::Reload(_) | ConsumerCommand::Retry(_)
+            );
         match command {
             ConsumerCommand::Stream(press) => self.dictate(press, commands, deferred, type_words),
             ConsumerCommand::Transcribe(ring, at_stop) => {
@@ -649,6 +654,13 @@ impl Pipeline {
             }
             ConsumerCommand::Discard => self.discard(),
             ConsumerCommand::Ask(ask) => self.ask(ask),
+            ConsumerCommand::Retry(retry) => {
+                let answer = self.retry(&retry.samples);
+                if let Err(why) = &answer {
+                    log::error!("the retry of history row {} failed: {why}", retry.id);
+                }
+                let _ = retry.reply.send(answer);
+            }
             ConsumerCommand::Retune(words) => self.speech_to_text.set_vocabulary(&words),
             ConsumerCommand::Speak(speech) => self.speech_to_text.set_speech(speech),
             // The load takes seconds and holds this thread. Nothing is lost:
@@ -908,6 +920,17 @@ impl Pipeline {
         })
     }
 
+    /// Transcribes kept audio again for the window that asked. Nothing is
+    /// typed, kept or cued: the answer goes back to that window alone.
+    fn retry(&mut self, samples: &[f32]) -> Result<String, String> {
+        self.ready()?;
+        match self.transcribe(samples) {
+            Ok(text) if text.is_empty() => Err(NO_TEXT.to_string()),
+            Ok(text) => Ok(text),
+            Err(error) => Err(reason(&error)),
+        }
+    }
+
     // A session opened while this command sat in the queue owns the ring now:
     // the discard skips, the cancelled lead-in stays.
     fn discard(&self) {
@@ -934,13 +957,13 @@ impl Pipeline {
             Ok(data) => data,
             Err(e) => {
                 log::error!("resampling failed: {e}");
-                self.dictation_failed(reason(&e));
+                self.dictation_failed(reason(&e), &[]);
                 return;
             }
         };
         match self.ready() {
             Ok(()) => self.deliver(&final_data, type_words),
-            Err(why) => self.dictation_failed(why),
+            Err(why) => self.dictation_failed(why, &final_data),
         }
     }
 
@@ -950,8 +973,9 @@ impl Pipeline {
         drop(ring);
     }
 
-    fn dictation_failed(&self, why: String) {
-        self.state.keep(&NewEntry::failed_dictation(&why));
+    fn dictation_failed(&self, why: String, samples: &[f32]) {
+        self.state
+            .keep(&NewEntry::failed_dictation(&why).with_audio(samples));
         self.state.set_last_error(Some(why));
         self.cues.emit(Signal::Error {
             reason: Reason::new(ReasonCode::TranscriptionFailed, None),
@@ -1057,7 +1081,7 @@ impl Pipeline {
         // The live words were the stream's; the typed text is one full pass
         self.speech_to_text.cancel_stream();
         if let Some(why) = dictation.broken.take() {
-            self.dictation_failed(why);
+            self.dictation_failed(why, &dictation.audio);
         } else {
             self.deliver(&dictation.audio, type_words);
         }
@@ -1137,13 +1161,16 @@ impl Pipeline {
         log::debug!("Transcribing...");
         let transcribe_started = Instant::now();
         let transcribed = self.transcribe(final_data);
-        match &transcribed {
-            Ok(text) if !text.is_empty() => self.state.keep(&NewEntry::dictation(text)),
-            Ok(_) => self
-                .state
-                .keep(&NewEntry::failed_dictation("The model returned no text.")),
-            Err(error) => self.state.keep(&NewEntry::failed_dictation(&reason(error))),
-        }
+        let why;
+        let entry = match &transcribed {
+            Ok(text) if !text.is_empty() => NewEntry::dictation(text),
+            Ok(_) => NewEntry::failed_dictation(NO_TEXT),
+            Err(error) => {
+                why = reason(error);
+                NewEntry::failed_dictation(&why)
+            }
+        };
+        self.state.keep(&entry.with_audio(final_data));
         match transcribed {
             Ok(transcription) => {
                 self.state.set_last_error(None);
@@ -1402,8 +1429,8 @@ fn settle_answer(
     listened: Result<Heard, String>,
     transcribe: impl FnOnce(&[f32]) -> Result<String, BansheeError>,
 ) -> Result<String, String> {
-    let keep = |text: Option<&str>, outcome: Outcome, reason: Option<&str>| {
-        state.keep(&NewEntry::question(question, text, outcome, reason));
+    let keep = |text: Option<&str>, outcome: Outcome, reason: Option<&str>, audio: &[f32]| {
+        state.keep(&NewEntry::question(question, text, outcome, reason).with_audio(audio));
     };
     match listened {
         Ok(Heard::Audio(audio)) => {
@@ -1413,9 +1440,9 @@ fn settle_answer(
             match transcribed {
                 Ok(text) => {
                     if text.is_empty() {
-                        keep(None, Outcome::NoAnswer, None);
+                        keep(None, Outcome::NoAnswer, None, &audio);
                     } else {
-                        keep(Some(&text), Outcome::Transcribed, None);
+                        keep(Some(&text), Outcome::Transcribed, None, &audio);
                     }
                     state.set_last_error(None);
                     log::debug!("Answer: {text}");
@@ -1426,7 +1453,7 @@ fn settle_answer(
                 }
                 Err(e) => {
                     let why = reason(&e);
-                    keep(None, Outcome::Failed, Some(&why));
+                    keep(None, Outcome::Failed, Some(&why), &audio);
                     log::error!("Transcription failed: {why}");
                     state.set_last_error(Some(why.clone()));
                     cues.emit(Signal::Error {
@@ -1445,7 +1472,7 @@ fn settle_answer(
             } else {
                 (ReasonCode::Closed, Outcome::Closed)
             };
-            keep(None, outcome, None);
+            keep(None, outcome, None, &[]);
             cues.emit(Signal::Error {
                 reason: Reason::new(code, None),
                 target: Some(Target::Answer),
@@ -1453,7 +1480,7 @@ fn settle_answer(
             Ok(String::new())
         }
         Err(why) => {
-            keep(None, Outcome::Failed, Some(&why));
+            keep(None, Outcome::Failed, Some(&why), &[]);
             state.set_last_error(Some(why.clone()));
             cues.emit(Signal::Error {
                 reason: Reason::new(ReasonCode::ListenFailed, None),
@@ -1560,6 +1587,57 @@ mod answer_tests {
         assert_eq!(rows[0].text.as_deref(), Some("Yes"));
         assert_eq!(rows[0].outcome, Outcome::Transcribed);
         assert_eq!(rows[0].reason, None);
+        assert!(state.audio_path(rows[0].id).is_some(), "the answer's audio");
+    }
+
+    #[test]
+    fn a_heard_answer_keeps_its_audio_and_silence_keeps_none() {
+        let failed = Err(banshee_common::error::BansheeError::Other(
+            "model gone".to_string(),
+        ));
+        for (name, listened, transcribed, kept) in [
+            (
+                "a transcribed answer",
+                Ok(Heard::Audio(vec![0.0; 16])),
+                Ok("Yes".to_string()),
+                true,
+            ),
+            (
+                "an empty answer",
+                Ok(Heard::Audio(vec![0.0; 16])),
+                Ok(String::new()),
+                true,
+            ),
+            (
+                "a failed answer",
+                Ok(Heard::Audio(vec![0.0; 16])),
+                failed,
+                true,
+            ),
+            (
+                "silence",
+                Ok(Heard::Silence),
+                Ok("unused".to_string()),
+                false,
+            ),
+            (
+                "a closed session",
+                Ok(Heard::Closed),
+                Ok("unused".to_string()),
+                false,
+            ),
+            (
+                "a broken listen",
+                Err("the mic left".to_string()),
+                Ok("unused".to_string()),
+                false,
+            ),
+        ] {
+            let (_, _, _, state) = settled(listened, transcribed);
+            let rows = state.history(None, None).unwrap();
+            assert_eq!(state.audio_path(rows[0].id).is_some(), kept, "{name}");
+            assert_eq!(rows[0].audio.is_some(), kept, "{name}");
+        }
     }
 
     #[test]
@@ -1675,6 +1753,8 @@ mod utterance_tests {
         transcribe_gate: Option<mpsc::Receiver<()>>,
         /// Told as each transcribe begins.
         transcribing: Option<mpsc::Sender<()>>,
+        /// The audio of every transcribe, in order.
+        heard: Arc<Mutex<Vec<Vec<f32>>>>,
     }
 
     /// The loading flag, the listening fact, the live state and whether the
@@ -1717,6 +1797,7 @@ mod utterance_tests {
                 sends_out: false,
                 transcribe_gate: None,
                 transcribing: None,
+                heard: Arc::default(),
             }
         }
 
@@ -1726,8 +1807,9 @@ mod utterance_tests {
     }
 
     impl Transcriber for Scripted {
-        fn transcribe(&mut self, _audio: &[f32]) -> Result<String, BansheeError> {
+        fn transcribe(&mut self, audio: &[f32]) -> Result<String, BansheeError> {
             self.note(Call::Transcribe);
+            self.heard.lock().unwrap().push(audio.to_vec());
             self.saw_the_flag
                 .store(self.state.is_transcribing(), Ordering::Relaxed);
             self.saw_a_dictation_in_ring
@@ -2128,6 +2210,7 @@ mod utterance_tests {
         assert_eq!(rows[0].kind, crate::history::Kind::Dictation);
         assert_eq!(rows[0].text.as_deref(), Some("hello there"));
         assert_eq!(rows[0].outcome, Outcome::Transcribed);
+        assert!(handled.state.audio_path(rows[0].id).is_some(), "its audio");
     }
 
     #[test]
@@ -2145,6 +2228,30 @@ mod utterance_tests {
         assert_eq!(rows[0].text, None);
         assert_eq!(rows[0].outcome, Outcome::Failed);
         assert_eq!(rows[0].reason.as_deref(), Some(why.as_str()));
+        assert!(handled.state.audio_path(rows[0].id).is_some(), "its audio");
+    }
+
+    #[test]
+    fn a_dictation_whose_model_was_not_ready_keeps_its_audio() {
+        let state = crate::test_support::daemon_state_with_cues(Cues::recording().0);
+        state.listening_model_unloaded();
+        let scripted = Scripted {
+            resident: false,
+            loads_fail: 1,
+            ..Scripted::new(&state, Ok("unused"))
+        };
+        let speech = spoken_then_quiet();
+        let (mut pipeline, mut producer) =
+            fillable(speech.len(), &state, Cues::recording().0, scripted);
+        producer.push_slice(&speech);
+
+        pipeline.transcribe_utterance(state.claim_ring(), |_| panic!("nothing is typed"));
+
+        let rows = state.history(None, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, Outcome::Failed);
+        let audio = rows[0].audio.as_ref().expect("the clip is kept to retry");
+        assert_eq!(audio.seconds, speech.len() as f64 / f64::from(SAMPLE_RATE));
     }
 
     #[test]
@@ -3651,6 +3758,117 @@ mod utterance_tests {
         );
     }
 
+    /// Serves one retry of `samples` and gives back its answer, the signals it
+    /// sent and whether anything was typed.
+    fn served_retry(
+        state: &Arc<DaemonState>,
+        cues: Cues,
+        scripted: Scripted,
+        samples: &[f32],
+    ) -> (Result<String, String>, Vec<Signal>, bool) {
+        let mut subscribed = cues.subscribe_signals();
+        let mut pipeline = holding(&[0.0], state, cues, scripted);
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let typed = Arc::new(AtomicBool::new(false));
+        let typing = Arc::clone(&typed);
+        let type_words = move |_: &str, _: Option<App>| {
+            typing.store(true, Ordering::Relaxed);
+            Ok(Delivered::Typed)
+        };
+        let _ = pipeline.serve(
+            ConsumerCommand::Retry(crate::state::RetryCommand {
+                id: 1,
+                samples: samples.to_vec(),
+                reply,
+            }),
+            &mpsc::channel().1,
+            &mut VecDeque::new(),
+            &type_words,
+        );
+        let mut signals = Vec::new();
+        while let Ok(signal) = subscribed.try_recv() {
+            signals.push(signal);
+        }
+        (
+            answer.blocking_recv().unwrap(),
+            signals,
+            typed.load(Ordering::Relaxed),
+        )
+    }
+
+    #[test]
+    fn a_retry_transcribes_the_samples_it_was_given_and_types_nothing() {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        let scripted = Scripted {
+            resident: false,
+            ..Scripted::new(&state, Ok("hello"))
+        };
+        let heard = Arc::clone(&scripted.heard);
+        let calls = Arc::clone(&scripted.calls);
+        let saw_the_flag = Arc::clone(&scripted.saw_the_flag);
+        let samples = vec![0.25; 1600];
+
+        let (answer, signals, typed) = served_retry(&state, cues, scripted, &samples);
+
+        assert_eq!(answer, Ok("hello".to_string()));
+        assert_eq!(*heard.lock().unwrap(), [samples]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [Call::Load, Call::Transcribe],
+            "a model that idled out loads before the retry"
+        );
+        assert!(!typed);
+        assert!(signals.is_empty(), "{signals:?}");
+        assert!(!saw_the_flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_retry_with_empty_text_answers_an_error() {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        let scripted = Scripted::new(&state, Ok(""));
+
+        let (answer, signals, typed) = served_retry(&state, cues, scripted, &[0.25; 1600]);
+
+        assert_eq!(answer, Err("The model returned no text.".to_string()));
+        assert!(!typed);
+        assert!(signals.is_empty(), "{signals:?}");
+    }
+
+    #[test]
+    fn a_retry_queued_behind_a_dictation_runs_after_it() {
+        let heard: Arc<Mutex<Vec<Vec<f32>>>> = Arc::default();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let retried = vec![0.25; 1600];
+        let done = consumed(
+            |state| Scripted {
+                heard: Arc::clone(&heard),
+                ..Scripted::new(state, Ok("words"))
+            },
+            &spoken_then_quiet(),
+            |state, commands| {
+                commands.send(ConsumerCommand::Stream(0)).unwrap();
+                commands
+                    .send(ConsumerCommand::Retry(crate::state::RetryCommand {
+                        id: 1,
+                        samples: retried.clone(),
+                        reply,
+                    }))
+                    .unwrap();
+                commands
+                    .send(ConsumerCommand::Transcribe(state.claim_ring(), None))
+                    .unwrap();
+            },
+        );
+        assert_eq!(done.typed, ["words"], "the retry did not end the dictation");
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.len(), 2, "the dictation and the retry each ran once");
+        assert_ne!(heard[0], retried, "the dictation runs first");
+        assert_eq!(heard[1], retried);
+        assert_eq!(answer.blocking_recv().unwrap(), Ok("words".to_string()));
+    }
+
     #[test]
     fn a_broken_dictation_leaves_nothing_for_the_next() {
         let (cues, _sounds) = Cues::recording();
@@ -3690,6 +3908,9 @@ mod utterance_tests {
             "the broken dictation says why"
         );
         assert!(capture.drain().is_empty(), "the hold's audio is gone");
+        let rows = state.history(None, None).unwrap();
+        let audio = rows[0].audio.as_ref().expect("the audio before the break");
+        assert!(audio.seconds > 0.0);
     }
 
     fn fed_samples(calls: &[Call]) -> usize {

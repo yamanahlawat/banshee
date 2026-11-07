@@ -49,6 +49,8 @@ export type HistoryRow = {
   outcome: 'transcribed' | 'failed' | 'no_answer' | 'closed' | 'unasked';
   reason: string | null;
   timestamp: string;
+  /// `until` is local RFC 3339, and null while Keep audio is Forever.
+  audio: { seconds: number; until: string | null } | null;
 };
 
 export type Domain =
@@ -103,6 +105,13 @@ export function applyConnect(id: string, disconnect: boolean): Promise<string | 
 }
 export function history(limit?: number): Promise<HistoryRow[]> {
   return call('history', { limit: limit ?? null });
+}
+export function historyAudio(id: HistoryRow['id']): Promise<ArrayBuffer> {
+  return call('history_audio', { id });
+}
+/// Transcribes the row's kept audio again, and answers the row as it now stands.
+export function retry(id: HistoryRow['id']): Promise<HistoryRow> {
+  return call('retry', { id });
 }
 export function clearHistory(): Promise<void> {
   return call('clear_history');

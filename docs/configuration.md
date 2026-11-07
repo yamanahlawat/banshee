@@ -10,6 +10,7 @@ The defaults:
 ```toml
 [daemon]
 save_history = true    # keep dictations and agent questions in ~/.banshee/banshee.db
+keep_audio = "7d"      # how long History keeps each row's audio: off | 1d | 7d | 30d | forever
 
 [stt]
 provider = "local"       # local | remote; see "A remote listener" below
@@ -146,7 +147,7 @@ banshee config set feedback.mode none
   - `audio.hotkey`, `audio.hotkey_mode`, `audio.input_device`, `audio.barge_in`, `audio.keep_open`
   - `feedback.mode`, `feedback.speak_problems`
   - `models.unload_after`
-  - `tts.voice`, `daemon.save_history`
+  - `tts.voice`, `daemon.save_history`, `daemon.keep_audio`
   - `stt.remote.api_key`, which is in use at the next dictation
   - `stt.provider`, `stt.remote.base_url` and `stt.remote.model`, which take
     the next dictation

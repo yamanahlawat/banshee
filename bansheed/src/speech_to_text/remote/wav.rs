@@ -8,9 +8,22 @@ pub fn pcm16_samples(samples: impl Iterator<Item = i16>) -> Vec<f32> {
     samples.map(crate::audio::utils::from_pcm16).collect()
 }
 
+pub const WAV_HEADER_BYTES: usize = 44;
+
+/// The samples of a WAV that `pcm16_wav` wrote, past its header.
+pub fn pcm16_wav_samples(wav: &[u8]) -> Vec<f32> {
+    wav.get(WAV_HEADER_BYTES..)
+        .unwrap_or_default()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| crate::audio::utils::from_pcm16(i16::from_le_bytes(*pair)))
+        .collect()
+}
+
 pub fn pcm16_wav(audio: &[f32], sample_rate: u32) -> Vec<u8> {
     let data_len = (audio.len() * 2) as u32;
-    let mut out = Vec::with_capacity(44 + data_len as usize);
+    let mut out = Vec::with_capacity(WAV_HEADER_BYTES + data_len as usize);
     out.extend_from_slice(b"RIFF");
     out.extend_from_slice(&(36 + data_len).to_le_bytes());
     out.extend_from_slice(b"WAVE");
@@ -33,8 +46,18 @@ pub fn pcm16_wav(audio: &[f32], sample_rate: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::pcm16_wav;
+    use super::{pcm16_wav, pcm16_wav_samples};
     use std::io::Cursor;
+
+    #[test]
+    fn a_wav_reads_back_as_the_samples_written() {
+        let written = [0.0, 0.5, -0.5, 1.0, -1.0];
+        let read = pcm16_wav_samples(&pcm16_wav(&written, 16_000));
+        assert_eq!(read.len(), written.len());
+        for (a, b) in written.iter().zip(&read) {
+            assert!((a - b).abs() <= 1.0 / i16::MAX as f32, "{a} vs {b}");
+        }
+    }
 
     #[test]
     fn the_header_says_mono_16_bit_at_the_given_rate() {

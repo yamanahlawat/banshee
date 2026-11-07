@@ -85,6 +85,8 @@ fn main() {
             commands::apply_connect,
             commands::history,
             commands::clear_history,
+            commands::history_audio,
+            commands::retry,
             commands::open_permission_pane,
             commands::copy_text,
             commands::open_licence,
