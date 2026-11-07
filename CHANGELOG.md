@@ -43,7 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The window has a sidebar, and History shows a list with the selected row beside
   it.** Every page is one click away, and the window can grow or fill the screen.
   The sidebar folds into a button when the window is narrow, and it says when audio
-  leaves this machine. The window opens at its default size each time.
+  leaves this machine. The window opens at its default size each time. A search
+  marks what it matched in each row.
 - **banshee config set knows every setting.** It refuses a key that is no setting.
   A text setting keeps digits as text, so `'"12"'` is no longer needed. It says
   `Banshee uses it now.` when the daemon took the change.

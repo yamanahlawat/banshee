@@ -1,6 +1,7 @@
 <script lang="ts">
   import { daemon } from '../lib/daemon';
   import { defaultOf, optionsOf, table, write } from '../lib/settings';
+  import { feedbackInForce } from '../lib/copy';
   import { onMac } from '../lib/keys';
   import Row from '../controls/Row.svelte';
   import Segmented from '../controls/Segmented.svelte';
@@ -14,19 +15,17 @@
     (option) => mac || option.value !== 'visual',
   );
   // Off macOS the row has no On screen radio, so a daemon set to visual still needs a selection.
-  $: visualWithoutFigure = feedback === 'visual' && !mac;
-  $: feedbackSelected = visualWithoutFigure ? 'both' : feedback;
+  $: feedbackSelected = feedbackInForce(feedback, mac);
+  $: visualWithoutFigure = feedbackSelected !== feedback;
   const FEEDBACK_NOTE = 'feedback-note';
+  // The page's lead says what shows and what plays, so a note says only the rest.
+  const SPOKEN = "An agent's questions are still spoken aloud.";
+  const FAILURE = 'A failure plays a sound too.';
   const FEEDBACK_NOTES: Record<string, string> = {
-    ...(mac && {
-      visual:
-        "A small Banshee figure above the Dock shows what Banshee does, with no sounds. An agent's questions are still spoken aloud. Using VoiceOver? Choose Both, so you hear when recording starts.",
-    }),
-    sound: 'A short sound when Banshee starts and stops listening, and when it fails.',
-    both: mac ? 'The Banshee figure and every sound.' : 'Every sound.',
-    none: mac
-      ? "No figure and no sound. An agent's questions are still spoken aloud."
-      : "No sound. An agent's questions are still spoken aloud.",
+    visual: `${SPOKEN} Using VoiceOver? Choose Both, so you hear when recording starts.`,
+    sound: FAILURE,
+    both: FAILURE,
+    none: SPOKEN,
   };
   $: feedbackNote = visualWithoutFigure
     ? 'Set to visual outside this window. Without the on-screen figure, Banshee plays every sound.'

@@ -98,6 +98,8 @@ export type Live = {
   microphone_refused: boolean;
   last_error: string | null;
   last_speech_error: string | null;
+  /// The cues in force: `visual`, `sound`, `both` or `none`. Null until read.
+  feedback: string | null;
   /// Moves on every kept row and every clear.
   history_changes: number;
 };
@@ -144,6 +146,7 @@ export function empty(): Daemon {
       microphone_refused: false,
       last_error: null,
       last_speech_error: null,
+      feedback: null,
       history_changes: 0,
     },
     pending: new Set(),

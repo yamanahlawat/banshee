@@ -14,6 +14,7 @@
   "audio_device": "MacBook Pro Microphone",
   "missing_device": null,
   "microphone_open": false,
+  "feedback": "both",
   "microphone_refused": false,
   "recording": false,
   "armed": false,

@@ -33,6 +33,7 @@
     SPEECH_FAILURE,
     failureReads,
     spell,
+    feedbackLead,
   } from './lib/copy';
   import {
     followSaveHistory,
@@ -57,7 +58,7 @@
     type Voices,
   } from './lib/tauri';
   import { humanize } from './lib/hotkey';
-  import { claimKeys, keysClaimed } from './lib/keys';
+  import { claimKeys, keysClaimed, onMac } from './lib/keys';
   import Sidebar from './bands/Sidebar.svelte';
   import Page from './bands/Page.svelte';
   import { PAGE_HEADING, SIDEBAR } from './bands/page';
@@ -82,6 +83,8 @@
   let agentsRead = false;
   // Nothing remembers the page, so every launch opens on History.
   let page: PageName = 'History';
+  // The platform does not change under this window.
+  const mac = onMac();
 
   // `updateCallbackDone` settles before the crossfade finishes.
   type ViewTransition = { updateCallbackDone: Promise<void> };
@@ -189,6 +192,8 @@
   $: config = ($daemon.status?.config ?? {}) as Record<string, Record<string, unknown>>;
   $: live = !isDown($daemon);
   $: connected = $agents.filter((a) => a.presence === 'connected').length;
+  // Only once the daemon has answered, so a failed read never claims none.
+  $: agentless = live && agentsRead && connected === 0;
   // Wayland grants no global grab, so the daemon binds nothing and says so.
   $: hotkeyListens = listensForHotkey($daemon);
   // The window names no key it has not been told. `audio.hotkey_mode` decides
@@ -252,7 +257,7 @@
         : holdToTalk
           ? `Hold ${boundKey} to talk.`
           : `Tap ${boundKey} to start, and again to stop.`,
-    Feedback: 'How Banshee tells you what it is doing.',
+    Feedback: feedbackLead($daemon.live.feedback, live, mac),
     'Saved history': !savingHistory
       ? 'Banshee is keeping nothing new you say.'
       : $table.total === 0
@@ -265,7 +270,8 @@
   $: waiting = $daemon.live.armed;
   $: nothingYet = $table.loaded && $table.rows.length === 0;
   $: blockers = $daemon.status?.blockers ?? [];
-  $: blocking = blockers.length > 0 || $daemon.download !== null;
+  $: downloading = $daemon.download !== null;
+  $: blocking = blockers.length > 0 || downloading;
   // Each says why History may hold nothing new, so it stands above the list.
   $: alerting = blocking || !live || failed !== null;
   // The daemon answers this, and the config only says what was asked for. A
@@ -529,6 +535,8 @@
             bind:reading
             saving={savingHistory}
             {alerting}
+            {downloading}
+            {agentless}
             {waiting}
             {host}
             compositor={!hotkeyListens}

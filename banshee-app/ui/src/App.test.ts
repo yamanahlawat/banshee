@@ -140,6 +140,27 @@ it('draws an empty history rather than leaving the body blank', async () => {
   expect(screen.queryByRole('listbox')).toBeNull();
 });
 
+it('asks for an agent on an empty History only once the daemon says none is connected', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Connect an agent' })).toBeTruthy(),
+  );
+  await fireEvent.click(screen.getByRole('button', { name: 'Connect an agent' }));
+  await waitFor(() => expect(pageHeading('Agents')).toBeTruthy());
+});
+
+it('asks for no agent while one is connected', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  vi.mocked(detectAgents).mockResolvedValue([
+    { id: 'claude', name: 'Claude Code', presence: 'connected', note: '' },
+  ]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
+  await waitFor(() => expect(get(agents)).toHaveLength(1));
+  expect(screen.queryByRole('button', { name: 'Connect an agent' })).toBeNull();
+});
+
 it('says what a blocker stops and offers the pane that clears it', async () => {
   vi.mocked(status).mockResolvedValue({
     ...permissions,
@@ -262,6 +283,15 @@ it('moves Feedback off the Hotkey page onto its own', async () => {
   await choose('Feedback');
   await waitFor(() => expect(page('Feedback')).toBeTruthy());
   expect(within(page('Feedback')).getByRole('radiogroup', { name: 'Feedback' })).toBeTruthy();
+});
+
+it('leads Feedback with the mode the daemon reports', async () => {
+  // The config still asks for both: the lead reads the cues in force.
+  vi.mocked(status).mockResolvedValue({ ...ready, feedback: 'none' });
+  render(App);
+  await listed();
+  await choose('Feedback');
+  await waitFor(() => expect(pageHeading('Feedback').textContent).toMatch(/plays no sound\.$/));
 });
 
 it('asks before it deletes the record', async () => {
@@ -1265,7 +1295,11 @@ it('says an agent is waiting above the list, and names the key that answers it',
   expect(
     within(notices).getByText('An agent asked a question and is waiting for your answer.'),
   ).toBeTruthy();
-  expect(within(notices).getByText('Tap Right Command to answer.')).toBeTruthy();
+  // Only the key name is a machine value, so only it takes the mono face.
+  const how = within(notices).getByText(
+    (_, node) => node?.tagName === 'P' && node.textContent === 'Tap Right Command to answer.',
+  );
+  expect(within(how).getByText('Right Command').classList.contains('mono')).toBe(true);
 });
 
 // Each item is its own Tab stop, so no item hides behind another.

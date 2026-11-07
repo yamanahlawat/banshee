@@ -15,6 +15,7 @@ import {
   readNewest,
   table,
   dayLabel,
+  marked,
   matches,
   rowFlag,
   selected,
@@ -145,6 +146,38 @@ describe('matches', () => {
   });
   it('matches every row for an empty needle', () => {
     expect(matches(row({}), '')).toBe(true);
+  });
+});
+
+describe('marked', () => {
+  it('splits out every match, ignoring case and keeping the text as written', () => {
+    expect(marked('Push it, then PUSH the tag', 'push')).toEqual([
+      { text: 'Push', hit: true },
+      { text: ' it, then ', hit: false },
+      { text: 'PUSH', hit: true },
+      { text: ' the tag', hit: false },
+    ]);
+  });
+  it('reads the needle as plain text', () => {
+    expect(marked('costs $5.00 (or 5x0)', '5.0')).toEqual([
+      { text: 'costs $', hit: false },
+      { text: '5.0', hit: true },
+      { text: '0 (or 5x0)', hit: false },
+    ]);
+  });
+  it('marks nothing for an empty needle', () => {
+    expect(marked('noon', '')).toEqual([{ text: 'noon', hit: false }]);
+  });
+  // Case folding differs between toLowerCase and a regex: İ lowers to i plus a
+  // combining dot, which a regex never folds to i.
+  it.each([
+    ['İstanbul', 'i'],
+    ['costs $5.00', '5.0'],
+    ['5x0', '5.0'],
+    ['Push it', 'PUSH'],
+  ])('marks %s for %s exactly when the row matches', (text, needle) => {
+    const hit = marked(text, needle).some((part) => part.hit);
+    expect(matches(row({ question: null, text }), needle)).toBe(hit);
   });
 });
 

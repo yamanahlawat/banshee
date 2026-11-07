@@ -375,6 +375,22 @@ describe('the rows', () => {
     expect(within(option('Agent asked Run the suite')).getByText('Yesterday')).toBeTruthy();
   });
 
+  it('marks what the search matched in each row, and keeps the names whole', () => {
+    const { container } = list(kinds(), { query: 'the' });
+    const marks = [...container.querySelectorAll('mark')].map((mark) => mark.textContent);
+    expect(marks).toEqual(['the', 'The', 'the']);
+    screen.getByRole('option', { name: 'Open the pull request., Today at 14:32' });
+    screen.getByRole('option', {
+      name: 'Agent asked Which branch should I use? You answered The release one., Today at 12:00',
+    });
+    screen.getByRole('option', { name: /^Agent asked Run the suite\?/ });
+  });
+
+  it('marks nothing with no search', () => {
+    const { container } = list(kinds());
+    expect(container.querySelector('mark')).toBeNull();
+  });
+
   it('holds no button in an option, and axe passes', async () => {
     const { container } = list(kinds());
     for (const one of screen.getAllByRole('option')) {

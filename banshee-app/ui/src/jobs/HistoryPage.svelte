@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { copy } from '../lib/copy';
-  import { copyOf, listed, selected, table, view } from '../lib/history';
+  import { copyOf, listed, needle, selected, table, view } from '../lib/history';
   import { keysClaimed, onMac } from '../lib/keys';
   import { listAndDetail, sidebarShown } from '../lib/layout';
   import { today } from '../lib/time';
@@ -18,6 +18,10 @@
   export let saving: boolean;
   /// The window's own notices fill the `alerts` slot, and say why nothing works.
   export let alerting: boolean;
+  /// A download runs, and its box is the page while it does.
+  export let downloading: boolean;
+  /// The daemon answered and no agent is connected.
+  export let agentless: boolean;
   /// An agent asked a question and waits for the answer.
   export let waiting: boolean;
   /// Where audio goes while a remote listener is in use.
@@ -32,6 +36,7 @@
   export let reading = false;
 
   const mac = onMac();
+  const SHOWS = 'Your dictations show here, and so do the questions agents ask you.';
 
   let list: HistoryList | undefined;
   let detail: HistoryDetail | undefined;
@@ -57,6 +62,19 @@
     : hotkey
       ? `${verb} ${hotkey} and talk in any app.`
       : 'No key is bound, so nothing starts dictation.';
+  $: keyless = !compositor && !hotkey;
+  // A notice above holds the one action, and may say why the key does nothing.
+  $: empty = alerting
+    ? { detail: keyless ? says : SHOWS }
+    : keyless
+      ? { detail: says, action: 'Open Hotkey', to: 'Hotkey' as Page }
+      : agentless
+        ? {
+            detail: `${says} Your dictations show here. No agent can speak to you yet. Connect one, and its questions show here too.`,
+            action: 'Connect an agent',
+            to: 'Agents' as Page,
+          }
+        : { detail: `${says} ${SHOWS}` };
 
   function choose(id: Id) {
     view.update((now) => ({ ...now, chosen: id }));
@@ -129,7 +147,7 @@
           {#if compositor}
             <p class="how">Press your compositor's Banshee binding to answer.</p>
           {:else if hotkey}
-            <p class="how">{verb} {hotkey} to answer.</p>
+            <p class="how">{verb} <span class="mono">{hotkey}</span> to answer.</p>
           {/if}
         </div>
       {/if}
@@ -159,15 +177,12 @@
             scrolled={hold}
             follow={$view.chosen === null}
             opensOnClick={!wide}
-            query={$view.query.trim()}
+            query={$needle}
             now={$today}
           />
         {:else}
           <div class="none">
-            <Absence
-              label="No match"
-              detail={`Nothing said so far contains “${$view.query.trim()}”.`}
-            />
+            <Absence label="No match" detail={`Nothing said so far contains “${$needle}”.`} />
           </div>
         {/if}
       </div>
@@ -178,6 +193,7 @@
               bind:this={detail}
               {row}
               now={$today}
+              query={$needle}
               goListening={() => go('Listening')}
             />
           {/if}
@@ -192,14 +208,12 @@
           action="Open Saved history"
           act={() => go('Saved history')}
         />
-      {:else if !alerting}
+      {:else if !downloading}
         <Absence
           label="Nothing here yet"
-          detail={compositor || hotkey
-            ? `${says} Your dictations show here, and so do the questions agents ask you.`
-            : says}
-          action={compositor || hotkey ? '' : 'Open Hotkey'}
-          act={() => go('Hotkey')}
+          detail={empty.detail}
+          action={empty.action}
+          act={() => empty.to && go(empty.to)}
         />
       {/if}
     </div>
@@ -235,13 +249,10 @@
     margin-top: 12px;
   }
 
-  /* The readout voice: an instruction the config answers, not a thing anyone
-     said. */
   .how {
     margin-top: 8px;
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--accent);
+    font-size: 13px;
+    color: var(--dim);
   }
 
   .split {

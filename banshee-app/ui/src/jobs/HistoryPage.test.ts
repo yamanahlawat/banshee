@@ -49,6 +49,8 @@ function show(rows: HistoryRow[], props: Record<string, unknown> = {}) {
   const view = render(HistoryPage, {
     saving: true,
     alerting: false,
+    downloading: false,
+    agentless: false,
     waiting: false,
     host: null,
     compositor: false,
@@ -512,11 +514,30 @@ describe('an empty History', () => {
     expect(go).toHaveBeenCalledWith('Saved history');
   });
 
-  it('says nothing before the table is read, or while a notice above says why', () => {
+  it('asks for an agent when none is connected', async () => {
+    const { go } = show([], { agentless: true });
+    expect(
+      screen.getByText(
+        'Tap Right Command and talk in any app. Your dictations show here. No agent can speak to you yet. Connect one, and its questions show here too.',
+      ),
+    ).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Connect an agent' }));
+    expect(go).toHaveBeenCalledWith('Agents');
+  });
+
+  it('keeps Open Hotkey the one action when no key is bound and no agent is connected', () => {
+    show([], { hotkey: '', agentless: true });
+    expect(screen.getByRole('button', { name: 'Open Hotkey' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Connect an agent' })).toBeNull();
+  });
+
+  it('says nothing before the table is read', () => {
     table.set({ rows: [], total: 0, loaded: false, saving: null });
-    const { unmount } = render(HistoryPage, {
+    render(HistoryPage, {
       saving: true,
       alerting: false,
+      downloading: false,
+      agentless: false,
       waiting: false,
       host: null,
       compositor: false,
@@ -525,11 +546,38 @@ describe('an empty History', () => {
       go: vi.fn(),
     });
     expect(screen.queryByText('Nothing here yet')).toBeNull();
-    unmount();
+  });
 
-    show([], { alerting: true });
-    expect(screen.queryByText('Nothing here yet')).toBeNull();
+  it('stays under a notice, saying what the page is for and leaving the action to the notice', () => {
+    show([], { alerting: true, agentless: true });
     expect(notices()).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Nothing here yet' })).toBeTruthy();
+    expect(
+      screen.getByText('Your dictations show here, and so do the questions agents ask you.'),
+    ).toBeTruthy();
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+
+  it('still says no key is bound under a notice, and leaves the action to it', () => {
+    show([], { alerting: true, hotkey: '' });
+    expect(screen.getByText('No key is bound, so nothing starts dictation.')).toBeTruthy();
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+
+  it('asks a compositor user for an agent when none is connected', async () => {
+    const { go } = show([], { compositor: true, agentless: true });
+    expect(
+      screen.getByText(
+        'Your compositor starts dictation here. Your dictations show here. No agent can speak to you yet. Connect one, and its questions show here too.',
+      ),
+    ).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Connect an agent' }));
+    expect(go).toHaveBeenCalledWith('Agents');
+  });
+
+  it('gives way to a download, which is the page while it runs', () => {
+    show([], { alerting: true, downloading: true });
+    expect(screen.queryByText('Nothing here yet')).toBeNull();
   });
 
   it('carries no accessibility violations', async () => {
@@ -550,7 +598,11 @@ describe('the notices above the list', () => {
     expect(
       within(stack).getByText('An agent asked a question and is waiting for your answer.'),
     ).toBeTruthy();
-    expect(within(stack).getByText('Tap Right Command to answer.')).toBeTruthy();
+    // Only the key name is a machine value, so only it takes the mono face.
+    const how = within(stack).getByText(
+      (_, node) => node?.tagName === 'P' && node.textContent === 'Tap Right Command to answer.',
+    );
+    expect(within(how).getByText('Right Command').classList.contains('mono')).toBe(true);
     expect(stack.contains(screen.getByRole('listbox'))).toBe(false);
   });
 

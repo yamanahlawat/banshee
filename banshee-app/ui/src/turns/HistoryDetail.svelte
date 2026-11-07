@@ -3,10 +3,13 @@
   import { dayLabel, rowFlag } from '../lib/history';
   import type { HistoryRow } from '../lib/tauri';
   import { formatTime } from '../lib/time';
+  import Marked from './Marked.svelte';
 
   export let row: HistoryRow;
   export let now: Date;
   export let goListening: () => void;
+  /// The trimmed search, whose matches the words mark.
+  export let query = '';
 
   let heading: HTMLElement;
 
@@ -48,13 +51,13 @@
       <button class="btn" on:click={goListening}>Open Listening</button>
     </div>
   {:else if row.kind === 'dictation'}
-    <p class="words user">{row.text ?? ''}</p>
+    <p class="words user"><Marked text={row.text ?? ''} needle={query} /></p>
     <div class="actions">{@render copyButton('Copy', row.text ?? '', 'text')}</div>
   {:else}
-    <p class="words agent">{row.question ?? ''}</p>
+    <p class="words agent"><Marked text={row.question ?? ''} needle={query} /></p>
     <hr />
     {#if row.outcome === 'transcribed'}
-      <p class="words user">{row.text ?? ''}</p>
+      <p class="words user"><Marked text={row.text ?? ''} needle={query} /></p>
     {:else}
       {#if flag}<p class="flag">{flag}</p>{/if}
       {#if note}<p class="note">{note}</p>{/if}
