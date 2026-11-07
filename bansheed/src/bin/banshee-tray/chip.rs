@@ -202,7 +202,6 @@ impl Chip {
         self.settle();
     }
 
-    #[cfg(any(target_os = "macos", test))]
     pub fn deadline(&self) -> Option<Instant> {
         [
             self.held.as_ref().map(|(_, at)| *at + FAULT_HOLD),

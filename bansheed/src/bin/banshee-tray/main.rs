@@ -24,6 +24,8 @@ mod scenes;
 
 mod tray {
     use std::collections::HashMap;
+    #[cfg(not(target_os = "macos"))]
+    use std::sync::mpsc::RecvTimeoutError;
     use std::time::{Duration, Instant};
 
     use banshee_common::cue::Signal;
@@ -307,7 +309,7 @@ mod tray {
 
     /// `None` leaves the tray to the menu bar alone, and the daemon to its earcons.
     #[cfg(target_os = "macos")]
-    fn build_panel(postbox: impl Postbox) -> Option<Box<dyn Surface>> {
+    fn build_surface(postbox: impl Postbox) -> Option<Box<dyn Surface>> {
         let Some(mtm) = objc2::MainThreadMarker::new() else {
             log::error!("the chip must be built on the main thread");
             return None;
@@ -316,6 +318,11 @@ mod tray {
             postbox.post(Message::Open);
         });
         Some(Box::new(super::panel::Panel::new(mtm, open)))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn build_surface(_postbox: impl Postbox) -> Option<Box<dyn Surface>> {
+        None
     }
 
     /// Hands a `Message` to whoever owns the tray. winit carries one as a user
@@ -929,11 +936,13 @@ mod tray {
 
         /// The panel and the watch, which must each exist once.
         fn begin(&mut self) {
-            #[cfg(target_os = "macos")]
-            {
-                self.surface = build_panel(self.postbox.clone());
-                spawn_watch(self.postbox.clone(), self.surface.is_some());
-            }
+            self.surface = build_surface(self.postbox.clone());
+            spawn_watch(self.postbox.clone(), self.surface.is_some());
+        }
+
+        fn tick(&mut self, now: Instant) {
+            self.chip.tick(now);
+            self.redraw();
         }
 
         /// After every chip input and every tick: hides the surface while
@@ -1108,8 +1117,7 @@ mod tray {
 
         fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
             if matches!(cause, StartCause::ResumeTimeReached { .. }) {
-                self.chip.tick(Instant::now());
-                self.redraw();
+                self.tick(Instant::now());
             }
         }
 
@@ -1587,12 +1595,27 @@ mod tray {
             }
         }));
 
-        spawn_watch(sender.clone(), false);
-
         let mut app = App::new(sender);
         app.start();
 
-        for message in receiver {
+        loop {
+            let message = match app.chip.deadline() {
+                Some(deadline) => {
+                    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(message) => message,
+                        Err(RecvTimeoutError::Timeout) => {
+                            app.tick(Instant::now());
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                None => match receiver.recv() {
+                    Ok(message) => message,
+                    Err(_) => break,
+                },
+            };
             if let Flow::Exit = app.handle(message) {
                 break;
             }
@@ -1636,6 +1659,26 @@ mod tray {
                 app.start_with(|| Err("no menu bar".into()), |_| begun += 1);
             }
             assert_eq!(begun, 1);
+        }
+
+        #[test]
+        fn a_tick_past_the_hold_ends_a_held_failure() {
+            let mut app = App::new(std::sync::mpsc::channel::<Message>().0);
+            let t0 = Instant::now();
+            app.chip.feed(
+                chip::Input::Signal(Signal::Error {
+                    reason: banshee_common::cue::Reason::new(
+                        banshee_common::cue::ReasonCode::PipelineBroken,
+                        None,
+                    ),
+                    target: None,
+                }),
+                t0,
+            );
+            app.redraw();
+            assert!(app.scene.is_some());
+            app.tick(t0 + chip::FAULT_HOLD + Duration::from_millis(1));
+            assert!(app.scene.is_none());
         }
 
         #[test]
