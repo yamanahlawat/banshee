@@ -1537,3 +1537,16 @@ fn an_accessibility_move_is_published_once_and_a_repeat_never() {
     assert!(state.noted_accessibility());
     assert_eq!(*changes.borrow_and_update(), start + 2);
 }
+
+#[test]
+fn a_change_count_moves_by_one_per_bump_and_wakes_a_subscriber() {
+    let count = super::change_count::ChangeCount::new();
+    let receiver = count.subscribe();
+    assert_eq!(count.now(), 0);
+    assert!(!receiver.has_changed().unwrap());
+
+    count.bump();
+
+    assert_eq!(count.now(), 1);
+    assert!(receiver.has_changed().unwrap());
+}

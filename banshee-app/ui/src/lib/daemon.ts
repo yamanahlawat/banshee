@@ -104,6 +104,8 @@ export type Live = {
   feedback: string | null;
   /// Moves on every kept row and every clear.
   history_changes: number;
+  /// Moves on every settings write, from any surface.
+  settings_changes: number;
 };
 export type Daemon = {
   status: Status | null;
@@ -150,6 +152,7 @@ export function empty(): Daemon {
       last_speech_error: null,
       feedback: null,
       history_changes: 0,
+      settings_changes: 0,
     },
     pending: new Set(),
     down: null,

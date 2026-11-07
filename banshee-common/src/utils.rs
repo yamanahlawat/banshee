@@ -267,7 +267,9 @@ impl Subscription {
     /// The daemon's state at the moment of subscribing, and the connection that
     /// carries every later notification. The two differ in width: the opening
     /// state is the whole `banshee.status` reply, and a change carries only the
-    /// fields that move on their own. Re-read `banshee.status` for the rest.
+    /// fields that move on their own. Re-read `banshee.status` for the rest:
+    /// `history_changes` and `settings_changes` are counters that say a
+    /// re-read is due, and `settings_changes` moves after each persisted write.
     pub async fn open(events: &[&str]) -> Result<(Value, Self), BansheeError> {
         Self::subscribe(serde_json::json!({ "events": events })).await
     }

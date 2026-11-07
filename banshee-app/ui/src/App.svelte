@@ -78,6 +78,7 @@
   import SavedHistoryPage from './jobs/SavedHistoryPage.svelte';
 
   let seenChanges: number | null = null;
+  let seenSettings: number | null = null;
   let wasLoadingModel = false;
   let voices: Voices = { voices: [], current: null };
   let voicesRead = false;
@@ -345,12 +346,23 @@
     }
   }
 
+  function advance(seen: number | null, now: number | undefined): [number | null, boolean] {
+    if (now === undefined) return [seen, false];
+    return [now, seen !== null && now !== seen];
+  }
+
   // Every kept row and every clear moves the count, whatever the activity was.
   function noteChanges(now: number | undefined) {
-    if (now === undefined) return;
-    const moved = seenChanges !== null && now !== seenChanges;
-    seenChanges = now;
+    let moved: boolean;
+    [seenChanges, moved] = advance(seenChanges, now);
     if (moved) readNewest().catch(() => {});
+  }
+
+  // A read only records the count; a push that moves it is what asks for a read.
+  function noteSettingsChanges(now: number | undefined): boolean {
+    let moved: boolean;
+    [seenSettings, moved] = advance(seenSettings, now);
+    return moved;
   }
 
   /// andStart is off for the restart poll: launchd is already bringing the daemon back.
@@ -359,6 +371,7 @@
       await refreshStatus(status);
       startRefusal = '';
       noteChanges($daemon.live.history_changes);
+      noteSettingsChanges($daemon.live.settings_changes);
       wasLoadingModel = $daemon.live.loading_model;
       return true;
     } catch (error) {
@@ -412,6 +425,7 @@
         if (readinessIsStale($daemon, e.payload)) readStatus(false);
         applyPush(e.payload);
         noteChanges(e.payload.history_changes);
+        if (noteSettingsChanges(e.payload.settings_changes)) readStatus(false);
         // `stt_model` and `stt_translates` come only with a full status, and the
         // read a write does happens before the file lands, so this is the only
         // word that the model in force moved. Held rather than read off the

@@ -410,6 +410,36 @@ fn a_voice_write_reaches_the_running_daemon() {
     assert!(outcome.waiting.is_empty());
 }
 
+#[test]
+fn a_persisted_write_moves_settings_changes() {
+    let (state, _spoken) = crate::test_support::daemon_state_recording_tts();
+    let before = state.settings_changes();
+
+    configure_in_scratch(
+        Some(&state),
+        assignments(&[("tts.voice", "am_adam".into())]),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(state.settings_changes(), before + 1);
+}
+
+#[test]
+fn an_unpersisted_write_leaves_settings_changes() {
+    let (state, _spoken) = crate::test_support::daemon_state_recording_tts();
+    let before = state.settings_changes();
+
+    configure_in_scratch(
+        Some(&state),
+        assignments(&[("tts.voice", "am_adam".into())]),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(state.settings_changes(), before);
+}
+
 // A backend that cannot take the voice must not be reported as speaking in
 // it, or the window marks a voice nothing will ever use.
 #[test]

@@ -348,6 +348,25 @@ it('opens History and its search on Cmd+F, and Escape clears it with the selecti
   ).toBe('true');
 });
 
+it('a moved settings counter re-reads status', async () => {
+  render(App);
+  await listed();
+  await waitFor(() => expect(status).toHaveBeenCalled());
+
+  vi.mocked(status).mockClear();
+  pushes.get('daemon:state')?.({ payload: { settings_changes: 0 } });
+  await Promise.resolve();
+  expect(status).not.toHaveBeenCalled();
+
+  vi.mocked(status).mockResolvedValue({ ...ready, settings_changes: 1 });
+  pushes.get('daemon:state')?.({ payload: { settings_changes: 1 } });
+  await waitFor(() => expect(status).toHaveBeenCalledTimes(1));
+
+  pushes.get('daemon:state')?.({ payload: { settings_changes: 1 } });
+  await Promise.resolve();
+  expect(status).toHaveBeenCalledTimes(1);
+});
+
 it('follows the newest row again when the window is reopened', async () => {
   render(App);
   await listed();

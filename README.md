@@ -134,12 +134,13 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 ## Use it
 
 - **Talk over it.** The hotkey stops whatever Banshee says. `barge_in = "none"` lets it finish.
-- **The window.** `Open Banshee` in the menu bar. A sidebar reaches History, Agents and every setting. History lists your dictations and the questions agents asked you, newest first, with the selected one beside the list and a copy button. Quit it and dictation carries on.
+- **The window.** `Open Banshee` in the menu bar. A sidebar reaches [History](#history), Agents and every setting. Quit it and dictation carries on.
 - **The figure above the Dock.** On macOS, a small rust capsule shows while Banshee records, works, waits for your answer, copies or fails. Nothing shows at rest. `feedback.mode` picks the figure, the earcons or both. [Feedback](docs/configuration.md)
 
 <p align="center"><img src="assets/window.png" width="360" alt="The Banshee window: the last dictation in large type with a copy button, the day's earlier dictations beneath it, and a footer naming the microphone, hotkey, voice and connected agents."></p>
 
 - The menu bar icon answers one question: can I speak right now.
+- The menu's `Listening model` and `Voice` rows list the models and voices already on this machine. A pick takes effect with no restart. Downloads stay in the window. Under a transcription or speech server, the row names the server and is greyed out.
 - A lasting problem puts an exclamation badge on the idle figure. The first menu row says what is wrong, for example `Accessibility is not granted` or `Microphone access is not allowed`, and opens Banshee. When Banshee started without Accessibility, the daemon restarts as that grant lands, and the badge clears. On macOS 14 and later, a microphone grant or refusal reaches Banshee at its next use, with no restart.
 - When Banshee is not running, the first row reads `Start Banshee` and runs `banshee start`. It reads `Starting Banshee` while that runs, and `Start failed. Open Banshee` if it fails. The tooltip reads `Banshee is not running`.
 - The badge shows only at rest. The recording, speaking, waiting and busy marks keep their shape.
@@ -152,6 +153,20 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 - Busy means Banshee transcribes what you said.
 - Waiting for you means an agent asked a question and holds for your answer.
 - The states differ by shape, never by colour alone, and macOS tints the template image.
+
+## History
+
+History keeps what you dictated and what agents asked you. Open it from the sidebar.
+
+- **The list.** Rows run newest first. The row you select shows beside the list, with a copy button.
+- **Dictations.** A row holds the text. A dictation that failed to transcribe holds the reason.
+- **Questions.** An agent's question sits with your spoken answer. When you gave none, the row says what happened: `No answer heard`, `Closed before you answered`, `Not transcribed` or `Not asked aloud`. Status updates are not kept.
+- **Audio.** Banshee keeps the audio of each dictation and answer for 7 days by default. Press the play button in a row's detail to hear it.
+- **Retry.** On a dictation with kept audio, `Retry with` and the model's name, for example `Retry with Parakeet Unified`, transcribes it again from the recording. With a transcription server in use, the button reads `Retry with the transcription server` and sends the recording there.
+- **Keep audio.** On `Saved history`, pick Off, 1 day, 7 days, 30 days or Forever. A shorter period deletes older audio at once, and the window asks first when that would delete any. `daemon.keep_audio` sets the same. [Saved history](docs/configuration.md)
+- **Clear.** On `Saved history`, `Clear` asks first, then deletes every row and its audio. It cannot be undone.
+
+Audio holds whatever the microphone heard, other voices too. On `Saved history`, `Stop saving` keeps nothing new, and `daemon.save_history` sets the same.
 
 ## Other ways to install
 

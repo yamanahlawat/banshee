@@ -417,6 +417,7 @@ struct StateWatches {
     last_speech_error: watch::Receiver<Option<String>>,
     feedback: watch::Receiver<crate::config::FeedbackMode>,
     history: watch::Receiver<u64>,
+    settings: watch::Receiver<u64>,
 }
 
 impl StateWatches {
@@ -432,6 +433,7 @@ impl StateWatches {
             last_speech_error: state.subscribe_last_speech_error(),
             feedback: state.subscribe_feedback(),
             history: state.subscribe_history_changes(),
+            settings: state.subscribe_settings_changes(),
         }
     }
 
@@ -449,6 +451,7 @@ impl StateWatches {
             woken = self.last_speech_error.changed() => woken,
             woken = self.feedback.changed() => woken,
             woken = self.history.changed() => woken,
+            woken = self.settings.changed() => woken,
         }
     }
 }

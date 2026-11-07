@@ -467,6 +467,7 @@ fn live_state_at(
         "feedback": daemon_state.cues().mode().word(),
         "blockers": blockers,
         "history_changes": daemon_state.history_changes(),
+        "settings_changes": daemon_state.settings_changes(),
     });
     // Ranked once, in banshee-common, so no client ranks the flags itself.
     live["activity"] = banshee_common::Activity::of(&live).word().into();

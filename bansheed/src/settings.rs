@@ -626,6 +626,9 @@ fn write_locked(
 
     if let Some(state) = state {
         state.record_outcome(&outcome.applied, &outcome.waiting);
+        if persist {
+            state.bump_settings_changes();
+        }
     }
 
     Ok(outcome)

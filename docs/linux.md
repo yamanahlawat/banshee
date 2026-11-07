@@ -91,6 +91,7 @@ bind = , F9, exec, banshee record toggle
 ## Showing the state in a bar
 
 - **`banshee tray`** puts the mark in any bar that hosts StatusNotifierItem.
+- **The entries in the tray's `Listening model` and `Voice` submenus** draw as checkboxes on StatusNotifierItem hosts.
 - **`banshee watch --waybar`** feeds a Waybar module.
 - **It emits** one custom-module object per line:
 
