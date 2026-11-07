@@ -1359,7 +1359,6 @@ fn scratch_config(text: &str) -> (std::path::PathBuf, Vec<Download>) {
     (path, wanted)
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn a_fetch_into_an_empty_folder_chooses_the_chip() {
     let (path, wanted) = scratch_config("");
@@ -1372,7 +1371,6 @@ fn a_fetch_into_an_empty_folder_chooses_the_chip() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn voiceover_starts_on_both() {
     let (path, wanted) = scratch_config("");
@@ -1380,7 +1378,6 @@ fn voiceover_starts_on_both() {
     assert_eq!(chosen, Some(FeedbackMode::Both));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn a_folder_that_holds_a_model_is_no_new_install() {
     let (path, wanted) = scratch_config("");
@@ -1392,7 +1389,6 @@ fn a_folder_that_holds_a_model_is_no_new_install() {
     assert!(!path.exists(), "nothing is written");
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn a_file_that_chose_keeps_its_choice() {
     let text = "[feedback]\nmode = \"sound\"\n";
@@ -1407,7 +1403,6 @@ fn a_file_that_chose_keeps_its_choice() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn the_first_write_keeps_the_comments() {
     let text = "# my settings\n[audio]\nhotkey = \"F5\" # the key\n";
@@ -1417,7 +1412,6 @@ fn the_first_write_keeps_the_comments() {
     assert!(written.contains("# my settings") && written.contains("# the key"));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn the_first_write_goes_through_a_symlinked_config() {
     let (target, wanted) = scratch_config("");
@@ -1434,7 +1428,6 @@ fn the_first_write_goes_through_a_symlinked_config() {
     assert!(std::fs::read_to_string(&target).unwrap().contains("visual"));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn a_config_that_never_chose_a_mode_is_a_new_install() {
     let text = "[tts]\nvoice = \"af_sky\"\n";
@@ -1447,7 +1440,6 @@ fn a_config_that_never_chose_a_mode_is_a_new_install() {
     assert!(written.starts_with(text), "{written}");
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn a_config_of_blank_lines_and_comments_is_a_new_install() {
     let (path, wanted) = scratch_config("\n  \n# my settings\n");
@@ -1455,7 +1447,6 @@ fn a_config_of_blank_lines_and_comments_is_a_new_install() {
     assert_eq!(chosen, Some(FeedbackMode::Visual));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn a_mode_set_while_the_first_write_waits_wins() {
     let (path, wanted) = scratch_config("");
@@ -1475,18 +1466,6 @@ fn a_mode_set_while_the_first_write_waits_wins() {
 
     assert_eq!(first.join().unwrap().unwrap(), None);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), chosen);
-}
-
-#[cfg(not(target_os = "macos"))]
-#[test]
-fn off_macos_a_new_install_keeps_the_absent_key() {
-    let (path, wanted) = scratch_config("");
-    let chosen = write_first_feedback(&path, None, &wanted, &wanted, || {
-        panic!("off macos this never reads VoiceOver")
-    })
-    .unwrap();
-    assert_eq!(chosen, None);
-    assert!(!path.exists(), "nothing is written");
 }
 
 #[test]

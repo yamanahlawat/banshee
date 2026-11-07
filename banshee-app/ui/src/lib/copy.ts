@@ -179,28 +179,24 @@ export function speechNote(facts: Speech): string {
     : 'Text stays on this machine.';
 }
 
-/// Only macOS draws the figure, so elsewhere visual plays every sound.
-export function feedbackInForce(mode: string, mac: boolean): string {
-  return mode === 'visual' && !mac ? 'both' : mode;
-}
-
 const MAC_FEEDBACK: Record<string, string> = {
   both: 'Banshee shows the figure above the Dock and plays a sound when it starts and stops listening.',
   visual: 'Banshee shows the figure above the Dock and plays no sound.',
   sound: 'Banshee plays a sound when it starts and stops listening, and shows nothing.',
   none: 'Banshee shows nothing and plays no sound.',
 };
-const FIGURELESS_FEEDBACK: Record<string, string> = {
-  both: 'Banshee plays a sound when it starts and stops listening.',
-  sound: 'Banshee plays a sound when it starts and stops listening.',
-  none: 'Banshee plays no sound.',
+const LINUX_FEEDBACK: Record<string, string> = {
+  both: 'Banshee shows the figure at the bottom of the screen and plays a sound when it starts and stops listening.',
+  visual: 'Banshee shows the figure at the bottom of the screen and plays no sound.',
+  sound: 'Banshee plays a sound when it starts and stops listening, and shows nothing.',
+  none: 'Banshee shows nothing and plays no sound.',
 };
 
 /// Null while the daemon runs and has not said which cues are in force.
 export function feedbackLead(mode: string | null, live: boolean, mac: boolean): string | null {
   if (!live) return 'Banshee is not running, so it shows and plays nothing.';
   if (mode === null) return null;
-  return (mac ? MAC_FEEDBACK : FIGURELESS_FEEDBACK)[feedbackInForce(mode, mac)] ?? null;
+  return (mac ? MAC_FEEDBACK : LINUX_FEEDBACK)[mode] ?? null;
 }
 
 /// A sentence should not open on a digit, and a count mid-sentence reads better

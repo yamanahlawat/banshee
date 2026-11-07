@@ -127,6 +127,18 @@ bind = , F9, exec, banshee record toggle
 - **That exit** is how the module reconnects once the daemon comes back.
 - **The same channel** is open to any client over `banshee.subscribe`.
 
+## The figure on screen
+
+- **The figure** is a small rust capsule at the bottom centre of the focused screen, 12 pixels off the edge.
+- **It shows** while Banshee records, works, waits for your answer, copies or fails.
+- **Live words** show in it as you speak.
+- **It needs layer shell.** Hyprland, Sway, KDE and most other Wayland desktops have it.
+- **It never takes keyboard focus,** so it never steals typing from the app you dictate into.
+- **It takes no clicks** except on a failure.
+- **GNOME and X11** draw nothing. Banshee plays every sound there.
+- **`feedback.mode`** picks the figure, the sounds or both. A new install starts on `visual`.
+- **The layer namespace is `banshee`.** A Hyprland layer rule on that namespace, such as `no_screen_share`, hides it from screen shares.
+
 ## Building the desktop window
 
 - **The window** is a Tauri app. It needs WebKitGTK, GTK 3 and Node: 22 from

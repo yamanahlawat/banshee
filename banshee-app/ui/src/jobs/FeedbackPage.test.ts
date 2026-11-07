@@ -40,18 +40,6 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it('maps a daemon reporting visual to Both, and says it was set from the command line', () => {
-  ready({ mode: 'visual' });
-  const page = render(FeedbackPage);
-  const chosen = page.getByRole('radio', { name: 'Both' });
-  expect(chosen.getAttribute('aria-checked')).toBe('true');
-  expect(
-    page.getByText(
-      'Set to visual outside this window. Without the on-screen figure, Banshee plays every sound.',
-    ),
-  ).toBeTruthy();
-});
-
 it('points the feedback radiogroup at its note', () => {
   ready({ mode: 'sound' });
   const page = render(FeedbackPage);
@@ -77,11 +65,15 @@ it('selects On screen for a daemon set to visual, with the VoiceOver advice', ()
   ).toBeTruthy();
 });
 
-it('offers no On screen where no figure draws', () => {
+it('offers On screen on Linux, selects it for visual, and names the layer shell', () => {
   const page = renderPage({ userAgent: LINUX_UA, feedback: { mode: 'visual' } });
-  expect(page.queryByRole('radio', { name: 'On screen' })).toBeNull();
-  const chosen = page.getByRole('radio', { name: 'Both' });
+  const chosen = page.getByRole('radio', { name: 'On screen' });
   expect(chosen.getAttribute('aria-checked')).toBe('true');
+  expect(
+    page.getByText(
+      "An agent's questions are still spoken aloud. The figure needs a desktop with layer shell, such as Hyprland, Sway or KDE. Without one, Banshee plays every sound.",
+    ),
+  ).toBeTruthy();
 });
 
 // The lead says what shows and what plays, so the note says only the rest.

@@ -87,7 +87,10 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   read every transcript in `banshee.db`. Nothing shows which client opened the microphone.
 - The corrector for words to know has its threshold (0.10, Soundex weight 0.5) measured on
   synthetic speech and plain-English references only. Real accents and jargon are not measured.
-- Live words on Linux wait for the capsule. The macOS chip shows them today.
+- Orca hears nothing from the Linux capsule. The owner wants to brainstorm it.
+- On Linux, Reduce Motion and high contrast are not read.
+- The Linux capsule uses integer scale only; a fractional scale draws it soft.
+- Live words in characters the Archivo Latin subset lacks are left out on Linux.
 - An idea for answers: use the unusual words in an agent's question as vocabulary for that
   answer.
 - A listening model download that fails for a reason other than a licence reaches the window

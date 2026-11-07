@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The capsule shows on Linux.** On Hyprland, Sway, KDE and any other desktop with
+  layer shell, the Banshee figure appears at the bottom centre of the screen while Banshee
+  records, works, waits for your answer, copies or fails, with the live words as you speak.
+  It never takes focus. On GNOME and X11 there is no capsule, and every sound plays as
+  before. A new Linux install starts on On screen. A click on a failure opens the window
+  at the fix.
 - **The Waybar module shows a lasting problem.** While Banshee is idle with a problem, the
   module's `alt` reads `problem` and the tooltip leads with the problem's name, the same
   words the tray shows.
@@ -43,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `feedback.speak_problems = false` turns the speech off.
 - **When Banshee cannot type a dictation, it copies it.** With no Accessibility
   grant, no Wayland typer, or a typer that fails, the words stay on the
-  clipboard. The capsule says "Copied" for 3 s on macOS; Linux has no capsule. A
+  clipboard. The capsule says "Copied" for 3 s. A
   level two-note sound plays in place of the error sound. Paste them yourself.
   The old clipboard is not put back.
 - **A dictation is copied when you switch apps before it lands.** If the app in
@@ -121,9 +127,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fetches one of 73, and `banshee setup --list` shows each id with its size,
   languages, whether it streams and its licence. 18 models need
   `--accept-licence`: the CC-BY-NC ones, Moonshine, HAI-DEF and FunASR.
-- **The macOS chip shows live words while you speak.** They appear during
+- **The chip shows live words while you speak.** They appear during
   dictation and spoken answers. When you let go, one full pass over the recording
-  produces the typed text. Linux has no capsule yet, so live words wait for it.
+  produces the typed text.
 - **Words to know start empty, and work on every model.** A model that takes
   vocabulary receives the list. For any other model, a corrector swaps a close-sounding
   word for a listed one, with the rule from Handy (threshold 0.10, Soundex weight 0.5).
