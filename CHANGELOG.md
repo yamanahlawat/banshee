@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The menu bar switches the listening model and the voice.** `Listening model` and
+  `Voice` list the models and voices already on this machine, mark the one chosen, and
+  switch with no restart. Downloads stay in the window. Under a transcription or speech
+  server, the row names the server and stays greyed out.
+- **The window follows a setting changed in the menu bar or with `banshee config set`.**
+  It shows the new value without a reload.
 - **History keeps the questions agents ask you, with your answer.** A question you did
   not answer is kept with what happened: no answer heard, closed, not transcribed, or
   not asked aloud. A dictation that failed to transcribe is kept with the reason.

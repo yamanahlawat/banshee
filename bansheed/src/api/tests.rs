@@ -2870,3 +2870,17 @@ async fn a_retry_whose_row_was_cleared_meanwhile_names_the_row() {
         (rpc_code::INVALID_PARAMS, format!("No row has id {id}."))
     );
 }
+
+#[test]
+fn the_live_state_carries_settings_changes() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    assert_eq!(live_state(&state)["settings_changes"], 0);
+
+    state.bump_settings_changes();
+
+    assert_eq!(
+        live_state(&state)["settings_changes"],
+        state.settings_changes()
+    );
+    assert_eq!(state.settings_changes(), 1);
+}

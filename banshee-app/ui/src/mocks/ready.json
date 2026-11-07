@@ -99,6 +99,7 @@
   "last_error": null,
   "last_speech_error": null,
   "history_changes": 0,
+  "settings_changes": 0,
   "activity": "idle",
   "stt_translates": false,
   "stt_models": [

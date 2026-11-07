@@ -25,12 +25,15 @@ mod tray {
     use banshee_common::cue::Signal;
     use banshee_common::feedback::FeedbackMode;
     use banshee_common::{
-        Activity, BANSHEE_CUE, BANSHEE_HISTORY, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED,
-        BANSHEE_WORDS, EVENT_CUES, EVENT_LEVEL, EVENT_STATE, EVENT_WORDS, utils,
+        Activity, BANSHEE_CONFIGURE, BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_HISTORY,
+        BANSHEE_LEVEL, BANSHEE_LIST_VOICES, BANSHEE_STATE_CHANGED, BANSHEE_STATUS, BANSHEE_WORDS,
+        DownloadState, EVENT_CUES, EVENT_DOWNLOADS, EVENT_LEVEL, EVENT_STATE, EVENT_WORDS, utils,
     };
     use serde::Deserialize;
     use serde_json::Value;
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{
+        CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+    };
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
     #[cfg(not(target_os = "macos"))]
     use tray_icon::{MouseButton, TrayIconEvent};
@@ -50,8 +53,9 @@ mod tray {
     const QUIT_ID: &str = "quit";
     // A daemon that accepts the connection and never answers would hold this
     // thread forever. Nothing measured this number. It trades how long a slow
-    // reply can still land against how long a click can hold a thread.
-    const COPY_WAIT: Duration = Duration::from_secs(5);
+    // reply can still land against how long a click, or the watch, can hold a
+    // thread.
+    const DAEMON_WAIT: Duration = Duration::from_secs(5);
 
     const COPY_LAST_ID: &str = "copy-last";
     const OPEN_ID: &str = "open";
@@ -61,6 +65,12 @@ mod tray {
     const STATE_ID: &str = "state";
     const DEVICE_ID: &str = "device";
     const REMOTE_ID: &str = "remote";
+    const MODEL_MENU_ID: &str = "model";
+    const VOICE_MENU_ID: &str = "voice";
+    const MODEL_KEY: &str = "stt.model";
+    const VOICE_KEY: &str = "tts.voice";
+    const CHOICE_MENUS: [(&str, &str); 2] =
+        [(MODEL_MENU_ID, MODEL_KEY), (VOICE_MENU_ID, VOICE_KEY)];
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Start {
@@ -265,6 +275,8 @@ mod tray {
         StartFinished { succeeded: bool },
         CopyLast,
         Copied(String),
+        Choices(Choices),
+        Pick(Pick),
     }
 
     /// Draws a scene. The panel is macOS only; elsewhere there is nothing to draw.
@@ -396,6 +408,85 @@ mod tray {
         banshee_common::speaker_started(status).then(|| host.to_string())
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct Entry {
+        id: String,
+        label: String,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    enum Choice {
+        #[default]
+        Down,
+        Server(String),
+        Local {
+            picked: String,
+            entries: Vec<Entry>,
+        },
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Choices {
+        model: Choice,
+        voice: Choice,
+    }
+
+    impl Choices {
+        /// `remote` must be built from the same `status`.
+        fn of(status: &Value, voices: &Value, remote: &Remote) -> Self {
+            Self {
+                model: choice(
+                    remote.audio.clone(),
+                    status["config"]["stt"]["model"].as_str(),
+                    &status["stt_models"],
+                    "label",
+                ),
+                voice: choice(
+                    remote.text.clone(),
+                    status["config"]["tts"]["voice"].as_str(),
+                    &voices["voices"],
+                    "name",
+                ),
+            }
+        }
+
+        fn of_key(&mut self, key: &str) -> &mut Choice {
+            if key == MODEL_KEY {
+                &mut self.model
+            } else {
+                &mut self.voice
+            }
+        }
+    }
+
+    fn choice(host: Option<String>, picked: Option<&str>, listed: &Value, label: &str) -> Choice {
+        if let Some(host) = host {
+            return Choice::Server(host);
+        }
+        let entries = listed
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|one| one["downloaded"].as_bool() == Some(true))
+            .filter_map(|one| {
+                Some(Entry {
+                    id: one["id"].as_str()?.to_string(),
+                    label: one[label].as_str()?.to_string(),
+                })
+            })
+            .collect();
+        Choice::Local {
+            picked: picked.unwrap_or_default().to_string(),
+            entries,
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Pick {
+        key: &'static str,
+        value: String,
+    }
+
     // A daemon that is down sends nothing anywhere.
     fn remote_line(indicator: Indicator, remote: &Remote) -> String {
         if indicator == Indicator::NotRunning {
@@ -434,13 +525,71 @@ mod tray {
         Info(&'static str, String),
         Separator,
         Action(&'static str, String, bool),
+        Submenu {
+            id: &'static str,
+            title: String,
+            enabled: bool,
+            rows: Vec<Row>,
+        },
+        Check {
+            id: String,
+            label: String,
+            checked: bool,
+        },
     }
 
     impl Row {
-        fn id(&self) -> Option<&'static str> {
+        fn id(&self) -> Option<&str> {
             match self {
-                Row::Info(id, _) | Row::Action(id, _, _) => Some(id),
+                Row::Info(id, _) | Row::Action(id, _, _) | Row::Submenu { id, .. } => Some(id),
+                Row::Check { id, .. } => Some(id),
                 Row::Separator => None,
+            }
+        }
+    }
+
+    /// The submenu for one choice. A machine with nothing downloaded has
+    /// nothing to pick, so it gets no submenu.
+    fn choice_menu(
+        id: &'static str,
+        name: &str,
+        choice: &Choice,
+        indicator: Indicator,
+    ) -> Option<Row> {
+        let down = |title: &str| Row::Submenu {
+            id,
+            title: title.to_string(),
+            enabled: false,
+            rows: Vec::new(),
+        };
+        if indicator == Indicator::NotRunning {
+            return Some(down(name));
+        }
+        match choice {
+            Choice::Down => Some(down(name)),
+            Choice::Server(host) => Some(down(&format!("{name}: on {host}"))),
+            Choice::Local { entries, .. } if entries.is_empty() => None,
+            Choice::Local { picked, entries } => {
+                let title = entries
+                    .iter()
+                    .find(|entry| entry.id == *picked)
+                    .map_or_else(
+                        || name.to_string(),
+                        |entry| format!("{name}: {}", entry.label),
+                    );
+                Some(Row::Submenu {
+                    id,
+                    title,
+                    enabled: true,
+                    rows: entries
+                        .iter()
+                        .map(|entry| Row::Check {
+                            id: format!("{id}:{}", entry.id),
+                            label: entry.label.clone(),
+                            checked: entry.id == *picked,
+                        })
+                        .collect(),
+                })
             }
         }
     }
@@ -471,6 +620,7 @@ mod tray {
         start: Start,
         device: &Device,
         remote: &Remote,
+        choices: &Choices,
     ) -> Vec<Row> {
         let mut rows = Vec::new();
         if let Some(row) = lead_row(indicator, problem, start) {
@@ -482,6 +632,18 @@ mod tray {
             rows.push(Row::Info(DEVICE_ID, line));
         }
         rows.push(Row::Info(REMOTE_ID, remote_line(indicator, remote)));
+        rows.extend(choice_menu(
+            MODEL_MENU_ID,
+            "Listening model",
+            &choices.model,
+            indicator,
+        ));
+        rows.extend(choice_menu(
+            VOICE_MENU_ID,
+            "Voice",
+            &choices.voice,
+            indicator,
+        ));
         rows.push(Row::Separator);
         rows.push(Row::Action(
             COPY_LAST_ID,
@@ -501,28 +663,110 @@ mod tray {
         start: Start,
         device: &Device,
         remote: &Remote,
+        choices: &Choices,
     ) -> Vec<String> {
-        menu_rows(indicator, problem, start, device, remote)
-            .into_iter()
-            .map(|row| match row {
-                Row::Info(_, text) | Row::Action(_, text, _) => text,
-                Row::Separator => "---".to_string(),
-            })
-            .collect()
+        fn flatten(rows: Vec<Row>, indent: &str, out: &mut Vec<String>) {
+            for row in rows {
+                match row {
+                    Row::Info(_, text) | Row::Action(_, text, _) => {
+                        out.push(format!("{indent}{text}"))
+                    }
+                    Row::Separator => out.push("---".to_string()),
+                    Row::Submenu { title, rows, .. } => {
+                        out.push(format!("{indent}{title}"));
+                        flatten(rows, &format!("{indent}  "), out);
+                    }
+                    Row::Check { label, checked, .. } => {
+                        let mark = if checked { "\u{2713} " } else { "" };
+                        out.push(format!("{indent}{mark}{label}"));
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        flatten(
+            menu_rows(indicator, problem, start, device, remote, choices),
+            "",
+            &mut out,
+        );
+        out
     }
 
     struct Ui {
         tray: TrayIcon,
         // The menu owns the native objects; dropping it empties the tray
         menu: Menu,
-        items: HashMap<&'static str, Shown>,
-        layout: Vec<Option<&'static str>>,
+        items: HashMap<String, Shown>,
+        layout: Vec<Slot>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Slot {
+        Item(String),
+        Separator,
+        Submenu(String, Vec<Slot>),
+    }
+
+    fn layout_of(rows: &[Row]) -> Vec<Slot> {
+        rows.iter()
+            .map(|row| match (row, row.id()) {
+                (Row::Submenu { rows, .. }, Some(id)) => {
+                    Slot::Submenu(id.to_string(), layout_of(rows))
+                }
+                (_, Some(id)) => Slot::Item(id.to_string()),
+                (_, None) => Slot::Separator,
+            })
+            .collect()
+    }
+
+    enum Native {
+        Item(MenuItem),
+        Submenu(Submenu),
+        Check(CheckMenuItem),
+    }
+
+    impl Native {
+        fn new(row: &Row, id: &str, text: &str, enabled: bool) -> Self {
+            match row {
+                Row::Submenu { .. } => Native::Submenu(Submenu::with_id(id, text, enabled)),
+                Row::Check { checked, .. } => {
+                    Native::Check(CheckMenuItem::with_id(id, text, enabled, *checked, None))
+                }
+                _ => Native::Item(MenuItem::with_id(id, text, enabled, None)),
+            }
+        }
+
+        fn item(&self) -> &dyn IsMenuItem {
+            match self {
+                Native::Item(item) => item,
+                Native::Submenu(submenu) => submenu,
+                Native::Check(check) => check,
+            }
+        }
+
+        fn set_text(&self, text: &str) {
+            match self {
+                Native::Item(item) => item.set_text(text),
+                Native::Submenu(submenu) => submenu.set_text(text),
+                Native::Check(check) => check.set_text(text),
+            }
+        }
+
+        fn set_enabled(&self, enabled: bool) {
+            match self {
+                Native::Item(item) => item.set_enabled(enabled),
+                Native::Submenu(submenu) => submenu.set_enabled(enabled),
+                Native::Check(check) => check.set_enabled(enabled),
+            }
+        }
     }
 
     /// A native item and what was last written to it. Under muda's snapshot
     /// feature on Linux every write rebuilds the whole StatusNotifierItem menu.
+    /// The mark is read off the item itself, because muda flips a check item
+    /// on the click before the tray hears of it.
     struct Shown {
-        item: MenuItem,
+        native: Native,
         text: String,
         enabled: bool,
     }
@@ -530,41 +774,85 @@ mod tray {
     impl Ui {
         /// Makes the menu read `rows`. Each id keeps one native item for the
         /// life of the menu, and the menu is laid out again only when the
-        /// sequence of rows changes.
+        /// places of the rows change.
         fn present(&mut self, rows: &[Row]) -> Result<(), Box<dyn std::error::Error>> {
-            for row in rows {
-                let (id, text, enabled) = match row {
-                    Row::Info(id, text) => (*id, text, false),
-                    Row::Action(id, text, enabled) => (*id, text, *enabled),
-                    Row::Separator => continue,
-                };
-                let shown = self.items.entry(id).or_insert_with(|| Shown {
-                    item: MenuItem::with_id(id, text, enabled, None),
-                    text: text.clone(),
-                    enabled,
-                });
-                if shown.text != *text {
-                    shown.item.set_text(text);
-                    shown.text.clone_from(text);
-                }
-                if shown.enabled != enabled {
-                    shown.item.set_enabled(enabled);
-                    shown.enabled = enabled;
-                }
-            }
-            let layout: Vec<_> = rows.iter().map(Row::id).collect();
+            self.write(rows);
+            let layout = layout_of(rows);
             if layout == self.layout {
                 return Ok(());
             }
             while self.menu.remove_at(0).is_some() {}
             self.layout.clear();
-            for id in &layout {
-                match id {
-                    Some(id) => self.menu.append(&self.items[id].item)?,
-                    None => self.menu.append(&PredefinedMenuItem::separator())?,
+            self.lay_out(&layout, &|item| self.menu.append(item))?;
+            self.layout = layout;
+            Ok(())
+        }
+
+        fn write(&mut self, rows: &[Row]) {
+            for row in rows {
+                let (id, text, enabled, checked) = match row {
+                    Row::Separator => continue,
+                    Row::Info(id, text) => (*id, text.as_str(), false, None),
+                    Row::Action(id, text, enabled) => (*id, text.as_str(), *enabled, None),
+                    Row::Submenu {
+                        id,
+                        title,
+                        enabled,
+                        rows,
+                    } => {
+                        self.write(rows);
+                        (*id, title.as_str(), *enabled, None)
+                    }
+                    Row::Check { id, label, checked } => {
+                        (id.as_str(), label.as_str(), true, Some(*checked))
+                    }
+                };
+                let shown = match self.items.get_mut(id) {
+                    Some(shown) => shown,
+                    None => self.items.entry(id.to_string()).or_insert(Shown {
+                        native: Native::new(row, id, text, enabled),
+                        text: text.to_string(),
+                        enabled,
+                    }),
+                };
+                if shown.text != text {
+                    shown.native.set_text(text);
+                    text.clone_into(&mut shown.text);
+                }
+                if shown.enabled != enabled {
+                    shown.native.set_enabled(enabled);
+                    shown.enabled = enabled;
+                }
+                if let (Native::Check(check), Some(checked)) = (&shown.native, checked)
+                    && check.is_checked() != checked
+                {
+                    check.set_checked(checked);
                 }
             }
-            self.layout = layout;
+        }
+
+        fn lay_out(
+            &self,
+            slots: &[Slot],
+            append: &dyn Fn(&dyn IsMenuItem) -> tray_icon::menu::Result<()>,
+        ) -> tray_icon::menu::Result<()> {
+            for slot in slots {
+                let id = match slot {
+                    Slot::Separator => {
+                        append(&PredefinedMenuItem::separator())?;
+                        continue;
+                    }
+                    Slot::Item(id) => id,
+                    Slot::Submenu(id, children) => {
+                        if let Native::Submenu(submenu) = &self.items[id].native {
+                            while submenu.remove_at(0).is_some() {}
+                            self.lay_out(children, &|item| submenu.append(item))?;
+                        }
+                        id
+                    }
+                };
+                append(self.items[id].native.item())?;
+            }
             Ok(())
         }
     }
@@ -575,6 +863,7 @@ mod tray {
         problem: Option<Problem>,
         device: Device,
         remote: Remote,
+        choices: Choices,
         chip: chip::Chip,
         drawing: bool,
         scene: Option<chip::Scene>,
@@ -583,6 +872,7 @@ mod tray {
         begun: bool,
         starting: Start,
         run_start: Box<dyn Fn(P)>,
+        run_pick: Box<dyn Fn(P, Pick)>,
         clock: Box<dyn Fn() -> Instant>,
     }
 
@@ -594,6 +884,7 @@ mod tray {
                 problem: None,
                 device: Device::default(),
                 remote: Remote::default(),
+                choices: Choices::default(),
                 chip: chip::Chip::default(),
                 drawing: false,
                 scene: None,
@@ -602,6 +893,7 @@ mod tray {
                 begun: false,
                 starting: Start::Ready,
                 run_start: Box::new(|postbox| spawn_start(postbox, start_the_daemon)),
+                run_pick: Box::new(|postbox, pick| spawn_pick(postbox, pick)),
                 clock: Box::new(Instant::now),
             }
         }
@@ -755,6 +1047,20 @@ mod tray {
                     copy_to_clipboard(&text).unwrap_or_else(|error| log::error!("{error}"));
                     return Step::Stay;
                 }
+                Message::Choices(choices) => {
+                    std::mem::replace(&mut self.choices, choices) != self.choices
+                }
+                // Shown even when nothing moved: muda flipped the clicked row's
+                // check, and the show writes it back.
+                Message::Pick(pick) => {
+                    if let Choice::Local { picked, .. } = self.choices.of_key(pick.key)
+                        && *picked != pick.value
+                    {
+                        picked.clone_from(&pick.value);
+                        (self.run_pick)(self.postbox.clone(), pick);
+                    }
+                    true
+                }
             };
             if changed { Step::Show } else { Step::Stay }
         }
@@ -767,6 +1073,7 @@ mod tray {
                 self.starting,
                 &self.device,
                 &self.remote,
+                &self.choices,
             );
             let Some(ui) = &mut self.ui else { return };
             if let Err(error) = ui.present(&rows) {
@@ -848,9 +1155,15 @@ mod tray {
     async fn watch(postbox: impl Postbox, to_draw: bool) {
         let send = |message| postbox.post(message);
         let events: &[&str] = if to_draw {
-            &[EVENT_STATE, EVENT_CUES, EVENT_LEVEL, EVENT_WORDS]
+            &[
+                EVENT_STATE,
+                EVENT_DOWNLOADS,
+                EVENT_CUES,
+                EVENT_LEVEL,
+                EVENT_WORDS,
+            ]
         } else {
-            &[EVENT_STATE]
+            &[EVENT_STATE, EVENT_DOWNLOADS]
         };
         loop {
             let opened = if to_draw {
@@ -868,6 +1181,14 @@ mod tray {
                 {
                     return;
                 }
+                let mut settings = None;
+                if let Ok(voices) = ask_daemon(BANSHEE_LIST_VOICES, serde_json::json!({})).await {
+                    let choices = Choices::of(&status, &voices, &Remote::of(&status));
+                    if !send(Message::Choices(choices)) {
+                        return;
+                    }
+                    settings = settings_count(&status);
+                }
                 // Every push carries the device too: the watchdog rebinds while
                 // the daemon idles, so no other field has to move with it
                 loop {
@@ -883,6 +1204,12 @@ mod tray {
                                 && send(Message::Chip(chip::Input::Live(chip::Live::of(
                                     &notification.params,
                                 ))))
+                                && (!settings_moved(settings, &notification.params)
+                                    || reread(&postbox, &mut settings).await)
+                        }
+                        BANSHEE_DOWNLOAD_PROGRESS => {
+                            !download_finished(&notification.params)
+                                || reread(&postbox, &mut settings).await
                         }
                         BANSHEE_CUE => match signal_of(&notification.params) {
                             Some(signal) => send(Message::Chip(chip::Input::Signal(signal))),
@@ -911,6 +1238,7 @@ mod tray {
             }
             if !send(Message::State(Indicator::NotRunning))
                 || !send(Message::Problem(None))
+                || !send(Message::Choices(Choices::default()))
                 || !send(Message::Chip(chip::Input::Gone))
             {
                 return;
@@ -919,25 +1247,115 @@ mod tray {
         }
     }
 
-    fn spawn_copy_last(postbox: impl Postbox) {
+    fn settings_count(status: &Value) -> Option<u64> {
+        status.get("settings_changes").and_then(Value::as_u64)
+    }
+
+    /// `seen` is the count of the last successful read, and `None` counts as
+    /// moved. A push without a count never moves it.
+    fn settings_moved(seen: Option<u64>, pushed: &Value) -> bool {
+        settings_count(pushed).is_some_and(|count| seen != Some(count))
+    }
+
+    /// A file that lands, or fails, can change what is on this machine.
+    fn download_finished(progress: &Value) -> bool {
+        progress
+            .get("state")
+            .and_then(|state| DownloadState::deserialize(state).ok())
+            .is_some_and(|state| state != DownloadState::Downloading)
+    }
+
+    async fn call_in_time(
+        method: &str,
+        params: Value,
+    ) -> Result<Result<Value, banshee_common::error::BansheeError>, tokio::time::error::Elapsed>
+    {
+        tokio::time::timeout(DAEMON_WAIT, utils::call_daemon(method, params)).await
+    }
+
+    async fn ask_daemon(
+        method: &str,
+        params: Value,
+    ) -> Result<Value, banshee_common::error::BansheeError> {
+        call_in_time(method, params).await.map_err(|_| {
+            banshee_common::error::BansheeError::Other(
+                "the daemon did not answer in time".to_string(),
+            )
+        })?
+    }
+
+    type Reading = (Remote, Choices, Option<u64>);
+
+    async fn read_choices() -> Option<Reading> {
+        let (status, voices) = tokio::try_join!(
+            ask_daemon(BANSHEE_STATUS, serde_json::json!({})),
+            ask_daemon(BANSHEE_LIST_VOICES, serde_json::json!({}))
+        )
+        .ok()?;
+        let remote = Remote::of(&status);
+        let choices = Choices::of(&status, &voices, &remote);
+        Some((remote, choices, settings_count(&status)))
+    }
+
+    /// False once the far end is gone.
+    fn post_reading(postbox: &impl Postbox, (remote, choices, _): Reading) -> bool {
+        postbox.post(Message::Remote(remote)) && postbox.post(Message::Choices(choices))
+    }
+
+    /// False once the far end is gone. A failed read forgets the count, so the
+    /// next state push reads again.
+    async fn reread(postbox: &impl Postbox, settings: &mut Option<u64>) -> bool {
+        let Some(reading) = read_choices().await else {
+            *settings = None;
+            return true;
+        };
+        let count = reading.2;
+        let delivered = post_reading(postbox, reading);
+        if delivered {
+            *settings = count;
+        }
+        delivered
+    }
+
+    /// Runs `work` to the end on its own thread, so a click never waits on the daemon.
+    fn spawn_work(work: impl Future<Output = ()> + Send + 'static) {
         std::thread::spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
+            match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
-                Ok(runtime) => runtime,
-                Err(error) => return log::error!("{error}"),
-            };
-            let reply = runtime.block_on(async {
-                tokio::time::timeout(
-                    COPY_WAIT,
-                    utils::call_daemon(
-                        BANSHEE_HISTORY,
-                        serde_json::json!({ "limit": 1, "kind": "dictation" }),
-                    ),
-                )
-                .await
+                Ok(runtime) => runtime.block_on(work),
+                Err(error) => log::error!("{error}"),
+            }
+        });
+    }
+
+    fn spawn_pick(postbox: impl Postbox, pick: Pick) {
+        spawn_work(async move {
+            let settings = serde_json::json!({
+                "settings": { pick.key: pick.value },
+                "persist": true,
             });
+            match call_in_time(BANSHEE_CONFIGURE, settings).await {
+                Ok(Ok(_)) => return,
+                Ok(Err(error)) => {
+                    log::warn!("{} was not set to {}: {error}", pick.key, pick.value)
+                }
+                Err(_) => log::error!("the daemon did not answer in time"),
+            }
+            if let Some(reading) = read_choices().await {
+                post_reading(&postbox, reading);
+            }
+        });
+    }
+
+    fn spawn_copy_last(postbox: impl Postbox) {
+        spawn_work(async move {
+            let reply = call_in_time(
+                BANSHEE_HISTORY,
+                serde_json::json!({ "limit": 1, "kind": "dictation" }),
+            )
+            .await;
             let Ok(reply) = reply else {
                 return log::error!("the daemon did not answer in time");
             };
@@ -1077,7 +1495,16 @@ mod tray {
             COPY_LAST_ID => Some(Message::CopyLast),
             OPEN_ID | PROBLEM_ID | START_FAILED_ID => Some(Message::Open),
             START_ID => Some(Message::Start),
-            _ => None,
+            _ => {
+                let (menu, value) = id.split_once(':')?;
+                let (_, key) = CHOICE_MENUS.iter().find(|(known, _)| *known == menu)?;
+                (!value.is_empty()).then(|| {
+                    Message::Pick(Pick {
+                        key,
+                        value: value.to_string(),
+                    })
+                })
+            }
         }
     }
 
@@ -1344,6 +1771,7 @@ mod tray {
                 start,
                 &device(Some("MacBook Pro Microphone"), None),
                 &Remote::default(),
+                &Choices::default(),
             )
         }
 
@@ -1361,13 +1789,16 @@ mod tray {
                 start,
                 &Device::default(),
                 &Remote::default(),
+                &Choices::default(),
             )
         }
 
-        const TODAYS_ROWS: [&str; 8] = [
+        const TODAYS_ROWS: [&str; 10] = [
             "Idle",
             "Microphone: MacBook Pro Microphone, opens when you speak",
             "Audio and text stay on this machine",
+            "Listening model",
+            "Voice",
             "---",
             "Copy last dictation",
             "Open Banshee",
@@ -1401,6 +1832,8 @@ mod tray {
                     "---",
                     "Banshee is not running",
                     "Audio and text stay on this machine",
+                    "Listening model",
+                    "Voice",
                     "---",
                     "Copy last dictation",
                     "Open Banshee",
@@ -1575,32 +2008,409 @@ mod tray {
             );
         }
 
+        fn ids_of(row: &Row) -> Vec<&str> {
+            let children = match row {
+                Row::Submenu { rows, .. } => rows.iter().flat_map(ids_of).collect(),
+                _ => Vec::new(),
+            };
+            row.id().into_iter().chain(children).collect()
+        }
+
         // The menu keeps one native item per id, so two rows with one id would
         // share it.
         #[test]
         fn no_menu_carries_one_id_twice() {
             let wrong = problem("Accessibility is off");
+            let mut named_like_rows = status();
+            named_like_rows["stt_models"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"id": "quit", "label": "Quit", "downloaded": true}));
+            let mut voices_like_rows = voices();
+            voices_like_rows["voices"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"id": "quit", "name": "Quit", "downloaded": true}));
+            let listed = Choices::of(
+                &named_like_rows,
+                &voices_like_rows,
+                &Remote::of(&named_like_rows),
+            );
             for indicator in [Indicator::Idle, Indicator::Recording, Indicator::NotRunning] {
+                let choices = if indicator == Indicator::NotRunning {
+                    &Choices::default()
+                } else {
+                    &listed
+                };
                 for start in [
                     Start::Ready,
                     Start::Running,
                     Start::Started(Instant::now()),
                     Start::Failed,
                 ] {
-                    let ids: Vec<_> = menu_rows(
+                    let rows = menu_rows(
                         indicator,
                         Some(&wrong),
                         start,
                         &Device::default(),
                         &Remote::default(),
-                    )
-                    .iter()
-                    .filter_map(Row::id)
-                    .collect();
+                        choices,
+                    );
+                    let ids: Vec<_> = rows.iter().flat_map(ids_of).collect();
                     let unique: std::collections::HashSet<_> = ids.iter().collect();
                     assert_eq!(unique.len(), ids.len(), "{indicator:?} {start:?}: {ids:?}");
                 }
             }
+        }
+
+        fn status() -> Value {
+            serde_json::json!({
+                "config": {
+                    "stt": {"model": "whisper-large"},
+                    "tts": {"voice": "af_heart"},
+                },
+                "stt_models": [
+                    {"id": "parakeet", "label": "Parakeet", "downloaded": true},
+                    {"id": "whisper-turbo", "label": "Whisper turbo", "downloaded": false},
+                    {"id": "whisper-large", "label": "Whisper large", "downloaded": true},
+                ],
+            })
+        }
+
+        fn voices() -> Value {
+            serde_json::json!({
+                "current": "af_heart",
+                "voices": [
+                    {"id": "companion", "name": "Companion", "downloaded": true},
+                    {"id": "af_sky", "name": "Sky", "downloaded": false},
+                    {"id": "af_heart", "name": "Heart", "downloaded": true},
+                ],
+            })
+        }
+
+        fn entries(choice: &Choice) -> Vec<(&str, &str)> {
+            match choice {
+                Choice::Local { entries, .. } => entries
+                    .iter()
+                    .map(|entry| (entry.id.as_str(), entry.label.as_str()))
+                    .collect(),
+                _ => panic!("expected a local choice"),
+            }
+        }
+
+        fn menu(choices: &Choices, indicator: Indicator) -> Vec<String> {
+            menu_labels(
+                indicator,
+                None,
+                Start::Ready,
+                &Device::default(),
+                &Remote::default(),
+                choices,
+            )
+        }
+
+        #[test]
+        fn choices_list_only_downloaded_entries_in_the_daemons_order() {
+            let choices = Choices::of(&status(), &voices(), &Remote::of(&status()));
+            assert_eq!(
+                entries(&choices.model),
+                [("parakeet", "Parakeet"), ("whisper-large", "Whisper large")]
+            );
+            assert_eq!(
+                entries(&choices.voice),
+                [("companion", "Companion"), ("af_heart", "Heart")]
+            );
+        }
+
+        #[test]
+        fn choices_mark_the_configured_pick() {
+            let choices = Choices::of(&status(), &voices(), &Remote::of(&status()));
+            assert!(
+                matches!(&choices.model, Choice::Local { picked, .. } if picked == "whisper-large")
+            );
+            assert!(matches!(&choices.voice, Choice::Local { picked, .. } if picked == "af_heart"));
+        }
+
+        #[test]
+        fn a_remote_listener_or_speaker_is_a_server_choice() {
+            let mut remote = status();
+            remote["remote"] = serde_json::json!({
+                "stt": {"remote": true, "host": "api.example.com"},
+                "tts": {"remote": true, "host": "tts.example.com", "speaker_started": true},
+            });
+            let choices = Choices::of(&remote, &voices(), &Remote::of(&remote));
+            assert!(matches!(&choices.model, Choice::Server(host) if host == "api.example.com"));
+            assert!(matches!(&choices.voice, Choice::Server(host) if host == "tts.example.com"));
+        }
+
+        #[test]
+        fn the_submenus_read_the_exact_copy() {
+            let local = menu(
+                &Choices::of(&status(), &voices(), &Remote::of(&status())),
+                Indicator::Idle,
+            );
+            assert_eq!(
+                local[3..10],
+                [
+                    "Listening model: Whisper large",
+                    "  Parakeet",
+                    "  \u{2713} Whisper large",
+                    "Voice: Heart",
+                    "  Companion",
+                    "  \u{2713} Heart",
+                    "---",
+                ]
+            );
+
+            let mut absent = status();
+            absent["config"]["stt"]["model"] = "gone".into();
+            let rows = menu(
+                &Choices::of(&absent, &voices(), &Remote::of(&absent)),
+                Indicator::Idle,
+            );
+            assert_eq!(
+                rows[3..6],
+                ["Listening model", "  Parakeet", "  Whisper large"]
+            );
+
+            let mut remote = status();
+            remote["remote"] = serde_json::json!({
+                "stt": {"remote": true, "host": "api.example.com"},
+            });
+            let choices = Choices::of(&remote, &voices(), &Remote::of(&remote));
+            assert_eq!(
+                menu(&choices, Indicator::Idle)[3],
+                "Listening model: on api.example.com"
+            );
+            let rows = menu_rows(
+                Indicator::Idle,
+                None,
+                Start::Ready,
+                &Device::default(),
+                &Remote::default(),
+                &choices,
+            );
+            assert!(rows.iter().any(|row| matches!(
+                row,
+                Row::Submenu { id: MODEL_MENU_ID, enabled: false, rows: children, .. } if children.is_empty()
+            )));
+
+            let mut speaker = status();
+            speaker["remote"] = serde_json::json!({
+                "tts": {"remote": true, "host": "tts.example.com", "speaker_started": true},
+            });
+            let rows = menu(
+                &Choices::of(&speaker, &voices(), &Remote::of(&speaker)),
+                Indicator::Idle,
+            );
+            assert_eq!(rows[6], "Voice: on tts.example.com");
+
+            let down = menu(&Choices::default(), Indicator::Idle);
+            assert_eq!(down[3..5], ["Listening model", "Voice"]);
+            let rows = menu_rows(
+                Indicator::Idle,
+                None,
+                Start::Ready,
+                &Device::default(),
+                &Remote::default(),
+                &Choices::default(),
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| matches!(row, Row::Submenu { enabled: false, rows: children, .. } if children.is_empty()))
+                    .count(),
+                2
+            );
+        }
+
+        #[test]
+        fn a_submenu_with_nothing_downloaded_is_left_out() {
+            let empty = Choices::of(
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+                &Remote::of(&serde_json::json!({})),
+            );
+            assert_eq!(
+                menu(&empty, Indicator::Idle)[2..],
+                [&TODAYS_ROWS[2..3], &TODAYS_ROWS[5..]].concat()
+            );
+        }
+
+        #[test]
+        fn a_dead_daemon_shows_both_submenus_disabled() {
+            let rows = menu_rows(
+                Indicator::NotRunning,
+                None,
+                Start::Ready,
+                &Device::default(),
+                &Remote::default(),
+                &Choices::of(&status(), &voices(), &Remote::of(&status())),
+            );
+            let disabled = rows
+                .iter()
+                .filter(|row| matches!(row, Row::Submenu { enabled: false, rows: children, .. } if children.is_empty()))
+                .count();
+            assert_eq!(disabled, 2);
+        }
+
+        #[test]
+        fn a_pick_id_is_a_write_of_its_key() {
+            let pick = |id| match menu_message(id) {
+                Some(Message::Pick(pick)) => Some(pick),
+                _ => None,
+            };
+            assert_eq!(
+                pick("model:whisper-large-v3-turbo"),
+                Some(Pick {
+                    key: "stt.model",
+                    value: "whisper-large-v3-turbo".to_string()
+                })
+            );
+            assert_eq!(
+                pick("voice:af_sky"),
+                Some(Pick {
+                    key: "tts.voice",
+                    value: "af_sky".to_string()
+                })
+            );
+            assert_eq!(pick("model:"), None);
+            assert_eq!(pick("other:x"), None);
+        }
+
+        type Written = std::rc::Rc<std::cell::RefCell<Vec<Pick>>>;
+
+        fn picking_app() -> (App<std::sync::mpsc::Sender<Message>>, Written) {
+            let written: Written = Default::default();
+            let mut app = App::new(std::sync::mpsc::channel::<Message>().0);
+            let picks = written.clone();
+            app.run_pick = Box::new(move |_, pick| picks.borrow_mut().push(pick));
+            app.update(Message::State(Indicator::Idle));
+            app.update(Message::Choices(Choices::of(
+                &status(),
+                &voices(),
+                &Remote::of(&status()),
+            )));
+            (app, written)
+        }
+
+        fn model_pick(value: &str) -> Pick {
+            Pick {
+                key: MODEL_KEY,
+                value: value.to_string(),
+            }
+        }
+
+        #[test]
+        fn the_same_choices_stay() {
+            let (mut app, _) = picking_app();
+            assert_eq!(
+                app.update(Message::Choices(Choices::of(
+                    &status(),
+                    &voices(),
+                    &Remote::of(&status())
+                ))),
+                Step::Stay
+            );
+            let mut moved = status();
+            moved["config"]["stt"]["model"] = "parakeet".into();
+            assert_eq!(
+                app.update(Message::Choices(Choices::of(
+                    &moved,
+                    &voices(),
+                    &Remote::of(&moved)
+                ))),
+                Step::Show
+            );
+            assert_eq!(app.update(Message::Choices(Choices::default())), Step::Show);
+            assert_eq!(app.update(Message::Choices(Choices::default())), Step::Stay);
+        }
+
+        #[test]
+        fn a_pick_moves_the_mark_at_once() {
+            let (mut app, written) = picking_app();
+            assert_eq!(
+                app.update(Message::Pick(model_pick("parakeet"))),
+                Step::Show
+            );
+            assert_eq!(*written.borrow(), [model_pick("parakeet")]);
+            assert_eq!(
+                menu(&app.choices, Indicator::Idle)[3..6],
+                [
+                    "Listening model: Parakeet",
+                    "  \u{2713} Parakeet",
+                    "  Whisper large"
+                ]
+            );
+        }
+
+        // muda unchecks the row on the click, so the show puts the check back.
+        #[test]
+        fn a_click_on_the_checked_row_writes_nothing_and_shows_again() {
+            let (mut app, written) = picking_app();
+            assert_eq!(
+                app.update(Message::Pick(model_pick("whisper-large"))),
+                Step::Show
+            );
+            assert!(written.borrow().is_empty());
+            assert_eq!(
+                menu(&app.choices, Indicator::Idle)[3..6],
+                [
+                    "Listening model: Whisper large",
+                    "  Parakeet",
+                    "  \u{2713} Whisper large"
+                ]
+            );
+        }
+
+        #[test]
+        fn a_moved_settings_count_asks_for_a_reread() {
+            let seen = Some(3);
+            let pushed =
+                |count: u64| serde_json::json!({"recording": false, "settings_changes": count});
+            assert!(settings_moved(None, &pushed(3)));
+            assert!(!settings_moved(seen, &pushed(3)));
+            assert!(settings_moved(seen, &pushed(4)));
+            assert!(!settings_moved(
+                seen,
+                &serde_json::json!({"recording": true})
+            ));
+        }
+
+        #[test]
+        fn a_finished_download_asks_for_a_reread() {
+            for (state, reread) in [("downloading", false), ("done", true), ("failed", true)] {
+                let pushed = serde_json::json!({
+                    "model": "ggml-large-v3-turbo.bin",
+                    "label": "Whisper turbo",
+                    "index": 1,
+                    "count": 1,
+                    "bytes": 10,
+                    "total": 10,
+                    "state": state,
+                });
+                assert_eq!(download_finished(&pushed), reread, "{state}");
+            }
+            assert!(!download_finished(&serde_json::json!({})));
+        }
+
+        #[test]
+        fn a_moved_mark_keeps_the_layout_and_a_new_entry_moves_it() {
+            let layout = |status: &Value| {
+                layout_of(&menu_rows(
+                    Indicator::Idle,
+                    None,
+                    Start::Ready,
+                    &Device::default(),
+                    &Remote::default(),
+                    &Choices::of(status, &voices(), &Remote::of(status)),
+                ))
+            };
+            let mut picked = status();
+            picked["config"]["stt"]["model"] = "parakeet".into();
+            assert_eq!(layout(&status()), layout(&picked));
+            let mut fetched = status();
+            fetched["stt_models"][1]["downloaded"] = true.into();
+            assert_ne!(layout(&status()), layout(&fetched));
         }
 
         #[test]
@@ -1612,6 +2422,7 @@ mod tray {
                     Start::Ready,
                     &Device::default(),
                     &Remote::default(),
+                    &Choices::default(),
                 );
                 action(rows, COPY_LAST_ID)
                     .expect("menu_rows must include the copy action")
@@ -1646,6 +2457,7 @@ mod tray {
                     Start::Ready,
                     &Device::default(),
                     &Remote::default(),
+                    &Choices::default(),
                 );
                 let open = action(rows, OPEN_ID).expect("menu_rows must include the open action");
                 assert!(open.1, "{indicator:?} must still offer the window");

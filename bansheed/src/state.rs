@@ -13,6 +13,7 @@ use tokio::sync::{broadcast, watch};
 use crate::audio::cues::{Cues, Reason, ReasonCode, Signal, Target, broken};
 use crate::config::{BargeInMode, Config, FeedbackMode};
 use crate::text_to_speech::{SpeechPlayer, lock};
+use change_count::ChangeCount;
 
 // One file emits at most 101 notifications, so a subscriber has to fall a whole
 // file behind before the channel starts dropping any of them
@@ -498,7 +499,7 @@ pub struct DaemonState {
     recording: AtomicU8,
     started_at: Instant,
     history: Mutex<crate::history::Store>,
-    history_changes: watch::Sender<u64>,
+    history_changes: ChangeCount,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
     // Reading a model off disk can take seconds, and the listener answers
@@ -513,7 +514,8 @@ pub struct DaemonState {
     // One counter for the whole device picture. It moves only when a setter
     // writes a value that differs, because the watchdog rewrites the same one
     // every rescan and each move wakes the push task of every subscriber.
-    device_changes: watch::Sender<u64>,
+    device_changes: ChangeCount,
+    settings_changes: ChangeCount,
     downloads: broadcast::Sender<DownloadProgress>,
     downloading: AtomicBool,
     /// Set when the daemon leaves to be started again, so the supervisor reads
@@ -642,8 +644,9 @@ impl DaemonState {
             loading_model: watch::channel(false).0,
             last_error: watch::channel(None).0,
             last_speech_error: watch::channel(None).0,
-            device_changes: watch::channel(0).0,
-            history_changes: watch::channel(0).0,
+            device_changes: ChangeCount::new(),
+            history_changes: ChangeCount::new(),
+            settings_changes: ChangeCount::new(),
             downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
             downloading: AtomicBool::new(false),
             restart_wanted: AtomicBool::new(false),
@@ -1301,8 +1304,7 @@ impl DaemonState {
     }
 
     fn publish_device_change(&self) {
-        self.device_changes
-            .send_modify(|generation| *generation += 1);
+        self.device_changes.bump();
     }
 
     /// Moves when the device a client can see changes. The value is a
@@ -1877,7 +1879,7 @@ impl DaemonState {
     }
 
     pub fn history_changes(&self) -> u64 {
-        *self.history_changes.borrow()
+        self.history_changes.now()
     }
 
     pub fn keep(&self, entry: &crate::history::NewEntry) {
@@ -1886,7 +1888,7 @@ impl DaemonState {
         }
         let kept = self.history_store().keep(entry);
         match kept {
-            Ok(_) => self.history_changes.send_modify(|changes| *changes += 1),
+            Ok(_) => self.history_changes.bump(),
             Err(error) => log::error!("Failed to keep a history row: {error}"),
         }
     }
@@ -1947,7 +1949,7 @@ impl DaemonState {
 
     pub fn clear_history(&self) -> Result<(), banshee_common::error::BansheeError> {
         self.history_store().clear()?;
-        self.history_changes.send_modify(|changes| *changes += 1);
+        self.history_changes.bump();
         Ok(())
     }
 
@@ -1955,6 +1957,20 @@ impl DaemonState {
     /// count, not a row: the reader lists the history itself.
     pub fn subscribe_history_changes(&self) -> watch::Receiver<u64> {
         self.history_changes.subscribe()
+    }
+
+    pub fn settings_changes(&self) -> u64 {
+        self.settings_changes.now()
+    }
+
+    /// Moves once per persisted settings write, after its applies, so a reader
+    /// woken by it sees the speaker and listener the write built.
+    pub fn bump_settings_changes(&self) {
+        self.settings_changes.bump();
+    }
+
+    pub fn subscribe_settings_changes(&self) -> watch::Receiver<u64> {
+        self.settings_changes.subscribe()
     }
 
     /// Called from the real time audio thread, so it must not lock or allocate.
@@ -2041,5 +2057,6 @@ impl DaemonState {
     }
 }
 
+mod change_count;
 #[cfg(test)]
 mod tests;
