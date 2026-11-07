@@ -590,10 +590,10 @@ impl SeatHandler for Stage {
 
 impl Stage {
     fn release_pointer(&mut self) {
-        if let Some((_, pointer)) = self.pointer.take() {
-            if pointer.version() >= 3 {
-                pointer.release();
-            }
+        if let Some((_, pointer)) = self.pointer.take()
+            && pointer.version() >= 3
+        {
+            pointer.release();
         }
     }
 }
