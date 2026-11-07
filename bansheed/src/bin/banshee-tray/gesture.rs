@@ -25,7 +25,6 @@ pub enum End {
     Repeat,
 }
 
-/// What a track animates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Property {
     TranslationX,
@@ -34,9 +33,7 @@ pub enum Property {
     Scale,
     Opacity,
     DashPhase,
-    /// The dash of an outline's dash pattern.
     Dash,
-    /// The gap of an outline's dash pattern.
     Gap,
     Width,
 }
@@ -401,8 +398,7 @@ pub fn at(track: &Track, elapsed: f64, model: f64) -> f64 {
     values[segment] + (values[segment + 1] - values[segment]) * eased
 }
 
-/// The eased progress at `x` along `curve`: Newton's method finds the curve's
-/// parameter for `x`, and bisection takes over where Newton stalls.
+/// The eased progress at `x` along `curve`.
 #[cfg(any(target_os = "linux", test))]
 pub fn ease([x1, y1, x2, y2]: Bezier, x: f64) -> f64 {
     const CLOSE: f64 = 1e-7;

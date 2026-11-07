@@ -17,7 +17,6 @@ use crate::gesture::{self, Property, Track};
 use crate::scenes::{self, Move, failed, holds_the_voice, rest_pose, wears_headphones};
 use crate::words::Line;
 
-/// The figure's own 100-unit square has its centre here.
 const CENTRE: (f64, f64) = (50.0, 50.0);
 
 static OUTLINE_LENGTH: LazyLock<f64> =
@@ -197,8 +196,6 @@ fn paint_headphones(canvas: &mut Pixmap, live: &Live, voice: Transform, clip: &M
     }
 }
 
-/// The words with their baseline centred in the capsule, behind a mask over
-/// their ink that the reveal widens from the left.
 fn paint_words(
     canvas: &mut Pixmap,
     line: &Line,
@@ -288,8 +285,7 @@ enum Layer {
     WordsMask,
 }
 
-/// Each animated value: the model, overwritten by every move in order, as a
-/// later Core Animation on the same key path covers an earlier one.
+/// Each animated value: the model, overwritten by every move in order.
 struct Live {
     capsule: Motion,
     exit: Motion,

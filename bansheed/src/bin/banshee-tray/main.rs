@@ -298,7 +298,6 @@ mod tray {
         Lost,
     }
 
-    /// Draws a scene: the panel on macOS, the layer-shell capsule on Linux.
     trait Surface {
         fn show(&mut self, scene: Option<&chip::Scene>);
         fn level(&mut self, level: f32);

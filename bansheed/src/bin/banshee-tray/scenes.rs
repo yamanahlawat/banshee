@@ -32,7 +32,7 @@ pub enum Move {
 /// How a scene's moves join what showed before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Entrance {
-    /// The panel had nothing on screen.
+    /// Nothing was on screen.
     Fresh,
     /// A scene already on screen, and its words carry over unchanged.
     SameWords,

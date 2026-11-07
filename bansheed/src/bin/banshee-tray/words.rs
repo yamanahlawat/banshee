@@ -52,7 +52,6 @@ pub fn line(text: &str, cut: Cut, room: f32) -> Line {
     }
 }
 
-/// The bundled Archivo at the capsule's weight and width, parsed once.
 fn capsule_font() -> &'static Font {
     static FONT: OnceLock<Font> = OnceLock::new();
     FONT.get_or_init(|| font(WORDS_WEIGHT as f32, WORDS_WIDTH as f32))

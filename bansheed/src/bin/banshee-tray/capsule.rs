@@ -198,7 +198,6 @@ fn connect(
     Ok((event_loop, stage))
 }
 
-/// The layer surface while it shows.
 struct Shown {
     layer: LayerSurface,
     /// The logical size last asked for.
@@ -211,13 +210,11 @@ struct Shown {
     clickable: Option<Rect>,
 }
 
-/// The capsule thread's state, which every Wayland event reaches.
 struct Stage {
     registry: RegistryState,
     compositor: CompositorState,
     outputs: OutputState,
     seats: SeatState,
-    /// The seat with the pointer, and the pointer.
     pointer: Option<(wl_seat::WlSeat, wl_pointer::WlPointer)>,
     open: Box<dyn Fn() + Send>,
     shm: Shm,
@@ -340,7 +337,6 @@ impl Stage {
         self.sync_clickable(now);
     }
 
-    /// Commits the input region when the capsule's rectangle moved.
     fn sync_clickable(&mut self, now: Instant) {
         let Some(shown) = self.surface.as_mut() else {
             return;
@@ -582,7 +578,6 @@ impl SeatHandler for Stage {
 }
 
 impl Stage {
-    /// Lets go of the pointer when `seat` holds it.
     fn release_pointer(&mut self, seat: &wl_seat::WlSeat) {
         if self.pointer.as_ref().is_some_and(|(held, _)| held == seat)
             && let Some((_, pointer)) = self.pointer.take()

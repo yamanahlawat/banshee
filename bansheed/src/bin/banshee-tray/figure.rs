@@ -10,11 +10,8 @@ pub const INSET: f64 = (CAPSULE - FIGURE) / 2.0;
 pub const TRAVEL: f64 = 12.0;
 pub const WORDS_GAP: f64 = 4.0;
 pub const WORDS_TAIL: f64 = 16.0;
-/// Where the words start, from the capsule's left edge.
 pub const WORDS_LEFT: f64 = INSET + FIGURE + WORDS_GAP;
-/// The capsule's width besides its words.
 pub const AROUND_WORDS: f64 = WORDS_LEFT + WORDS_TAIL;
-/// The clear space the capsule keeps from each side of the screen.
 pub const SCREEN_MARGIN: f64 = 12.0;
 pub const WORDS_SIZE: f64 = 16.0;
 pub const WORDS_TRACKING: f64 = -0.015;
@@ -23,7 +20,6 @@ pub const WORDS_WIDTH: f64 = 106.0;
 /// Antialiased glyph edges reach past the outlines' box.
 pub const WORDS_BLEED: f64 = 1.0;
 
-/// The capsule's width around words `words` wide.
 pub fn capsule_width(words: f64) -> f64 {
     WORDS_LEFT + words + WORDS_TAIL
 }
