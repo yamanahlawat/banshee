@@ -100,6 +100,8 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - On Linux, Reduce Motion and high contrast are not read.
 - The Linux capsule uses integer scale only; a fractional scale draws it soft.
 - Live words in characters the Archivo Latin subset lacks are left out on Linux.
+- The Linux capsule's per-frame cost is unmeasured: it allocates its masks, pixmap and buffer
+  each frame, and live words reshape the whole transcript on every partial.
 - An idea for answers: use the unusual words in an agent's question as vocabulary for that
   answer.
 - A listening model download that fails for a reason other than a licence reaches the window

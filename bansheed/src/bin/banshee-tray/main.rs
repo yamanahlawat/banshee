@@ -391,8 +391,6 @@ mod tray {
     enum Flow {
         Stay,
         Exit,
-        #[cfg(target_os = "linux")]
-        Lost,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -400,8 +398,6 @@ mod tray {
         Show,
         Stay,
         Exit,
-        #[cfg(target_os = "linux")]
-        Lost,
     }
 
     #[derive(Debug, Default, PartialEq, Eq)]
@@ -1015,8 +1011,6 @@ mod tray {
                 }
                 Step::Stay => Flow::Stay,
                 Step::Exit => Flow::Exit,
-                #[cfg(target_os = "linux")]
-                Step::Lost => Flow::Lost,
             }
         }
 
@@ -1095,7 +1089,7 @@ mod tray {
                     std::mem::replace(&mut self.starting, finished) != self.starting
                 }
                 #[cfg(target_os = "linux")]
-                Message::Lost => return Step::Lost,
+                Message::Lost => return Step::Exit,
                 Message::Open => {
                     open_the_window().unwrap_or_else(|error| log::error!("{error}"));
                     return Step::Stay;
@@ -1671,11 +1665,13 @@ mod tray {
                     Err(_) => break,
                 },
             };
+            #[cfg(target_os = "linux")]
+            if matches!(message, Message::Lost) {
+                return Err("the Wayland connection closed".into());
+            }
             match app.handle(message) {
                 Flow::Stay => {}
                 Flow::Exit => break,
-                #[cfg(target_os = "linux")]
-                Flow::Lost => return Err("the Wayland connection closed".into()),
             }
         }
         Ok(())

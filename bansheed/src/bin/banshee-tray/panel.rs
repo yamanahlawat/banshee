@@ -36,20 +36,20 @@ use objc2_quartz_core::{
 
 use super::chip::{Cut, Scene, Show, words_of};
 use super::figure::{
-    self, BAND, BAND_GAP, BEHIND, BONE, CAPSULE, CUP_GAP, CUP_RADII, CUPS, FIGURE, HALO, HEADBAND,
-    INSET, KINDLE_AFTER, LEVEL_STEP, LIGHT, OUTLINE, OUTLINE_CONTRAST, PIVOT, Pose, RING,
-    RING_STRENGTH, RUST, Segment, TRAVEL, Voice, WORDS_BLEED, WORDS_GAP, WORDS_SIZE, WORDS_TAIL,
-    WORDS_TRACKING, WORDS_WEIGHT, WORDS_WIDTH, WORKING_DEPTH,
+    self, AROUND_WORDS, BAND, BAND_GAP, BEHIND, BONE, CAPSULE, CUP_GAP, CUP_RADII, CUPS, FIGURE,
+    HALO, HEADBAND, INSET, KINDLE_AFTER, LEVEL_STEP, LIGHT, OUTLINE, OUTLINE_CONTRAST, PIVOT, Pose,
+    RING, RING_STRENGTH, RUST, SCREEN_MARGIN, Segment, TRAVEL, Voice, WORDS_BLEED, WORDS_LEFT,
+    WORDS_SIZE, WORDS_TRACKING, WORDS_WEIGHT, WORDS_WIDTH,
 };
 use super::scenes::{
-    Entrance, Move, answer_opens, centred, holds_the_voice, in_capsule, leaving, moves,
+    Entrance, Move, answer_opens, centred, failed, holds_the_voice, in_capsule, leaving, moves,
+    rest_pose, takes_clicks, wears_headphones,
 };
 
 mod motion;
 
 /// Unmeasured.
 const ABOVE_DOCK: CGFloat = 12.0;
-const SCREEN_MARGIN: CGFloat = 12.0;
 /// Measured: a Dock with 54pt tiles shows about 79pt tall.
 const DOCK_ABOVE_TILE: CGFloat = 26.0;
 /// Unmeasured: the tile size the Dock uses before anyone sets one.
@@ -609,7 +609,7 @@ impl Panel {
         }
         CATransaction::commit();
         self.window
-            .setIgnoresMouseEvents(!matches!(scene.show, Show::Broken(_)));
+            .setIgnoresMouseEvents(!takes_clicks(&scene.show));
         self.window.orderFrontRegardless();
         self.on_screen = Some(scene.clone());
     }
@@ -781,23 +781,16 @@ impl Panel {
     fn draw(&self, show: &Show, place: Place, contrast: bool, entering: bool) {
         let layers = &self.layers;
         let working = matches!(show, Show::Working);
-        let failed = matches!(show, Show::NothingHeard(_) | Show::Broken(_));
         self.lay_words(show, place, entering);
 
-        let rest = figure::pose(0.0, 0.0, self.calm);
-        let depth = if working && !self.calm {
-            WORKING_DEPTH
-        } else {
-            rest.depth
-        };
-        self.strike(Pose { depth, ..rest });
+        self.strike(rest_pose(show, self.calm));
         let outline = if contrast { OUTLINE_CONTRAST } else { OUTLINE };
         for layer in [&layers.outline, &layers.fill] {
             layer.setLineWidth(outline);
         }
         layers
             .outline
-            .setLineDashPattern(failed.then_some(&*self.outline_dash));
+            .setLineDashPattern(failed(show).then_some(&*self.outline_dash));
 
         for layer in [
             &layers.ring_far,
@@ -809,19 +802,17 @@ impl Panel {
             layer.setHidden(!working);
         }
         layers.fill.setHidden(!holds_the_voice(show));
-        layers
-            .headphones
-            .setHidden(!matches!(show, Show::YourTurn | Show::Answering(_)));
+        layers.headphones.setHidden(!wears_headphones(show));
     }
 
     /// Sizes the capsule to the scene's words and sets them in it.
     fn lay_words(&self, show: &Show, place: Place, entering: bool) {
         let layers = &self.layers;
-        let room = 2.0 * (place.right - place.anchor.x) - (INSET + FIGURE + WORDS_GAP + WORDS_TAIL);
+        let room = 2.0 * (place.right - place.anchor.x) - AROUND_WORDS;
         let words = words_of(show).and_then(|(words, cut)| self.words(words, cut, room));
-        let width = words.as_ref().map_or(CAPSULE, |words| {
-            INSET + FIGURE + WORDS_GAP + words.width + WORDS_TAIL
-        });
+        let width = words
+            .as_ref()
+            .map_or(CAPSULE, |words| figure::capsule_width(words.width));
         let from = if entering || self.calm {
             width
         } else {
@@ -843,7 +834,7 @@ impl Panel {
             layers.words.setPath(Some(&words.path));
             layers.words.setBounds(words.ink);
             layers.words.setPosition(CGPoint::new(
-                INSET + FIGURE + WORDS_GAP + words.ink.origin.x,
+                WORDS_LEFT + words.ink.origin.x,
                 baseline + words.ink.origin.y,
             ));
             layers.words_mask.setBounds(rect(

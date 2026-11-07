@@ -36,10 +36,7 @@ use tiny_skia::Pixmap;
 use crate::chip::Scene;
 use crate::figure::{CAPSULE, TRAVEL};
 use crate::paint;
-use crate::renderer::{Order, Renderer, room_on, to_argb};
-
-/// The clear space below the capsule, `TRAVEL`, already holds it off the edge.
-const BOTTOM_MARGIN: i32 = 0;
+use crate::renderer::{Order, Rect, Renderer, room_on, to_argb};
 
 enum Command {
     Show(Option<Scene>),
@@ -184,7 +181,6 @@ fn connect(
         surface: None,
         entered: None,
         scale: 1,
-        owed: false,
         done: false,
     };
     let looped = |error: calloop::Error| Failure::EventLoop(error.to_string());
@@ -215,8 +211,6 @@ struct Shown {
     clickable: Option<Rect>,
 }
 
-type Rect = (i32, i32, i32, i32);
-
 /// The capsule thread's state, which every Wayland event reaches.
 struct Stage {
     registry: RegistryState,
@@ -235,8 +229,6 @@ struct Stage {
     /// The output the last surface entered.
     entered: Option<wl_output::WlOutput>,
     scale: u32,
-    /// A configure, a scale change or a frame callback asks for a frame.
-    owed: bool,
     done: bool,
 }
 
@@ -293,7 +285,6 @@ impl Stage {
         );
         layer.set_anchor(Anchor::BOTTOM);
         layer.set_exclusive_zone(0);
-        layer.set_margin(0, 0, BOTTOM_MARGIN, 0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         set_clickable(&self.compositor, &layer, None);
         layer.set_size(asked.0, asked.1);
@@ -314,7 +305,7 @@ impl Stage {
             .outputs()
             .filter_map(|output| self.outputs.info(&output))
             .map(|info| info.scale_factor);
-        u32::try_from(scales.max().unwrap_or(1)).map_or(1, |scale| scale.max(1))
+        scale_of(scales.max().unwrap_or(1))
     }
 
     /// The logical width of the output the capsule last entered, or of the
@@ -343,7 +334,7 @@ impl Stage {
     fn refresh(&mut self, now: Instant) {
         let orders = self.renderer.tick(now);
         self.carry_out(orders, now);
-        if self.owed || self.renderer.stale {
+        if self.renderer.stale {
             self.draw(now);
         }
         self.sync_clickable(now);
@@ -387,7 +378,6 @@ impl Stage {
                 shown.ready = false;
             }
             Some(Ok(pixmap)) => {
-                self.owed = false;
                 self.renderer.stale = false;
                 let live = self.renderer.live(now);
                 if let Err(error) =
@@ -398,6 +388,10 @@ impl Stage {
             }
         }
     }
+}
+
+fn scale_of(factor: i32) -> u32 {
+    u32::try_from(factor).map_or(1, |scale| scale.max(1))
 }
 
 fn set_clickable(compositor: &CompositorState, layer: &LayerSurface, rect: Option<Rect>) {
@@ -446,8 +440,8 @@ impl CompositorHandler for Stage {
         factor: i32,
     ) {
         if self.owns(surface) {
-            self.scale = u32::try_from(factor).map_or(1, |scale| scale.max(1));
-            self.owed = true;
+            self.scale = scale_of(factor);
+            self.renderer.stale = true;
         }
     }
 
@@ -473,7 +467,7 @@ impl CompositorHandler for Stage {
             .filter(|shown| shown.layer.wl_surface() == surface)
         {
             shown.waiting = false;
-            self.owed = true;
+            self.renderer.stale = true;
         }
     }
 
@@ -542,7 +536,7 @@ impl LayerShellHandler for Stage {
     ) {
         if let Some(shown) = self.surface.as_mut().filter(|shown| &shown.layer == layer) {
             shown.ready = true;
-            self.owed = true;
+            self.renderer.stale = true;
         }
     }
 }
@@ -577,23 +571,21 @@ impl SeatHandler for Stage {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Pointer
-            && self.pointer.as_ref().is_some_and(|(s, _)| *s == seat)
-        {
-            self.release_pointer();
+        if capability == Capability::Pointer {
+            self.release_pointer(&seat);
         }
     }
 
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
-        if self.pointer.as_ref().is_some_and(|(s, _)| *s == seat) {
-            self.release_pointer();
-        }
+        self.release_pointer(&seat);
     }
 }
 
 impl Stage {
-    fn release_pointer(&mut self) {
-        if let Some((_, pointer)) = self.pointer.take()
+    /// Lets go of the pointer when `seat` holds it.
+    fn release_pointer(&mut self, seat: &wl_seat::WlSeat) {
+        if self.pointer.as_ref().is_some_and(|(held, _)| held == seat)
+            && let Some((_, pointer)) = self.pointer.take()
             && pointer.version() >= 3
         {
             pointer.release();

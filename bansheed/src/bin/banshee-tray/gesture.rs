@@ -25,10 +25,26 @@ pub enum End {
     Repeat,
 }
 
+/// What a track animates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Property {
+    TranslationX,
+    TranslationY,
+    Rotation,
+    Scale,
+    Opacity,
+    DashPhase,
+    /// The dash of an outline's dash pattern.
+    Dash,
+    /// The gap of an outline's dash pattern.
+    Gap,
+    Width,
+}
+
 /// One property through `values` at `key_times`, eased per segment by
 /// `curves` as a CSS keyframe list eases. Key times are shares of `duration`.
 pub struct Track {
-    pub property: &'static str,
+    pub property: Property,
     pub key_times: &'static [f64],
     pub values: Cow<'static, [f64]>,
     pub curves: &'static [Bezier],
@@ -38,7 +54,7 @@ pub struct Track {
 }
 
 type Keys = (
-    &'static str,
+    Property,
     &'static [f64],
     Cow<'static, [f64]>,
     &'static [Bezier],
@@ -64,13 +80,13 @@ pub fn chip_rise() -> Vec<Track> {
     gesture(
         [
             (
-                "transform.translation.y",
+                Property::TranslationY,
                 ENDS,
                 Cow::Borrowed(&[-12.0, 0.0]),
                 &[SETTLE],
             ),
             (
-                "opacity",
+                Property::Opacity,
                 &[0.0, 0.6, 1.0],
                 Cow::Borrowed(&[0.0, 1.0, 1.0]),
                 &[SETTLE; 2],
@@ -86,12 +102,17 @@ pub fn figure_emerge() -> Vec<Track> {
     gesture(
         [
             (
-                "transform.translation.y",
+                Property::TranslationY,
                 ENDS,
                 Cow::Borrowed(&[70.0, 0.0]),
                 &[SETTLE],
             ),
-            ("opacity", ENDS, Cow::Borrowed(&[0.0, 1.0]), &[SETTLE]),
+            (
+                Property::Opacity,
+                ENDS,
+                Cow::Borrowed(&[0.0, 1.0]),
+                &[SETTLE],
+            ),
         ],
         0.36,
         0.0,
@@ -104,13 +125,13 @@ pub fn fill_kindle(delay: f64) -> Vec<Track> {
     gesture(
         [
             (
-                "opacity",
+                Property::Opacity,
                 TIMES,
                 Cow::Borrowed(&[0.0, 1.0, 1.0]),
                 &[SETTLE; 2],
             ),
             (
-                "transform.scale",
+                Property::Scale,
                 TIMES,
                 Cow::Borrowed(&[0.86, 1.06, 1.0]),
                 &[SETTLE; 2],
@@ -125,7 +146,7 @@ pub fn fill_kindle(delay: f64) -> Vec<Track> {
 pub fn working_hover() -> Vec<Track> {
     gesture(
         [(
-            "transform.translation.y",
+            Property::TranslationY,
             &[0.0, 0.5, 1.0],
             Cow::Borrowed(&[0.0, -5.0, 0.0]),
             &[SWAY; 2],
@@ -140,7 +161,7 @@ pub fn working_hover() -> Vec<Track> {
 pub fn halo_light(length: f64) -> Vec<Track> {
     gesture(
         [(
-            "lineDashPhase",
+            Property::DashPhase,
             ENDS,
             Cow::Owned(vec![0.0, -length]),
             &[LINEAR],
@@ -157,12 +178,7 @@ fn radians(degrees: &[f64]) -> Cow<'static, [f64]> {
 
 pub fn head_tilt() -> Vec<Track> {
     gesture(
-        [(
-            "transform.rotation.z",
-            ENDS,
-            radians(&[0.0, -11.0]),
-            &[SETTLE],
-        )],
+        [(Property::Rotation, ENDS, radians(&[0.0, -11.0]), &[SETTLE])],
         0.42,
         0.0,
         End::Hold,
@@ -173,7 +189,7 @@ pub fn head_tilt() -> Vec<Track> {
 pub fn cups_press(side: f64) -> Vec<Track> {
     gesture(
         [(
-            "transform.translation.x",
+            Property::TranslationX,
             &[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
             Cow::Owned([0.0, 9.0, 0.0, 6.0, 0.0, 0.0].map(|at| at * side).to_vec()),
             &[SETTLE; 5],
@@ -187,7 +203,7 @@ pub fn cups_press(side: f64) -> Vec<Track> {
 pub fn head_shake() -> Vec<Track> {
     gesture(
         [(
-            "transform.rotation.z",
+            Property::Rotation,
             &[0.0, 0.16, 0.38, 0.6, 0.8, 1.0],
             radians(&[0.0, -10.0, 9.0, -6.0, 4.0, 0.0]),
             &[SHAKE; 5],
@@ -201,7 +217,7 @@ pub fn head_shake() -> Vec<Track> {
 pub fn strain() -> Vec<Track> {
     gesture(
         [(
-            "transform.translation.y",
+            Property::TranslationY,
             &[0.0, 0.35, 0.48, 0.62, 1.0],
             Cow::Borrowed(&[0.0, -16.0, -13.0, -16.0, 4.0]),
             &[SETTLE; 4],
@@ -218,8 +234,13 @@ pub fn outline_breaks(length: f64) -> Vec<Track> {
     let [dash, gap] = outline_dash(length);
     gesture(
         [
-            ("dash", ENDS, Cow::Owned(vec![length, dash]), &[DROP]),
-            ("gap", ENDS, Cow::Owned(vec![0.0, gap]), &[DROP]),
+            (
+                Property::Dash,
+                ENDS,
+                Cow::Owned(vec![length, dash]),
+                &[DROP],
+            ),
+            (Property::Gap, ENDS, Cow::Owned(vec![0.0, gap]), &[DROP]),
         ],
         0.52,
         0.42,
@@ -232,12 +253,17 @@ pub fn words_reveal(width: f64) -> Vec<Track> {
     gesture(
         [
             (
-                "bounds.size.width",
+                Property::Width,
                 ENDS,
                 Cow::Owned(vec![0.0, width]),
                 &[SETTLE],
             ),
-            ("opacity", ENDS, Cow::Borrowed(&[0.2, 1.0]), &[SETTLE]),
+            (
+                Property::Opacity,
+                ENDS,
+                Cow::Borrowed(&[0.2, 1.0]),
+                &[SETTLE],
+            ),
         ],
         0.22,
         0.08,
@@ -245,18 +271,16 @@ pub fn words_reveal(width: f64) -> Vec<Track> {
     )
 }
 
-pub fn chip_width(from: f64, to: f64) -> Vec<Track> {
-    gesture(
-        [(
-            "bounds.size.width",
-            ENDS,
-            Cow::Owned(vec![from, to]),
-            &[SETTLE],
-        )],
-        0.24,
-        0.0,
-        End::Release,
-    )
+pub fn chip_width(from: f64, to: f64) -> Track {
+    Track {
+        property: Property::Width,
+        key_times: ENDS,
+        values: Cow::Owned(vec![from, to]),
+        curves: &[SETTLE],
+        duration: 0.24,
+        delay: 0.0,
+        end: End::Release,
+    }
 }
 
 pub fn float_out() -> Vec<Track> {
@@ -264,13 +288,13 @@ pub fn float_out() -> Vec<Track> {
     gesture(
         [
             (
-                "transform.translation.y",
+                Property::TranslationY,
                 TIMES,
                 Cow::Borrowed(&[0.0, 4.0, -120.0]),
                 &[ASCEND; 2],
             ),
             (
-                "opacity",
+                Property::Opacity,
                 TIMES,
                 Cow::Borrowed(&[1.0, 1.0, 0.0]),
                 &[ASCEND; 2],
@@ -286,12 +310,12 @@ fn sink(duration: f64, delay: f64) -> Vec<Track> {
     gesture(
         [
             (
-                "transform.translation.y",
+                Property::TranslationY,
                 ENDS,
                 Cow::Borrowed(&[0.0, -8.0]),
                 &[DROP],
             ),
-            ("opacity", ENDS, Cow::Borrowed(&[1.0, 0.0]), &[DROP]),
+            (Property::Opacity, ENDS, Cow::Borrowed(&[1.0, 0.0]), &[DROP]),
         ],
         duration,
         delay,
@@ -309,7 +333,12 @@ pub fn failure_exit() -> Vec<Track> {
 
 pub fn fade_in(delay: f64) -> Vec<Track> {
     gesture(
-        [("opacity", ENDS, Cow::Borrowed(&[0.0, 1.0]), &[LINEAR])],
+        [(
+            Property::Opacity,
+            ENDS,
+            Cow::Borrowed(&[0.0, 1.0]),
+            &[LINEAR],
+        )],
         FADE,
         delay,
         End::Release,
@@ -318,7 +347,12 @@ pub fn fade_in(delay: f64) -> Vec<Track> {
 
 pub fn fade_out() -> Vec<Track> {
     gesture(
-        [("opacity", ENDS, Cow::Borrowed(&[1.0, 0.0]), &[LINEAR])],
+        [(
+            Property::Opacity,
+            ENDS,
+            Cow::Borrowed(&[1.0, 0.0]),
+            &[LINEAR],
+        )],
         FADE,
         0.0,
         End::Hold,
@@ -422,7 +456,7 @@ mod tests {
             strain(),
             outline_breaks(100.0),
             words_reveal(40.0),
-            chip_width(44.0, 120.0),
+            vec![chip_width(44.0, 120.0)],
             float_out(),
             frame_sink(),
             failure_exit(),
@@ -443,8 +477,8 @@ mod tests {
     fn every_track_has_one_value_per_key_time_and_one_curve_per_segment() {
         for track in every_gesture().into_iter().flatten() {
             let times = track.key_times.len();
-            assert_eq!(track.values.len(), times, "{}", track.property);
-            assert_eq!(track.curves.len(), times - 1, "{}", track.property);
+            assert_eq!(track.values.len(), times, "{:?}", track.property);
+            assert_eq!(track.curves.len(), times - 1, "{:?}", track.property);
         }
     }
 
@@ -468,7 +502,7 @@ mod tests {
 
     #[test]
     fn at_eases_between_key_times() {
-        let width = one(chip_width(0.0, 1.0));
+        let width = chip_width(0.0, 1.0);
         let halfway = at(&width, width.delay + width.duration / 2.0, 99.0);
         assert!(close(halfway, ease(SETTLE, 0.5)), "{halfway}");
     }

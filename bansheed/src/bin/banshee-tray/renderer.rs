@@ -4,13 +4,16 @@
 use std::time::{Duration, Instant};
 
 use crate::chip::{Scene, Show, words_of};
-use crate::figure::{self, CAPSULE, FIGURE, INSET, LEVEL_STEP, Pose, Voice, WORDS_GAP, WORDS_TAIL};
+use crate::figure::{self, AROUND_WORDS, CAPSULE, LEVEL_STEP, Pose, SCREEN_MARGIN, Voice, seconds};
 use crate::gesture;
 use crate::paint::{self, Frame};
-use crate::scenes::{Entrance, Move, answer_opens, holds_the_voice, in_capsule, leaving, moves};
+use crate::scenes::{
+    Entrance, Move, answer_opens, holds_the_voice, in_capsule, leaving, moves, takes_clicks,
+};
 use crate::words::{self, Line};
 
-const SIDE_MARGIN: f64 = 12.0;
+/// `(x, y, width, height)` in surface logical pixels.
+pub type Rect = (i32, i32, i32, i32);
 
 /// What the surface does before the next frame.
 #[derive(Debug, PartialEq, Eq)]
@@ -22,8 +25,9 @@ pub enum Order {
 pub struct Renderer {
     /// On the surface, through its leave too.
     scene: Option<Scene>,
-    /// Each move with the instant it started, in the order they play.
-    moves: Vec<(Move, Instant)>,
+    /// Each move with the instant it started and how long it lasts, in the
+    /// order they play.
+    moves: Vec<(Move, Instant, Option<f64>)>,
     leave_ends: Option<Instant>,
     line: Option<Line>,
     /// The width the capsule grows or shrinks from, and when that began.
@@ -35,7 +39,7 @@ pub struct Renderer {
     pose: Pose,
     pose_from: Pose,
     heard: Option<Instant>,
-    /// The picture changed since the last frame.
+    /// A frame is owed: the picture changed, or the surface asked for one.
     pub stale: bool,
     /// Logical pixels the words may take.
     pub room: f64,
@@ -84,7 +88,7 @@ impl Renderer {
         } else {
             // The capsule keeps its entrance; every gesture since stops.
             self.moves
-                .retain(|&(step, _)| matches!(step, Move::Rise | Move::FadeIn | Move::Emerge));
+                .retain(|&(step, ..)| matches!(step, Move::Rise | Move::FadeIn | Move::Emerge));
         }
         self.voice = Voice::default();
         self.voice_since = Some(now);
@@ -92,8 +96,11 @@ impl Renderer {
         self.heard = None;
         self.lay_words(&scene.show, now);
         let started = moves(&scene.show, entrance, false);
-        self.moves
-            .extend(started.into_iter().map(|step| (step, now)));
+        self.moves.extend(
+            started
+                .into_iter()
+                .map(|step| (step, now, paint::lasts(step))),
+        );
         self.scene = Some(scene.clone());
         orders
     }
@@ -101,7 +108,7 @@ impl Renderer {
     /// Sets the words and sizes the capsule to them, from the width it shows
     /// now when a scene already shows.
     fn lay_words(&mut self, show: &Show, now: Instant) {
-        let from = self.picture(now, 1, paint::shown_width);
+        let from = self.widths(now).map(|(_, shown)| shown);
         self.line = words_of(show).map(|(text, cut)| words::line(text, cut, self.room as f32));
         let to = paint::width(self.line.as_ref());
         self.width_from = from.filter(|&from| from != to).map(|from| (from, now));
@@ -120,7 +127,7 @@ impl Renderer {
             return vec![Order::Destroy];
         };
         let lasts = paint::lasts(step).expect("a leave ends");
-        self.moves.push((step, now));
+        self.moves.push((step, now, Some(lasts)));
         self.leave_ends = Some(now + Duration::from_secs_f64(lasts));
         self.stale = true;
         Vec::new()
@@ -160,9 +167,10 @@ impl Renderer {
 
     /// Whether frames still change with nothing new coming in.
     pub fn live(&self, now: Instant) -> bool {
-        let moving = self.moves.iter().any(|&(step, started)| {
-            paint::lasts(step).is_none_or(|lasts| seconds(started, now) < lasts)
-        });
+        let moving = self
+            .moves
+            .iter()
+            .any(|&(_, started, lasts)| lasts.is_none_or(|lasts| seconds(started, now) < lasts));
         let easing = self
             .heard
             .is_some_and(|heard| seconds(heard, now) < LEVEL_STEP);
@@ -176,22 +184,14 @@ impl Renderer {
             return self.pose;
         };
         let share = (seconds(heard, now) / LEVEL_STEP).min(1.0);
-        let (from, to) = (self.pose_from, self.pose);
-        let mix = |from: f64, to: f64| from + (to - from) * share;
-        Pose {
-            depth: mix(from.depth, to.depth),
-            sway: mix(from.sway, to.sway),
-            lift: mix(from.lift, to.lift),
-            scale: mix(from.scale, to.scale),
-            fill: mix(from.fill, to.fill),
-        }
+        Pose::lerp(self.pose_from, self.pose, share)
     }
 
     /// The width transition's from-width and seconds so far, while it runs.
     fn transition(&self, now: Instant) -> Option<(f64, f64)> {
         let (from, started) = self.width_from?;
         let elapsed = seconds(started, now);
-        let lasts = gesture::lasts(&gesture::chip_width(from, from))?;
+        let lasts = gesture::lasts(&[gesture::chip_width(from, from)])?;
         (elapsed < lasts).then_some((from, elapsed))
     }
 
@@ -206,7 +206,7 @@ impl Renderer {
         let moves: Vec<_> = self
             .moves
             .iter()
-            .map(|&(step, started)| (step, seconds(started, now)))
+            .map(|&(step, started, _)| (step, seconds(started, now)))
             .collect();
         Some(use_frame(&Frame {
             show: &scene.show,
@@ -218,9 +218,17 @@ impl Renderer {
         }))
     }
 
-    /// The capsule's rectangle as `(x, y, width, height)` in surface logical
-    /// pixels, while a failure shows and takes clicks.
-    pub fn input_region(&self, now: Instant) -> Option<(i32, i32, i32, i32)> {
+    /// The surface's span and the capsule's width as it shows at `now`. `None`
+    /// with nothing on the surface.
+    fn widths(&self, now: Instant) -> Option<(f64, f64)> {
+        self.scene.as_ref()?;
+        let (line, width_from) = (self.line.as_ref(), self.transition(now));
+        let span = f64::from(paint::span(line, width_from));
+        Some((span, paint::shown_width(line, width_from)))
+    }
+
+    /// The capsule's rectangle while a failure shows and takes clicks.
+    pub fn input_region(&self, now: Instant) -> Option<Rect> {
         let (span, width) = self.clickable(now)?;
         let x = ((span - width) / 2.0).floor();
         Some((x as i32, 0, width.ceil() as i32, CAPSULE as i32))
@@ -236,16 +244,14 @@ impl Renderer {
     /// The surface's span and the capsule's width, while a failure shows and
     /// is not on its way out.
     fn clickable(&self, now: Instant) -> Option<(f64, f64)> {
-        let broken = self
+        let clicks = self
             .scene
             .as_ref()
-            .is_some_and(|scene| matches!(scene.show, Show::Broken(_)));
-        if !broken || self.leave_ends.is_some() {
+            .is_some_and(|scene| takes_clicks(&scene.show));
+        if !clicks || self.leave_ends.is_some() {
             return None;
         }
-        self.picture(now, 1, |frame| {
-            (f64::from(paint::size(frame).0), paint::shown_width(frame))
-        })
+        self.widths(now)
     }
 
     pub fn clear(&mut self) {
@@ -257,14 +263,10 @@ impl Renderer {
     }
 }
 
-fn seconds(since: Instant, now: Instant) -> f64 {
-    now.saturating_duration_since(since).as_secs_f64()
-}
-
 /// The words' room on an output `width` logical pixels wide, with the capsule
 /// centred and clear of both sides.
 pub fn room_on(width: i32) -> f64 {
-    f64::from(width) - 2.0 * SIDE_MARGIN - (INSET + FIGURE + WORDS_GAP + WORDS_TAIL)
+    f64::from(width) - 2.0 * SCREEN_MARGIN - AROUND_WORDS
 }
 
 /// tiny-skia's premultiplied RGBA as `wl_shm` ARGB8888, a premultiplied
@@ -306,7 +308,7 @@ mod tests {
         orders.extend(renderer.tick(at(t0, 5000)));
         assert_eq!(orders, [Order::Create, Order::Destroy, Order::Create]);
         assert_eq!(renderer.scene.as_ref(), Some(&your_turn));
-        let steps: Vec<_> = renderer.moves.iter().map(|&(step, _)| step).collect();
+        let steps: Vec<_> = renderer.moves.iter().map(|&(step, ..)| step).collect();
         assert_eq!(steps.first(), Some(&Move::Rise));
         assert!(!steps.contains(&Move::FailureExit), "{steps:?}");
     }
@@ -357,7 +359,7 @@ mod tests {
             None,
             "a rise has no width to grow from"
         );
-        let before = renderer.picture(at(t0, 500), 1, paint::shown_width);
+        let before = renderer.widths(at(t0, 500)).map(|(_, shown)| shown);
         let longer = scene(Show::Recording("hi there, how are you".into()), 1);
         renderer.show(Some(&longer), at(t0, 500));
         let (from, _) = renderer.transition(at(t0, 500)).expect("the width moves");

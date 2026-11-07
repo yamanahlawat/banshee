@@ -10,12 +10,27 @@ pub const INSET: f64 = (CAPSULE - FIGURE) / 2.0;
 pub const TRAVEL: f64 = 12.0;
 pub const WORDS_GAP: f64 = 4.0;
 pub const WORDS_TAIL: f64 = 16.0;
+/// Where the words start, from the capsule's left edge.
+pub const WORDS_LEFT: f64 = INSET + FIGURE + WORDS_GAP;
+/// The capsule's width besides its words.
+pub const AROUND_WORDS: f64 = WORDS_LEFT + WORDS_TAIL;
+/// The clear space the capsule keeps from each side of the screen.
+pub const SCREEN_MARGIN: f64 = 12.0;
 pub const WORDS_SIZE: f64 = 16.0;
 pub const WORDS_TRACKING: f64 = -0.015;
 pub const WORDS_WEIGHT: f64 = 750.0;
 pub const WORDS_WIDTH: f64 = 106.0;
 /// Antialiased glyph edges reach past the outlines' box.
 pub const WORDS_BLEED: f64 = 1.0;
+
+/// The capsule's width around words `words` wide.
+pub fn capsule_width(words: f64) -> f64 {
+    WORDS_LEFT + words + WORDS_TAIL
+}
+
+pub fn seconds(since: Instant, now: Instant) -> f64 {
+    now.saturating_duration_since(since).as_secs_f64()
+}
 
 pub const RUST: u32 = 0x8A2A0D;
 pub const BONE: u32 = 0xF2EFE9;
@@ -67,7 +82,7 @@ impl Voice {
         // Unmeasured: the 0.55 share kept per 60ms step, and the 100ms cap.
         let dt_ms = self
             .at
-            .map_or(60.0, |at| now.duration_since(at).as_secs_f64() * 1000.0)
+            .map_or(60.0, |at| seconds(at, now) * 1000.0)
             .min(100.0);
         let follow = 1.0 - 0.55f64.powf(dt_ms / 60.0);
         self.level += (target - self.level) * follow;
@@ -83,6 +98,20 @@ pub struct Pose {
     pub lift: f64,
     pub scale: f64,
     pub fill: f64,
+}
+
+impl Pose {
+    #[cfg(any(target_os = "linux", test))]
+    pub fn lerp(from: Pose, to: Pose, share: f64) -> Pose {
+        let mix = |from: f64, to: f64| from + (to - from) * share;
+        Pose {
+            depth: mix(from.depth, to.depth),
+            sway: mix(from.sway, to.sway),
+            lift: mix(from.lift, to.lift),
+            scale: mix(from.scale, to.scale),
+            fill: mix(from.fill, to.fill),
+        }
+    }
 }
 
 /// Reduce Motion holds the figure still and carries the level as the bone

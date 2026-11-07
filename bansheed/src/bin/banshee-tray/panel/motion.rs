@@ -11,7 +11,7 @@ use objc2_quartz_core::{
     kCAMediaTimingFunctionLinear,
 };
 
-use crate::gesture::{self, Bezier, End, LINEAR, Track};
+use crate::gesture::{self, Bezier, End, LINEAR, Property, Track};
 
 fn numbers(values: &[f64]) -> Retained<NSArray<NSNumber>> {
     NSArray::from_retained_slice(
@@ -21,6 +21,19 @@ fn numbers(values: &[f64]) -> Retained<NSArray<NSNumber>> {
             .map(NSNumber::new_f64)
             .collect::<Vec<_>>(),
     )
+}
+
+fn key_path(property: Property) -> &'static str {
+    match property {
+        Property::TranslationX => "transform.translation.x",
+        Property::TranslationY => "transform.translation.y",
+        Property::Rotation => "transform.rotation.z",
+        Property::Scale => "transform.scale",
+        Property::Opacity => "opacity",
+        Property::DashPhase => "lineDashPhase",
+        Property::Dash | Property::Gap => "lineDashPattern",
+        Property::Width => "bounds.size.width",
+    }
 }
 
 /// One key path through `values` at `times`, eased per segment as a CSS
@@ -57,7 +70,7 @@ fn scalar(keys: &Track) -> Retained<CAKeyframeAnimation> {
     let values = numbers(&keys.values);
     // SAFETY: an array of NSNumber is an array of objects.
     let values = unsafe { values.cast_unchecked() };
-    track(keys.property, keys.key_times, values, keys.curves)
+    track(key_path(keys.property), keys.key_times, values, keys.curves)
 }
 
 /// `delay` seconds from now. The layer holds the first keyframe until then.
@@ -180,7 +193,7 @@ pub fn outline_breaks(length: CGFloat) -> Retained<CAAnimation> {
     // SAFETY: an array of arrays is an array of objects.
     let values = unsafe { patterns.cast_unchecked() };
     one(
-        track("lineDashPattern", dash.key_times, values, dash.curves),
+        track(key_path(dash.property), dash.key_times, values, dash.curves),
         dash.duration,
         dash.delay,
         dash.end,
@@ -192,7 +205,7 @@ pub fn words_reveal(width: CGFloat) -> Retained<CAAnimation> {
 }
 
 pub fn chip_width(from: CGFloat, to: CGFloat) -> Retained<CAAnimation> {
-    animation(&gesture::chip_width(from, to))
+    animation(&[gesture::chip_width(from, to)])
 }
 
 pub fn float_out() -> Retained<CAAnimation> {

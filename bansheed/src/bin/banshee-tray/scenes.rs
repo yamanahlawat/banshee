@@ -1,7 +1,7 @@
 //! Which moves each scene plays, independent of what draws them.
 
 use crate::chip::{Show, words_of};
-use crate::figure::CAPSULE;
+use crate::figure::{self, CAPSULE, Pose, WORKING_DEPTH};
 
 /// What a scene plays. Each names one gesture, or the fade that stands in
 /// for it under Reduce Motion.
@@ -92,6 +92,33 @@ pub fn holds_the_voice(show: &Show) -> bool {
     matches!(show, Show::Recording(_) | Show::Answering(_))
 }
 
+pub fn failed(show: &Show) -> bool {
+    matches!(show, Show::NothingHeard(_) | Show::Broken(_))
+}
+
+pub fn wears_headphones(show: &Show) -> bool {
+    matches!(show, Show::YourTurn | Show::Answering(_))
+}
+
+/// A click on the capsule opens the window.
+pub fn takes_clicks(show: &Show) -> bool {
+    matches!(show, Show::Broken(_))
+}
+
+/// The figure's pose outside the voice states: the hem deeper while Working,
+/// unless `calm` holds it still.
+pub fn rest_pose(show: &Show, calm: bool) -> Pose {
+    let rest = figure::pose(0.0, 0.0, calm);
+    if matches!(show, Show::Working) && !calm {
+        Pose {
+            depth: WORKING_DEPTH,
+            ..rest
+        }
+    } else {
+        rest
+    }
+}
+
 pub fn centred(midline: f64, width: f64) -> f64 {
     midline - width / 2.0
 }
@@ -165,7 +192,7 @@ mod tests {
         assert_eq!(leaving(&Show::Copied, false), Some(FailureExit));
     }
 
-    fn failed() -> [Show; 2] {
+    fn failures() -> [Show; 2] {
         [
             Show::NothingHeard("Nothing heard".into()),
             Show::Broken("Microphone blocked".into()),
@@ -173,7 +200,7 @@ mod tests {
     }
 
     fn every_show() -> Vec<Show> {
-        let [nothing_heard, broken] = failed();
+        let [nothing_heard, broken] = failures();
         vec![
             Show::Recording(String::new()),
             Show::Working,
@@ -213,7 +240,7 @@ mod tests {
             moves(&Show::Answering(String::new()), Entrance::NewWords, false),
             [Open, Tilt, Words]
         );
-        let [nothing_heard, broken] = failed();
+        let [nothing_heard, broken] = failures();
         assert_eq!(
             moves(&nothing_heard, Entrance::NewWords, false),
             [Shake, Breaks, Words]
@@ -306,7 +333,7 @@ mod tests {
             moves(&Show::Answering(String::new()), Entrance::NewWords, true),
             [OpenFade, WordsFade]
         );
-        for fault in failed() {
+        for fault in failures() {
             assert_eq!(moves(&fault, Entrance::NewWords, true), [WordsFade]);
         }
         assert_eq!(
@@ -325,7 +352,7 @@ mod tests {
             Show::Answering(String::new()),
         ]
         .into_iter()
-        .chain(failed())
+        .chain(failures())
         {
             assert_eq!(leaving(&show, false), Some(Move::FailureExit), "{show:?}");
             assert_eq!(leaving(&show, true), Some(Move::FadeOut), "{show:?}");

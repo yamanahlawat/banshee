@@ -1,5 +1,7 @@
 //! One capsule frame in tiny-skia, with each live move read at `elapsed`.
 
+use std::sync::LazyLock;
+
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect,
     Stroke, StrokeDash, Transform,
@@ -9,14 +11,18 @@ use crate::chip::Show;
 use crate::figure::{
     self, BAND, BAND_GAP, BEHIND, BONE, CAPSULE, CUP_GAP, CUP_RADII, CUPS, FIGURE, HALO, HEADBAND,
     INSET, KINDLE_AFTER, LIGHT, OUTLINE, PIVOT, Pose, RING, RING_STRENGTH, RUST, Segment, TRAVEL,
-    WORDS_BLEED, WORDS_GAP, WORDS_TAIL, WORKING_DEPTH,
+    WORDS_BLEED, WORDS_LEFT,
 };
-use crate::gesture::{self, Track};
-use crate::scenes::{self, Move, holds_the_voice};
+use crate::gesture::{self, Property, Track};
+use crate::scenes::{self, Move, failed, holds_the_voice, rest_pose, wears_headphones};
 use crate::words::Line;
 
 /// The figure's own 100-unit square has its centre here.
 const CENTRE: (f64, f64) = (50.0, 50.0);
+
+static OUTLINE_LENGTH: LazyLock<f64> =
+    LazyLock::new(|| figure::path_length(&figure::shroud(0.0, 0.0)));
+static LIGHT_LENGTH: LazyLock<f64> = LazyLock::new(|| figure::ellipse_length(HALO.2, HALO.3));
 
 pub struct Frame<'a> {
     pub show: &'a Show,
@@ -34,45 +40,39 @@ pub struct Frame<'a> {
 /// The span the capsule may reach during a width transition, and the height
 /// of the capsule with the clear space below it, in logical pixels.
 pub fn size(frame: &Frame) -> (u32, u32) {
-    let from = frame.width_from.map_or(0.0, |(from, _)| from);
-    let span = target_width(frame).max(from).ceil();
-    (span as u32, (TRAVEL + CAPSULE) as u32)
+    (
+        span(frame.line, frame.width_from),
+        (TRAVEL + CAPSULE) as u32,
+    )
+}
+
+/// The span the capsule may reach while it grows or shrinks from
+/// `width_from`, in logical pixels.
+pub fn span(line: Option<&Line>, width_from: Option<(f64, f64)>) -> u32 {
+    let from = width_from.map_or(0.0, |(from, _)| from);
+    width(line).max(from).ceil() as u32
 }
 
 /// The width `line` gives the capsule once any transition ends.
 pub fn width(line: Option<&Line>) -> f64 {
     line.filter(|line| line.path.is_some())
-        .map_or(CAPSULE, |line| {
-            INSET + FIGURE + WORDS_GAP + f64::from(line.width) + WORDS_TAIL
-        })
+        .map_or(CAPSULE, |line| figure::capsule_width(f64::from(line.width)))
         .ceil()
 }
 
-fn target_width(frame: &Frame) -> f64 {
-    width(frame.line)
-}
-
 /// The capsule's width as it shows now, part way through a transition or not.
-pub fn shown_width(frame: &Frame) -> f64 {
-    let to = target_width(frame);
-    frame.width_from.map_or(to, |(from, seconds)| {
-        let [width] = &gesture::chip_width(from, to)[..] else {
-            unreachable!("a width transition moves the width alone");
-        };
-        gesture::at(width, seconds, to)
+pub fn shown_width(line: Option<&Line>, width_from: Option<(f64, f64)>) -> f64 {
+    let to = width(line);
+    width_from.map_or(to, |(from, seconds)| {
+        gesture::at(&gesture::chip_width(from, to), seconds, to)
     })
 }
 
-/// The rest pose outside the voice states, and the deeper hem while Working.
 fn pose_of(frame: &Frame) -> Pose {
-    let rest = figure::pose(0.0, 0.0, false);
-    match frame.show {
-        show if holds_the_voice(show) => frame.pose,
-        Show::Working => Pose {
-            depth: WORKING_DEPTH,
-            ..rest
-        },
-        _ => rest,
+    if holds_the_voice(frame.show) {
+        frame.pose
+    } else {
+        rest_pose(frame.show, false)
     }
 }
 
@@ -87,7 +87,7 @@ pub fn paint(frame: &Frame) -> Pixmap {
     let mut pixmap =
         Pixmap::new(width * scale, height * scale).expect("a frame at a scale of 1 or more");
     let live = Live::of(frame);
-    let shown = shown_width(frame);
+    let shown = shown_width(frame.line, frame.width_from);
     let left = scenes::centred(f64::from(width) / 2.0, shown);
     let capsule = Transform::from_scale(scale as f32, scale as f32)
         .pre_translate(left as f32, -live.capsule.y as f32);
@@ -125,7 +125,6 @@ fn paint_figure(canvas: &mut Pixmap, frame: &Frame, live: &Live, capsule: Transf
 
     let body = path(&figure::shroud(pose.depth, pose.sway));
     let halo = oval((HALO.0, HALO.1), (HALO.2, HALO.3));
-    let light_length = figure::ellipse_length(HALO.2, HALO.3);
     let halo_half = |canvas: &mut Pixmap, near: bool| {
         let half = if near {
             Rect::from_xywh(-40.0, HALO.1 as f32, 180.0, 100.0)
@@ -140,7 +139,7 @@ fn paint_figure(canvas: &mut Pixmap, frame: &Frame, live: &Live, capsule: Transf
         let light = Stroke {
             line_cap: LineCap::Round,
             dash: StrokeDash::new(
-                figure::light_dash(light_length)
+                figure::light_dash(*LIGHT_LENGTH)
                     .map(|at| at as f32)
                     .to_vec(),
                 live.light_phase as f32,
@@ -174,7 +173,7 @@ fn paint_figure(canvas: &mut Pixmap, frame: &Frame, live: &Live, capsule: Transf
     if working {
         halo_half(canvas, true);
     }
-    if matches!(show, Show::YourTurn | Show::Answering(_)) {
+    if wears_headphones(show) {
         paint_headphones(canvas, live, voice, clip);
     }
 }
@@ -212,7 +211,7 @@ fn paint_words(
         return;
     }
     let top = (CAPSULE - f64::from(line.ascent + line.descent)) / 2.0;
-    let at = capsule.pre_translate((INSET + FIGURE + WORDS_GAP) as f32, top as f32);
+    let at = capsule.pre_translate(WORDS_LEFT as f32, top as f32);
     let ink_box = path.bounds();
     let bleed = WORDS_BLEED as f32;
     let reveal = Rect::from_xywh(
@@ -306,8 +305,7 @@ struct Live {
 
 impl Live {
     fn of(frame: &Frame) -> Self {
-        let outline = figure::path_length(&figure::shroud(0.0, 0.0));
-        let failed = matches!(frame.show, Show::NothingHeard(_) | Show::Broken(_));
+        let outline = *OUTLINE_LENGTH;
         let words_width = words(frame).map_or(0.0, |(_, path)| {
             f64::from(path.bounds().width()) + 2.0 * WORDS_BLEED
         });
@@ -321,15 +319,14 @@ impl Live {
             words: STILL,
             words_width,
             light_phase: 0.0,
-            dash: if failed {
+            dash: if failed(frame.show) {
                 figure::outline_dash(outline)
             } else {
                 [outline, 0.0]
             },
         };
-        let light = figure::ellipse_length(HALO.2, HALO.3);
         for &(step, seconds) in frame.moves {
-            for (layer, tracks) in tracks(step, outline, light, words_width) {
+            for (layer, tracks) in tracks(step, outline, *LIGHT_LENGTH, words_width) {
                 for track in &tracks {
                     let value = live.slot(layer, track.property);
                     *value = gesture::at(track, seconds, *value);
@@ -339,28 +336,30 @@ impl Live {
         live
     }
 
-    fn slot(&mut self, layer: Layer, property: &str) -> &mut f64 {
-        let motion = match (layer, property) {
-            (Layer::Outline, "dash") => return &mut self.dash[0],
-            (Layer::Outline, "gap") => return &mut self.dash[1],
-            (Layer::Lights, "lineDashPhase") => return &mut self.light_phase,
-            (Layer::WordsMask, "bounds.size.width") => return &mut self.words_width,
-            (Layer::Capsule, _) => &mut self.capsule,
-            (Layer::Exit, _) => &mut self.exit,
-            (Layer::Entry, _) => &mut self.entry,
-            (Layer::Gesture, _) => &mut self.gesture,
-            (Layer::Fill, _) => &mut self.fill,
-            (Layer::Cup(side), _) => &mut self.cups[side],
-            (Layer::WordsMask, _) => &mut self.words,
-            (Layer::Outline | Layer::Lights, _) => unreachable!("{layer:?} moves no {property}"),
-        };
+    fn slot(&mut self, layer: Layer, property: Property) -> &mut f64 {
         match property {
-            "transform.translation.x" => &mut motion.x,
-            "transform.translation.y" => &mut motion.y,
-            "transform.rotation.z" => &mut motion.turn,
-            "transform.scale" => &mut motion.scale,
-            "opacity" => &mut motion.opacity,
-            _ => unreachable!("{layer:?} moves no {property}"),
+            Property::Dash => &mut self.dash[0],
+            Property::Gap => &mut self.dash[1],
+            Property::DashPhase => &mut self.light_phase,
+            Property::Width => &mut self.words_width,
+            Property::TranslationX => &mut self.motion(layer).x,
+            Property::TranslationY => &mut self.motion(layer).y,
+            Property::Rotation => &mut self.motion(layer).turn,
+            Property::Scale => &mut self.motion(layer).scale,
+            Property::Opacity => &mut self.motion(layer).opacity,
+        }
+    }
+
+    fn motion(&mut self, layer: Layer) -> &mut Motion {
+        match layer {
+            Layer::Capsule => &mut self.capsule,
+            Layer::Exit => &mut self.exit,
+            Layer::Entry => &mut self.entry,
+            Layer::Gesture => &mut self.gesture,
+            Layer::Fill => &mut self.fill,
+            Layer::Cup(side) => &mut self.cups[side],
+            Layer::WordsMask => &mut self.words,
+            Layer::Outline | Layer::Lights => unreachable!("{layer:?} has no motion"),
         }
     }
 }
@@ -400,7 +399,6 @@ fn tracks(step: Move, outline: f64, light: f64, words: f64) -> Vec<(Layer, Vec<T
 
 /// How long `step` runs before its frames stop changing. `None` for a move that
 /// repeats.
-#[cfg(any(target_os = "linux", test))]
 pub fn lasts(step: Move) -> Option<f64> {
     tracks(step, 0.0, 0.0, 0.0)
         .iter()
@@ -699,7 +697,7 @@ mod tests {
         let line = line_of(&show);
         let words_bone = |moves: &[(Move, f64)]| {
             let pixmap = paint(&frame(&show, line.as_ref(), moves));
-            let left = (INSET + FIGURE + WORDS_GAP) as u32;
+            let left = WORDS_LEFT as u32;
             (left..pixmap.width())
                 .flat_map(|x| (0..CAPSULE as u32).map(move |y| (x, y)))
                 .filter(|&(x, y)| near(rgba(&pixmap, x, y), BONE))
