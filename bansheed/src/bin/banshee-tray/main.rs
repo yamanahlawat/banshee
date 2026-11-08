@@ -1088,7 +1088,9 @@ mod tray {
                     std::mem::replace(&mut self.starting, finished) != self.starting
                 }
                 #[cfg(target_os = "linux")]
-                Message::Lost => return Step::Exit,
+                Message::Lost => {
+                    unreachable!("serve ends the tray before a lost connection reaches update")
+                }
                 Message::Open => {
                     open_the_window().unwrap_or_else(|error| log::error!("{error}"));
                     return Step::Stay;

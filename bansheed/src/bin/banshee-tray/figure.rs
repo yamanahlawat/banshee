@@ -13,6 +13,19 @@ pub const WORDS_TAIL: f64 = 16.0;
 pub const WORDS_LEFT: f64 = INSET + FIGURE + WORDS_GAP;
 pub const AROUND_WORDS: f64 = WORDS_LEFT + WORDS_TAIL;
 pub const SCREEN_MARGIN: f64 = 12.0;
+/// Unmeasured.
+pub const ABOVE_DOCK: f64 = 12.0;
+/// Measured: a Dock with 54pt tiles shows about 79pt tall.
+const DOCK_ABOVE_TILE: f64 = 26.0;
+/// Unmeasured: the tile size the Dock uses before anyone sets one.
+pub const DOCK_TILE_DEFAULT: f64 = 48.0;
+#[cfg(target_os = "linux")]
+pub const ABOVE_DEFAULT_DOCK: f64 = dock_height(DOCK_TILE_DEFAULT) + ABOVE_DOCK;
+
+/// How tall a bottom Dock with `tile`-point tiles shows.
+pub const fn dock_height(tile: f64) -> f64 {
+    tile + DOCK_ABOVE_TILE
+}
 pub const WORDS_SIZE: f64 = 16.0;
 pub const WORDS_TRACKING: f64 = -0.015;
 pub const WORDS_WEIGHT: f64 = 750.0;

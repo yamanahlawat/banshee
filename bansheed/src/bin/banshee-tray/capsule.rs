@@ -34,7 +34,7 @@ use smithay_client_toolkit::{delegate_dispatch2, delegate_registry, registry_han
 use tiny_skia::Pixmap;
 
 use crate::chip::Scene;
-use crate::figure::{CAPSULE, TRAVEL};
+use crate::figure::{ABOVE_DEFAULT_DOCK, CAPSULE, TRAVEL};
 use crate::paint;
 use crate::renderer::{Order, Rect, Renderer, room_on, to_argb};
 
@@ -281,6 +281,7 @@ impl Stage {
             None,
         );
         layer.set_anchor(Anchor::BOTTOM);
+        layer.set_margin(0, 0, (ABOVE_DEFAULT_DOCK - TRAVEL) as i32, 0);
         layer.set_exclusive_zone(0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         set_clickable(&self.compositor, &layer, None);
@@ -331,10 +332,13 @@ impl Stage {
     fn refresh(&mut self, now: Instant) {
         let orders = self.renderer.tick(now);
         self.carry_out(orders, now);
+        let changing = self.renderer.stale || self.renderer.live(now);
         if self.renderer.stale {
             self.draw(now);
         }
-        self.sync_clickable(now);
+        if changing {
+            self.sync_clickable(now);
+        }
     }
 
     fn sync_clickable(&mut self, now: Instant) {
@@ -547,16 +551,12 @@ impl SeatHandler for Stage {
     fn new_capability(
         &mut self,
         _: &Connection,
-        qh: &QueueHandle<Self>,
+        _: &QueueHandle<Self>,
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability != Capability::Pointer || self.pointer.is_some() {
-            return;
-        }
-        match self.seats.get_pointer(qh, &seat) {
-            Ok(pointer) => self.pointer = Some((seat, pointer)),
-            Err(error) => log::error!("the capsule cannot read the pointer: {error}"),
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            self.hold_pointer(seat);
         }
     }
 
@@ -578,12 +578,28 @@ impl SeatHandler for Stage {
 }
 
 impl Stage {
+    fn hold_pointer(&mut self, seat: wl_seat::WlSeat) {
+        match self.seats.get_pointer(&self.qh, &seat) {
+            Ok(pointer) => self.pointer = Some((seat, pointer)),
+            Err(error) => log::error!("the capsule cannot read the pointer: {error}"),
+        }
+    }
+
+    /// Lets go of the pointer `seat` held, and takes another seat's.
     fn release_pointer(&mut self, seat: &wl_seat::WlSeat) {
-        if self.pointer.as_ref().is_some_and(|(held, _)| held == seat)
-            && let Some((_, pointer)) = self.pointer.take()
+        if !self.pointer.as_ref().is_some_and(|(held, _)| held == seat) {
+            return;
+        }
+        if let Some((_, pointer)) = self.pointer.take()
             && pointer.version() >= 3
         {
             pointer.release();
+        }
+        let other = self.seats.seats().find(|other| {
+            other != seat && self.seats.info(other).is_some_and(|info| info.has_pointer)
+        });
+        if let Some(other) = other {
+            self.hold_pointer(other);
         }
     }
 }

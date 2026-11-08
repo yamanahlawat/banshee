@@ -36,10 +36,10 @@ use objc2_quartz_core::{
 
 use super::chip::{Cut, Scene, Show, words_of};
 use super::figure::{
-    self, AROUND_WORDS, BAND, BAND_GAP, BEHIND, BONE, CAPSULE, CUP_GAP, CUP_RADII, CUPS, FIGURE,
-    HALO, HEADBAND, INSET, KINDLE_AFTER, LEVEL_STEP, LIGHT, OUTLINE, OUTLINE_CONTRAST, PIVOT, Pose,
-    RING, RING_STRENGTH, RUST, SCREEN_MARGIN, Segment, TRAVEL, Voice, WORDS_BLEED, WORDS_LEFT,
-    WORDS_SIZE, WORDS_TRACKING, WORDS_WEIGHT, WORDS_WIDTH,
+    self, ABOVE_DOCK, AROUND_WORDS, BAND, BAND_GAP, BEHIND, BONE, CAPSULE, CUP_GAP, CUP_RADII,
+    CUPS, DOCK_TILE_DEFAULT, FIGURE, HALO, HEADBAND, INSET, KINDLE_AFTER, LEVEL_STEP, LIGHT,
+    OUTLINE, OUTLINE_CONTRAST, PIVOT, Pose, RING, RING_STRENGTH, RUST, SCREEN_MARGIN, Segment,
+    TRAVEL, Voice, WORDS_BLEED, WORDS_LEFT, WORDS_SIZE, WORDS_TRACKING, WORDS_WEIGHT, WORDS_WIDTH,
 };
 use super::scenes::{
     Entrance, Move, answer_opens, centred, failed, holds_the_voice, in_capsule, leaving, moves,
@@ -47,13 +47,6 @@ use super::scenes::{
 };
 
 mod motion;
-
-/// Unmeasured.
-const ABOVE_DOCK: CGFloat = 12.0;
-/// Measured: a Dock with 54pt tiles shows about 79pt tall.
-const DOCK_ABOVE_TILE: CGFloat = 26.0;
-/// Unmeasured: the tile size the Dock uses before anyone sets one.
-const DOCK_TILE_DEFAULT: CGFloat = 48.0;
 
 fn rect(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
@@ -175,7 +168,7 @@ fn hidden_dock_height() -> CGFloat {
         .and_then(|value| value.downcast::<CFNumber>().ok())
         .and_then(|tile| tile.as_f64())
         .unwrap_or(DOCK_TILE_DEFAULT);
-    tile + DOCK_ABOVE_TILE
+    figure::dock_height(tile)
 }
 
 /// Where the capsule goes on the screen that holds the focused window.

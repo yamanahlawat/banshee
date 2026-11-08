@@ -268,13 +268,15 @@ pub fn words_reveal(width: f64) -> Vec<Track> {
     )
 }
 
+pub const CHIP_WIDTH_LASTS: f64 = 0.24;
+
 pub fn chip_width(from: f64, to: f64) -> Track {
     Track {
         property: Property::Width,
         key_times: ENDS,
         values: Cow::Owned(vec![from, to]),
         curves: &[SETTLE],
-        duration: 0.24,
+        duration: CHIP_WIDTH_LASTS,
         delay: 0.0,
         end: End::Release,
     }

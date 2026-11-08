@@ -129,7 +129,7 @@ bind = , F9, exec, banshee record toggle
 
 ## The figure on screen
 
-- **The figure** is a small rust capsule at the bottom centre of the focused screen, 12 pixels off the edge.
+- **The figure** is a small rust capsule at the bottom centre of the focused screen, 86 pixels above the edge.
 - **It shows** while Banshee records, works, waits for your answer, copies or fails.
 - **Live words** show in it as you speak.
 - **It needs layer shell.** Hyprland, Sway, KDE and most other Wayland desktops have it.

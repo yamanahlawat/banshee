@@ -159,7 +159,7 @@ impl Renderer {
         let t_ms = self
             .voice_since
             .map_or(0.0, |since| seconds(since, now) * 1000.0);
-        self.pose_from = self.pose;
+        self.pose_from = self.pose_at(now);
         self.pose = figure::pose(level, t_ms, false);
         self.heard = Some(now);
         self.stale = true;
@@ -191,8 +191,7 @@ impl Renderer {
     fn transition(&self, now: Instant) -> Option<(f64, f64)> {
         let (from, started) = self.width_from?;
         let elapsed = seconds(started, now);
-        let lasts = gesture::lasts(&[gesture::chip_width(from, from)])?;
-        (elapsed < lasts).then_some((from, elapsed))
+        (elapsed < gesture::CHIP_WIDTH_LASTS).then_some((from, elapsed))
     }
 
     /// Hands `use_frame` the frame at `now`. `None` with nothing on the surface.
@@ -222,28 +221,26 @@ impl Renderer {
     /// with nothing on the surface.
     fn widths(&self, now: Instant) -> Option<(f64, f64)> {
         self.scene.as_ref()?;
-        let (line, width_from) = (self.line.as_ref(), self.transition(now));
-        let span = f64::from(paint::span(line, width_from));
-        Some((span, paint::shown_width(line, width_from)))
+        Some(paint::widths(self.line.as_ref(), self.transition(now)))
     }
 
     /// The capsule's rectangle while a failure shows and takes clicks.
     pub fn input_region(&self, now: Instant) -> Option<Rect> {
-        let (span, width) = self.clickable(now)?;
+        let (span, width, top) = self.clickable(now)?;
         let x = ((span - width) / 2.0).floor();
-        Some((x as i32, 0, width.ceil() as i32, CAPSULE as i32))
+        Some((x as i32, top as i32, width.ceil() as i32, CAPSULE as i32))
     }
 
     /// Whether a press at `(x, y)`, surface logical pixels, lands on a
     /// capsule that takes clicks.
     pub fn opens_at(&self, x: f64, y: f64, now: Instant) -> bool {
         self.clickable(now)
-            .is_some_and(|(span, width)| in_capsule(span, width, x, y))
+            .is_some_and(|(span, width, top)| in_capsule(span, width, x, y - top))
     }
 
-    /// The surface's span and the capsule's width, while a failure shows and
-    /// is not on its way out.
-    fn clickable(&self, now: Instant) -> Option<(f64, f64)> {
+    /// The surface's span, the capsule's width and its top edge to the whole
+    /// pixel, while a failure shows and is not on its way out.
+    fn clickable(&self, now: Instant) -> Option<(f64, f64, f64)> {
         let clicks = self
             .scene
             .as_ref()
@@ -251,7 +248,10 @@ impl Renderer {
         if !clicks || self.leave_ends.is_some() {
             return None;
         }
-        self.widths(now)
+        self.picture(now, 1, |frame| {
+            let (span, width) = paint::widths(frame.line, frame.width_from);
+            (span, width, paint::capsule_top(frame).round())
+        })
     }
 
     pub fn clear(&mut self) {
@@ -415,6 +415,48 @@ mod tests {
         let between = lift(1016);
         assert!(heard.lift < between && between < rest.lift, "{between}");
         assert_eq!(lift(1040), heard.lift);
+    }
+
+    #[test]
+    fn an_early_sample_eases_on_from_the_pose_on_screen() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&scene(Show::Recording(String::new()), 1)), t0);
+        renderer.level(1.0, at(t0, 1000));
+        let lift = |renderer: &Renderer| {
+            renderer
+                .picture(at(t0, 1016), 1, |frame| frame.pose.lift)
+                .expect("a scene shows")
+        };
+        let shown = lift(&renderer);
+        renderer.level(0.2, at(t0, 1016));
+        assert_eq!(lift(&renderer), shown);
+    }
+
+    #[test]
+    fn the_click_area_rides_the_rise() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&scene(Show::Broken("No microphone".into()), 1)), t0);
+        let rising = at(t0, 30);
+        let top = renderer
+            .picture(rising, 1, paint::capsule_top)
+            .expect("a scene shows");
+        assert!(top > 1.0, "{top}");
+        let (_, y, _, _) = renderer.input_region(rising).expect("a failure");
+        assert_eq!(y, top.round() as i32);
+        let (y, middle) = (f64::from(y), paint::width(renderer.line.as_ref()) / 2.0);
+        assert!(renderer.opens_at(middle, y, rising), "the region's top row");
+        assert!(
+            renderer.opens_at(middle, y + CAPSULE - 1.0, rising),
+            "the region's bottom row"
+        );
+        assert!(
+            !renderer.opens_at(middle, y - 1.0, rising),
+            "above the region"
+        );
+        let settled = renderer.input_region(at(t0, 1000)).expect("a failure");
+        assert_eq!(settled.1, 0);
     }
 
     #[test]

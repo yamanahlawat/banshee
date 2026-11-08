@@ -59,12 +59,25 @@ pub fn width(line: Option<&Line>) -> f64 {
         .ceil()
 }
 
+/// The surface's span and the capsule's width as it shows now.
+pub fn widths(line: Option<&Line>, width_from: Option<(f64, f64)>) -> (f64, f64) {
+    (
+        f64::from(span(line, width_from)),
+        shown_width(line, width_from),
+    )
+}
+
 /// The capsule's width as it shows now, part way through a transition or not.
 pub fn shown_width(line: Option<&Line>, width_from: Option<(f64, f64)>) -> f64 {
     let to = width(line);
     width_from.map_or(to, |(from, seconds)| {
         gesture::at(&gesture::chip_width(from, to), seconds, to)
     })
+}
+
+/// The capsule's top edge in the surface, in logical pixels.
+pub fn capsule_top(frame: &Frame) -> f64 {
+    Live::of(frame).top()
 }
 
 fn pose_of(frame: &Frame) -> Pose {
@@ -89,7 +102,7 @@ pub fn paint(frame: &Frame) -> Pixmap {
     let shown = shown_width(frame.line, frame.width_from);
     let left = scenes::centred(f64::from(width) / 2.0, shown);
     let capsule = Transform::from_scale(scale as f32, scale as f32)
-        .pre_translate(left as f32, -live.capsule.y as f32);
+        .pre_translate(left as f32, live.top() as f32);
     let shape = stadium(shown as f32);
     let mut clip = Mask::new(pixmap.width(), pixmap.height()).expect("the size of the frame");
     clip.fill_path(&shape, FillRule::Winding, true, capsule);
@@ -300,6 +313,10 @@ struct Live {
 }
 
 impl Live {
+    fn top(&self) -> f64 {
+        -self.capsule.y
+    }
+
     fn of(frame: &Frame) -> Self {
         let outline = *OUTLINE_LENGTH;
         let words_width = words(frame).map_or(0.0, |(_, path)| {
