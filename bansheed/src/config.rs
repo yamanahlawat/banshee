@@ -372,7 +372,7 @@ pub struct STTConfig {
     #[serde(deserialize_with = "probability")]
     pub vad_threshold: f32,
     pub vocabulary: Vec<String>,
-    // Trailing silence that ends an armed-listening answer
+    // Silence before the first end-of-answer check, and between later checks
     pub endpoint_silence_ms: u64,
 }
 

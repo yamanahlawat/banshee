@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A pause to think rarely ends your answer to an agent now.** After the pause, Banshee
+  checks whether you sound finished. If you don't, it keeps listening and checks again after
+  each further pause of the same length. Speaking again starts the checks over. An existing
+  install fetches the 9 MB turn detection model from the window or with `banshee setup`.
+  Until then, answers end on the pause as before. Dictation is unchanged.
 - **The capsule shows on Linux.** On Hyprland, Sway, KDE and any other desktop with
   layer shell, the Banshee figure appears at the bottom centre of the screen while Banshee
   records, works, waits for your answer, copies or fails, with the live words as you speak.

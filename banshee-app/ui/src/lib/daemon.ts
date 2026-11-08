@@ -4,7 +4,7 @@ import { derived, writable } from 'svelte/store';
 /// neither answers what a client has to route on. Both are absent from a
 /// daemon older than them.
 export type Remedy = 'download' | 'restart' | 'grant';
-type FileRole = 'speech' | 'detector' | 'engine' | 'voice';
+type FileRole = 'speech' | 'detector' | 'engine' | 'voice' | 'turn';
 export type BlockerKind = 'permission' | 'model' | 'pipeline' | 'provider' | 'keyfile';
 export type Blocker = {
   kind: BlockerKind;

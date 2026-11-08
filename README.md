@@ -191,6 +191,7 @@ Audio holds whatever the microphone heard, other voices too. On `Saved history`,
 
 - The default voice is [Pocket TTS](https://huggingface.co/kyutai/pocket-tts-without-voice-cloning) by Kyutai, under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/).
 - Parakeet Unified by NVIDIA. Licensed by NVIDIA Corporation under the [NVIDIA Open Model License](https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/blob/843b1b175ace04f5a89d379c79e2518c0d065b25/LICENSE).
+- Turn detection is [Smart Turn v3.2](https://huggingface.co/pipecat-ai/smart-turn-v3) by Daily, under [BSD-2-Clause](https://opensource.org/license/bsd-2-clause).
 - The rule that fixes the words to know follows Handy's word correction ([cjpais/Handy](https://github.com/cjpais/Handy), MIT).
 
 ## License

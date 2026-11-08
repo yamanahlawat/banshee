@@ -1,7 +1,11 @@
 pub mod local;
+mod log_mel;
 pub mod remote;
+mod smart_turn;
 pub mod vad;
 mod vocabulary;
+
+pub use smart_turn::{SmartTurn, TurnJudge};
 
 use std::path::Path;
 

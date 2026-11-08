@@ -17,7 +17,7 @@ use crate::dictation::{Delivered, deliver_text};
 use crate::frontmost::App;
 use crate::history::{NewEntry, Outcome};
 use crate::speech_to_text::vad::{Detector, VAD_CHUNK};
-use crate::speech_to_text::{Listener, Route, SAMPLE_RATE, Speech, Transcriber};
+use crate::speech_to_text::{Listener, Route, SAMPLE_RATE, Speech, Transcriber, TurnJudge};
 use crate::state::{
     AskCommand, ConsumerCommand, DaemonState, Listening, RecordingError, RecordingMode,
 };
@@ -199,12 +199,13 @@ impl Capture {
 /// Builds the listener a config names, for a switch while the daemon runs.
 pub type BuildListener = Box<dyn FnMut(&STTConfig) -> Result<Listener, RecordingError> + Send>;
 
-// Everything the audio consumer thread owns. The listening model and the
-// detector load and drop on this thread alone.
+// Everything the audio consumer thread owns. The listening model, the
+// detector and the turn detection model load and drop on this thread alone.
 pub struct Pipeline {
     pub source: Arc<Capture>,
     pub speech_to_text: Box<dyn Transcriber>,
     pub vad: Detector,
+    pub judge: Box<dyn TurnJudge>,
     pub state: Arc<DaemonState>,
     pub cues: Cues,
     /// When the models last served, which their idle unload counts from.
@@ -242,10 +243,18 @@ impl Transcriber for Unbuilt {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    Waiting { speech_run: usize },
-    InSpeech { silence_run: usize, start: usize },
+    Waiting {
+        speech_run: usize,
+    },
+    InSpeech {
+        silence_run: usize,
+        start: usize,
+        checks: u32,
+    },
     // The user is holding the hotkey; the release ends the answer
-    Manual { start: usize },
+    Manual {
+        start: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -269,14 +278,72 @@ fn advance(phase: Phase, is_speech: bool, processed: usize) -> Phase {
             Phase::InSpeech {
                 silence_run: 0,
                 start: processed.saturating_sub((ONSET_CHUNKS + PREROLL_CHUNKS) * VAD_CHUNK),
+                checks: 0,
             }
         }
-        Phase::InSpeech { silence_run, start } => Phase::InSpeech {
-            silence_run: if is_speech { 0 } else { silence_run + 1 },
+        Phase::InSpeech {
+            silence_run,
             start,
-        },
+            checks,
+        } => {
+            if is_speech {
+                Phase::InSpeech {
+                    silence_run: 0,
+                    start,
+                    checks: 0,
+                }
+            } else {
+                Phase::InSpeech {
+                    silence_run: silence_run + 1,
+                    start,
+                    checks,
+                }
+            }
+        }
         Phase::Manual { .. } => phase,
     }
+}
+
+/// Unfinished at or under this: 3.2% of finished answers on 500 held-out clips.
+const TURN_THRESHOLD: f32 = 0.2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Finished,
+    Unfinished,
+}
+
+fn verdict(p_complete: f32) -> Verdict {
+    if p_complete <= TURN_THRESHOLD {
+        Verdict::Unfinished
+    } else {
+        Verdict::Finished
+    }
+}
+
+fn check_due(silence_run: usize, checks: u32, endpoint_chunks: usize) -> bool {
+    silence_run >= endpoint_chunks * (checks as usize + 1)
+}
+
+/// The audio a check hears: the first judges the speech, trimmed where the
+/// silence began; later ones hear the silence too.
+fn judged(
+    audio: &[f32],
+    start: usize,
+    processed: usize,
+    silence_run: usize,
+    checks: u32,
+) -> &[f32] {
+    let end = if checks == 0 {
+        processed.saturating_sub(silence_run * VAD_CHUNK).max(start)
+    } else {
+        processed
+    };
+    &audio[start..end]
+}
+
+fn seconds(chunks: usize) -> f64 {
+    (chunks as u64 * CHUNK_MS) as f64 / 1000.0
 }
 
 /// The detector has just confirmed that the answer began.
@@ -308,7 +375,14 @@ fn afresh(vad: &mut Detector, phase: &mut Phase) {
     vad.reset_state();
     match phase {
         Phase::Waiting { speech_run } => *speech_run = 0,
-        Phase::InSpeech { silence_run, .. } => *silence_run = 0,
+        Phase::InSpeech {
+            silence_run,
+            checks,
+            ..
+        } => {
+            *silence_run = 0;
+            *checks = 0;
+        }
         Phase::Manual { .. } => {}
     }
 }
@@ -870,9 +944,10 @@ impl Pipeline {
         BansheeError::Transcription(why)
     }
 
-    /// Frees the listening model and the detector once they have idled past
-    /// `models.unload_after`, and answers when they are due. `None` once they
-    /// are freed, or when they stay loaded: only a use loads them again.
+    /// Frees the listening model, the detector and the turn detection model
+    /// once they have idled past `models.unload_after`, and answers when they
+    /// are due. `None` once they are freed, or when they stay loaded: only a
+    /// use loads them again.
     fn unload_idle(&mut self, now: Instant) -> Option<Instant> {
         let due = crate::models::unload_due(self.used, self.state.unload_after())?;
         if now < due {
@@ -883,14 +958,23 @@ impl Pipeline {
             self.state.listening_model_unloaded();
         }
         let detector = self.vad.unload();
-        if detector || listener {
+        let turn = self.judge.unload();
+        let freed: Vec<&str> = [
+            (listener, "listening model"),
+            (detector, "voice detector"),
+            (turn, "turn detection model"),
+        ]
+        .into_iter()
+        .filter_map(|(freed, name)| freed.then_some(name))
+        .collect();
+        if let Some((last, rest)) = freed.split_last() {
             crate::models::return_freed_memory();
-            let freed = match (listener, detector) {
-                (true, true) => "listening model and voice detector",
-                (true, false) => "listening model",
-                _ => "voice detector",
+            let named = if rest.is_empty() {
+                (*last).to_string()
+            } else {
+                format!("{} and {last}", rest.join(", "))
             };
-            log::info!("The {freed} unloaded after idling");
+            log::info!("The {named} unloaded after idling");
         }
         None
     }
@@ -918,6 +1002,17 @@ impl Pipeline {
             log::error!("the listening model did not load: {error}");
             failed_load("the listening model", &error)
         })
+    }
+
+    /// Loads the turn detection model for an answer. One that will not load
+    /// leaves the answer to end on the pause alone.
+    fn ready_judge(&mut self) {
+        if let Err(error) = self.judge.load() {
+            log::warn!(
+                "the turn detection model would not load: {}. Answers end on the pause until banshee setup or the window's download fetches it",
+                reason(&error).trim_end_matches('.')
+            );
+        }
     }
 
     /// Transcribes kept audio again for the window that asked. Nothing is
@@ -1241,6 +1336,7 @@ impl Pipeline {
         // Before capture opens: a load that outlasted the open and the arm
         // cue's settle would drop the start of the answer with the cue.
         let listened = self.ready().and_then(|()| {
+            self.ready_judge();
             self.state.hear_answer(ask.session);
             let asked = Instant::now();
             match self.await_arm_cue(asked + ask.timeout, ask.session)? {
@@ -1308,6 +1404,32 @@ impl Pipeline {
         Some(start)
     }
 
+    /// Smart Turn's verdict on `heard`, logged after `check`. Without the
+    /// model, or when it fails, the answer is finished.
+    fn hear_turn(&mut self, heard: &[f32], check: &str, step: f64) -> Verdict {
+        if !self.judge.resident() {
+            log::info!("{check}, no turn model, finished");
+            return Verdict::Finished;
+        }
+        let began = Instant::now();
+        let p = match self.judge.judge(heard) {
+            Ok(p) => p,
+            Err(error) => {
+                log::info!("{check}, the turn model failed: {error}, finished");
+                return Verdict::Finished;
+            }
+        };
+        let ms = began.elapsed().as_millis();
+        let judged = verdict(p);
+        match judged {
+            Verdict::Unfinished => log::info!(
+                "{check}, P(complete) {p:.2}, unfinished, next check in {step:.1} s, {ms} ms"
+            ),
+            Verdict::Finished => log::info!("{check}, P(complete) {p:.2}, finished, {ms} ms"),
+        }
+        judged
+    }
+
     // Confirms onset, then ends on trailing silence; the audio comes back at
     // 16 kHz. `Heard::Silence` and `Heard::Closed` are an answer that never
     // came; `Err` is a listen that broke.
@@ -1356,14 +1478,22 @@ impl Pipeline {
 
             // Checked before suppression so stuck speech cannot hang the session
             if Instant::now() >= hard_deadline {
-                return match phase {
-                    Phase::InSpeech { start, .. } | Phase::Manual { start } => {
-                        capture.finish(&mut audio)?;
-                        audio.drain(..start);
-                        Ok(Heard::Audio(audio))
+                let start = match phase {
+                    Phase::InSpeech { start, checks, .. } => {
+                        if checks > 0 {
+                            log::info!(
+                                "answer ended at the {} s cap after {checks} checks",
+                                MAX_ANSWER.as_secs()
+                            );
+                        }
+                        start
                     }
-                    Phase::Waiting { .. } => Ok(Heard::Silence),
+                    Phase::Manual { start } => start,
+                    Phase::Waiting { .. } => return Ok(Heard::Silence),
                 };
+                capture.finish(&mut audio)?;
+                audio.drain(..start);
+                return Ok(Heard::Audio(audio));
             }
 
             // Half-duplex: drop capture while the daemon itself is speaking
@@ -1404,16 +1534,49 @@ impl Pipeline {
                         fed = self.open_answer_stream(start);
                     }
                 }
+                if let (
+                    Phase::InSpeech {
+                        silence_run: paused,
+                        checks,
+                        ..
+                    },
+                    Phase::InSpeech { silence_run: 0, .. },
+                ) = (phase, next)
+                    && checks > 0
+                {
+                    log::info!("answer resumed after {:.1} s of silence", seconds(paused));
+                }
                 phase = next;
             }
             while feed_stream(&mut *self.speech_to_text, &self.state, &audio, &mut fed) {}
 
-            if let Phase::InSpeech { silence_run, start } = phase
-                && silence_run >= endpoint_chunks
+            if let Phase::InSpeech {
+                silence_run,
+                start,
+                checks,
+            } = phase
+                && check_due(silence_run, checks, endpoint_chunks)
             {
-                capture.finish(&mut audio)?;
-                audio.drain(..start);
-                return Ok(Heard::Audio(audio));
+                let heard = judged(&audio, start, processed, silence_run, checks);
+                let check = format!(
+                    "answer check {}: {:.1} s of silence",
+                    checks + 1,
+                    seconds(silence_run)
+                );
+                match self.hear_turn(heard, &check, seconds(endpoint_chunks)) {
+                    Verdict::Unfinished => {
+                        phase = Phase::InSpeech {
+                            silence_run,
+                            start,
+                            checks: checks + 1,
+                        };
+                    }
+                    Verdict::Finished => {
+                        capture.finish(&mut audio)?;
+                        audio.drain(..start);
+                        return Ok(Heard::Audio(audio));
+                    }
+                }
             }
             if matches!(phase, Phase::Waiting { .. }) && Instant::now() >= deadline {
                 return Ok(Heard::Silence);
@@ -1709,7 +1872,7 @@ mod utterance_tests {
     use banshee_common::error::BansheeError;
     use banshee_common::listening::ListeningModel;
     use ringbuf::traits::{Producer, Split};
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     const FAILED_LOAD_FIX: &str =
         ". The next use tries again. If it fails every time, restart: banshee start";
@@ -1906,6 +2069,70 @@ mod utterance_tests {
         }
     }
 
+    type Answer = Box<dyn FnMut(usize) -> Result<f32, BansheeError> + Send>;
+
+    /// Answers each check from the length of audio it heard, and notes that
+    /// length.
+    struct ScriptedJudge {
+        answer: Answer,
+        heard: Arc<Mutex<Vec<usize>>>,
+        resident: bool,
+        load_fails: bool,
+        loads: Arc<AtomicUsize>,
+    }
+
+    impl ScriptedJudge {
+        fn by_length(
+            answer: impl FnMut(usize) -> Result<f32, BansheeError> + Send + 'static,
+        ) -> Self {
+            Self {
+                answer: Box::new(answer),
+                heard: Arc::default(),
+                resident: true,
+                load_fails: false,
+                loads: Arc::default(),
+            }
+        }
+
+        /// Its verdicts in order, then finished.
+        fn answering(verdicts: impl IntoIterator<Item = Result<f32, BansheeError>>) -> Self {
+            let mut verdicts: VecDeque<_> = verdicts.into_iter().collect();
+            Self::by_length(move |_| verdicts.pop_front().unwrap_or(Ok(0.9)))
+        }
+
+        fn finished() -> Self {
+            Self::answering([])
+        }
+
+        fn unloaded() -> Self {
+            Self {
+                resident: false,
+                ..Self::finished()
+            }
+        }
+    }
+
+    impl TurnJudge for ScriptedJudge {
+        fn judge(&mut self, audio: &[f32]) -> Result<f32, BansheeError> {
+            self.heard.lock().unwrap().push(audio.len());
+            (self.answer)(audio.len())
+        }
+        fn resident(&self) -> bool {
+            self.resident
+        }
+        fn load(&mut self) -> Result<(), BansheeError> {
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            if self.load_fails {
+                return Err(BansheeError::Other("the file is damaged".to_string()));
+            }
+            self.resident = true;
+            Ok(())
+        }
+        fn unload(&mut self) -> bool {
+            std::mem::take(&mut self.resident)
+        }
+    }
+
     struct Handled {
         signals: Vec<Signal>,
         rose: bool,
@@ -1991,6 +2218,16 @@ mod utterance_tests {
         cues: Cues,
         speech_to_text: Scripted,
     ) -> (Pipeline, HeapProd<f32>) {
+        fillable_with_judge(room, state, cues, speech_to_text, ScriptedJudge::finished())
+    }
+
+    fn fillable_with_judge(
+        room: usize,
+        state: &Arc<DaemonState>,
+        cues: Cues,
+        speech_to_text: Scripted,
+        judge: ScriptedJudge,
+    ) -> (Pipeline, HeapProd<f32>) {
         let (producer, consumer) = ringbuf::HeapRb::<f32>::new(room).split();
         state.set_endpoint_silence_ms(800);
         let pipeline = Pipeline {
@@ -2000,6 +2237,7 @@ mod utterance_tests {
             })),
             speech_to_text: Box::new(speech_to_text),
             vad: Detector::open(crate::test_support::silero()).unwrap(),
+            judge: Box::new(judge),
             state: Arc::clone(state),
             cues,
             used: Instant::now(),
@@ -2102,13 +2340,14 @@ mod utterance_tests {
     /// `listened_by` with the daemon holding `quiet_ms` before the answer
     /// opens. The audio arrives in sixteenth-second slices, so the endpoint is
     /// judged between slices as it is on a live microphone.
-    fn listened_with_quiet_length(audio: &[f32], quiet_ms: u64) -> Vec<f32> {
+    fn listened_with_quiet_length(audio: &[f32], quiet_ms: u64, judge: ScriptedJudge) -> Vec<f32> {
         let (cues, _sounds) = Cues::recording();
         let state = crate::test_support::daemon_state_with_cues(cues.clone());
         let session = state.arm_for_ask().unwrap();
         assert!(state.open_answer(session));
         let scripted = Scripted::new(&state, Ok(""));
-        let (mut pipeline, mut producer) = fillable(audio.len(), &state, cues, scripted);
+        let (mut pipeline, mut producer) =
+            fillable_with_judge(audio.len(), &state, cues, scripted, judge);
         state.set_endpoint_silence_ms(quiet_ms);
         let samples = audio.to_vec();
         let feeding = thread::spawn(move || {
@@ -2129,8 +2368,10 @@ mod utterance_tests {
 
     #[test]
     fn an_answer_ends_on_the_quiet_length_the_daemon_holds() {
-        let short = listened_with_quiet_length(&speech_gap_speech(), 800);
-        let long = listened_with_quiet_length(&speech_gap_speech(), 3500);
+        let short =
+            listened_with_quiet_length(&speech_gap_speech(), 800, ScriptedJudge::finished());
+        let long =
+            listened_with_quiet_length(&speech_gap_speech(), 3500, ScriptedJudge::finished());
         let gap = SAMPLE_RATE as usize;
         assert!(
             short.len() + gap < long.len(),
@@ -2138,6 +2379,217 @@ mod utterance_tests {
             short.len(),
             long.len()
         );
+    }
+
+    /// Enough unfinished verdicts to hold every check in `speech_gap_speech`'s
+    /// three-second gap at 800 ms apart.
+    const HOLDS_THE_GAP: [f32; 3] = [0.05; 3];
+
+    fn held_through_the_gap() -> impl Iterator<Item = Result<f32, BansheeError>> {
+        HOLDS_THE_GAP.into_iter().map(Ok)
+    }
+
+    fn ends_in_the_first_gap(heard: &[f32]) -> bool {
+        heard.len() < crate::speech_to_text::vad::test_speech().len() + 3 * SAMPLE_RATE as usize
+    }
+
+    #[test]
+    fn an_unfinished_pause_keeps_the_answer_open() {
+        let cut = listened_with_quiet_length(&speech_gap_speech(), 800, ScriptedJudge::finished());
+        let held = listened_with_quiet_length(
+            &speech_gap_speech(),
+            800,
+            ScriptedJudge::answering(held_through_the_gap()),
+        );
+        let speech = crate::speech_to_text::vad::test_speech().len();
+        assert!(
+            held.len() >= cut.len() + speech,
+            "both utterances are heard: {} against the cut at {}",
+            held.len(),
+            cut.len()
+        );
+    }
+
+    #[test]
+    fn a_finished_verdict_ends_the_answer_at_the_pause() {
+        let judge =
+            ScriptedJudge::answering(std::iter::once(Ok(0.9)).chain(held_through_the_gap()));
+        let heard = listened_with_quiet_length(&speech_gap_speech(), 800, judge);
+        assert!(ends_in_the_first_gap(&heard), "{} samples", heard.len());
+    }
+
+    #[test]
+    fn a_judge_that_fails_ends_on_the_silence() {
+        let judge = ScriptedJudge::answering(
+            std::iter::once(Err(BansheeError::Other("the session broke".to_string())))
+                .chain(held_through_the_gap()),
+        );
+        let heard = listened_with_quiet_length(&speech_gap_speech(), 800, judge);
+        assert!(ends_in_the_first_gap(&heard), "{} samples", heard.len());
+    }
+
+    #[test]
+    fn no_turn_model_ends_on_the_silence() {
+        let judge = ScriptedJudge::unloaded();
+        let heard_by_judge = Arc::clone(&judge.heard);
+        let heard = listened_with_quiet_length(&speech_gap_speech(), 800, judge);
+        assert!(ends_in_the_first_gap(&heard), "{} samples", heard.len());
+        assert!(
+            heard_by_judge.lock().unwrap().is_empty(),
+            "the judge was asked"
+        );
+    }
+
+    #[test]
+    fn the_first_check_hears_no_trailing_silence() {
+        let judge = ScriptedJudge::finished();
+        let heard = Arc::clone(&judge.heard);
+        listened_with_quiet_length(&speech_gap_speech(), 800, judge);
+        let speech = crate::speech_to_text::vad::test_speech().len();
+        let heard = heard.lock().unwrap();
+        assert!(
+            heard[0] <= speech + PREROLL_CHUNKS * VAD_CHUNK + VAD_CHUNK,
+            "the first check heard {} samples of {speech} spoken",
+            heard[0]
+        );
+    }
+
+    #[test]
+    fn speech_after_an_unfinished_verdict_starts_over() {
+        let speech = crate::speech_to_text::vad::test_speech().len();
+        let first_and_gap = speech + 3 * SAMPLE_RATE as usize;
+        // Unfinished until a check hears the second utterance, however many
+        // checks the gap holds
+        let judge = ScriptedJudge::by_length(move |heard| {
+            Ok(if heard < first_and_gap { 0.05 } else { 0.9 })
+        });
+        let heard = Arc::clone(&judge.heard);
+        listened_with_quiet_length(&speech_gap_speech(), 800, judge);
+        let heard = heard.lock().unwrap();
+        let Some((last, gap_checks)) = heard.split_last() else {
+            panic!("no check ran");
+        };
+        assert!(!gap_checks.is_empty(), "the gap held no check: {heard:?}");
+        assert!(
+            *last <= first_and_gap + speech + PREROLL_CHUNKS * VAD_CHUNK + VAD_CHUNK,
+            "the check after the second utterance is a first check: {heard:?}"
+        );
+    }
+
+    #[test]
+    fn an_answer_ends_at_a_later_check_on_the_full_window() {
+        let mut audio = crate::speech_to_text::vad::test_speech();
+        audio.extend(std::iter::repeat_n(0.0, 3 * SAMPLE_RATE as usize));
+        let judge = ScriptedJudge::answering([Ok(0.05)]);
+        let heard = Arc::clone(&judge.heard);
+        let samples = listened_with_quiet_length(&audio, 800, judge);
+        assert!(!samples.is_empty());
+        let heard = heard.lock().unwrap();
+        assert!(heard.len() >= 2, "the silence held one check: {heard:?}");
+        assert!(
+            heard[1] > heard[0],
+            "the second check did not hear the full window: {heard:?}"
+        );
+    }
+
+    /// Asks over a capture that `producer` fills with `audio` once the arm cue
+    /// has played and the answer has opened, and gives back the reply.
+    fn answered(
+        pipeline: &mut Pipeline,
+        mut producer: HeapProd<f32>,
+        audio: Vec<f32>,
+    ) -> Result<String, String> {
+        let state = Arc::clone(&pipeline.state);
+        let session = state.arm_for_ask().unwrap();
+        let feeding = thread::spawn(move || {
+            let until = Instant::now() + WAIT;
+            while !state.arm_cue_played() && Instant::now() < until {
+                state.heard_sound();
+                state.announce_sound();
+                thread::sleep(Duration::from_millis(5));
+            }
+            while !state.is_answer_open() && Instant::now() < until {
+                thread::sleep(Duration::from_millis(5));
+            }
+            producer.push_slice(&audio);
+        });
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        pipeline.ask(AskCommand {
+            reply,
+            question: String::new(),
+            timeout: WAIT,
+            session,
+        });
+        feeding.join().unwrap();
+        answer.blocking_recv().expect("every ask replies")
+    }
+
+    #[test]
+    fn an_answer_loads_the_turn_model_before_it_listens() {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        let judge = ScriptedJudge::unloaded();
+        let heard = Arc::clone(&judge.heard);
+        let audio = spoken_then_quiet();
+        let (mut pipeline, producer) = fillable_with_judge(
+            audio.len(),
+            &state,
+            cues,
+            Scripted::new(&state, Ok("the answer")),
+            judge,
+        );
+        let replied = answered(&mut pipeline, producer, audio);
+
+        assert_eq!(replied, Ok("the answer".to_string()));
+        assert!(pipeline.judge.resident());
+        assert_eq!(heard.lock().unwrap().len(), 1, "the loaded model judged");
+    }
+
+    #[test]
+    fn a_turn_model_that_will_not_load_leaves_the_answer_to_end_on_the_pause() {
+        let (cues, _sounds) = Cues::recording();
+        let state = crate::test_support::daemon_state_with_cues(cues.clone());
+        let judge = ScriptedJudge {
+            load_fails: true,
+            ..ScriptedJudge::unloaded()
+        };
+        let (heard, loads) = (Arc::clone(&judge.heard), Arc::clone(&judge.loads));
+        let audio = spoken_then_quiet();
+        let (mut pipeline, producer) = fillable_with_judge(
+            audio.len(),
+            &state,
+            cues,
+            Scripted::new(&state, Ok("the answer")),
+            judge,
+        );
+        let replied = answered(&mut pipeline, producer, audio);
+
+        assert_eq!(replied, Ok("the answer".to_string()));
+        assert_eq!(loads.load(Ordering::Relaxed), 1);
+        assert!(
+            heard.lock().unwrap().is_empty(),
+            "a model not in memory judged"
+        );
+        assert_eq!(state.last_error(), None);
+    }
+
+    #[test]
+    fn a_dictation_leaves_the_turn_model_unloaded() {
+        let state = crate::test_support::daemon_state_with_cues(Cues::silent());
+        let scripted = Scripted {
+            resident: false,
+            ..Scripted::new(&state, Ok(""))
+        };
+        let judge = ScriptedJudge::unloaded();
+        let loads = Arc::clone(&judge.loads);
+        let (mut pipeline, _producer) =
+            fillable_with_judge(1, &state, Cues::silent(), scripted, judge);
+        pipeline.vad.unload();
+
+        assert_eq!(pipeline.ready(), Ok(()));
+        assert!(pipeline.vad.resident(), "ready loaded what dictation needs");
+        assert_eq!(loads.load(Ordering::Relaxed), 0);
+        assert!(!pipeline.judge.resident());
     }
 
     fn untyped(_: &DaemonState, _: &str) -> Result<Delivered, BansheeError> {
@@ -3034,6 +3486,34 @@ mod utterance_tests {
             crate::state::Listening::Available(parakeet())
         );
         assert_eq!(state.pipeline(), crate::state::Pipeline::Open);
+    }
+
+    #[test]
+    fn the_idle_unload_frees_the_turn_model() {
+        let state = crate::test_support::daemon_state_with_cues(Cues::silent());
+        let scripted = Scripted {
+            resident: false,
+            ..Scripted::new(&state, Ok(""))
+        };
+        let mut pipeline = holding(&[0.0], &state, Cues::silent(), scripted);
+        pipeline.vad.unload();
+        state.set_unload_after(Some(LIMIT));
+        let used = pipeline.used;
+        let returns = crate::models::returns_on_this_thread();
+
+        assert_eq!(
+            pipeline.unload_idle(used + LIMIT - Duration::from_secs(1)),
+            Some(used + LIMIT)
+        );
+        assert!(pipeline.judge.resident(), "a second early");
+
+        assert_eq!(pipeline.unload_idle(used + LIMIT), None);
+        assert!(!pipeline.judge.resident());
+        assert_eq!(
+            crate::models::returns_on_this_thread(),
+            returns + 1,
+            "the freed memory goes back to the system"
+        );
     }
 
     #[test]
@@ -5069,8 +5549,11 @@ mod tests {
 
 #[cfg(test)]
 mod phase_tests {
-    use super::{ONSET_CHUNKS, PREROLL_CHUNKS, Phase, advance, onset};
-    use crate::speech_to_text::vad::VAD_CHUNK;
+    use super::{
+        ONSET_CHUNKS, PREROLL_CHUNKS, Phase, Verdict, advance, afresh, check_due, judged, onset,
+        verdict,
+    };
+    use crate::speech_to_text::vad::{Detector, VAD_CHUNK};
 
     #[test]
     fn speech_shorter_than_the_onset_stays_waiting() {
@@ -5108,6 +5591,7 @@ mod phase_tests {
             Phase::InSpeech {
                 silence_run: 0,
                 start: processed - (ONSET_CHUNKS + PREROLL_CHUNKS) * VAD_CHUNK,
+                checks: 0,
             }
         );
     }
@@ -5121,7 +5605,8 @@ mod phase_tests {
             advance(almost, true, ONSET_CHUNKS * VAD_CHUNK),
             Phase::InSpeech {
                 silence_run: 0,
-                start: 0
+                start: 0,
+                checks: 0,
             }
         );
     }
@@ -5131,19 +5616,22 @@ mod phase_tests {
         let speaking = Phase::InSpeech {
             silence_run: 3,
             start: 512,
+            checks: 2,
         };
         assert_eq!(
             advance(speaking, false, 0),
             Phase::InSpeech {
                 silence_run: 4,
-                start: 512
+                start: 512,
+                checks: 2,
             }
         );
         assert_eq!(
             advance(speaking, true, 0),
             Phase::InSpeech {
                 silence_run: 0,
-                start: 512
+                start: 512,
+                checks: 0,
             }
         );
     }
@@ -5154,6 +5642,7 @@ mod phase_tests {
         let speaking = Phase::InSpeech {
             silence_run: 0,
             start: 0,
+            checks: 0,
         };
         let held = Phase::Manual { start: 0 };
         assert!(onset(waiting, speaking));
@@ -5173,5 +5662,65 @@ mod phase_tests {
         let held = Phase::Manual { start: 7 };
         assert_eq!(advance(held, true, 99), held);
         assert_eq!(advance(held, false, 99), held);
+    }
+
+    #[test]
+    fn the_boundary_probability_is_unfinished() {
+        assert_eq!(verdict(0.2), Verdict::Unfinished);
+        assert_eq!(verdict(0.21), Verdict::Finished);
+    }
+
+    #[test]
+    fn the_first_check_falls_on_the_endpoint() {
+        assert!(!check_due(77, 0, 78));
+        assert!(check_due(78, 0, 78));
+    }
+
+    #[test]
+    fn after_one_unfinished_verdict_the_next_check_falls_an_endpoint_later() {
+        assert!(!check_due(155, 1, 78));
+        assert!(check_due(156, 1, 78));
+    }
+
+    #[test]
+    fn the_first_check_hears_the_speech_alone() {
+        let audio = vec![0.0; 10 + 5 * VAD_CHUNK];
+        let heard = judged(&audio, 10, 10 + 5 * VAD_CHUNK, 3, 0);
+        assert_eq!(heard.len(), 2 * VAD_CHUNK);
+    }
+
+    #[test]
+    fn a_later_check_hears_the_silence_too() {
+        let audio = vec![0.0; 10 + 5 * VAD_CHUNK];
+        assert_eq!(
+            judged(&audio, 10, 10 + 5 * VAD_CHUNK, 3, 1).len(),
+            5 * VAD_CHUNK
+        );
+    }
+
+    #[test]
+    fn a_check_never_reaches_before_the_answer() {
+        let audio = vec![0.0; 10 + 5 * VAD_CHUNK];
+        let heard = judged(&audio, 10, 10 + 5 * VAD_CHUNK, 9, 0);
+        assert!(heard.is_empty(), "{} samples", heard.len());
+    }
+
+    #[test]
+    fn afresh_starts_the_checks_over() {
+        let mut vad = Detector::open(crate::test_support::silero()).unwrap();
+        let mut phase = Phase::InSpeech {
+            silence_run: 78,
+            start: 0,
+            checks: 1,
+        };
+        afresh(&mut vad, &mut phase);
+        assert_eq!(
+            phase,
+            Phase::InSpeech {
+                silence_run: 0,
+                start: 0,
+                checks: 0,
+            }
+        );
     }
 }

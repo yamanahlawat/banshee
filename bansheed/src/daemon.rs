@@ -96,6 +96,12 @@ fn start_recording(
             source: Arc::clone(&capture),
             speech_to_text: listener.engine,
             vad,
+            // An empty path never loads, so no models directory means no turn model
+            judge: Box::new(crate::speech_to_text::SmartTurn::new(
+                models::download::models_dir()
+                    .map(|dir| dir.join(models::TURN_MODEL))
+                    .unwrap_or_default(),
+            )),
             state: Arc::clone(daemon_state),
             cues,
             used: std::time::Instant::now(),
