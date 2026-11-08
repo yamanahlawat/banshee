@@ -52,8 +52,8 @@ mode = "both"          # visual | sound | both | none
 speak_problems = true  # false = never say a new problem aloud
 ```
 
-- **A new install on macOS starts on `visual`.** Its first model download writes
-  `visual`, or `both` when VoiceOver is on. Elsewhere the absent key means both.
+- **A new install starts on `visual`.** Its first model download writes
+  `visual`, or `both` when VoiceOver is on.
 - **`speak_problems` says a new problem aloud once.** Banshee says the problem's
   name and its fix, after anything already queued. A model file that goes missing
   is spoken at the next use. So is a fault in a microphone held open by
@@ -62,10 +62,10 @@ speak_problems = true  # false = never say a new problem aloud
   together, only the first is spoken. A microphone refusal is spoken at the use
   that finds it. Turn it off with
   `banshee config set feedback.speak_problems false`.
-- **`visual` draws a small Banshee figure above the Dock on macOS.** The menu
-  bar icon draws it, and the window starts the icon. `visual` plays no earcons
-  while the menu bar icon draws the figure, and plays every sound with no
-  menu bar icon running.
+- **`visual` draws a small Banshee figure at the bottom of the screen.** The tray
+  draws it, and the window starts the tray. On Linux the desktop needs layer
+  shell. `visual` plays no earcons while the figure draws, and plays every sound
+  when nothing draws it.
 - **`input_device` is a case-insensitive substring** of the microphone name, so
   `"yeti"` matches `Blue Yeti Stereo Microphone`.
 - **An exact name wins** over a longer name that contains it, so a `Yeti` next

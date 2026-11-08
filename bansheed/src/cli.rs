@@ -151,8 +151,8 @@ fn decoded<T: serde::de::DeserializeOwned>(reply: &serde_json::Value, key: &str)
 
 // One object per line, as Waybar requires. The same word lands in three keys
 // because Waybar splits them: `text` shows, `alt` picks a format-icon, `class`
-// picks CSS. Readiness is left out until the Linux capsule item gives the bar
-// a place for a problem. A refused microphone has its own flag, so the
+// picks CSS. A lasting problem shows only while idle, since an activity keeps
+// its own icon while it lasts. A refused microphone has its own flag, so the
 // tooltip carries that one.
 fn waybar_line(
     word: &str,
@@ -160,7 +160,9 @@ fn waybar_line(
     missing: Option<&str>,
     open: bool,
     refused: bool,
+    problem: Option<&str>,
 ) -> String {
+    let problem = problem.filter(|_| word == "idle");
     let tooltip = match device {
         // Nothing to say about the microphone, so the word stands alone
         None => format!("Banshee is {word}"),
@@ -169,13 +171,26 @@ fn waybar_line(
             banshee_common::microphone_label(device, missing, open, refused)
         ),
     };
+    let tooltip = match problem {
+        Some(problem) => format!("{problem}. {tooltip}"),
+        None => tooltip,
+    };
     serde_json::json!({
         "text": word,
-        "alt": word,
+        "alt": if problem.is_some() { "problem" } else { word },
         "class": word,
         "tooltip": tooltip,
     })
     .to_string()
+}
+
+fn problem_name(state: &serde_json::Value) -> Option<&str> {
+    state
+        .get("blockers")?
+        .as_array()?
+        .first()?
+        .get("name")?
+        .as_str()
 }
 
 fn watch_line(
@@ -185,9 +200,10 @@ fn watch_line(
     missing: Option<&str>,
     open: bool,
     refused: bool,
+    problem: Option<&str>,
 ) -> String {
     if waybar {
-        waybar_line(word, device, missing, open, refused)
+        waybar_line(word, device, missing, open, refused, problem)
     } else {
         word.to_string()
     }
@@ -426,6 +442,7 @@ pub async fn watch(waybar: bool, events: Vec<String>) -> Result<(), BansheeError
             banshee_common::missing_device(&state),
             banshee_common::microphone_open(&state),
             banshee_common::microphone_refused(&state),
+            problem_name(&state),
         );
         // The reader sees the line, so the line is what has to differ
         if line != shown {

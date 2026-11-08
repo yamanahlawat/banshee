@@ -1,6 +1,75 @@
-//! The Banshee shroud in the mark's own 100-unit square, y down.
+//! The Banshee shroud in the mark's own 100-unit square, y down, and the
+//! capsule around it in points.
 
 use std::time::Instant;
+
+pub const FIGURE: f64 = 32.0;
+pub const CAPSULE: f64 = 44.0;
+pub const INSET: f64 = (CAPSULE - FIGURE) / 2.0;
+/// Clear space below the capsule, so the rise and the sinks travel without a cut.
+pub const TRAVEL: f64 = 12.0;
+pub const WORDS_GAP: f64 = 4.0;
+pub const WORDS_TAIL: f64 = 16.0;
+pub const WORDS_LEFT: f64 = INSET + FIGURE + WORDS_GAP;
+pub const AROUND_WORDS: f64 = WORDS_LEFT + WORDS_TAIL;
+pub const SCREEN_MARGIN: f64 = 12.0;
+/// Unmeasured.
+pub const ABOVE_DOCK: f64 = 12.0;
+/// Measured: a Dock with 54pt tiles shows about 79pt tall.
+const DOCK_ABOVE_TILE: f64 = 26.0;
+/// Unmeasured: the tile size the Dock uses before anyone sets one.
+pub const DOCK_TILE_DEFAULT: f64 = 48.0;
+#[cfg(target_os = "linux")]
+pub const ABOVE_DEFAULT_DOCK: f64 = dock_height(DOCK_TILE_DEFAULT) + ABOVE_DOCK;
+
+/// How tall a bottom Dock with `tile`-point tiles shows.
+pub const fn dock_height(tile: f64) -> f64 {
+    tile + DOCK_ABOVE_TILE
+}
+pub const WORDS_SIZE: f64 = 16.0;
+pub const WORDS_TRACKING: f64 = -0.015;
+pub const WORDS_WEIGHT: f64 = 750.0;
+pub const WORDS_WIDTH: f64 = 106.0;
+/// Antialiased glyph edges reach past the outlines' box.
+pub const WORDS_BLEED: f64 = 1.0;
+
+pub fn capsule_width(words: f64) -> f64 {
+    WORDS_LEFT + words + WORDS_TAIL
+}
+
+pub fn seconds(since: Instant, now: Instant) -> f64 {
+    now.saturating_duration_since(since).as_secs_f64()
+}
+
+pub const RUST: u32 = 0x8A2A0D;
+pub const BONE: u32 = 0xF2EFE9;
+pub const RING_STRENGTH: f64 = 0.45;
+pub const OUTLINE: f64 = 9.0;
+#[cfg(target_os = "macos")]
+pub const OUTLINE_CONTRAST: f64 = 12.0;
+/// A broken outline's dash and gap, as shares of the outline's length.
+const OUTLINE_DASH: [f64; 2] = [0.088, 0.056];
+pub const RING: f64 = 6.0;
+pub const LIGHT: f64 = 7.0;
+/// The halo light's dash and gap, as shares of the halo's length.
+const LIGHT_DASH: [f64; 2] = [0.22, 0.78];
+pub const BEHIND: f64 = 15.0;
+pub const HALO: (f64, f64, f64, f64) = (50.0, 40.0, 42.0, 16.0);
+pub const CUPS: [(f64, f64); 2] = [(15.0, 46.0), (85.0, 46.0)];
+pub const CUP_RADII: (f64, f64) = (12.0, 17.0);
+pub const CUP_GAP: f64 = 10.0;
+pub const HEADBAND: [Segment; 2] = [
+    Segment::Move(15.0, 32.0),
+    Segment::Cubic([15.0, -4.0, 85.0, -4.0, 85.0, 32.0]),
+];
+pub const BAND: f64 = 6.0;
+pub const BAND_GAP: f64 = 14.0;
+pub const WORKING_DEPTH: f64 = 0.3;
+/// The gesture, voice and fill layers turn and scale about the figure's feet.
+pub const PIVOT: (f64, f64) = (50.0, 88.0);
+pub const KINDLE_AFTER: f64 = 0.2;
+/// The daemon samples the level every 33ms, so each sample eases into the next.
+pub const LEVEL_STEP: f64 = 0.033;
 
 /// MacBook Pro Microphone, sample 2 (1029 frames) p10: 0.016, the room between words.
 const FLOOR: f64 = 0.016;
@@ -22,7 +91,7 @@ impl Voice {
         // Unmeasured: the 0.55 share kept per 60ms step, and the 100ms cap.
         let dt_ms = self
             .at
-            .map_or(60.0, |at| now.duration_since(at).as_secs_f64() * 1000.0)
+            .map_or(60.0, |at| seconds(at, now) * 1000.0)
             .min(100.0);
         let follow = 1.0 - 0.55f64.powf(dt_ms / 60.0);
         self.level += (target - self.level) * follow;
@@ -38,6 +107,20 @@ pub struct Pose {
     pub lift: f64,
     pub scale: f64,
     pub fill: f64,
+}
+
+impl Pose {
+    #[cfg(any(target_os = "linux", test))]
+    pub fn lerp(from: Pose, to: Pose, share: f64) -> Pose {
+        let mix = |from: f64, to: f64| from + (to - from) * share;
+        Pose {
+            depth: mix(from.depth, to.depth),
+            sway: mix(from.sway, to.sway),
+            lift: mix(from.lift, to.lift),
+            scale: mix(from.scale, to.scale),
+            fill: mix(from.fill, to.fill),
+        }
+    }
 }
 
 /// Reduce Motion holds the figure still and carries the level as the bone
@@ -128,6 +211,14 @@ pub fn path_length(segments: &[Segment]) -> f64 {
         }
     }
     length
+}
+
+pub fn outline_dash(length: f64) -> [f64; 2] {
+    OUTLINE_DASH.map(|share| share * length)
+}
+
+pub fn light_dash(length: f64) -> [f64; 2] {
+    LIGHT_DASH.map(|share| share * length)
 }
 
 /// Ramanujan's second approximation.

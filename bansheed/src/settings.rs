@@ -635,7 +635,6 @@ fn write_locked(
 }
 
 /// A file chose its feedback when it sets `feedback.mode`.
-#[cfg(target_os = "macos")]
 fn chose_feedback(text: &str) -> Result<bool, BansheeError> {
     let document: DocumentMut = text
         .parse()
@@ -674,10 +673,6 @@ pub fn voiceover_on() -> bool {
 /// config at `path` that never chose its feedback, is a new install, so it
 /// writes `visual` there. VoiceOver users start on `both`, because nothing is
 /// announced while the microphone waits for an answer. Answers the mode it wrote.
-///
-/// The chip only draws on macOS, so off macOS this leaves the key absent
-/// rather than writing a mode with no figure to show it.
-#[cfg(target_os = "macos")]
 pub fn write_first_feedback(
     path: &std::path::Path,
     state: Option<&DaemonState>,
@@ -707,17 +702,6 @@ pub fn write_first_feedback(
     let assignments = [("feedback.mode".to_string(), mode.word().into())].into();
     write_locked(&writing, path, &existing, state, assignments, None, true)?;
     Ok(Some(mode))
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn write_first_feedback(
-    _path: &std::path::Path,
-    _state: Option<&DaemonState>,
-    _wanted: &[Download],
-    _missing: &[Download],
-    _voiceover: impl FnOnce() -> bool,
-) -> Result<Option<FeedbackMode>, BansheeError> {
-    Ok(None)
 }
 
 #[cfg(test)]

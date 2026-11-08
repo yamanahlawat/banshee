@@ -12,14 +12,28 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod capsule;
 mod chip;
-#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), expect(dead_code))]
 mod figure;
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+mod gesture;
+#[cfg(any(target_os = "linux", test))]
+mod paint;
 #[cfg(target_os = "macos")]
 mod panel;
+#[cfg(any(target_os = "linux", test))]
+mod renderer;
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+mod scenes;
+#[cfg(any(target_os = "linux", test))]
+mod words;
 
 mod tray {
     use std::collections::HashMap;
+    #[cfg(not(target_os = "macos"))]
+    use std::sync::mpsc::RecvTimeoutError;
     use std::time::{Duration, Instant};
 
     use banshee_common::cue::Signal;
@@ -272,14 +286,18 @@ mod tray {
         Quit,
         Open,
         Start,
-        StartFinished { succeeded: bool },
+        StartFinished {
+            succeeded: bool,
+        },
         CopyLast,
         Copied(String),
         Choices(Choices),
         Pick(Pick),
+        /// The capsule's Wayland connection closed.
+        #[cfg(target_os = "linux")]
+        Lost,
     }
 
-    /// Draws a scene. The panel is macOS only; elsewhere there is nothing to draw.
     trait Surface {
         fn show(&mut self, scene: Option<&chip::Scene>);
         fn level(&mut self, level: f32);
@@ -303,7 +321,7 @@ mod tray {
 
     /// `None` leaves the tray to the menu bar alone, and the daemon to its earcons.
     #[cfg(target_os = "macos")]
-    fn build_panel(postbox: impl Postbox) -> Option<Box<dyn Surface>> {
+    fn build_surface(postbox: impl Postbox) -> Option<Box<dyn Surface>> {
         let Some(mtm) = objc2::MainThreadMarker::new() else {
             log::error!("the chip must be built on the main thread");
             return None;
@@ -312,6 +330,38 @@ mod tray {
             postbox.post(Message::Open);
         });
         Some(Box::new(super::panel::Panel::new(mtm, open)))
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Surface for super::capsule::Capsule {
+        fn show(&mut self, scene: Option<&chip::Scene>) {
+            super::capsule::Capsule::show(self, scene);
+        }
+
+        fn level(&mut self, level: f32) {
+            super::capsule::Capsule::level(self, level);
+        }
+
+        fn announce(&self, _words: &str) {}
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_surface(postbox: impl Postbox) -> Option<Box<dyn Surface>> {
+        let opener = postbox.clone();
+        let capsule = super::capsule::Capsule::open(
+            move || {
+                opener.post(Message::Open);
+            },
+            move || {
+                postbox.post(Message::Lost);
+            },
+        )?;
+        Some(Box::new(capsule))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn build_surface(_postbox: impl Postbox) -> Option<Box<dyn Surface>> {
+        None
     }
 
     /// Hands a `Message` to whoever owns the tray. winit carries one as a user
@@ -925,11 +975,13 @@ mod tray {
 
         /// The panel and the watch, which must each exist once.
         fn begin(&mut self) {
-            #[cfg(target_os = "macos")]
-            {
-                self.surface = build_panel(self.postbox.clone());
-                spawn_watch(self.postbox.clone(), self.surface.is_some());
-            }
+            self.surface = build_surface(self.postbox.clone());
+            spawn_watch(self.postbox.clone(), self.surface.is_some());
+        }
+
+        fn tick(&mut self, now: Instant) {
+            self.chip.tick(now);
+            self.redraw();
         }
 
         /// After every chip input and every tick: hides the surface while
@@ -1035,6 +1087,10 @@ mod tray {
                     };
                     std::mem::replace(&mut self.starting, finished) != self.starting
                 }
+                #[cfg(target_os = "linux")]
+                Message::Lost => {
+                    unreachable!("serve ends the tray before a lost connection reaches update")
+                }
                 Message::Open => {
                     open_the_window().unwrap_or_else(|error| log::error!("{error}"));
                     return Step::Stay;
@@ -1104,8 +1160,7 @@ mod tray {
 
         fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
             if matches!(cause, StartCause::ResumeTimeReached { .. }) {
-                self.chip.tick(Instant::now());
-                self.redraw();
+                self.tick(Instant::now());
             }
         }
 
@@ -1583,14 +1638,41 @@ mod tray {
             }
         }));
 
-        spawn_watch(sender.clone(), false);
-
         let mut app = App::new(sender);
         app.start();
+        serve(&mut app, &receiver)
+    }
 
-        for message in receiver {
-            if let Flow::Exit = app.handle(message) {
-                break;
+    #[cfg(not(target_os = "macos"))]
+    fn serve<P: Postbox>(
+        app: &mut App<P>,
+        receiver: &std::sync::mpsc::Receiver<Message>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            let message = match app.chip.deadline() {
+                Some(deadline) => {
+                    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(message) => message,
+                        Err(RecvTimeoutError::Timeout) => {
+                            app.tick(Instant::now());
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                None => match receiver.recv() {
+                    Ok(message) => message,
+                    Err(_) => break,
+                },
+            };
+            #[cfg(target_os = "linux")]
+            if matches!(message, Message::Lost) {
+                return Err("the Wayland connection closed".into());
+            }
+            match app.handle(message) {
+                Flow::Stay => {}
+                Flow::Exit => break,
             }
         }
         Ok(())
@@ -1632,6 +1714,36 @@ mod tray {
                 app.start_with(|| Err("no menu bar".into()), |_| begun += 1);
             }
             assert_eq!(begun, 1);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_lost_connection_ends_the_tray_with_an_error() {
+            let (sender, receiver) = std::sync::mpsc::channel::<Message>();
+            let mut app = App::new(sender.clone());
+            sender.post(Message::Lost);
+            let ended = serve(&mut app, &receiver).map_err(|error| error.to_string());
+            assert_eq!(ended, Err("the Wayland connection closed".to_string()));
+        }
+
+        #[test]
+        fn a_tick_past_the_hold_ends_a_held_failure() {
+            let mut app = App::new(std::sync::mpsc::channel::<Message>().0);
+            let t0 = Instant::now();
+            app.chip.feed(
+                chip::Input::Signal(Signal::Error {
+                    reason: banshee_common::cue::Reason::new(
+                        banshee_common::cue::ReasonCode::PipelineBroken,
+                        None,
+                    ),
+                    target: None,
+                }),
+                t0,
+            );
+            app.redraw();
+            assert!(app.scene.is_some());
+            app.tick(t0 + chip::FAULT_HOLD + Duration::from_millis(1));
+            assert!(app.scene.is_none());
         }
 
         #[test]

@@ -1,7 +1,6 @@
-//! Each gesture as the one Core Animation it adds. Figure values are in the
-//! mark's units, y down. Capsule values are points, y up.
+//! Each gesture as the one Core Animation it adds, built from its `gesture`
+//! tracks.
 
-use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_core_foundation::CGFloat;
@@ -12,28 +11,7 @@ use objc2_quartz_core::{
     kCAMediaTimingFunctionLinear,
 };
 
-type Bezier = [f32; 4];
-
-const SETTLE: Bezier = [0.16, 1.0, 0.3, 1.0];
-const SWAY: Bezier = [0.45, 0.0, 0.55, 1.0];
-const SHAKE: Bezier = [0.36, 0.07, 0.19, 0.97];
-const DROP: Bezier = [0.7, 0.0, 0.84, 0.0];
-const ASCEND: Bezier = [0.33, 0.0, 0.2, 1.0];
-
-const FADE: f64 = 0.12;
-
-#[derive(Clone, Copy)]
-enum Pace {
-    Curve(Bezier),
-    Linear,
-}
-
-#[derive(Clone, Copy)]
-enum End {
-    Release,
-    Hold,
-    Repeat,
-}
+use crate::gesture::{self, Bezier, End, LINEAR, Property, Track};
 
 fn numbers(values: &[f64]) -> Retained<NSArray<NSNumber>> {
     NSArray::from_retained_slice(
@@ -45,43 +23,54 @@ fn numbers(values: &[f64]) -> Retained<NSArray<NSNumber>> {
     )
 }
 
+fn key_path(property: Property) -> &'static str {
+    match property {
+        Property::TranslationX => "transform.translation.x",
+        Property::TranslationY => "transform.translation.y",
+        Property::Rotation => "transform.rotation.z",
+        Property::Scale => "transform.scale",
+        Property::Opacity => "opacity",
+        Property::DashPhase => "lineDashPhase",
+        Property::Dash | Property::Gap => "lineDashPattern",
+        Property::Width => "bounds.size.width",
+    }
+}
+
 /// One key path through `values` at `times`, eased per segment as a CSS
 /// keyframe list eases.
 fn track(
     key_path: &str,
     times: &[f64],
     values: &NSArray<AnyObject>,
-    pace: Pace,
+    curves: &[Bezier],
 ) -> Retained<CAKeyframeAnimation> {
     let animation = CAKeyframeAnimation::animationWithKeyPath(Some(&NSString::from_str(key_path)));
     // SAFETY: every caller passes NSNumber values, or NSArrays of NSNumber for
     // a dash pattern: the types its key path animates.
     unsafe { animation.setValues(Some(values)) };
     animation.setKeyTimes(Some(&numbers(times)));
-    let function = match pace {
-        Pace::Curve([x1, y1, x2, y2]) => {
-            CAMediaTimingFunction::functionWithControlPoints(x1, y1, x2, y2)
-        }
-        Pace::Linear => {
-            // SAFETY: Core Animation defines the function names as immutable constants.
-            let linear = unsafe { kCAMediaTimingFunctionLinear };
-            CAMediaTimingFunction::functionWithName(linear)
-        }
-    };
-    let segments = vec![function; times.len().saturating_sub(1)];
+    let segments: Vec<_> = curves
+        .iter()
+        .map(|&curve| {
+            if curve == LINEAR {
+                // SAFETY: Core Animation defines the function names as immutable constants.
+                let linear = unsafe { kCAMediaTimingFunctionLinear };
+                CAMediaTimingFunction::functionWithName(linear)
+            } else {
+                let [x1, y1, x2, y2] = curve.map(|point| point as f32);
+                CAMediaTimingFunction::functionWithControlPoints(x1, y1, x2, y2)
+            }
+        })
+        .collect();
     animation.setTimingFunctions(Some(&NSArray::from_retained_slice(&segments)));
     animation
 }
 
-fn scalar(
-    key_path: &str,
-    times: &[f64],
-    values: &[f64],
-    pace: Pace,
-) -> Retained<CAKeyframeAnimation> {
-    let values = numbers(values);
+fn scalar(keys: &Track) -> Retained<CAKeyframeAnimation> {
+    let values = numbers(&keys.values);
     // SAFETY: an array of NSNumber is an array of objects.
-    track(key_path, times, unsafe { values.cast_unchecked() }, pace)
+    let values = unsafe { values.cast_unchecked() };
+    track(key_path(keys.property), keys.key_times, values, keys.curves)
 }
 
 /// `delay` seconds from now. The layer holds the first keyframe until then.
@@ -137,257 +126,112 @@ fn pair(
     timed(group.into_super(), duration, delay, end)
 }
 
-fn degrees(values: &[f64]) -> Vec<f64> {
-    values.iter().map(|value| value.to_radians()).collect()
+/// A gesture's tracks as one animation, or as a group when it moves two
+/// properties together.
+fn animation(tracks: &[Track]) -> Retained<CAAnimation> {
+    match tracks {
+        [only] => one(scalar(only), only.duration, only.delay, only.end),
+        [first, second] => pair(
+            [scalar(first), scalar(second)],
+            first.duration,
+            first.delay,
+            first.end,
+        ),
+        _ => unreachable!("every gesture moves one or two properties"),
+    }
 }
 
 pub fn chip_rise() -> Retained<CAAnimation> {
-    pair(
-        [
-            scalar(
-                "transform.translation.y",
-                &[0.0, 1.0],
-                &[-12.0, 0.0],
-                Pace::Curve(SETTLE),
-            ),
-            scalar(
-                "opacity",
-                &[0.0, 0.6, 1.0],
-                &[0.0, 1.0, 1.0],
-                Pace::Curve(SETTLE),
-            ),
-        ],
-        0.22,
-        0.0,
-        End::Release,
-    )
+    animation(&gesture::chip_rise())
 }
 
 pub fn figure_emerge() -> Retained<CAAnimation> {
-    pair(
-        [
-            scalar(
-                "transform.translation.y",
-                &[0.0, 1.0],
-                &[70.0, 0.0],
-                Pace::Curve(SETTLE),
-            ),
-            scalar("opacity", &[0.0, 1.0], &[0.0, 1.0], Pace::Curve(SETTLE)),
-        ],
-        0.36,
-        0.0,
-        End::Release,
-    )
+    animation(&gesture::figure_emerge())
 }
 
 pub fn fill_kindle(delay: f64) -> Retained<CAAnimation> {
-    let times = [0.0, 0.6, 1.0];
-    pair(
-        [
-            scalar("opacity", &times, &[0.0, 1.0, 1.0], Pace::Curve(SETTLE)),
-            scalar(
-                "transform.scale",
-                &times,
-                &[0.86, 1.06, 1.0],
-                Pace::Curve(SETTLE),
-            ),
-        ],
-        0.26,
-        delay,
-        End::Release,
-    )
+    animation(&gesture::fill_kindle(delay))
 }
 
 pub fn working_hover() -> Retained<CAAnimation> {
-    one(
-        scalar(
-            "transform.translation.y",
-            &[0.0, 0.5, 1.0],
-            &[0.0, -5.0, 0.0],
-            Pace::Curve(SWAY),
-        ),
-        2.4,
-        0.0,
-        End::Repeat,
-    )
+    animation(&gesture::working_hover())
 }
 
-/// One lap of the ellipse `length` units round.
 pub fn halo_light(length: CGFloat) -> Retained<CAAnimation> {
-    one(
-        scalar("lineDashPhase", &[0.0, 1.0], &[0.0, -length], Pace::Linear),
-        1.2,
-        0.0,
-        End::Repeat,
-    )
+    animation(&gesture::halo_light(length))
 }
 
 pub fn head_tilt() -> Retained<CAAnimation> {
-    one(
-        scalar(
-            "transform.rotation.z",
-            &[0.0, 1.0],
-            &degrees(&[0.0, -11.0]),
-            Pace::Curve(SETTLE),
-        ),
-        0.42,
-        0.0,
-        End::Hold,
-    )
+    animation(&gesture::head_tilt())
 }
 
-/// `side` is 1 for the left cup and -1 for the right, so both press inward.
 pub fn cups_press(side: f64) -> Retained<CAAnimation> {
-    let values = [0.0, 9.0, 0.0, 6.0, 0.0, 0.0].map(|at| at * side);
-    one(
-        scalar(
-            "transform.translation.x",
-            &[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-            &values,
-            Pace::Curve(SETTLE),
-        ),
-        0.64,
-        0.18,
-        End::Release,
-    )
+    animation(&gesture::cups_press(side))
 }
 
 pub fn head_shake() -> Retained<CAAnimation> {
-    one(
-        scalar(
-            "transform.rotation.z",
-            &[0.0, 0.16, 0.38, 0.6, 0.8, 1.0],
-            &degrees(&[0.0, -10.0, 9.0, -6.0, 4.0, 0.0]),
-            Pace::Curve(SHAKE),
-        ),
-        0.46,
-        0.0,
-        End::Release,
-    )
+    animation(&gesture::head_shake())
 }
 
 pub fn strain() -> Retained<CAAnimation> {
-    one(
-        scalar(
-            "transform.translation.y",
-            &[0.0, 0.35, 0.48, 0.62, 1.0],
-            &[0.0, -16.0, -13.0, -16.0, 4.0],
-            Pace::Curve(SETTLE),
-        ),
-        0.9,
-        0.0,
-        End::Hold,
-    )
+    animation(&gesture::strain())
 }
 
-/// From solid to the dashes `dash` holds, on an outline `length` units round.
-pub fn outline_breaks(length: CGFloat, dash: &NSArray<NSNumber>) -> Retained<CAAnimation> {
-    let patterns = NSArray::from_retained_slice(&[numbers(&[length, 0.0]), dash.retain()]);
+/// The dash and gap tracks as one track of dash patterns.
+pub fn outline_breaks(length: CGFloat) -> Retained<CAAnimation> {
+    let tracks = gesture::outline_breaks(length);
+    let [dash, gap] = &tracks[..] else {
+        unreachable!("an outline breaks by its dash and its gap");
+    };
+    let patterns: Vec<_> = dash
+        .values
+        .iter()
+        .zip(gap.values.iter())
+        .map(|(&dash, &gap)| numbers(&[dash, gap]))
+        .collect();
+    let patterns = NSArray::from_retained_slice(&patterns);
     // SAFETY: an array of arrays is an array of objects.
     let values = unsafe { patterns.cast_unchecked() };
     one(
-        track("lineDashPattern", &[0.0, 1.0], values, Pace::Curve(DROP)),
-        0.52,
-        0.42,
-        End::Release,
+        track(key_path(dash.property), dash.key_times, values, dash.curves),
+        dash.duration,
+        dash.delay,
+        dash.end,
     )
 }
 
-/// On the words' mask, `width` points wide when whole.
 pub fn words_reveal(width: CGFloat) -> Retained<CAAnimation> {
-    pair(
-        [
-            scalar(
-                "bounds.size.width",
-                &[0.0, 1.0],
-                &[0.0, width],
-                Pace::Curve(SETTLE),
-            ),
-            scalar("opacity", &[0.0, 1.0], &[0.2, 1.0], Pace::Curve(SETTLE)),
-        ],
-        0.22,
-        0.08,
-        End::Release,
-    )
+    animation(&gesture::words_reveal(width))
 }
 
 pub fn chip_width(from: CGFloat, to: CGFloat) -> Retained<CAAnimation> {
-    one(
-        scalar(
-            "bounds.size.width",
-            &[0.0, 1.0],
-            &[from, to],
-            Pace::Curve(SETTLE),
-        ),
-        0.24,
-        0.0,
-        End::Release,
-    )
+    animation(&[gesture::chip_width(from, to)])
 }
 
 pub fn float_out() -> Retained<CAAnimation> {
-    let times = [0.0, 0.25, 1.0];
-    pair(
-        [
-            scalar(
-                "transform.translation.y",
-                &times,
-                &[0.0, 4.0, -120.0],
-                Pace::Curve(ASCEND),
-            ),
-            scalar("opacity", &times, &[1.0, 1.0, 0.0], Pace::Curve(ASCEND)),
-        ],
-        0.44,
-        0.0,
-        End::Hold,
-    )
-}
-
-fn sink(duration: f64, delay: f64) -> Retained<CAAnimation> {
-    pair(
-        [
-            scalar(
-                "transform.translation.y",
-                &[0.0, 1.0],
-                &[0.0, -8.0],
-                Pace::Curve(DROP),
-            ),
-            scalar("opacity", &[0.0, 1.0], &[1.0, 0.0], Pace::Curve(DROP)),
-        ],
-        duration,
-        delay,
-        End::Hold,
-    )
+    animation(&gesture::float_out())
 }
 
 pub fn frame_sink() -> Retained<CAAnimation> {
-    sink(0.14, 0.3)
+    animation(&gesture::frame_sink())
 }
 
 pub fn failure_exit() -> Retained<CAAnimation> {
-    sink(0.15, 0.0)
+    animation(&gesture::failure_exit())
 }
 
 pub fn fade_in(delay: f64) -> Retained<CAAnimation> {
-    one(
-        scalar("opacity", &[0.0, 1.0], &[0.0, 1.0], Pace::Linear),
-        FADE,
-        delay,
-        End::Release,
-    )
+    animation(&gesture::fade_in(delay))
 }
 
 pub fn fade_out() -> Retained<CAAnimation> {
-    one(
-        scalar("opacity", &[0.0, 1.0], &[1.0, 0.0], Pace::Linear),
-        FADE,
-        0.0,
-        End::Hold,
-    )
+    animation(&gesture::fade_out())
 }
 
 #[cfg(test)]
 mod tests {
+    use objc2::Message;
+
     use super::*;
 
     fn tracks(animation: &CAAnimation) -> Vec<Retained<CAKeyframeAnimation>> {
@@ -405,47 +249,6 @@ mod tests {
                 .unwrap()
                 .retain(),
         ]
-    }
-
-    #[test]
-    fn every_track_has_one_value_per_key_time_and_one_curve_per_segment() {
-        let dash = numbers(&[8.8, 5.6]);
-        let all = [
-            chip_rise(),
-            figure_emerge(),
-            fill_kindle(0.2),
-            working_hover(),
-            halo_light(100.0),
-            head_tilt(),
-            cups_press(1.0),
-            head_shake(),
-            strain(),
-            outline_breaks(100.0, &dash),
-            words_reveal(40.0),
-            chip_width(44.0, 120.0),
-            float_out(),
-            frame_sink(),
-            failure_exit(),
-            fade_in(0.0),
-            fade_out(),
-        ];
-        for animation in &all {
-            for track in tracks(animation) {
-                let times = track.keyTimes().unwrap().count();
-                assert_eq!(
-                    track.values().unwrap().count(),
-                    times,
-                    "{:?}",
-                    track.keyPath()
-                );
-                assert_eq!(
-                    track.timingFunctions().unwrap().count(),
-                    times - 1,
-                    "{:?}",
-                    track.keyPath()
-                );
-            }
-        }
     }
 
     #[test]

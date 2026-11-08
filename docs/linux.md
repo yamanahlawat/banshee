@@ -101,6 +101,7 @@ bind = , F9, exec, banshee record toggle
 
 - **`text`** shows.
 - **`alt`** picks a `format-icons` entry.
+- **`alt` reads `problem`** while Banshee is idle with a problem, and the tooltip names it.
 - **`class`** is the CSS hook.
 - **Put this** in your Waybar config:
 
@@ -110,7 +111,7 @@ bind = , F9, exec, banshee record toggle
     "return-type": "json",
     "restart-interval": 5,
     "format": "{icon}",
-    "format-icons": { "idle": "mic", "recording": "REC", "busy": "...", "speaking": "spk" }
+    "format-icons": { "idle": "mic", "recording": "REC", "busy": "...", "speaking": "spk", "problem": "!" }
 }
 ```
 
@@ -125,6 +126,18 @@ bind = , F9, exec, banshee record toggle
 - **`restart-interval` matters:** the command exits when the daemon stops.
 - **That exit** is how the module reconnects once the daemon comes back.
 - **The same channel** is open to any client over `banshee.subscribe`.
+
+## The figure on screen
+
+- **The figure** is a small rust capsule at the bottom centre of the focused screen, 86 pixels above the edge.
+- **It shows** while Banshee records, works, waits for your answer, copies or fails.
+- **Live words** show in it as you speak.
+- **It needs layer shell.** Hyprland, Sway, KDE and most other Wayland desktops have it.
+- **It never takes keyboard focus,** so it never steals typing from the app you dictate into.
+- **It takes no clicks** except on a failure.
+- **GNOME and X11** draw nothing. Banshee plays every sound there.
+- **`feedback.mode`** picks the figure, the sounds or both. A new install starts on `visual`.
+- **The layer namespace is `banshee`.** A Hyprland layer rule on that namespace, such as `no_screen_share`, hides it from screen shares.
 
 ## Building the desktop window
 
