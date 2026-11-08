@@ -52,6 +52,7 @@ ndarray = "0.17.2"
 num2words = "0.4.1"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-rustls", "copy-dylibs", "api-24"] }
 rdev = "0.5.3"
+realfft = "3.5"
 regex = "1.13.0"
 reqwest = { version = "0.13.4", features = ["rustls", "system-proxy", "blocking", "multipart", "json"], default-features = false }
 ringbuf = "0.5.0"

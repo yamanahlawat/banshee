@@ -18,7 +18,7 @@ model = "parakeet-unified-en-0.6b"  # a listening model id; see "Tuning the list
 vad_threshold = 0.5      # 0.0 to 1.0; higher means stricter speech detection
 vocabulary = []          # words the model keeps mangling, for example ["clippy", "tokio"]
 translate = false        # true answers in English, for a model or server that translates
-endpoint_silence_ms = 2500  # trailing silence that ends a spoken answer
+endpoint_silence_ms = 2500  # silence before Banshee first checks whether you sound finished
 
 [stt.remote]                           # read when provider = "remote"
 base_url = "https://api.openai.com/v1" # an OpenAI-compatible /v1 root; https, or http on your own network
@@ -201,9 +201,11 @@ Speak with one by: banshee config set tts.voice "<id>"
 
 ## Tuning the listener
 
-- **Banshee waits `endpoint_silence_ms`** before it decides you are done.
+- **Banshee waits `endpoint_silence_ms`** before it first checks whether you sound finished.
+- If you sound unfinished, it keeps listening and checks again after each further
+  `endpoint_silence_ms` of silence.
 - **Lower it** if replies feel sluggish.
-- **Raise it** if Banshee cuts you off.
+- **Raise it** to delay the first check and to space the later ones further apart.
 
 `stt.model` names the listening model. Banshee runs it on transcribe.cpp.
 

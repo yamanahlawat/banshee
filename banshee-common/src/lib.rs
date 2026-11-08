@@ -394,6 +394,7 @@ pub enum FileRole {
     Detector,
     Engine,
     Voice,
+    Turn,
 }
 
 /// What clears a blocker. `kind` says which part is at fault and `command` is
@@ -486,6 +487,14 @@ mod wire_tests {
         Activity, BANSHEE_STATE_CHANGED, Blocker, BlockerKind, DownloadProgress, DownloadState,
         InputDevice, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Version,
     };
+
+    #[test]
+    fn file_role_turn_serialises_as_turn() {
+        assert_eq!(
+            serde_json::to_string(&super::FileRole::Turn).unwrap(),
+            "\"turn\""
+        );
+    }
 
     /// The window's `BlockerKind` union spells this one `keyfile`, so the wire
     /// name is a contract between the two.

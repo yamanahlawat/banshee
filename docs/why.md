@@ -16,9 +16,8 @@ types what you dictate into any app.
 - No account, no cloud tier. It works on a plane.
 - A remote listener and a remote voice are yours to turn on; the tray names
   it when either runs.
-- **It waits while you think.** Answers end on 2.5 seconds of silence, not
-  the usual few hundred milliseconds.
-- A mid-sentence pause to think does not cut you off.
+- **It waits while you think.** After 2.5 seconds of silence, Banshee checks
+  whether you sound finished. If you don't, it keeps listening.
 - **It handles your jargon in both directions.** `vocabulary` goes to the model
   where it takes words, and a corrector fixes the rest.
 - **Not tied to one vendor.** It is an MCP server.

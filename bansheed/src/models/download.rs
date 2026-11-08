@@ -43,8 +43,8 @@ pub struct Download {
     pub megabytes: u64,
     pub name: String,
     pub url: String,
-    /// Checked before the file is renamed into place. Only a listening model
-    /// carries one.
+    /// Checked before the file is renamed into place. A listening model and the
+    /// turn model carry one.
     pub sha256: Option<&'static str>,
     /// The listening model this file is, whose licence may hold it back.
     pub model: Option<&'static ListeningModel>,
@@ -54,6 +54,7 @@ pub struct Download {
 const KOKORO_MEGABYTES: u64 = 311;
 const DETECTOR_MEGABYTES: u64 = 2;
 const VOICE_MEGABYTES: u64 = 1;
+const TURN_MEGABYTES: u64 = 9;
 
 /// Pinned to revisions so a repo update cannot silently change the model.
 pub fn pocket_files() -> Vec<Download> {
@@ -120,6 +121,16 @@ pub fn listening_file(model: &'static ListeningModel) -> Download {
     }
 }
 
+fn turn_file() -> Download {
+    Download {
+        megabytes: TURN_MEGABYTES,
+        name: crate::models::TURN_MODEL.to_string(),
+        url: "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-cpu.onnx".to_string(),
+        sha256: Some("2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f"),
+        model: None,
+    }
+}
+
 pub fn wanted(config: &Config) -> Vec<Download> {
     let vad = SileroVADConfig::new(crate::models::VAD_MODEL);
     let mut downloads = Vec::new();
@@ -133,6 +144,7 @@ pub fn wanted(config: &Config) -> Vec<Download> {
         sha256: None,
         model: None,
     });
+    downloads.push(turn_file());
     if speaks_locally(config) {
         downloads.extend(voice_files(&config.tts.voice));
     }
@@ -173,6 +185,8 @@ pub fn role(file: &str) -> FileRole {
         FileRole::Speech
     } else if file == crate::models::VAD_MODEL {
         FileRole::Detector
+    } else if file == crate::models::TURN_MODEL {
+        FileRole::Turn
     } else if file == banshee_common::KOKORO_MODEL || Path::new(file).starts_with(POCKET_DIR) {
         FileRole::Engine
     } else {
@@ -188,6 +202,7 @@ pub fn label(file: &str) -> &'static str {
         FileRole::Detector => "Voice detection model",
         FileRole::Engine => "Speech engine",
         FileRole::Voice => "Voice",
+        FileRole::Turn => "Turn detection model",
     }
 }
 
@@ -547,6 +562,41 @@ mod sha256_tests {
         assert!(!arrived_unaccepted);
         after.unwrap();
         assert!(arrived);
+    }
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::{label, role, wanted};
+    use crate::config::{Config, Provider};
+    use crate::models::TURN_MODEL;
+    use banshee_common::FileRole;
+
+    const TURN_SHA256: &str = "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f";
+
+    #[test]
+    fn setup_fetches_the_turn_model_with_its_hash() {
+        let mut remote = Config::default();
+        remote.stt.provider = Provider::Remote;
+        for config in [Config::default(), remote] {
+            let turn = wanted(&config)
+                .into_iter()
+                .find(|download| download.name == TURN_MODEL)
+                .expect("setup wants the turn model");
+            assert_eq!(turn.sha256, Some(TURN_SHA256));
+            assert!(turn.model.is_none());
+        }
+    }
+
+    #[test]
+    fn the_turn_model_is_named_for_what_it_does() {
+        assert_eq!(role(TURN_MODEL), FileRole::Turn);
+        assert_eq!(label(TURN_MODEL), "Turn detection model");
+    }
+
+    #[test]
+    fn the_daemon_starts_without_the_turn_model() {
+        assert!(!crate::models::required(&Config::default()).contains(&TURN_MODEL));
     }
 }
 

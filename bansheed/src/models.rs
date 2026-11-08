@@ -7,6 +7,7 @@ use banshee_common::{
 use crate::config::{Config, Provider};
 
 pub const VAD_MODEL: &str = "silero_vad.onnx";
+pub const TURN_MODEL: &str = "smart-turn-v3.2-cpu.onnx";
 
 /// ONNX Runtime allows one environment per process, even after the first is dropped.
 fn environment() -> Result<&'static ort::environment::Environment, BansheeError> {
@@ -18,28 +19,29 @@ fn environment() -> Result<&'static ort::environment::Environment, BansheeError>
         .map_err(|error| BansheeError::Other(error.clone()))
 }
 
+pub(crate) fn onnx_fault(error: impl std::fmt::Display) -> BansheeError {
+    BansheeError::Other(error.to_string())
+}
+
 /// One ONNX session, built the same way for every model that needs one.
 pub fn onnx_session(
     path: &std::path::Path,
     threads: usize,
     entries: &[(&str, &str)],
 ) -> Result<ort::session::Session, BansheeError> {
-    fn fault(error: impl std::fmt::Display) -> BansheeError {
-        BansheeError::Other(error.to_string())
-    }
     // ort's default registers CoreML on macOS, which refuses the companion's zero-length inputs
     let mut builder = ort::session::Session::builder(environment()?)
-        .map_err(fault)?
+        .map_err(onnx_fault)?
         .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
-        .map_err(fault)?
+        .map_err(onnx_fault)?
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
-        .map_err(fault)?
+        .map_err(onnx_fault)?
         .with_intra_threads(threads)
-        .map_err(fault)?;
+        .map_err(onnx_fault)?;
     for (key, value) in entries {
-        builder = builder.with_config_entry(key, value).map_err(fault)?;
+        builder = builder.with_config_entry(key, value).map_err(onnx_fault)?;
     }
-    builder.commit_from_file(path).map_err(fault)
+    builder.commit_from_file(path).map_err(onnx_fault)
 }
 
 /// When a local model last used at `used` unloads under `limit`, or `None`
