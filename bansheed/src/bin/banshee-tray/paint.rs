@@ -1122,6 +1122,29 @@ mod tests {
         assert!(count(&pixmap, bytes(MUTED), hint.top, bottom, 2.0) > 0);
     }
 
+    #[test]
+    fn the_painted_card_draws_the_name_in_muted_ink() {
+        let show = Show::Reading;
+        let card = laid_from(
+            &Scene {
+                question: Some("Retry it?".into()),
+                client: Some("claude".into()),
+                ..Scene::of(show.clone(), 1)
+            },
+            false,
+        )
+        .expect("a card");
+        let name = &card.layout.blocks[0];
+        assert_eq!(name.lines[0].line, "claude");
+        let pixmap = paint(&Frame {
+            scale: 2,
+            ..card_frame(&show, &card, &[])
+        });
+        let (top, bottom) = (name.top, name.top + name.height);
+        assert!(count(&pixmap, bytes(MUTED), top, bottom, 2.0) > 0);
+        assert_eq!(count(&pixmap, BONE, top, bottom, 2.0), 0);
+    }
+
     fn rgba(pixmap: &Pixmap, x: u32, y: u32) -> [u8; 4] {
         let pixel = pixmap.pixel(x, y).expect("inside the pixmap");
         [pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()]

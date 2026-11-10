@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::Caller;
 use crate::state::RecordingMode;
 use banshee_common::{BANSHEE_ASK_USER, BANSHEE_STATUS, DownloadProgress};
 use tokio::net::UnixStream;
@@ -37,7 +38,7 @@ async fn send(writer: &mut OwnedWriteHalf, method: &str, params: serde_json::Val
 // Hands back the writer: dropping it closes the connection under the server
 fn connect(state: &Arc<DaemonState>) -> (Incoming, OwnedWriteHalf) {
     let (client, server) = UnixStream::pair().expect("no socket pair");
-    tokio::spawn(serve(server, Arc::clone(state)));
+    tokio::spawn(serve(server, Arc::clone(state), Caller::unread()));
     let (reader, writer) = client.into_split();
     (BufReader::new(reader).lines(), writer)
 }
@@ -338,7 +339,7 @@ async fn a_words_subscriber_hears_the_words_and_their_end() {
 #[tokio::test]
 async fn a_new_question_subscriber_gets_the_live_question_at_once() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    state.publish_question("Ship it?");
+    state.publish_question("Ship it?", None);
     let (mut lines, mut writer) = connect(&state);
     send(
         &mut writer,
@@ -350,7 +351,33 @@ async fn a_new_question_subscriber_gets_the_live_question_at_once() {
 
     let pushed = next_message(&mut lines).await;
     assert_eq!(pushed["method"], banshee_common::BANSHEE_QUESTION);
-    assert_eq!(pushed["params"], serde_json::json!({"text": "Ship it?"}));
+    assert_eq!(
+        pushed["params"],
+        serde_json::json!({"text": "Ship it?", "client": null})
+    );
+}
+
+#[tokio::test]
+async fn the_question_line_names_who_asks() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["question"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+    let _idle = next_message(&mut lines).await;
+
+    state.publish_question("Ship it?", Some("claude"));
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_QUESTION);
+    assert_eq!(
+        pushed["params"],
+        serde_json::json!({"text": "Ship it?", "client": "claude"})
+    );
 }
 
 #[tokio::test]
@@ -365,7 +392,7 @@ async fn a_cues_only_subscriber_never_receives_the_question() {
     .await;
     let _reply = next_message(&mut lines).await;
 
-    state.publish_question("Ship it?");
+    state.publish_question("Ship it?", None);
     state.cues().emit(crate::audio::cues::Signal::Arm);
 
     let pushed = next_message(&mut lines).await;
@@ -767,6 +794,22 @@ async fn a_line_that_is_not_a_request_is_answered_with_a_parse_error() {
     );
 }
 
+#[tokio::test]
+async fn a_connection_is_read_as_the_process_that_made_it() {
+    let path = test_socket_path("caller");
+    let _ = std::fs::remove_file(&path);
+    let listener = tokio::net::UnixListener::bind(&path).expect("bind");
+    let _client = UnixStream::connect(&path).await.expect("connect");
+    let (accepted, _) = listener.accept().await.unwrap();
+    let _ = std::fs::remove_file(&path);
+
+    let me = std::env::current_exe().unwrap();
+    assert_eq!(
+        caller_of(&accepted).client().name.as_deref(),
+        Some(&*me.file_name().unwrap().to_string_lossy())
+    );
+}
+
 // The socket is bound in `claim()`, before the microphone is open. A client
 // that connects in that gap must be answered, not left waiting for a device.
 #[tokio::test]
@@ -810,7 +853,7 @@ async fn a_client_that_leaves_ends_the_call_it_parked() {
     let (commands, never_answered) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
     let (client, server) = UnixStream::pair().expect("no socket pair");
-    let serving = tokio::spawn(serve(server, Arc::clone(&state)));
+    let serving = tokio::spawn(serve(server, Arc::clone(&state), Caller::unread()));
 
     let (reader, mut writer) = client.into_split();
     send(
@@ -842,7 +885,7 @@ async fn a_request_sent_during_a_call_is_still_answered() {
     let (commands, answerer) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
     let (client, server) = UnixStream::pair().expect("no socket pair");
-    tokio::spawn(serve(server, Arc::clone(&state)));
+    tokio::spawn(serve(server, Arc::clone(&state), Caller::unread()));
     let (reader, mut writer) = client.into_split();
     let mut lines = BufReader::new(reader).lines();
 

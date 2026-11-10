@@ -185,6 +185,8 @@ pub struct Scene {
     pub serial: u64,
     /// Cleaned.
     pub question: Option<String>,
+    /// Who asks `question`. Cleaned.
+    pub client: Option<String>,
     pub countdown: Option<Countdown>,
 }
 
@@ -195,6 +197,7 @@ impl Scene {
             show,
             serial,
             question: None,
+            client: None,
             countdown: None,
         }
     }
@@ -231,8 +234,11 @@ pub enum Input {
     Seed(Live),
     /// The committed words of the recording in progress.
     Words(String),
-    /// What the agent is asking. Empty when the ask has ended.
-    Question(String),
+    /// What the agent is asking, and the program that asks. Empty when the ask has ended.
+    Question {
+        text: String,
+        client: Option<String>,
+    },
     Clicked,
     Gone,
 }
@@ -264,6 +270,7 @@ pub struct Chip {
     live: Option<Live>,
     words: String,
     text: Option<String>,
+    client: Option<String>,
     countdown: Option<Countdown>,
     taught: bool,
     ticked: Option<Instant>,
@@ -272,7 +279,7 @@ pub struct Chip {
     serial: u64,
 }
 
-type Shown = (Show, Option<String>, Option<Countdown>);
+type Shown = (Show, Option<String>, Option<String>, Option<Countdown>);
 
 impl Chip {
     pub fn feed(&mut self, input: Input, now: Instant) {
@@ -294,7 +301,7 @@ impl Chip {
                 self.seed(live);
             }
             Input::Words(words) => self.words = words,
-            Input::Question(text) => self.ask(&text, now),
+            Input::Question { text, client } => self.ask(&text, client.as_deref(), now),
             Input::Clicked => self.missed = None,
             Input::Gone => self.reset(),
         }
@@ -350,12 +357,15 @@ impl Chip {
     }
 
     pub fn scene(&self) -> Option<Scene> {
-        self.shown.clone().map(|(show, question, countdown)| Scene {
-            show,
-            serial: self.serial,
-            question,
-            countdown,
-        })
+        self.shown
+            .clone()
+            .map(|(show, question, client, countdown)| Scene {
+                show,
+                serial: self.serial,
+                question,
+                client,
+                countdown,
+            })
     }
 
     /// Keeps `serial`, so a later scene still reads as new, and `taught`, so
@@ -375,15 +385,17 @@ impl Chip {
         };
     }
 
-    fn ask(&mut self, text: &str, now: Instant) {
+    fn ask(&mut self, text: &str, client: Option<&str>, now: Instant) {
         if text.is_empty() {
             self.countdown = None;
             self.text = None;
+            self.client = None;
             if self.question == Some(Question::Reading) {
                 self.question = None;
             }
         } else {
             self.text = Some(clean(text));
+            self.client = client.map(clean).filter(|name| !name.is_empty());
             self.question.get_or_insert(Question::Reading);
             self.restart_quiet(now);
             self.begin();
@@ -625,6 +637,7 @@ impl Chip {
         let renewed = std::mem::take(&mut self.renewed)
             && matches!(resolved, Some(Show::NothingHeard(_) | Show::Broken(_)));
         let question = self.question.and(self.text.clone());
+        let client = question.as_ref().and(self.client.clone());
         let shown_show = self.shown.as_ref().map(|(show, ..)| show);
         // New words are the recording going on, not a new state.
         let reworded = matches!(
@@ -633,7 +646,7 @@ impl Chip {
                 | (Some(Show::Answering(_)), Some(Show::Answering(_)))
         );
         let moved = resolved.as_ref() != shown_show;
-        let next = resolved.map(|show| (show, question, self.countdown));
+        let next = resolved.map(|show| (show, question, client, self.countdown));
         if next != self.shown || renewed {
             if (moved || renewed) && !reworded {
                 self.serial += 1;
@@ -1756,13 +1769,25 @@ mod tests {
         let mut chip = Chip::default();
         let mut before = chip.scene();
         let mut said = Vec::new();
-        chip.feed(Input::Question("Ship it?".to_string()), clock.at(0));
+        chip.feed(
+            Input::Question {
+                text: "Ship it?".to_string(),
+                client: None,
+            },
+            clock.at(0),
+        );
         assert_eq!(
             announcement(before.as_ref(), chip.scene().as_ref()),
             None,
             "the reading state is not announced"
         );
-        chip.feed(Input::Question(String::new()), clock.at(0));
+        chip.feed(
+            Input::Question {
+                text: String::new(),
+                client: None,
+            },
+            clock.at(0),
+        );
         before = chip.scene();
         for signal in [
             Signal::RecordStart {
@@ -1985,11 +2010,66 @@ mod tests {
     }
 
     fn asked(chip: &mut Chip, at: Instant, text: &str) {
-        chip.feed(Input::Question(text.to_string()), at);
+        chip.feed(
+            Input::Question {
+                text: text.to_string(),
+                client: None,
+            },
+            at,
+        );
     }
 
     fn question_of(chip: &Chip) -> Option<String> {
         chip.scene().and_then(|scene| scene.question)
+    }
+
+    fn asked_by(chip: &mut Chip, at: Instant, text: &str, client: Option<&str>) {
+        chip.feed(
+            Input::Question {
+                text: text.to_string(),
+                client: client.map(str::to_string),
+            },
+            at,
+        );
+    }
+
+    fn client_of(chip: &Chip) -> Option<String> {
+        chip.scene().and_then(|scene| scene.client)
+    }
+
+    #[test]
+    fn a_question_shows_who_asks_and_an_ended_one_shows_nobody() {
+        let clock = Clock::new();
+        let mut chip = Chip::default();
+        asked_by(&mut chip, clock.at(0), "Ship it?", Some("claude"));
+        assert_eq!(client_of(&chip).as_deref(), Some("claude"));
+        asked_by(&mut chip, clock.at(0), "Ship it now?", Some("codex"));
+        assert_eq!(client_of(&chip).as_deref(), Some("codex"));
+        fed(&mut chip, clock.at(0), [Signal::Arm, Signal::Onset]);
+        assert_eq!(client_of(&chip).as_deref(), Some("codex"));
+        asked_by(&mut chip, clock.at(0), "", None);
+        let ended = chip.scene().expect("the answer still shows");
+        assert_eq!((ended.question, ended.client), (None, None));
+        asked_by(&mut chip, clock.at(0), "Ship it?", None);
+        assert_eq!(question_of(&chip).as_deref(), Some("Ship it?"));
+        assert_eq!(client_of(&chip), None);
+    }
+
+    #[test]
+    fn a_dictation_scene_has_no_client() {
+        let clock = Clock::new();
+        let mut chip = Chip::default();
+        asked_by(&mut chip, clock.at(0), "Ship it?", Some("claude"));
+        asked_by(&mut chip, clock.at(0), "", None);
+        fed(
+            &mut chip,
+            clock.at(0),
+            [Signal::RecordStart {
+                target: Target::Dictate,
+            }],
+        );
+        assert_eq!(shown(&chip), Some(RECORDING));
+        assert_eq!(client_of(&chip), None);
     }
 
     #[test]
@@ -2017,7 +2097,13 @@ mod tests {
     fn a_sent_answer_says_sent_alone_for_the_sent_hold() {
         let clock = Clock::new();
         let mut chip = Chip::default();
-        chip.feed(Input::Question("Update them?".into()), clock.at(0));
+        chip.feed(
+            Input::Question {
+                text: "Update them?".into(),
+                client: None,
+            },
+            clock.at(0),
+        );
         fed(&mut chip, clock.at(0), [Signal::Arm, Signal::Onset]);
         chip.feed(Input::Words("yes, update them".into()), clock.at(100));
         fed(
@@ -2135,8 +2221,24 @@ mod tests {
         assert_eq!(question_of(&chip).as_deref(), Some("Ab?"));
     }
 
+    #[test]
+    fn the_shown_name_is_cleaned_and_a_name_of_controls_alone_is_none() {
+        let clock = Clock::new();
+        let mut chip = Chip::default();
+        asked_by(&mut chip, clock.at(0), "Ship it?", Some("cla\u{202E}ude\n"));
+        assert_eq!(client_of(&chip).as_deref(), Some("claude"));
+        asked_by(&mut chip, clock.at(0), "Ship it?", Some("\u{202E}\u{7}"));
+        assert_eq!(client_of(&chip), None);
+    }
+
     fn answering(chip: &mut Chip, at: Instant) {
-        chip.feed(Input::Question("Retry it?".into()), at);
+        chip.feed(
+            Input::Question {
+                text: "Retry it?".into(),
+                client: None,
+            },
+            at,
+        );
         fed(chip, at, [Signal::Arm, Signal::Onset]);
     }
 
@@ -2200,11 +2302,23 @@ mod tests {
     fn nothing_counts_before_speech_or_while_the_key_is_held() {
         let clock = Clock::new();
         let mut chip = Chip::default();
-        chip.feed(Input::Question("Retry it?".into()), clock.at(0));
+        chip.feed(
+            Input::Question {
+                text: "Retry it?".into(),
+                client: None,
+            },
+            clock.at(0),
+        );
         fed(&mut chip, clock.at(0), [Signal::Arm, quiet(2500)]);
         assert_eq!(counting(&chip), None);
         let mut chip = Chip::default();
-        chip.feed(Input::Question("Retry it?".into()), clock.at(0));
+        chip.feed(
+            Input::Question {
+                text: "Retry it?".into(),
+                client: None,
+            },
+            clock.at(0),
+        );
         fed(
             &mut chip,
             clock.at(0),
@@ -2227,7 +2341,10 @@ mod tests {
                 target: Target::Answer,
             }),
             Input::Signal(error_of(ReasonCode::Silence, Target::Answer)),
-            Input::Question(String::new()),
+            Input::Question {
+                text: String::new(),
+                client: None,
+            },
             Input::Gone,
         ];
         for end in ends {
@@ -2263,7 +2380,13 @@ mod tests {
             clock.at(300),
             [Signal::Disarm, Signal::Answered { heard: true }],
         );
-        chip.feed(Input::Question(String::new()), clock.at(300));
+        chip.feed(
+            Input::Question {
+                text: String::new(),
+                client: None,
+            },
+            clock.at(300),
+        );
         answering(&mut chip, clock.at(5000));
         fed(&mut chip, clock.at(5100), [quiet(2500)]);
         assert_eq!(counting(&chip).map(|c| c.teach), Some(false));

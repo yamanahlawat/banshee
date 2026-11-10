@@ -88,7 +88,18 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - `BANSHEE_LOG=debug` writes every transcription to the log, a dictated password included
   (the `Transcription:` and `Dictating:` debug lines in `Pipeline::deliver`).
 - Any process running as the user can start a recording through the daemon's socket, and can
-  read every transcript in `banshee.db`. Nothing shows which client opened the microphone.
+  read every transcript in `banshee.db`.
+- The daemon names a socket client from its process ID, so a process that exits and a new one
+  that takes the ID can be misnamed. A pidfd on Linux 6.5 and later, and `LOCAL_PEERTOKEN` on
+  macOS 13 and later, close that gap. Take that step before anything depends on the name.
+- The shim's parent is not measured for Cursor, OpenCode or the npm Claude Code, so their
+  questions may carry another name or none. Claude Code in the desktop app reads as `claude`.
+- On Linux, when the shim's `/proc/<pid>/exe` link cannot be read, the `comm` fallback cuts
+  the name to 15 characters (`banshee-mcp-shi`). The shim is then not recognised and its agent
+  is not named. Not measured.
+- The daemon reads the caller's process again on every `speak`, `ask_user` and socket
+  recording, though a connection's process does not change. Reading it once per connection
+  would save the repeat. The cost is not measured.
 - The corrector for words to know has its threshold (0.10, Soundex weight 0.5) measured on
   synthetic speech and plain-English references only. Real accents and jargon are not measured.
 - Orca hears nothing from the Linux capsule. The owner wants to brainstorm it.

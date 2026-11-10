@@ -24,6 +24,7 @@ const asked = (
   outcome,
   reason: null,
   timestamp,
+  client: null,
   audio: null,
   ...extra,
 });
@@ -315,6 +316,21 @@ describe('the rows', () => {
     asked(3, 'Tag it?', 'failed', at(1, 16), { reason: 'The model failed to load.' }),
     asked(2, 'Merge it?', 'unasked', at(3, 9), { reason: 'Banshee is muted.' }),
   ];
+
+  it('shows the asker after the time and reads it aloud', () => {
+    list([asked(1, 'Shall I push?', 'transcribed', at(0, 12), { text: 'Yes.', client: 'claude' })]);
+    const row = screen.getByRole('option', { name: /^claude asked Shall I push\?/ });
+    const meta = row.querySelector('.meta') as HTMLElement;
+    expect(meta.textContent?.replace(/\s+/g, ' ').trim()).toBe('12:00 claude');
+    expect(row.querySelector('.client')?.textContent).toBe('claude');
+  });
+
+  it('keeps "Agent asked" and a bare time for a row with no client', () => {
+    list([asked(1, 'Shall I push?', 'transcribed', at(0, 12), { text: 'Yes.' })]);
+    const row = screen.getByRole('option', { name: /^Agent asked Shall I push\?/ });
+    expect(row.querySelector('.client')).toBeNull();
+    expect((row.querySelector('.meta') as HTMLElement).textContent?.trim()).toBe('12:00');
+  });
 
   it('names each option by its text, its day and time, and its flag', () => {
     list(kinds());

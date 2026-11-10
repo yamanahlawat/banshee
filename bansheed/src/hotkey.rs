@@ -1396,9 +1396,14 @@ impl Pipeline {
         self.speech_to_text.cancel_stream();
         let state = Arc::clone(&self.state);
         let cues = self.cues.clone();
-        let text = settle_answer(&state, &cues, &ask.question, listened, |audio| {
-            self.transcribe(audio)
-        });
+        let text = settle_answer(
+            &state,
+            &cues,
+            &ask.question,
+            ask.client.as_deref(),
+            listened,
+            |audio| self.transcribe(audio),
+        );
         let _ = ask.reply.send(text);
     }
 
@@ -1644,11 +1649,16 @@ fn settle_answer(
     state: &DaemonState,
     cues: &Cues,
     question: &str,
+    client: Option<&str>,
     listened: Result<Heard, String>,
     transcribe: impl FnOnce(&[f32]) -> Result<String, BansheeError>,
 ) -> Result<String, String> {
     let keep = |text: Option<&str>, outcome: Outcome, reason: Option<&str>, audio: &[f32]| {
-        state.keep(&NewEntry::question(question, text, outcome, reason).with_audio(audio));
+        state.keep(
+            &NewEntry::question(question, text, outcome, reason)
+                .with_client(client)
+                .with_audio(audio),
+        );
     };
     match listened {
         Ok(Heard::Audio(audio)) => {
@@ -1750,7 +1760,10 @@ mod answer_tests {
         let (cues, sounds) = Cues::recording();
         let mut signals = cues.subscribe_signals();
         let state = crate::test_support::daemon_state_with_cues(cues.clone());
-        let text = super::settle_answer(&state, &cues, "Ship it?", listened, |_| transcribed);
+        let text =
+            super::settle_answer(&state, &cues, "Ship it?", Some("claude"), listened, |_| {
+                transcribed
+            });
         let signal = signals.try_recv().expect("the answer sends one signal");
         (text, signal, sounds.try_iter().collect(), state)
     }
@@ -1805,6 +1818,7 @@ mod answer_tests {
         assert_eq!(rows[0].text.as_deref(), Some("Yes"));
         assert_eq!(rows[0].outcome, Outcome::Transcribed);
         assert_eq!(rows[0].reason, None);
+        assert_eq!(rows[0].client.as_deref(), Some("claude"));
         assert!(state.audio_path(rows[0].id).is_some(), "the answer's audio");
     }
 
@@ -2657,6 +2671,7 @@ mod utterance_tests {
         pipeline.ask(AskCommand {
             reply,
             question: String::new(),
+            client: None,
             timeout: WAIT,
             session,
         });
@@ -2788,6 +2803,17 @@ mod utterance_tests {
                 "{name}: the exit lowers it"
             );
         }
+    }
+
+    #[test]
+    fn a_dictation_stores_no_client() {
+        let handled = handle(
+            &crate::speech_to_text::vad::test_speech(),
+            Ok("hello there"),
+            |_, _| Ok(Delivered::Typed),
+        );
+        let rows = handled.state.history(None, None).unwrap();
+        assert_eq!(rows[0].client, None);
     }
 
     #[test]
@@ -3264,6 +3290,7 @@ mod utterance_tests {
                 pipeline.ask(AskCommand {
                     reply,
                     question: String::new(),
+                    client: None,
                     timeout,
                     session,
                 });
@@ -3899,6 +3926,7 @@ mod utterance_tests {
         pipeline.ask(AskCommand {
             reply,
             question: String::new(),
+            client: None,
             timeout: Duration::from_millis(100),
             session,
         });
@@ -4328,6 +4356,7 @@ mod utterance_tests {
         pipeline.ask(AskCommand {
             reply,
             question: String::new(),
+            client: None,
             timeout: Duration::from_secs(10),
             session,
         });

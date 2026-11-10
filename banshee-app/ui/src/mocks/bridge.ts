@@ -204,7 +204,11 @@ const SAID = [
   'commit that with a message about the timeout',
 ];
 
-const ASKED = { kind: 'question' as const, question: 'Which branch should I use?' };
+const ASKED = {
+  kind: 'question' as const,
+  question: 'Which branch should I use?',
+  client: null,
+};
 
 function rows(): HistoryRow[] {
   const state = chosen();
@@ -248,6 +252,7 @@ function rows(): HistoryRow[] {
     (i) => ({
       kind: 'dictation',
       question: null,
+      client: null,
       text: null,
       outcome: 'failed',
       reason: 'The transcription server refused the key.',
@@ -256,6 +261,7 @@ function rows(): HistoryRow[] {
     () => ({
       kind: 'dictation',
       question: null,
+      client: null,
       text: null,
       outcome: 'failed',
       reason: 'The transcription server refused the key.',
@@ -277,6 +283,7 @@ function rows(): HistoryRow[] {
       : {
           kind: 'dictation' as const,
           question: null,
+          client: null,
           text: SAID[i % SAID.length],
           outcome: 'transcribed' as const,
           reason: null,

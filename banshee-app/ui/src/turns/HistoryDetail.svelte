@@ -72,7 +72,8 @@
 
 <div class="detail" role="region" aria-label="Selected row">
   <h2 class="when" tabindex="-1" bind:this={heading}>
-    {dayLabel(row.timestamp, now)} at <span class="mono time">{formatTime(row.timestamp)}</span>
+    {dayLabel(row.timestamp, now)} at
+    <span class="mono time">{formatTime(row.timestamp)}</span>{row.client ? `, ${row.client}` : ''}
   </h2>
 
   {#snippet labelled(shown: string, widest: string)}

@@ -150,8 +150,9 @@ pub const BANSHEE_LEVEL: &str = "banshee.level";
 /// `{"text": ...}`: the committed words of the recording in progress, and an
 /// empty text when a recording ends.
 pub const BANSHEE_WORDS: &str = "banshee.words";
-/// `{"text": ...}`: the question an agent is asking, raw as the agent sent it,
-/// and an empty text once it ends.
+/// `{"text", "client"}`: the question an agent is asking, raw as the agent
+/// sent it, and the name of the program asking, null when nothing reads. An
+/// empty text means the question ended.
 pub const BANSHEE_QUESTION: &str = "banshee.question";
 
 /// The codes a reply carries. JSON-RPC reserves -32700 to -32600; the

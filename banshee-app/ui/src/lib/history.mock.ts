@@ -8,5 +8,6 @@ export const dictated = (id: number, text: string, timestamp: string): HistoryRo
   outcome: 'transcribed',
   reason: null,
   timestamp,
+  client: null,
   audio: null,
 });

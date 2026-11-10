@@ -50,6 +50,8 @@ export type HistoryRow = {
   outcome: 'transcribed' | 'failed' | 'no_answer' | 'closed' | 'unasked';
   reason: string | null;
   timestamp: string;
+  /// The program that asked, on a question row only.
+  client: string | null;
   /// `until` is local RFC 3339, and null while Keep audio is Forever.
   audio: { seconds: number; until: string | null } | null;
 };

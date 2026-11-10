@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::{Caller, Process};
 use crate::speech_to_text::Route;
 use crate::state::RecordingMode;
 use crate::test_support::daemon_state as test_state;
@@ -17,7 +18,7 @@ async fn history_honours_a_limit() {
     let state = crate::test_support::daemon_state_with_history(&["first", "second", "third"]);
 
     let request = request(BANSHEE_HISTORY, Some(serde_json::json!({ "limit": 1 })));
-    let response = dispatch(request, &state).await;
+    let response = dispatch(request, &state, &Caller::unread()).await;
 
     let JsonRpcResponse::Success { result, .. } = response else {
         panic!("expected success response");
@@ -59,7 +60,7 @@ async fn a_flag_that_is_not_a_boolean_is_refused() {
         ),
     ] {
         let JsonRpcResponse::Error { error, .. } =
-            dispatch(request(method, Some(params)), &state).await
+            dispatch(request(method, Some(params)), &state, &Caller::unread()).await
         else {
             panic!("a string {flag} must not be read as a flag by {method}");
         };
@@ -82,7 +83,9 @@ async fn history_filters_by_kind() {
         BANSHEE_HISTORY,
         Some(serde_json::json!({ "kind": "question" })),
     );
-    let JsonRpcResponse::Success { result, .. } = dispatch(request, &state).await else {
+    let JsonRpcResponse::Success { result, .. } =
+        dispatch(request, &state, &Caller::unread()).await
+    else {
         panic!("expected success response");
     };
     let history = result["history"].as_array().expect("a history array");
@@ -98,7 +101,8 @@ async fn an_unknown_kind_is_refused() {
         BANSHEE_HISTORY,
         Some(serde_json::json!({ "kind": "update" })),
     );
-    let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
+    let JsonRpcResponse::Error { error, .. } = dispatch(request, &state, &Caller::unread()).await
+    else {
         panic!("an unknown kind must be refused");
     };
     assert_eq!(error.code, rpc_code::INVALID_PARAMS);
@@ -106,8 +110,12 @@ async fn an_unknown_kind_is_refused() {
 }
 
 async fn listed_rows(state: &Arc<DaemonState>) -> usize {
-    let JsonRpcResponse::Success { result, .. } =
-        dispatch(request(BANSHEE_HISTORY, Some(serde_json::json!({}))), state).await
+    let JsonRpcResponse::Success { result, .. } = dispatch(
+        request(BANSHEE_HISTORY, Some(serde_json::json!({}))),
+        state,
+        &Caller::unread(),
+    )
+    .await
     else {
         panic!("expected success response");
     };
@@ -122,6 +130,7 @@ async fn history_lists_and_clears_while_saving_is_off() {
     let cleared = dispatch(
         request(BANSHEE_CLEAR_HISTORY, Some(serde_json::json!({}))),
         &state,
+        &Caller::unread(),
     )
     .await;
     assert!(matches!(cleared, JsonRpcResponse::Success { .. }));
@@ -136,7 +145,8 @@ async fn a_history_limit_that_does_not_fit_is_refused() {
         BANSHEE_HISTORY,
         Some(serde_json::json!({ "limit": 4_294_967_296u64 })),
     );
-    let JsonRpcResponse::Error { error, .. } = dispatch(request, &state).await else {
+    let JsonRpcResponse::Error { error, .. } = dispatch(request, &state, &Caller::unread()).await
+    else {
         panic!("a limit past 32 bits must not truncate");
     };
     assert_eq!(error.code, rpc_code::INVALID_PARAMS);
@@ -147,7 +157,7 @@ async fn history_takes_an_explicit_zero_literally() {
     let state = crate::test_support::daemon_state_with_history(&["first", "second", "third"]);
 
     let request = request(BANSHEE_HISTORY, Some(serde_json::json!({ "limit": 0 })));
-    let response = dispatch(request, &state).await;
+    let response = dispatch(request, &state, &Caller::unread()).await;
 
     let JsonRpcResponse::Success { result, .. } = response else {
         panic!("expected success response");
@@ -187,7 +197,7 @@ async fn ask_user_lets_speech_from_the_same_turn_finish() {
         BANSHEE_ASK_USER,
         Some(serde_json::json!({"question": "What should it say?"})),
     );
-    let response = dispatch(request, &state).await;
+    let response = dispatch(request, &state, &Caller::unread()).await;
 
     assert!(
         matches!(response, JsonRpcResponse::Success { .. }),
@@ -533,7 +543,7 @@ async fn another_agent_speaks_only_after_the_answer_closes() {
         BANSHEE_ASK_USER,
         Some(serde_json::json!({"question": "Ready to ship?"})),
     );
-    dispatch(request, &state).await;
+    dispatch(request, &state, &Caller::unread()).await;
 
     assert!(
         !listening.join().unwrap(),
@@ -565,7 +575,7 @@ async fn ask_user_returns_the_scoped_answer() {
         BANSHEE_ASK_USER,
         Some(serde_json::json!({"question": "Ready to ship?"})),
     );
-    let response = dispatch(request, &state).await;
+    let response = dispatch(request, &state, &Caller::unread()).await;
 
     let JsonRpcResponse::Success { result, .. } = response else {
         panic!("expected success response");
@@ -736,7 +746,7 @@ async fn stop_replies_ok_and_signals_shutdown() {
         params: None,
         id: Some(serde_json::json!(1)),
     };
-    let response = dispatch(request, &state).await;
+    let response = dispatch(request, &state, &Caller::unread()).await;
 
     let JsonRpcResponse::Success { result, .. } = response else {
         panic!("expected success response");
@@ -753,7 +763,7 @@ async fn stop_replies_ok_and_signals_shutdown() {
 async fn a_restart_replies_then_asks_to_exit_with_failure() {
     let state = test_state(std::sync::mpsc::channel().0);
 
-    let response = dispatch(request(BANSHEE_RESTART, None), &state).await;
+    let response = dispatch(request(BANSHEE_RESTART, None), &state, &Caller::unread()).await;
 
     let JsonRpcResponse::Success { result, .. } = response else {
         panic!("expected success response, got {response:?}");
@@ -822,7 +832,7 @@ async fn recording_rpcs_report_the_cause_not_a_busy_mic() {
             state.set_mic(mic.clone());
 
             let JsonRpcResponse::Error { error, .. } =
-                dispatch(request(method, params.clone()), &state).await
+                dispatch(request(method, params.clone()), &state, &Caller::unread()).await
             else {
                 panic!("{method} on {mic:?} must be refused");
             };
@@ -849,21 +859,22 @@ async fn record_start_and_stop_drive_push_to_talk() {
         BANSHEE_RECORD_START,
         Some(serde_json::json!({"dictate": true})),
     );
-    let JsonRpcResponse::Success { .. } = dispatch(start, &state).await else {
+    let JsonRpcResponse::Success { .. } = dispatch(start, &state, &Caller::unread()).await else {
         panic!("expected success response");
     };
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
     // A second start must be refused while recording
     let again = request(BANSHEE_RECORD_START, None);
-    let JsonRpcResponse::Error { error, .. } = dispatch(again, &state).await else {
+    let JsonRpcResponse::Error { error, .. } = dispatch(again, &state, &Caller::unread()).await
+    else {
         panic!("expected error response");
     };
     assert_eq!(error.code, rpc_code::BUSY);
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
     let stop = request(BANSHEE_RECORD_STOP, None);
-    let JsonRpcResponse::Success { .. } = dispatch(stop, &state).await else {
+    let JsonRpcResponse::Success { .. } = dispatch(stop, &state, &Caller::unread()).await else {
         panic!("expected success response");
     };
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
@@ -883,13 +894,13 @@ async fn recorded_with(params: Option<serde_json::Value>) -> Vec<crate::audio::c
     let mut signals = state.cues().subscribe_signals();
 
     let start = request(BANSHEE_RECORD_START, params);
-    let JsonRpcResponse::Success { .. } = dispatch(start, &state).await else {
+    let JsonRpcResponse::Success { .. } = dispatch(start, &state, &Caller::unread()).await else {
         panic!("the start must be accepted");
     };
     state.heard_sound();
     state.announce_sound();
     let stop = request(BANSHEE_RECORD_STOP, None);
-    let JsonRpcResponse::Success { .. } = dispatch(stop, &state).await else {
+    let JsonRpcResponse::Success { .. } = dispatch(stop, &state, &Caller::unread()).await else {
         panic!("the stop must be accepted");
     };
     let Ok(ConsumerCommand::Stream(_)) = command_receiver.try_recv() else {
@@ -936,14 +947,16 @@ async fn record_toggle_starts_then_stops_and_says_which() {
     let state = test_state(commands);
 
     let first = request(BANSHEE_RECORD_TOGGLE, None);
-    let JsonRpcResponse::Success { result, .. } = dispatch(first, &state).await else {
+    let JsonRpcResponse::Success { result, .. } = dispatch(first, &state, &Caller::unread()).await
+    else {
         panic!("expected success response");
     };
     assert_eq!(result["recording"], serde_json::Value::Bool(true));
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
     let second = request(BANSHEE_RECORD_TOGGLE, None);
-    let JsonRpcResponse::Success { result, .. } = dispatch(second, &state).await else {
+    let JsonRpcResponse::Success { result, .. } = dispatch(second, &state, &Caller::unread()).await
+    else {
         panic!("expected success response");
     };
     assert_eq!(result["recording"], serde_json::Value::Bool(false));
@@ -962,7 +975,8 @@ async fn record_stop_while_idle_is_a_no_op() {
     let state = test_state(commands);
 
     let stop = request(BANSHEE_RECORD_STOP, None);
-    let JsonRpcResponse::Success { result, .. } = dispatch(stop, &state).await else {
+    let JsonRpcResponse::Success { result, .. } = dispatch(stop, &state, &Caller::unread()).await
+    else {
         panic!("expected success response");
     };
     assert_eq!(result["ok"], true);
@@ -978,13 +992,13 @@ async fn subscribe_answers_with_the_status_payload() {
     state.set_recording_mode(RecordingMode::PushToTalk);
 
     let JsonRpcResponse::Success { result: polled, .. } =
-        dispatch(request(BANSHEE_STATUS, None), &state).await
+        dispatch(request(BANSHEE_STATUS, None), &state, &Caller::unread()).await
     else {
         panic!("expected success response");
     };
     let JsonRpcResponse::Success {
         result: subscribed, ..
-    } = dispatch(request(BANSHEE_SUBSCRIBE, None), &state).await
+    } = dispatch(request(BANSHEE_SUBSCRIBE, None), &state, &Caller::unread()).await
     else {
         panic!("expected success response");
     };
@@ -1439,8 +1453,12 @@ fn the_reply_says_which_speaker_started_and_not_which_voice_is_held() {
 #[tokio::test]
 async fn list_voices_names_no_current_voice_until_one_is_set_and_then_the_one_held() {
     let state = test_state(std::sync::mpsc::channel().0);
-    let JsonRpcResponse::Success { result, .. } =
-        dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
+    let JsonRpcResponse::Success { result, .. } = dispatch(
+        request(BANSHEE_LIST_VOICES, None),
+        &state,
+        &Caller::unread(),
+    )
+    .await
     else {
         panic!("expected success response");
     };
@@ -1449,8 +1467,12 @@ async fn list_voices_names_no_current_voice_until_one_is_set_and_then_the_one_he
 
     state.set_tts_voice(Some("marin".to_string()));
 
-    let JsonRpcResponse::Success { result, .. } =
-        dispatch(request(BANSHEE_LIST_VOICES, None), &state).await
+    let JsonRpcResponse::Success { result, .. } = dispatch(
+        request(BANSHEE_LIST_VOICES, None),
+        &state,
+        &Caller::unread(),
+    )
+    .await
     else {
         panic!("expected success response");
     };
@@ -1467,7 +1489,7 @@ async fn list_voices_names_no_current_voice_until_one_is_set_and_then_the_one_he
 
 async fn listed_voices(state: &Arc<DaemonState>) -> Vec<serde_json::Value> {
     let JsonRpcResponse::Success { result, .. } =
-        dispatch(request(BANSHEE_LIST_VOICES, None), state).await
+        dispatch(request(BANSHEE_LIST_VOICES, None), state, &Caller::unread()).await
     else {
         panic!("expected success response");
     };
@@ -1576,8 +1598,12 @@ async fn a_second_download_is_refused_while_one_runs() {
     }]);
     let slot = state.start_downloading().expect("the slot starts free");
 
-    let JsonRpcResponse::Error { error, .. } =
-        dispatch(request(BANSHEE_DOWNLOAD_MODELS, None), &state).await
+    let JsonRpcResponse::Error { error, .. } = dispatch(
+        request(BANSHEE_DOWNLOAD_MODELS, None),
+        &state,
+        &Caller::unread(),
+    )
+    .await
     else {
         panic!("expected the busy error");
     };
@@ -1604,6 +1630,7 @@ async fn a_download_by_model_fetches_that_model_and_refuses_an_unknown_id() {
             Some(serde_json::json!({"model": "moonshine-tiny"})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await
     else {
@@ -1618,6 +1645,7 @@ async fn a_download_by_model_fetches_that_model_and_refuses_an_unknown_id() {
             Some(serde_json::json!({"model": "no-such-model-9f3a"})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await
     else {
@@ -1661,8 +1689,12 @@ async fn a_first_download_writes_the_mode_into_the_daemons_own_config_after_the_
         model: None,
     }]);
 
-    let JsonRpcResponse::Success { .. } =
-        dispatch(request(BANSHEE_DOWNLOAD_MODELS, None), &state).await
+    let JsonRpcResponse::Success { .. } = dispatch(
+        request(BANSHEE_DOWNLOAD_MODELS, None),
+        &state,
+        &Caller::unread(),
+    )
+    .await
     else {
         panic!("expected the download to start");
     };
@@ -1696,8 +1728,12 @@ async fn downloading_nothing_reports_an_empty_list() {
     let state = test_state(std::sync::mpsc::channel().0);
     state.set_wanted_downloads(Vec::new());
 
-    let JsonRpcResponse::Success { result, .. } =
-        dispatch(request(BANSHEE_DOWNLOAD_MODELS, None), &state).await
+    let JsonRpcResponse::Success { result, .. } = dispatch(
+        request(BANSHEE_DOWNLOAD_MODELS, None),
+        &state,
+        &Caller::unread(),
+    )
+    .await
     else {
         panic!("expected success response");
     };
@@ -1721,6 +1757,7 @@ async fn an_unknown_agent_slug_is_refused_by_plan_and_apply() {
             Some(serde_json::json!({"agent": "notatool", "disconnect": false})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await
     else {
@@ -1740,6 +1777,7 @@ async fn an_unknown_agent_slug_is_refused_by_plan_and_apply() {
             Some(serde_json::json!({"agent": "notatool", "disconnect": false})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await
     else {
@@ -1791,7 +1829,7 @@ async fn disconnect_true_is_refused_before_the_agent_is_resolved() {
             Some(serde_json::json!({"agent": "notatool", "disconnect": true})),
         ),
     ] {
-        let response = dispatch(request, &state).await;
+        let response = dispatch(request, &state, &Caller::unread()).await;
         let JsonRpcResponse::Error { error, .. } = response else {
             panic!("expected an error response");
         };
@@ -1843,6 +1881,7 @@ async fn speak_passes_the_voice_parameter_to_the_backend() {
             Some(serde_json::json!({"text": "hello", "voice": "am_adam"})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await;
 
@@ -1872,7 +1911,7 @@ async fn ask_user_answers_an_error_when_the_listen_failed() {
         BANSHEE_ASK_USER,
         Some(serde_json::json!({"question": "Ready to ship?"})),
     );
-    let response = dispatch(request, &state).await;
+    let response = dispatch(request, &state, &Caller::unread()).await;
 
     let JsonRpcResponse::Error { error, .. } = response else {
         panic!("expected error response");
@@ -2107,14 +2146,14 @@ fn one_mock_carries_every_config_key(name: &str, body: &str) {
 async fn status_says_the_pipeline_is_opening_until_it_stands() {
     let state = crate::test_support::daemon_state_before_the_pipeline();
 
-    let opening = dispatch(request(BANSHEE_STATUS, None), &state).await;
+    let opening = dispatch(request(BANSHEE_STATUS, None), &state, &Caller::unread()).await;
     let JsonRpcResponse::Success { result, .. } = opening else {
         panic!("status answers");
     };
     assert_eq!(result["pipeline"], "opening");
 
     state.set_mic(crate::state::Mic::Open);
-    let open = dispatch(request(BANSHEE_STATUS, None), &state).await;
+    let open = dispatch(request(BANSHEE_STATUS, None), &state, &Caller::unread()).await;
     let JsonRpcResponse::Success { result, .. } = open else {
         panic!("status answers");
     };
@@ -2231,13 +2270,21 @@ fn spawn_question(
     state: &Arc<DaemonState>,
     question: &'static str,
 ) -> tokio::task::JoinHandle<JsonRpcResponse> {
+    spawn_question_from(state, question, Caller::unread())
+}
+
+fn spawn_question_from(
+    state: &Arc<DaemonState>,
+    question: &'static str,
+    caller: Caller,
+) -> tokio::task::JoinHandle<JsonRpcResponse> {
     let state = Arc::clone(state);
     tokio::spawn(async move {
         let asked = request(
             BANSHEE_ASK_USER,
             Some(serde_json::json!({ "question": question })),
         );
-        dispatch(asked, &state).await
+        dispatch(asked, &state, &caller).await
     })
 }
 
@@ -2334,15 +2381,232 @@ fn a_dropped_ask_leaves_a_recording_someone_else_started() {
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 }
 
+fn processes(pid: u32) -> Option<Process> {
+    let (path, parent) = match pid {
+        40 => (
+            "/Applications/Banshee.app/Contents/MacOS/banshee-mcp-shim",
+            41,
+        ),
+        41 => ("/usr/local/bin/claude", 2),
+        50 => ("/usr/local/bin/codex", 2),
+        60 => ("/usr/local/bin/banshee", 2),
+        _ => return None,
+    };
+    let path = std::path::PathBuf::from(path);
+    Some(Process {
+        name: path.file_name()?.to_string_lossy().into_owned(),
+        path: Some(path),
+        parent,
+    })
+}
+
+/// The shim that Claude, process 41, runs.
+const SHIM: Caller = Caller::read_by(40, processes);
+const CODEX: Caller = Caller::read_by(50, processes);
+
+/// Asks once from `caller`, and answers the way the consumer does, keeping the
+/// row with the asker the command carries. Gives back the question as it was
+/// published while the answer was listened for, and the rows.
+async fn ask_and_answer(caller: &Caller) -> (crate::state::Question, Vec<crate::history::Entry>) {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let published = state.subscribe_question();
+    let consumer = std::thread::spawn({
+        let state = Arc::clone(&state);
+        move || {
+            let Ok(ConsumerCommand::Ask(ask)) =
+                command_receiver.recv_timeout(std::time::Duration::from_secs(5))
+            else {
+                panic!("the ask never reached the listener");
+            };
+            let shown = published.borrow().clone();
+            state.keep(
+                &NewEntry::question(&ask.question, Some("yes"), Outcome::Transcribed, None)
+                    .with_client(ask.client.as_deref()),
+            );
+            state.disarm(ask.session);
+            let _ = ask.reply.send(Ok("yes".to_string()));
+            shown
+        }
+    });
+    dispatch(
+        request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "Ship it?"})),
+        ),
+        &state,
+        caller,
+    )
+    .await;
+    let shown = consumer.join().unwrap();
+    (shown, state.history(None, None).unwrap())
+}
+
 #[tokio::test]
-async fn a_speech_from_an_agent_counts_for_that_agent_only() {
+async fn a_question_publishes_and_keeps_the_name_of_who_asked() {
+    let (published, rows) = ask_and_answer(&SHIM).await;
+    assert_eq!(published.text, "Ship it?");
+    assert_eq!(published.client.as_deref(), Some("claude"));
+    assert_eq!(rows.last().unwrap().client.as_deref(), Some("claude"));
+}
+
+const BANSHEE: Caller = Caller::read_by(60, processes);
+
+#[tokio::test]
+async fn a_socket_dictation_logs_as_a_recording() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    dispatch(
+        request(BANSHEE_RECORD_START, Some(serde_json::json!({}))),
+        &state,
+        &BANSHEE,
+    )
+    .await;
+    assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+}
+
+#[tokio::test]
+async fn a_hold_to_answer_over_the_socket_is_not_logged_as_a_recording() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let (answers, answer_next) = std::sync::mpsc::channel::<&'static str>();
+    let listener = answer_in_turn(&state, command_receiver, answer_next);
+    let asking = spawn_question_from(&state, "Ready to ship?", SHIM);
+    wait_for(&state, "the ask arms", |state| {
+        state.recording_mode() == RecordingMode::Armed
+    })
+    .await;
+
+    dispatch(
+        request(BANSHEE_RECORD_START, Some(serde_json::json!({}))),
+        &state,
+        &BANSHEE,
+    )
+    .await;
+    assert_eq!(state.recording_mode(), RecordingMode::ArmedHold);
+
+    state.record_stop();
+    answers.send("yes").unwrap();
+    answer_of(asking).await;
+    drop(answers);
+    listener.join().unwrap();
+}
+
+#[tokio::test]
+async fn configuring_the_keep_open_setting_over_the_socket_succeeds_for_a_named_caller() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    let JsonRpcResponse::Success { result, .. } = dispatch(
+        request(
+            BANSHEE_CONFIGURE,
+            Some(serde_json::json!({"settings": {"audio.keep_open": true}})),
+        ),
+        &state,
+        &BANSHEE,
+    )
+    .await
+    else {
+        panic!("expected success response");
+    };
+    assert!(
+        result["applied"]
+            .as_array()
+            .unwrap()
+            .contains(&"audio.keep_open".into())
+    );
+}
+
+#[tokio::test]
+async fn a_question_that_is_never_put_keeps_the_name_too() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    state.set_mic(crate::state::Mic::Starting);
+    dispatch(
+        request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "Deploy now?"})),
+        ),
+        &state,
+        &SHIM,
+    )
+    .await;
+    let rows = state.history(None, None).unwrap();
+    assert_eq!(rows.last().unwrap().outcome, Outcome::Unasked);
+    assert_eq!(rows.last().unwrap().client.as_deref(), Some("claude"));
+}
+
+#[tokio::test]
+async fn a_question_from_an_unread_caller_carries_no_name() {
+    let (published, rows) = ask_and_answer(&Caller::unread()).await;
+    assert_eq!(published.text, "Ship it?");
+    assert_eq!(published.client, None);
+    assert_eq!(rows.last().unwrap().client, None);
+}
+
+#[tokio::test]
+async fn the_second_of_two_waiting_questions_shows_its_own_asker() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let (answers, answer_next) = std::sync::mpsc::channel::<&'static str>();
+    let listener = answer_in_turn(&state, command_receiver, answer_next);
+    let published = state.subscribe_question();
+
+    let first = spawn_question_from(&state, "First question", SHIM);
+    wait_for(&state, "the first ask arms", |state| {
+        state.recording_mode() == RecordingMode::Armed
+    })
+    .await;
+    let second = spawn_question_from(&state, "Second question", CODEX);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(published.borrow().client.as_deref(), Some("claude"));
+
+    answers.send("one").unwrap();
+    answer_of(first).await;
+    wait_for(&state, "the second question is published", |_| {
+        published.borrow().text == "Second question"
+    })
+    .await;
+    assert_eq!(published.borrow().client.as_deref(), Some("codex"));
+
+    answers.send("two").unwrap();
+    answer_of(second).await;
+    drop(answers);
+    listener.join().unwrap();
+}
+
+#[tokio::test]
+async fn speech_counts_for_the_shims_agent_and_ignores_a_sent_agent_pid() {
     let state = test_state(std::sync::mpsc::channel().0);
     dispatch(
         request(
             BANSHEE_SPEAK,
-            Some(serde_json::json!({"text": "hi", "agent_pid": 41})),
+            Some(serde_json::json!({"text": "hi", "agent_pid": 7})),
         ),
         &state,
+        &SHIM,
+    )
+    .await;
+    for (agent, verdict) in [(41, "pass"), (7, "speak")] {
+        let JsonRpcResponse::Success { result, .. } = dispatch(
+            request(
+                BANSHEE_TURN_ENDED,
+                Some(serde_json::json!({ "agent_pid": agent })),
+            ),
+            &state,
+            &Caller::unread(),
+        )
+        .await
+        else {
+            panic!("expected success response");
+        };
+        assert_eq!(result["verdict"], verdict, "agent {agent}");
+    }
+}
+
+#[tokio::test]
+async fn a_speech_from_an_agent_counts_for_that_agent_only() {
+    let state = test_state(std::sync::mpsc::channel().0);
+    dispatch(
+        request(BANSHEE_SPEAK, Some(serde_json::json!({"text": "hi"}))),
+        &state,
+        &SHIM,
     )
     .await;
     assert_eq!(
@@ -2365,6 +2629,7 @@ async fn a_question_that_cannot_be_asked_is_kept_as_unasked() {
             Some(serde_json::json!({"question": "Deploy now?"})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await;
     let JsonRpcResponse::Error { error, .. } = response else {
@@ -2389,6 +2654,7 @@ async fn an_unasked_question_keeps_the_words_the_agent_sent() {
             Some(serde_json::json!({"question": "Run `rm -rf /` now?"})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await;
     let rows = state.history(None, None).unwrap();
@@ -2421,6 +2687,7 @@ async fn a_question_is_spoken_clean_and_reaches_the_listener_as_sent() {
             Some(serde_json::json!({"question": "Run `rm -rf /` now?"})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await;
     assert_eq!(question.recv().unwrap(), "Run `rm -rf /` now?");
@@ -2443,7 +2710,7 @@ async fn history_keeps_the_raw_question_the_card_shows_clean() {
         let Ok(ConsumerCommand::Ask(ask)) = command_receiver.recv() else {
             return;
         };
-        let _ = shown.send(published.borrow().clone());
+        let _ = shown.send(published.borrow().text.clone());
         session_state.keep(&NewEntry::question(
             &ask.question,
             Some("no"),
@@ -2460,6 +2727,7 @@ async fn history_keeps_the_raw_question_the_card_shows_clean() {
             Some(serde_json::json!({"question": "Run \u{202E}now?"})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await;
 
@@ -2480,7 +2748,7 @@ async fn every_exit_after_the_arm_ends_the_published_question() {
     spawn_question(&held.state, crate::test_support::REFUSED)
         .await
         .unwrap();
-    assert_eq!(*refused.borrow(), "");
+    assert_eq!(*refused.borrow(), crate::state::Question::default());
     assert!(refused.has_changed().unwrap());
 
     let (commands, _consumer) = std::sync::mpsc::channel();
@@ -2489,25 +2757,28 @@ async fn every_exit_after_the_arm_ends_the_published_question() {
         commands,
     );
     let mut stalled = held.state.subscribe_question();
-    let asking = spawn_question(&held.state, crate::test_support::STALLS);
+    let asking = spawn_question_from(&held.state, crate::test_support::STALLS, SHIM);
     stalled.changed().await.unwrap();
-    assert_eq!(*stalled.borrow_and_update(), crate::test_support::STALLS);
+    assert_eq!(
+        stalled.borrow_and_update().text,
+        crate::test_support::STALLS
+    );
     asking.await.unwrap();
-    assert_eq!(*stalled.borrow(), "");
+    assert_eq!(*stalled.borrow(), crate::state::Question::default());
     assert!(stalled.has_changed().unwrap());
 
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let state = test_state(commands);
     let mut dropped = state.subscribe_question();
-    let asking = spawn_ask(&state);
+    let asking = spawn_question_from(&state, "Ready to ship?", SHIM);
     let _ask = tokio::task::spawn_blocking(move || command_receiver.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(*dropped.borrow_and_update(), "Ready to ship?");
+    assert_eq!(dropped.borrow_and_update().text, "Ready to ship?");
     asking.abort();
     wait_for(&state, "the dropped ask ends the question", |state| {
-        state.subscribe_question().borrow().is_empty()
+        *state.subscribe_question().borrow() == crate::state::Question::default()
     })
     .await;
     assert!(dropped.has_changed().unwrap());
@@ -2532,7 +2803,7 @@ async fn the_question_is_published_before_it_is_spoken() {
         .await
         .expect("the question was never published")
         .unwrap();
-    assert_eq!(*question.borrow(), "Ready to ship?");
+    assert_eq!(question.borrow().text, "Ready to ship?");
     assert_eq!(
         *spoken.lock().unwrap(),
         [crate::test_support::STALLS],
@@ -2549,9 +2820,10 @@ async fn a_question_refused_before_the_pipeline_stands_still_counts() {
     let response = dispatch(
         request(
             BANSHEE_ASK_USER,
-            Some(serde_json::json!({"question": "ready?", "agent_pid": 41})),
+            Some(serde_json::json!({"question": "ready?"})),
         ),
         &state,
+        &SHIM,
     )
     .await;
     let JsonRpcResponse::Error { error, .. } = response else {
@@ -2568,11 +2840,7 @@ async fn a_question_refused_before_the_pipeline_stands_still_counts() {
 async fn a_request_missing_its_text_counts_for_nobody() {
     let state = test_state(std::sync::mpsc::channel().0);
     for method in [BANSHEE_SPEAK, BANSHEE_ASK_USER] {
-        dispatch(
-            request(method, Some(serde_json::json!({"agent_pid": 41}))),
-            &state,
-        )
-        .await;
+        dispatch(request(method, Some(serde_json::json!({}))), &state, &SHIM).await;
     }
     assert_eq!(
         state.spoken().turn_ended(41),
@@ -2585,10 +2853,11 @@ async fn an_agent_pid_that_is_not_a_process_id_is_refused() {
     let state = test_state(std::sync::mpsc::channel().0);
     let response = dispatch(
         request(
-            BANSHEE_SPEAK,
-            Some(serde_json::json!({"text": "hi", "agent_pid": -1})),
+            BANSHEE_TURN_ENDED,
+            Some(serde_json::json!({"agent_pid": -1})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await;
     let JsonRpcResponse::Error { error, .. } = response else {
@@ -2606,6 +2875,7 @@ async fn turn_ended_with_no_repeat_answers_the_records_verdict() {
             Some(serde_json::json!({"agent_pid": 7})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await
     else {
@@ -2620,6 +2890,7 @@ async fn turn_ended_needs_the_agent() {
     let response = dispatch(
         request(BANSHEE_TURN_ENDED, Some(serde_json::json!({}))),
         &state,
+        &Caller::unread(),
     )
     .await;
     let JsonRpcResponse::Error { error, .. } = response else {
@@ -2637,6 +2908,7 @@ async fn turn_ended_with_repeat_true_answers_pass() {
             Some(serde_json::json!({"agent_pid": 7, "repeat": true})),
         ),
         &state,
+        &Caller::unread(),
     )
     .await
     else {
@@ -2679,6 +2951,7 @@ async fn a_configure_reply_names_the_keys_still_waiting() {
             })),
         ),
         &state,
+        &Caller::unread(),
     )
     .await;
     let JsonRpcResponse::Success { result, .. } = reply else {
@@ -2701,7 +2974,8 @@ async fn refusal(
     method: &str,
     params: serde_json::Value,
 ) -> (i32, String) {
-    let JsonRpcResponse::Error { error, .. } = dispatch(request(method, Some(params)), state).await
+    let JsonRpcResponse::Error { error, .. } =
+        dispatch(request(method, Some(params)), state, &Caller::unread()).await
     else {
         panic!("{method} must be refused");
     };
@@ -2735,6 +3009,7 @@ async fn history_audio_answers_the_path_of_a_kept_row() {
     let response = dispatch(
         request(BANSHEE_HISTORY_AUDIO, Some(serde_json::json!({"id": id}))),
         &state,
+        &Caller::unread(),
     )
     .await;
 
@@ -2884,6 +3159,7 @@ async fn retry_replaces_the_text_and_answers_the_row() {
     let response = dispatch(
         request(BANSHEE_RETRY, Some(serde_json::json!({"id": id}))),
         &state,
+        &Caller::unread(),
     )
     .await;
 
@@ -2950,6 +3226,7 @@ async fn a_retry_needs_no_microphone() {
         let response = dispatch(
             request(BANSHEE_RETRY, Some(serde_json::json!({"id": id}))),
             &state,
+            &Caller::unread(),
         )
         .await;
 

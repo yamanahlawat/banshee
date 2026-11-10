@@ -5,6 +5,7 @@ mod audio;
 pub mod bench;
 mod binding;
 mod cli;
+mod client;
 mod compositor;
 mod config;
 mod connect;

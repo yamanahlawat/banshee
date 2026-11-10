@@ -27,6 +27,7 @@ const asked = (outcome: HistoryRow['outcome'], extra: Partial<HistoryRow> = {}):
   outcome,
   reason: null,
   timestamp: STAMP,
+  client: null,
   audio: null,
   ...extra,
 });
@@ -56,6 +57,16 @@ describe('the frame', () => {
     component.focus();
     expect(document.activeElement).toBe(heading);
     expect(region.getAttribute('aria-live')).toBeNull();
+  });
+
+  it('names the asker on the date line', () => {
+    show(asked('no_answer', { client: 'claude' }));
+    expect(screen.getByRole('heading', { name: 'Today at 14:32, claude' })).toBeTruthy();
+  });
+
+  it('leaves the date line alone for a row with no client', () => {
+    show(asked('no_answer'));
+    expect(screen.getByRole('heading', { name: 'Today at 14:32' })).toBeTruthy();
   });
 
   it('names an earlier day', () => {

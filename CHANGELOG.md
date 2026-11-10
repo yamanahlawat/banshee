@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The question card, History and the log name the program that asked.** The card shows
+  the name above the question on macOS and Linux. History keeps it on question rows and shows
+  it after the time and in the detail's date line. Dictation shows no name, including
+  dictation through `banshee record`. The log names every socket use that opens the
+  microphone, and who set `audio.keep_open`. When the name does not read, none shows. The
+  daemon reads the name from the operating system, so a renamed program shows its new name.
+  The shim reports its parent, which reads as `claude` for Claude Code in the desktop app.
+  The parent is not measured for Cursor, OpenCode or the npm Claude Code.
 - **An agent's question shows on screen while you answer.** When an agent asks, the capsule
   becomes a card above the Dock: the whole question, with the ask in larger type, and a row
   that says whether Banshee is speaking, listening or transcribing. Clicks pass through it.

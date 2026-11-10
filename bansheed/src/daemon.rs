@@ -16,6 +16,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::api::{dispatch, live_state};
+use crate::client::Caller;
 use crate::config::Config;
 use crate::speech_to_text::vad::Detector;
 use crate::state::{ConsumerCommand, DaemonState, RecordingError};
@@ -297,7 +298,8 @@ pub async fn run(
             accepted = listener.accept() => match accepted {
                 Ok((stream, _addr)) => {
                     log::debug!("New client connected!");
-                    tokio::spawn(serve(stream, Arc::clone(daemon_state)));
+                    let caller = caller_of(&stream);
+                    tokio::spawn(serve(stream, Arc::clone(daemon_state), caller));
                 }
                 Err(error) => log::warn!("Connection failed, Error: {error}"),
             }
@@ -399,14 +401,15 @@ async fn push_level(writer: Arc<Mutex<OwnedWriteHalf>>, mut level: watch::Receiv
     }
 }
 
-async fn push_text(
+async fn push_watched<T: Clone>(
     writer: Arc<Mutex<OwnedWriteHalf>>,
     method: &'static str,
-    mut texts: watch::Receiver<String>,
+    mut values: watch::Receiver<T>,
+    params: fn(T) -> serde_json::Value,
 ) {
-    while texts.changed().await.is_ok() {
-        let text = texts.borrow_and_update().clone();
-        let notification = JsonRpcNotification::new(method, serde_json::json!({"text": text}));
+    while values.changed().await.is_ok() {
+        let value = values.borrow_and_update().clone();
+        let notification = JsonRpcNotification::new(method, params(value));
         if write_line(&mut *writer.lock().await, &notification)
             .await
             .is_err()
@@ -534,8 +537,18 @@ pub(crate) fn ids_of(blockers: &[banshee_common::Blocker]) -> Vec<String> {
     blockers.iter().map(|blocker| blocker.id.clone()).collect()
 }
 
+fn caller_of(stream: &UnixStream) -> Caller {
+    let pid = stream
+        .peer_cred()
+        .ok()
+        .and_then(|credentials| credentials.pid())
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0);
+    Caller::of(pid)
+}
+
 /// The subscription lives and dies with the connection.
-async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
+async fn serve(stream: UnixStream, state: Arc<DaemonState>, caller: Caller) {
     let (reader, writer) = stream.into_split();
     // Pushing is a task of its own, because ask_user parks this one inside
     // dispatch for minutes while it holds the microphone open
@@ -605,7 +618,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         // Watched while it runs: `ask_user` parks here for minutes holding the
         // microphone, and a client that goes away in the meantime is asking
         // for none of it. Dropping the call is what ends the work.
-        let mut call = std::pin::pin!(dispatch(request, &state));
+        let mut call = std::pin::pin!(dispatch(request, &state, &caller));
         let answered = loop {
             tokio::select! {
                 response = &mut call => break Some(response),
@@ -650,13 +663,23 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         }
         if let Some(words) = opening_words {
             let writer = Arc::clone(&writer);
-            pushing_words = Some(tokio::spawn(push_text(writer, BANSHEE_WORDS, words)));
+            pushing_words = Some(tokio::spawn(push_watched(
+                writer,
+                BANSHEE_WORDS,
+                words,
+                |text| serde_json::json!({ "text": text }),
+            )));
         }
         if let Some(mut question) = opening_question {
             // A tray that subscribes while an agent asks still gets the question.
             question.mark_changed();
             let writer = Arc::clone(&writer);
-            pushing_question = Some(tokio::spawn(push_text(writer, BANSHEE_QUESTION, question)));
+            pushing_question = Some(tokio::spawn(push_watched(
+                writer,
+                BANSHEE_QUESTION,
+                question,
+                |question| serde_json::json!(question),
+            )));
         }
     }
 

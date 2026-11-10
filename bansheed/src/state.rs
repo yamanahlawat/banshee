@@ -69,9 +69,16 @@ pub type RingClaim = Counted;
 
 pub struct AskCommand {
     pub question: String,
+    pub client: Option<String>,
     pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     pub timeout: Duration,
     pub session: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct Question {
+    pub text: String,
+    pub client: Option<String>,
 }
 
 pub struct RetryCommand {
@@ -567,7 +574,7 @@ pub struct DaemonState {
     // The committed words of the recording in progress, empty between recordings.
     words: watch::Sender<String>,
     // The question an agent is asking, empty once it ends.
-    question: watch::Sender<String>,
+    question: watch::Sender<Question>,
     withdrawals: Mutex<Withdrawals>,
     // The route of the last switch handed to the listener, which may still
     // wait in its queue.
@@ -680,7 +687,7 @@ impl DaemonState {
             level: watch::channel(0.0).0,
             level_watchers: Arc::new(watch::channel(0).0),
             words: watch::channel(String::new()).0,
-            question: watch::channel(String::new()).0,
+            question: watch::channel(Question::default()).0,
             withdrawals: Mutex::new(Withdrawals::default()),
             asked_listener: Mutex::new(asked_listener),
         }
@@ -2049,11 +2056,14 @@ impl DaemonState {
         self.words.subscribe()
     }
 
-    pub fn publish_question(&self, text: &str) {
-        self.question.send_replace(text.to_string());
+    pub fn publish_question(&self, text: &str, client: Option<&str>) {
+        self.question.send_replace(Question {
+            text: text.to_string(),
+            client: client.map(str::to_string),
+        });
     }
 
-    pub fn subscribe_question(&self) -> watch::Receiver<String> {
+    pub fn subscribe_question(&self) -> watch::Receiver<Question> {
         self.question.subscribe()
     }
 

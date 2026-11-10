@@ -21,6 +21,7 @@ const asked = (id: number, row: Partial<HistoryRow>): HistoryRow => ({
   outcome: 'no_answer',
   reason: null,
   timestamp: stamp(1),
+  client: null,
   audio: null,
   ...row,
 });
