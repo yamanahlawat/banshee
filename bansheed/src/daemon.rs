@@ -526,11 +526,11 @@ fn spoken_problem(blocker: &banshee_common::Blocker) -> String {
     )
 }
 
-fn problems(state: &DaemonState) -> Vec<banshee_common::Blocker> {
+pub(crate) fn problems(state: &DaemonState) -> Vec<banshee_common::Blocker> {
     crate::readiness::blockers_as_read(state, &state.pipeline())
 }
 
-fn ids_of(blockers: &[banshee_common::Blocker]) -> Vec<String> {
+pub(crate) fn ids_of(blockers: &[banshee_common::Blocker]) -> Vec<String> {
     blockers.iter().map(|blocker| blocker.id.clone()).collect()
 }
 
