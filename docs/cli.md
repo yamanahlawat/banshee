@@ -21,7 +21,7 @@
 | `banshee devices`               | List the microphones, and mark the one in use              |
 | `banshee watch`                 | Follow what the daemon is doing, one line per change       |
 | `banshee watch --waybar`        | The same, as Waybar custom-module JSON                     |
-| `banshee watch --events cues,level,words` | Print each cue, level and words event as one JSON line |
+| `banshee watch --events cues,level,words,question` | Print each cue, level, words and question event as one JSON line |
 | `banshee voices`                | List the speech voices on disk, and mark the one in use    |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee config remote`         | Set up the remote listener and speaker in one run, after showing each value |
@@ -38,10 +38,11 @@
 ## Following what the daemon is doing
 
 - `banshee watch` prints one word per state change, and keeps running.
-- `banshee watch --events cues,level,words` prints each event as one JSON line.
-  A words event carries the words heard so far while you speak, and an empty
-  text when the recording ends. The one-word lines and `--waybar` stay as they
-  are.
+- `banshee watch --events cues,level,words,question` prints each event as one
+  JSON line. A words event carries the words heard so far while you speak, and
+  an empty text when the recording ends. A question event carries the question
+  an agent is asking, and an empty text once it ends. The one-word lines and
+  `--waybar` stay as they are.
 
 ```
 $ banshee watch

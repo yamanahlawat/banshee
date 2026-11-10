@@ -237,6 +237,7 @@ struct EndsTheSession<'a> {
 impl Drop for EndsTheSession<'_> {
     fn drop(&mut self) {
         self.state.disarm(self.session);
+        self.state.publish_question("");
     }
 }
 
@@ -669,6 +670,8 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         state: daemon_state,
         session,
     };
+
+    daemon_state.publish_question(question);
 
     let clean_question = sanitize(question);
     // Queued behind what is already said. Every line after it waits for the

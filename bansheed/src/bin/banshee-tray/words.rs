@@ -7,11 +7,11 @@ use harfrust::{Buffer, ShapeOptions, ShaperFont, font::Font};
 use skrifa::{DrawMemory, GlyphId, PathSink, ScalerFont};
 use tiny_skia::{Path, PathBuilder};
 
-use crate::chip::Cut;
+use crate::card::{self, Cut, Measure};
+use crate::chip::Trim;
 use crate::figure::{WORDS_SIZE, WORDS_TRACKING, WORDS_WEIGHT, WORDS_WIDTH};
 
 const ARCHIVO: &[u8] = include_bytes!("../../../../assets/fonts/archivo-latin.ttf");
-const ELLIPSIS: char = '\u{2026}';
 
 /// A shaped line. The outline's baseline sits `ascent` below its top edge.
 pub struct Line {
@@ -21,14 +21,54 @@ pub struct Line {
     pub descent: f32,
 }
 
-pub fn line(text: &str, cut: Cut, room: f32) -> Line {
+pub fn line(text: &str, trim: Trim, room: f32) -> Line {
     let font = capsule_font();
-    let scale = scale_of(font);
+    let text = fit(font, text, trim, room);
+    outline(font, &text, WORDS_SIZE as f32, WORDS_TRACKING as f32)
+}
+
+/// `text` set in `cut`, uncut, as an outline.
+pub fn shaped(text: &str, cut: Cut) -> Line {
+    outline(
+        cut_font(cut),
+        text,
+        cut.size() as f32,
+        cut.tracking() as f32,
+    )
+}
+
+/// One Archivo instance per card cut.
+pub struct Fonts;
+
+impl Measure for Fonts {
+    fn width(&self, text: &str, cut: Cut) -> f64 {
+        f64::from(width_of(
+            cut_font(cut),
+            text,
+            cut.size() as f32,
+            cut.tracking() as f32,
+        ))
+    }
+
+    fn narrowest(&self, cut: Cut) -> f64 {
+        static NARROWEST: [OnceLock<f64>; Cut::ALL.len()] =
+            [const { OnceLock::new() }; Cut::ALL.len()];
+        *NARROWEST[cut as usize].get_or_init(|| card::narrowest_ascii(|one| self.width(one, cut)))
+    }
+}
+
+fn cut_font(cut: Cut) -> &'static Font {
+    static FONTS: [OnceLock<Font>; Cut::ALL.len()] = [const { OnceLock::new() }; Cut::ALL.len()];
+    FONTS[cut as usize].get_or_init(|| font(cut.weight() as f32, cut.width() as f32))
+}
+
+/// `text` as an outline in `font`, `size` pixels high, with `tracking` em added to each glyph.
+fn outline(font: &Font, text: &str, size: f32, tracking: f32) -> Line {
+    let scale = scale_of(font, size);
     let metrics = font.metrics();
     let h_line = metrics.h_line().unwrap_or_default();
     let ascent = h_line.ascender.to_f32() * scale;
     let descent = -h_line.descender.to_f32() * scale;
-    let text = fit(font, text, cut, room);
 
     let scaler = ScalerFont::unhinted(font.clone(), None);
     let mut pen = Pen {
@@ -37,7 +77,7 @@ pub fn line(text: &str, cut: Cut, room: f32) -> Line {
         ascent,
         x: 0.0,
     };
-    for (glyph, advance) in shape(font, &text) {
+    for (glyph, advance) in shape(font, text, size, tracking) {
         if let Some(outline) = scaler.outline(glyph) {
             // A glyph that fails to draw leaves a gap; the advance still holds its place.
             let _ = outline.draw(DrawMemory::Scratch, &mut pen);
@@ -67,13 +107,13 @@ fn font(weight: f32, width: f32) -> Font {
         .build()
 }
 
-fn scale_of(font: &Font) -> f32 {
-    WORDS_SIZE as f32 / f32::from(font.units_per_em())
+fn scale_of(font: &Font, size: f32) -> f32 {
+    size / f32::from(font.units_per_em())
 }
 
 /// Each glyph the text shapes to, with its advance in pixels. A glyph the
 /// font lacks is dropped.
-fn shape(font: &Font, text: &str) -> Vec<(GlyphId, f32)> {
+fn shape(font: &Font, text: &str, size: f32, tracking: f32) -> Vec<(GlyphId, f32)> {
     let mut buffer = Buffer::new();
     buffer.push_str(text);
     buffer.guess_segment_properties();
@@ -81,8 +121,8 @@ fn shape(font: &Font, text: &str) -> Vec<(GlyphId, f32)> {
     if harfrust::shape(&shaper, &mut buffer, ShapeOptions::new()).is_err() {
         return Vec::new();
     }
-    let tracking = (WORDS_TRACKING * WORDS_SIZE) as f32;
-    let scale = scale_of(font);
+    let tracking = tracking * size;
+    let scale = scale_of(font, size);
     buffer
         .glyph_infos()
         .iter()
@@ -95,40 +135,27 @@ fn shape(font: &Font, text: &str) -> Vec<(GlyphId, f32)> {
         .collect()
 }
 
-fn width_of(font: &Font, text: &str) -> f32 {
-    shape(font, text).iter().map(|(_, advance)| advance).sum()
+fn width_of(font: &Font, text: &str, size: f32, tracking: f32) -> f32 {
+    shape(font, text, size, tracking)
+        .iter()
+        .map(|(_, advance)| advance)
+        .sum()
 }
 
-/// The text cut to `room` pixels, with an ellipsis where the cut fell.
-fn fit(font: &Font, text: &str, cut: Cut, room: f32) -> String {
-    let chars: Vec<char> = text
+/// The characters `font` has, cut to `room` pixels.
+fn fit(font: &Font, text: &str, trim: Trim, room: f32) -> String {
+    let drawn: String = text
         .chars()
         .filter(|&c| font.charmap().map_unicode(c).is_some())
         .collect();
-    let whole: String = chars.iter().collect();
-    if width_of(font, &whole) <= room {
-        return whole;
-    }
-    let keeping = |count: usize| match cut {
-        Cut::End => {
-            let head: String = chars[..count].iter().collect();
-            format!("{}{ELLIPSIS}", head.trim_end())
-        }
-        Cut::Start => {
-            let tail: String = chars[chars.len() - count..].iter().collect();
-            format!("{ELLIPSIS}{}", tail.trim_start())
-        }
-    };
-    let (mut fits, mut over) = (0, chars.len());
-    while over - fits > 1 {
-        let middle = fits + (over - fits) / 2;
-        if width_of(font, &keeping(middle)) <= room {
-            fits = middle;
-        } else {
-            over = middle;
-        }
-    }
-    keeping(fits)
+    card::fit(&drawn, f64::from(room), trim, |line| {
+        f64::from(width_of(
+            font,
+            line,
+            WORDS_SIZE as f32,
+            WORDS_TRACKING as f32,
+        ))
+    })
 }
 
 /// Collects a glyph's outline with the y axis flipped, so the baseline sits at
@@ -176,68 +203,99 @@ impl PathSink for Pen {
 mod tests {
     use super::*;
 
+    const SIZE: f32 = WORDS_SIZE as f32;
+    const TRACKING: f32 = WORDS_TRACKING as f32;
     const LONG: &str = "this sentence runs well past the room the capsule has for it";
 
     #[test]
     fn your_turn_shapes_one_glyph_per_letter() {
         let font = capsule_font();
-        assert_eq!(shape(font, "Your turn").len(), 9);
-        assert!(width_of(font, "Your turn") > 0.0);
+        assert_eq!(shape(font, "Your turn", SIZE, TRACKING).len(), 9);
+        assert!(width_of(font, "Your turn", SIZE, TRACKING) > 0.0);
     }
 
     #[test]
     fn a_long_live_line_keeps_its_newest_end() {
         let font = capsule_font();
-        let kept = fit(font, LONG, Cut::Start, 100.0);
+        let kept = fit(font, LONG, Trim::Start, 100.0);
         let tail = kept
-            .strip_prefix(ELLIPSIS)
+            .strip_prefix(card::ELLIPSIS)
             .expect("the cut starts with an ellipsis");
         assert!(tail.len() > 3 && LONG.ends_with(tail));
-        assert!(line(LONG, Cut::Start, 100.0).width <= 100.0);
+        assert!(line(LONG, Trim::Start, 100.0).width <= 100.0);
     }
 
     #[test]
     fn a_long_reason_keeps_its_start() {
         let font = capsule_font();
-        let kept = fit(font, LONG, Cut::End, 100.0);
+        let kept = fit(font, LONG, Trim::End, 100.0);
         let head = kept
-            .strip_suffix(ELLIPSIS)
+            .strip_suffix(card::ELLIPSIS)
             .expect("the cut ends in an ellipsis");
         assert!(head.len() > 3 && LONG.starts_with(head));
-        assert!(line(LONG, Cut::End, 100.0).width <= 100.0);
+        assert!(line(LONG, Trim::End, 100.0).width <= 100.0);
     }
 
     #[test]
     fn a_line_that_fits_is_left_whole() {
         let font = capsule_font();
-        assert_eq!(fit(font, "Your turn", Cut::End, 1000.0), "Your turn");
+        assert_eq!(fit(font, "Your turn", Trim::End, 1000.0), "Your turn");
     }
 
     #[test]
     fn the_width_axis_widens_the_line() {
         let default = font(WORDS_WEIGHT as f32, 100.0);
-        assert!(width_of(capsule_font(), "Your turn") > width_of(&default, "Your turn"));
+        assert!(
+            width_of(capsule_font(), "Your turn", SIZE, TRACKING)
+                > width_of(&default, "Your turn", SIZE, TRACKING)
+        );
     }
 
     #[test]
     fn a_character_archivo_lacks_draws_no_box() {
-        let with = line("ok\u{2713}", Cut::End, 1000.0);
-        let without = line("ok", Cut::End, 1000.0);
+        let with = line("ok\u{2713}", Trim::End, 1000.0);
+        let without = line("ok", Trim::End, 1000.0);
         assert_eq!(with.width, without.width);
     }
 
     #[test]
     fn a_line_has_an_outline_below_its_top_edge() {
-        let drawn = line("Your turn", Cut::End, 1000.0);
+        let drawn = line("Your turn", Trim::End, 1000.0);
         let bounds = drawn.path.expect("letters have an outline").bounds();
         assert!(bounds.top() >= 0.0);
         assert!(bounds.bottom() <= drawn.ascent + drawn.descent);
-        assert!(line("", Cut::End, 1000.0).path.is_none());
+        assert!(line("", Trim::End, 1000.0).path.is_none());
     }
 
     #[test]
     fn the_outline_spans_the_shaped_width() {
-        let drawn = line("Your turn", Cut::End, 1000.0);
+        let drawn = line("Your turn", Trim::End, 1000.0);
+        let right = drawn
+            .path
+            .expect("letters have an outline")
+            .bounds()
+            .right();
+        assert!(
+            (drawn.width - right).abs() < 2.0,
+            "{} vs {right}",
+            drawn.width
+        );
+    }
+
+    #[test]
+    fn each_cut_measures_its_own_width() {
+        let width = |cut| Fonts.width("Your turn", cut);
+        assert!(width(Cut::Ask) > width(Cut::Context));
+        assert!(width(Cut::User) > width(Cut::Context));
+        let narrowest = Fonts.narrowest(Cut::Context);
+        assert!(narrowest > 0.0 && narrowest <= Fonts.width("i", Cut::Context));
+    }
+
+    #[test]
+    fn a_shaped_line_spans_its_measured_width() {
+        let drawn = shaped("Your turn", Cut::Label);
+        let measured = Fonts.width("Your turn", Cut::Label);
+        assert!((f64::from(drawn.width) - measured).abs() < 0.01);
         let right = drawn
             .path
             .expect("letters have an outline")

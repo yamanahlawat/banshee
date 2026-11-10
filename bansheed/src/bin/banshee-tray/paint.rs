@@ -3,25 +3,65 @@
 use std::sync::LazyLock;
 
 use tiny_skia::{
-    Color, FillRule, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect,
-    Stroke, StrokeDash, Transform,
+    Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, Path,
+    PathBuilder, Pixmap, PixmapPaint, Point, Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
-use crate::chip::Show;
+use crate::card::{
+    self, Block, CHIP_BORDER, ChipBox, DRAIN_HEIGHT, DRAIN_RADIUS, Divider, DividerKind, Layout,
+    MUTED, PlacedGlyph, RIM, RIM_WIDTH, SEGMENT_GAP, SEGMENT_HEIGHT, SEGMENT_OFF, SEGMENTS, SIDE,
+    Shape, Text,
+};
+use crate::chip::{Show, segments_lit};
 use crate::figure::{
     self, BAND, BAND_GAP, BEHIND, BONE, CAPSULE, CUP_GAP, CUP_RADII, CUPS, FIGURE, HALO, HEADBAND,
     INSET, KINDLE_AFTER, LIGHT, OUTLINE, PIVOT, Pose, RING, RING_STRENGTH, RUST, Segment, TRAVEL,
     WORDS_BLEED, WORDS_LEFT,
 };
 use crate::gesture::{self, Property, Track};
+use crate::glyphs::{DOTS, Glyph, Mark, marks};
 use crate::scenes::{self, Move, failed, holds_the_voice, rest_pose, wears_headphones};
-use crate::words::Line;
+use crate::words::{self, Line};
 
 const CENTRE: (f64, f64) = (50.0, 50.0);
 
 static OUTLINE_LENGTH: LazyLock<f64> =
     LazyLock::new(|| figure::path_length(&figure::shroud(0.0, 0.0)));
 static LIGHT_LENGTH: LazyLock<f64> = LazyLock::new(|| figure::ellipse_length(HALO.2, HALO.3));
+
+/// A card's layout with each of its lines shaped once, so a frame shapes
+/// nothing.
+pub struct Card {
+    pub layout: Layout,
+    /// Each block's lines, in the layout's order.
+    lines: Vec<Vec<Line>>,
+    chip: Option<Line>,
+}
+
+impl Card {
+    pub fn new(layout: Layout) -> Self {
+        let lines = layout
+            .blocks
+            .iter()
+            .map(|block| {
+                block
+                    .lines
+                    .iter()
+                    .map(|text| words::shaped(&text.line, text.cut))
+                    .collect()
+            })
+            .collect();
+        let chip = layout
+            .chip
+            .as_ref()
+            .map(|chip| words::shaped(&chip.label.line, chip.label.cut));
+        Card {
+            layout,
+            lines,
+            chip,
+        }
+    }
+}
 
 pub struct Frame<'a> {
     pub show: &'a Show,
@@ -33,23 +73,45 @@ pub struct Frame<'a> {
     /// The width the capsule grows or shrinks from, with the seconds since
     /// the change. `None` once no width transition runs.
     pub width_from: Option<(f64, f64)>,
+    pub card: Option<&'a Card>,
+    /// The height the card grows or shrinks from, with the seconds since the
+    /// change. `None` once no height transition runs.
+    pub height_from: Option<(f64, f64)>,
+    pub level: f64,
+    /// The share of the countdown left, from 1 to 0. `None` with no countdown.
+    pub countdown_share: Option<f64>,
     pub scale: u32,
+    /// The size the surface already has, which a frame never shrinks: a
+    /// compositor may animate a resize by stretching the new frame.
+    pub at_least: (u32, u32),
+}
+
+impl<'a> Frame<'a> {
+    fn layout(&self) -> Option<&'a Layout> {
+        self.card.map(|card| &card.layout)
+    }
 }
 
 /// The span the capsule may reach during a width transition, and the height
-/// of the capsule with the clear space below it, in logical pixels.
+/// it may reach during a height transition with the clear space below it, in
+/// logical pixels, and never less than the surface already has.
 pub fn size(frame: &Frame) -> (u32, u32) {
+    let (to_width, to_height) = target(frame.line, frame.layout());
+    let largest = |to: f64, from: Option<(f64, f64)>| to.max(from.map_or(0.0, |(from, _)| from));
+    let (width, height) = frame.at_least;
     (
-        span(frame.line, frame.width_from),
-        (TRAVEL + CAPSULE) as u32,
+        (largest(to_width, frame.width_from).ceil() as u32).max(width),
+        ((TRAVEL + largest(to_height, frame.height_from)).ceil() as u32).max(height),
     )
 }
 
-/// The span the capsule may reach while it grows or shrinks from
-/// `width_from`, in logical pixels.
-pub fn span(line: Option<&Line>, width_from: Option<(f64, f64)>) -> u32 {
-    let from = width_from.map_or(0.0, |(from, _)| from);
-    width(line).max(from).ceil() as u32
+/// The width and height the capsule or the card takes once any transition
+/// ends.
+pub fn target(line: Option<&Line>, layout: Option<&Layout>) -> (f64, f64) {
+    match layout {
+        Some(layout) => (layout.shape.width.ceil(), layout.shape.height.ceil()),
+        None => (width(line), CAPSULE),
+    }
 }
 
 /// The width `line` gives the capsule once any transition ends.
@@ -59,25 +121,41 @@ pub fn width(line: Option<&Line>) -> f64 {
         .ceil()
 }
 
-/// The surface's span and the capsule's width as it shows now.
-pub fn widths(line: Option<&Line>, width_from: Option<(f64, f64)>) -> (f64, f64) {
-    (
-        f64::from(span(line, width_from)),
-        shown_width(line, width_from),
-    )
-}
-
-/// The capsule's width as it shows now, part way through a transition or not.
-pub fn shown_width(line: Option<&Line>, width_from: Option<(f64, f64)>) -> f64 {
-    let to = width(line);
-    width_from.map_or(to, |(from, seconds)| {
+/// The capsule's or the card's width as it shows now, part way through a
+/// transition or not.
+pub fn shown_width(frame: &Frame) -> f64 {
+    let (to, _) = target(frame.line, frame.layout());
+    frame.width_from.map_or(to, |(from, seconds)| {
         gesture::at(&gesture::chip_width(from, to), seconds, to)
     })
 }
 
+pub fn shown_height(frame: &Frame) -> f64 {
+    let (_, to) = target(frame.line, frame.layout());
+    frame.height_from.map_or(to, |(from, seconds)| {
+        gesture::at(&gesture::chip_height(from, to), seconds, to)
+    })
+}
+
+pub fn shown_shape(frame: &Frame) -> Shape {
+    Shape {
+        width: shown_width(frame),
+        height: shown_height(frame),
+        radius: frame
+            .layout()
+            .map_or(CAPSULE / 2.0, |layout| layout.shape.radius),
+    }
+}
+
 /// The capsule's top edge in the surface, in logical pixels.
 pub fn capsule_top(frame: &Frame) -> f64 {
-    Live::of(frame).top()
+    top(frame, &Live::of(frame))
+}
+
+/// The bottom edge rests `TRAVEL` above the surface's, so a card grows up
+/// from where the pill sits.
+fn top(frame: &Frame, live: &Live) -> f64 {
+    live.top() + (f64::from(size(frame).1) - TRAVEL - shown_height(frame))
 }
 
 fn pose_of(frame: &Frame) -> Pose {
@@ -99,24 +177,216 @@ pub fn paint(frame: &Frame) -> Pixmap {
     let mut pixmap =
         Pixmap::new(width * scale, height * scale).expect("a frame at a scale of 1 or more");
     let live = Live::of(frame);
-    let shown = shown_width(frame.line, frame.width_from);
-    let left = scenes::centred(f64::from(width) / 2.0, shown);
+    let shown = shown_shape(frame);
+    let left = scenes::centred(f64::from(width) / 2.0, shown.width);
     let capsule = Transform::from_scale(scale as f32, scale as f32)
-        .pre_translate(left as f32, live.top() as f32);
-    let shape = stadium(shown as f32);
+        .pre_translate(left as f32, top(frame, &live) as f32);
+    let shape = rounded(shown.width as f32, shown.height as f32, shown.radius as f32);
     let mut clip = Mask::new(pixmap.width(), pixmap.height()).expect("the size of the frame");
     clip.fill_path(&shape, FillRule::Winding, true, capsule);
     group(&mut pixmap, live.capsule.opacity, |canvas| {
         canvas.fill_path(&shape, &ink(RUST, 1.0), FillRule::Winding, capsule, None);
+        if let Some(card) = frame.card {
+            return paint_card(canvas, frame, card, shown, &live, capsule, &clip);
+        }
+        let pill = body(frame, capsule);
         let opacity = live.exit.opacity * live.entry.opacity;
         group(canvas, opacity, |canvas| {
-            paint_figure(canvas, frame, &live, capsule, &clip)
+            paint_figure(canvas, frame, &live, pill, &clip)
         });
         if let Some((line, path)) = words(frame) {
-            paint_words(canvas, line, path, &live, capsule, &clip);
+            paint_words(canvas, line, path, &live, pill, &clip);
         }
     });
     pixmap
+}
+
+/// Where the contents sit in a shape whose top is at `at`: held to its bottom
+/// while its height moves.
+fn body(frame: &Frame, at: Transform) -> Transform {
+    let (_, to) = target(frame.line, frame.layout());
+    at.pre_translate(0.0, (shown_height(frame) - to) as f32)
+}
+
+fn paint_card(
+    canvas: &mut Pixmap,
+    frame: &Frame,
+    card: &Card,
+    shown: Shape,
+    live: &Live,
+    at: Transform,
+    clip: &Mask,
+) {
+    let layout = &card.layout;
+    let inset = RIM_WIDTH / 2.0;
+    let rim = rounded(
+        (shown.width - RIM_WIDTH) as f32,
+        (shown.height - RIM_WIDTH) as f32,
+        (layout.shape.radius - inset) as f32,
+    );
+    let rim_at = at.pre_translate(inset as f32, inset as f32);
+    canvas.stroke_path(&rim, &ink(RIM, 1.0), &stroke(RIM_WIDTH), rim_at, None);
+
+    let body = body(frame, at);
+    let mut blocks = layout.blocks.iter().zip(&card.lines);
+    let Some((answer, answer_lines)) = blocks.next_back() else {
+        return;
+    };
+    for (block, lines) in blocks {
+        paint_block(canvas, block, lines, body, clip);
+    }
+    if let Some(divider) = &layout.divider {
+        let track = layout.shape.width - 2.0 * SIDE;
+        let at = body.pre_translate(SIDE as f32, divider.top as f32);
+        paint_divider(canvas, divider, track, frame.countdown_share, at, clip);
+    }
+    group(canvas, live.words.opacity, |canvas| {
+        paint_block(canvas, answer, answer_lines, body, clip);
+        if let Some(PlacedGlyph { glyph, x, top }) = layout.glyph {
+            let glyph_at = body.pre_translate(x as f32, top as f32);
+            paint_glyph(canvas, glyph, frame.level, live, glyph_at, clip);
+        }
+        if let (Some(chip), Some(label)) = (&layout.chip, &card.chip) {
+            paint_chip(canvas, chip, label, body, clip);
+        }
+    });
+}
+
+fn paint_chip(canvas: &mut Pixmap, chip: &ChipBox, label: &Line, body: Transform, clip: &Mask) {
+    let ChipBox {
+        x,
+        top,
+        width,
+        height,
+        ..
+    } = *chip;
+    let inset = CHIP_BORDER / 2.0;
+    let border = rounded(
+        (width - CHIP_BORDER) as f32,
+        (height - CHIP_BORDER) as f32,
+        (height / 2.0 - inset) as f32,
+    );
+    let at = body.pre_translate((x + inset) as f32, (top + inset) as f32);
+    let muted = ink(MUTED, 1.0);
+    canvas.stroke_path(&border, &muted, &stroke(CHIP_BORDER), at, Some(clip));
+    paint_line(canvas, &chip.label, label, &ink(BONE, 1.0), body, clip);
+}
+
+fn paint_divider(
+    canvas: &mut Pixmap,
+    divider: &Divider,
+    track: f64,
+    share: Option<f64>,
+    at: Transform,
+    clip: &Mask,
+) {
+    let line = |width: f64, height: f64| {
+        Rect::from_xywh(0.0, 0.0, width as f32, height as f32).expect("a finite divider")
+    };
+    let laid = match divider.kind {
+        DividerKind::Thin => None,
+        DividerKind::Drain { share: laid, .. } => Some(laid),
+        DividerKind::Stepped { lit } => {
+            let lit = card::lit_segments(share.map_or(lit, segments_lit));
+            let width = card::segment_width(track);
+            for index in 0..SEGMENTS {
+                let shown = if lit.contains(&index) {
+                    ink(BONE, 1.0)
+                } else {
+                    ink(MUTED, SEGMENT_OFF)
+                };
+                let x = index as f64 * (width + SEGMENT_GAP);
+                let segment_at = at.pre_translate(x as f32, 0.0);
+                canvas.fill_rect(line(width, SEGMENT_HEIGHT), &shown, segment_at, Some(clip));
+            }
+            return;
+        }
+    };
+    let muted = ink(MUTED, 1.0);
+    canvas.fill_rect(line(track, divider.height), &muted, at, Some(clip));
+    let Some(laid) = laid else {
+        return;
+    };
+    let width = share.unwrap_or(laid) * track;
+    if width > 0.0 {
+        let radius = DRAIN_RADIUS.min(width / 2.0);
+        let drain = rounded(width as f32, DRAIN_HEIGHT as f32, radius as f32);
+        let drain_at = at.pre_translate(
+            ((track - width) / 2.0) as f32,
+            ((divider.height - DRAIN_HEIGHT) / 2.0) as f32,
+        );
+        canvas.fill_path(
+            &drain,
+            &ink(BONE, 1.0),
+            FillRule::Winding,
+            drain_at,
+            Some(clip),
+        );
+    }
+}
+
+fn paint_block(canvas: &mut Pixmap, block: &Block, lines: &[Line], body: Transform, clip: &Mask) {
+    for (text, line) in block.lines.iter().zip(lines) {
+        let top = line_top(text, line);
+        let hex = text.ink.hex();
+        let paint = match block.fade {
+            Some(fade) => faded(hex, block.top - top, block.top + fade - top),
+            None => ink(hex, 1.0),
+        };
+        paint_line(canvas, text, line, &paint, body, clip);
+    }
+}
+
+/// The top of `line`'s ink box, centred in the text's line box.
+fn line_top(text: &Text, line: &Line) -> f64 {
+    text.top + (text.height - f64::from(line.ascent + line.descent)) / 2.0
+}
+
+fn paint_line(
+    canvas: &mut Pixmap,
+    text: &Text,
+    line: &Line,
+    paint: &Paint,
+    body: Transform,
+    clip: &Mask,
+) {
+    let Some(path) = &line.path else {
+        return;
+    };
+    let at = body.pre_translate(text.x as f32, line_top(text, line) as f32);
+    canvas.fill_path(path, paint, FillRule::Winding, at, Some(clip));
+}
+
+fn paint_glyph(
+    canvas: &mut Pixmap,
+    glyph: Glyph,
+    level: f64,
+    live: &Live,
+    at: Transform,
+    clip: &Mask,
+) {
+    for (index, mark) in marks(glyph, level, false).into_iter().enumerate() {
+        let pulse = match glyph {
+            Glyph::Dots => live.dots[index].opacity,
+            Glyph::Bars | Glyph::BarsQuiet | Glyph::Arcs => 1.0,
+        };
+        match mark {
+            Mark::Stroke {
+                segments,
+                width,
+                opacity,
+            } => {
+                let bone = ink(BONE, opacity * pulse);
+                let line = round_stroke(width);
+                canvas.stroke_path(&path(&segments), &bone, &line, at, Some(clip));
+            }
+            Mark::Disc { centre, radius } => {
+                let bone = ink(BONE, pulse);
+                let disc = oval(centre, (radius, radius));
+                canvas.fill_path(&disc, &bone, FillRule::Winding, at, Some(clip));
+            }
+        }
+    }
 }
 
 fn paint_figure(canvas: &mut Pixmap, frame: &Frame, live: &Live, capsule: Transform, clip: &Mask) {
@@ -149,14 +419,13 @@ fn paint_figure(canvas: &mut Pixmap, frame: &Frame, live: &Live, capsule: Transf
         let ring = ink(BONE, RING_STRENGTH);
         canvas.stroke_path(&halo, &ring, &stroke(RING), voice, Some(&mask));
         let light = Stroke {
-            line_cap: LineCap::Round,
             dash: StrokeDash::new(
                 figure::light_dash(*LIGHT_LENGTH)
                     .map(|at| at as f32)
                     .to_vec(),
                 live.light_phase as f32,
             ),
-            ..stroke(LIGHT)
+            ..round_stroke(LIGHT)
         };
         canvas.stroke_path(&halo, &ink(BONE, 1.0), &light, voice, Some(&mask));
     };
@@ -193,10 +462,7 @@ fn paint_figure(canvas: &mut Pixmap, frame: &Frame, live: &Live, capsule: Transf
 fn paint_headphones(canvas: &mut Pixmap, live: &Live, voice: Transform, clip: &Mask) {
     let band = path(&HEADBAND);
     for (width, colour) in [(BAND_GAP, RUST), (BAND, BONE)] {
-        let line = Stroke {
-            line_cap: LineCap::Round,
-            ..stroke(width)
-        };
+        let line = round_stroke(width);
         canvas.stroke_path(&band, &ink(colour, 1.0), &line, voice, Some(clip));
     }
     for (centre, press) in CUPS.into_iter().zip(live.cups) {
@@ -296,6 +562,7 @@ enum Layer {
     Lights,
     Cup(usize),
     WordsMask,
+    Dot(usize),
 }
 
 /// Each animated value: the model, overwritten by every move in order.
@@ -307,6 +574,7 @@ struct Live {
     fill: Motion,
     cups: [Motion; 2],
     words: Motion,
+    dots: [Motion; DOTS],
     words_width: f64,
     light_phase: f64,
     dash: [f64; 2],
@@ -330,6 +598,7 @@ impl Live {
             fill: STILL,
             cups: [STILL; 2],
             words: STILL,
+            dots: [STILL; DOTS],
             words_width,
             light_phase: 0.0,
             dash: if failed(frame.show) {
@@ -355,6 +624,7 @@ impl Live {
             Property::Gap => &mut self.dash[1],
             Property::DashPhase => &mut self.light_phase,
             Property::Width => &mut self.words_width,
+            Property::Height => unreachable!("no move's track animates the height"),
             Property::TranslationX => &mut self.motion(layer).x,
             Property::TranslationY => &mut self.motion(layer).y,
             Property::Rotation => &mut self.motion(layer).turn,
@@ -372,6 +642,7 @@ impl Live {
             Layer::Fill => &mut self.fill,
             Layer::Cup(side) => &mut self.cups[side],
             Layer::WordsMask => &mut self.words,
+            Layer::Dot(index) => &mut self.dots[index],
             Layer::Outline | Layer::Lights => unreachable!("{layer:?} has no motion"),
         }
     }
@@ -397,6 +668,11 @@ fn tracks(step: Move, outline: f64, light: f64, words: f64) -> Vec<(Layer, Vec<T
                 (Layer::Cup(1), gesture::cups_press(-1.0)),
             ];
         }
+        Move::Pulse => {
+            return (0..DOTS)
+                .map(|i| (Layer::Dot(i), gesture::dot_pulse(i)))
+                .collect();
+        }
         Move::Shake => (Layer::Gesture, gesture::head_shake()),
         Move::Strain => (Layer::Gesture, gesture::strain()),
         Move::Breaks => (Layer::Outline, gesture::outline_breaks(outline)),
@@ -420,13 +696,35 @@ pub fn lasts(step: Move) -> Option<f64> {
         })
 }
 
-fn ink(hex: u32, alpha: f64) -> Paint<'static> {
+fn colour(hex: u32, alpha: f64) -> Color {
     let channel = |shift: u32| ((hex >> shift) & 0xFF) as u8;
     let mut colour = Color::from_rgba8(channel(16), channel(8), channel(0), 0xFF);
     colour.set_alpha(alpha as f32);
+    colour
+}
+
+fn ink(hex: u32, alpha: f64) -> Paint<'static> {
     let mut paint = Paint::default();
-    paint.set_color(colour);
+    paint.set_color(colour(hex, alpha));
     paint
+}
+
+/// `hex` clear at `from` and whole at `to`, down the y axis.
+fn faded(hex: u32, from: f64, to: f64) -> Paint<'static> {
+    let shader = LinearGradient::new(
+        Point::from_xy(0.0, from as f32),
+        Point::from_xy(0.0, to as f32),
+        vec![
+            GradientStop::new(0.0, colour(hex, 0.0)),
+            GradientStop::new(1.0, colour(hex, 1.0)),
+        ],
+        SpreadMode::Pad,
+        Transform::identity(),
+    );
+    Paint {
+        shader: shader.expect("a fade with length"),
+        ..Paint::default()
+    }
 }
 
 fn stroke(width: f64) -> Stroke {
@@ -434,6 +732,13 @@ fn stroke(width: f64) -> Stroke {
         width: width as f32,
         line_join: LineJoin::Round,
         ..Stroke::default()
+    }
+}
+
+fn round_stroke(width: f64) -> Stroke {
+    Stroke {
+        line_cap: LineCap::Round,
+        ..stroke(width)
     }
 }
 
@@ -463,25 +768,41 @@ fn oval((x, y): (f64, f64), (rx, ry): (f64, f64)) -> Path {
     PathBuilder::from_oval(bounds.expect("a finite oval")).expect("an oval with area")
 }
 
-/// The capsule `width` wide with fully rounded ends.
-fn stadium(width: f32) -> Path {
-    let radius = (CAPSULE / 2.0) as f32;
+fn rounded(width: f32, height: f32, radius: f32) -> Path {
+    let arm = radius * (1.0 - 4.0 / 3.0 * (std::f32::consts::SQRT_2 - 1.0));
+    let (right, bottom) = (width, height);
     let mut builder = PathBuilder::new();
-    builder.push_circle(radius, radius, radius);
-    builder.push_circle(width - radius, radius, radius);
-    let middle = Rect::from_ltrb(radius, 0.0, width - radius, 2.0 * radius);
-    builder.push_rect(middle.expect("a capsule at least as wide as it is tall"));
-    builder.finish().expect("a capsule has ink")
+    builder.move_to(radius, 0.0);
+    builder.line_to(right - radius, 0.0);
+    builder.cubic_to(right - arm, 0.0, right, arm, right, radius);
+    builder.line_to(right, bottom - radius);
+    builder.cubic_to(
+        right,
+        bottom - arm,
+        right - arm,
+        bottom,
+        right - radius,
+        bottom,
+    );
+    builder.line_to(radius, bottom);
+    builder.cubic_to(arm, bottom, 0.0, bottom - arm, 0.0, bottom - radius);
+    builder.line_to(0.0, radius);
+    builder.cubic_to(0.0, arm, arm, 0.0, radius, 0.0);
+    builder.close();
+    builder.finish().expect("a rounded shape has ink")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chip::{Cut, Done, words_of};
+    use std::time::{Duration, Instant};
+
+    use crate::card::{self, CARD_WIDTH, DividerKind};
+    use crate::chip::{Countdown, Done, Scene, Trim, words_of};
     use crate::figure::{
         CAPSULE, FIGURE, INSET, Segment, TRAVEL, WORDS_GAP, WORDS_TAIL, pose, shroud,
     };
-    use crate::words;
+    use crate::words::{self, Fonts};
 
     const RUST: [u8; 4] = [0x8A, 0x2A, 0x0D, 0xFF];
     const BONE: [u8; 4] = [0xF2, 0xEF, 0xE9, 0xFF];
@@ -497,6 +818,7 @@ mod tests {
             Show::Broken("Banshee cannot record".into()),
             Show::Done(Done::Typed),
             Show::Copied,
+            Show::Reading,
         ]
     }
 
@@ -511,8 +833,293 @@ mod tests {
             pose: pose(0.0, 0.0, false),
             line,
             width_from: None,
+            card: None,
+            height_from: None,
+            level: 0.0,
+            countdown_share: None,
             scale: 1,
+            at_least: (0, 0),
         }
+    }
+
+    fn laid_from(scene: &Scene, calm: bool) -> Option<Card> {
+        card::layout(scene, CARD_WIDTH - 2.0 * SIDE, calm, Instant::now(), &Fonts).map(Card::new)
+    }
+
+    fn laid(show: &Show, question: &str) -> Option<Card> {
+        laid_from(
+            &Scene {
+                question: Some(question.into()),
+                ..Scene::of(show.clone(), 1)
+            },
+            false,
+        )
+    }
+
+    fn counting(show: &Show, calm: bool, teach: bool) -> Card {
+        let countdown = Countdown {
+            since: Instant::now(),
+            lasts: Duration::from_millis(2500),
+            teach,
+        };
+        let scene = Scene {
+            question: Some("Retry it?".into()),
+            countdown: Some(countdown),
+            ..Scene::of(show.clone(), 1)
+        };
+        laid_from(&scene, calm).expect("a card")
+    }
+
+    fn card_frame<'a>(show: &'a Show, card: &'a Card, moves: &'a [(Move, f64)]) -> Frame<'a> {
+        Frame {
+            card: Some(card),
+            ..frame(show, None, moves)
+        }
+    }
+
+    fn block_of(layout: &Layout, cut: card::Cut) -> &card::Block {
+        layout
+            .blocks
+            .iter()
+            .find(|block| block.lines.first().is_some_and(|text| text.cut == cut))
+            .expect("a block in that cut")
+    }
+
+    fn bytes(hex: u32) -> [u8; 4] {
+        let [_, red, green, blue] = hex.to_be_bytes();
+        [red, green, blue, 0xFF]
+    }
+
+    fn count(pixmap: &Pixmap, ink: [u8; 4], top: f64, bottom: f64, scale: f64) -> usize {
+        let rows = (top * scale).ceil() as u32..(bottom * scale).floor() as u32;
+        rows.flat_map(|y| (0..pixmap.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| near(rgba(pixmap, x, y), ink))
+            .count()
+    }
+
+    #[test]
+    fn a_card_paints_rust_inside_its_rim_and_leaves_its_corners_clear() {
+        let show = Show::Reading;
+        let card = laid(&show, "Retry it?").expect("a card");
+        let pixmap = paint(&card_frame(&show, &card, &[]));
+        let (width, height) = (pixmap.width(), card.layout.shape.height.ceil() as u32);
+        let middle = height / 2;
+        assert!(near(rgba(&pixmap, SIDE as u32, middle), RUST));
+        assert!(near(rgba(&pixmap, 0, middle), bytes(RIM)));
+        assert!(near(rgba(&pixmap, width - 1, middle), bytes(RIM)));
+        let bottom = height - 1;
+        for (x, y) in [(0, 0), (width - 1, 0), (0, bottom), (width - 1, bottom)] {
+            assert_eq!(rgba(&pixmap, x, y)[3], 0, "({x}, {y})");
+        }
+        assert_eq!(rgba(&pixmap, width / 2, pixmap.height() - 1)[3], 0);
+    }
+
+    #[test]
+    fn the_card_paints_bone_where_the_layout_puts_the_ask() {
+        let show = Show::Reading;
+        let card = laid(&show, "The build is red. Retry it?").expect("a card");
+        let pixmap = paint(&Frame {
+            scale: 2,
+            ..card_frame(&show, &card, &[])
+        });
+        let ask = &block_of(&card.layout, card::Cut::Ask).lines[0];
+        let line = ask.top + card::Cut::Ask.line_height();
+        assert!(count(&pixmap, BONE, ask.top, line, 2.0) > 0);
+        let divider = card.layout.divider.as_ref().expect("a divider");
+        let (top, bottom) = (divider.top, divider.top + divider.height);
+        assert_eq!(count(&pixmap, BONE, top, bottom, 2.0), 0);
+        assert!(count(&pixmap, bytes(MUTED), top, bottom, 2.0) > 0);
+    }
+
+    #[test]
+    fn the_sent_pill_paints_its_rim_and_sent() {
+        let show = Show::Done(Done::Sent);
+        let card = laid_from(&Scene::of(show.clone(), 1), false).expect("a layout");
+        let scale = 2;
+        let pixmap = paint(&Frame {
+            scale,
+            ..card_frame(&show, &card, &[])
+        });
+        let at = |logical: f64| (logical * f64::from(scale)) as u32;
+        let width = card.layout.shape.width.ceil();
+        assert_eq!(pixmap.width(), at(width));
+
+        let stadium = rounded(width as f32, CAPSULE as f32, (CAPSULE / 2.0) as f32);
+        let mut expected = Pixmap::new(pixmap.width(), pixmap.height()).expect("a frame's size");
+        let placed = Transform::from_scale(scale as f32, scale as f32);
+        expected.fill_path(&stadium, &ink(RIM, 1.0), FillRule::Winding, placed, None);
+        for y in 0..pixmap.height() {
+            for x in 0..pixmap.width() {
+                let (found, wanted) = (rgba(&pixmap, x, y)[3], rgba(&expected, x, y)[3]);
+                if wanted == 0 || wanted == 0xFF {
+                    assert_eq!(found, wanted, "({x}, {y})");
+                }
+            }
+        }
+
+        assert!(near(rgba(&pixmap, at(0.75), at(CAPSULE / 2.0)), bytes(RIM)));
+
+        let block = &card.layout.blocks[0];
+        let sent = &block.lines[0];
+        assert_eq!(sent.line, "Sent");
+        let label = &card.lines[0][0];
+        let (top, bottom) = (sent.top, sent.top + card::Cut::Label.line_height());
+        let columns = at(sent.x)..at(sent.x + f64::from(label.width));
+        let bone = (at(top)..at(bottom))
+            .flat_map(|y| columns.clone().map(move |x| (x, y)))
+            .filter(|&(x, y)| near(rgba(&pixmap, x, y), BONE))
+            .count();
+        assert!(bone > 0);
+    }
+
+    #[test]
+    fn the_open_chip_is_a_muted_ring_around_bone() {
+        let show = Show::Missed {
+            count: 1,
+            ask: "Retry the build?".into(),
+        };
+        let card = laid_from(&Scene::of(show.clone(), 1), false).expect("a layout");
+        let scale = 2;
+        let pixmap = paint(&Frame {
+            scale,
+            ..card_frame(&show, &card, &[])
+        });
+        let at = |logical: f64| logical * f64::from(scale);
+        let chip = card.layout.chip.as_ref().expect("a chip");
+        let ChipBox { x, top, height, .. } = *chip;
+        let edge = rgba(&pixmap, at(x).ceil() as u32, at(top + height / 2.0) as u32);
+        assert!(near(edge, bytes(MUTED)), "{edge:?}");
+
+        let label = &chip.label;
+        let open = words::shaped(&label.line, label.cut);
+        let columns = at(label.x) as u32..at(label.x + f64::from(open.width)) as u32;
+        let rows = at(label.top) as u32..at(label.top + label.cut.line_height()) as u32;
+        let bone = rows
+            .flat_map(|y| columns.clone().map(move |x| (x, y)))
+            .filter(|&(x, y)| near(rgba(&pixmap, x, y), BONE))
+            .count();
+        assert!(bone > 0);
+    }
+
+    #[test]
+    fn a_pill_shrinking_from_a_card_keeps_its_figure_at_its_bottom() {
+        let from = 200.0;
+        let pixmap = paint(&Frame {
+            height_from: Some((from, 0.0)),
+            ..frame(&Show::Recording(String::new()), None, &[])
+        });
+        assert_eq!(pixmap.height(), (TRAVEL + from) as u32);
+        assert_eq!(count(&pixmap, BONE, 0.0, from - CAPSULE, 1.0), 0);
+        assert!(count(&pixmap, BONE, from - CAPSULE, from, 1.0) > 0);
+    }
+
+    #[test]
+    fn the_fade_leaves_the_top_of_a_cut_context_fainter_than_its_bottom() {
+        let show = Show::Reading;
+        let context = vec!["The migration renames the column."; 40].join(" ");
+        let card = laid(&show, &format!("{context} Retry it?")).expect("a card");
+        let pixmap = paint(&card_frame(&show, &card, &[]));
+        let block = block_of(&card.layout, card::Cut::Context);
+        assert_eq!(block.lines.len(), card::MAX_LINES);
+        assert!(block.fade.is_some());
+        let line = card::Cut::Context.line_height();
+        let bone_in = |text: &card::Text| count(&pixmap, BONE, text.top, text.top + line, 1.0);
+        let (first, last) = (&block.lines[0], &block.lines[card::MAX_LINES - 1]);
+        assert!(
+            bone_in(first) < bone_in(last),
+            "{} {}",
+            bone_in(first),
+            bone_in(last)
+        );
+    }
+
+    #[test]
+    fn a_frame_paints_the_lines_shaped_with_the_layout() {
+        let show = Show::Reading;
+        let mut card = laid(&show, "Retry it?").expect("a card");
+        let ask = &block_of(&card.layout, card::Cut::Ask).lines[0];
+        let (top, bottom) = (ask.top, ask.top + card::Cut::Ask.line_height());
+        let bone = |card: &Card| {
+            count(
+                &paint(&card_frame(&show, card, &[])),
+                BONE,
+                top,
+                bottom,
+                1.0,
+            )
+        };
+        assert!(bone(&card) > 0);
+        for line in card.lines.iter_mut().flatten() {
+            line.path = None;
+        }
+        assert_eq!(bone(&card), 0, "a frame drew a line it shaped itself");
+    }
+
+    #[test]
+    fn the_drain_is_bone_at_the_centre_and_muted_at_the_ends() {
+        let show = Show::Answering("yes".into());
+        let card = counting(&show, false, false);
+        let divider = card.layout.divider.as_ref().expect("a divider");
+        assert!(matches!(divider.kind, DividerKind::Drain { .. }));
+        let row = (divider.top + divider.height / 2.0) as u32;
+        let (centre, end) = ((card.layout.shape.width / 2.0) as u32, (SIDE + 2.0) as u32);
+        let muted = bytes(MUTED);
+        for (share, at_centre, at_end) in
+            [(0.5, BONE, muted), (1.0, BONE, BONE), (0.0, muted, muted)]
+        {
+            let pixmap = paint(&Frame {
+                countdown_share: Some(share),
+                ..card_frame(&show, &card, &[])
+            });
+            let (found_centre, found_end) = (rgba(&pixmap, centre, row), rgba(&pixmap, end, row));
+            assert!(near(found_centre, at_centre), "{share}: {found_centre:?}");
+            assert!(near(found_end, at_end), "{share}: {found_end:?}");
+        }
+    }
+
+    #[test]
+    fn the_stepped_divider_lights_its_middle_segments() {
+        let show = Show::Answering("yes".into());
+        let card = counting(&show, true, false);
+        let divider = card.layout.divider.as_ref().expect("a divider");
+        assert!(matches!(divider.kind, DividerKind::Stepped { .. }));
+        let row = (divider.top + divider.height / 2.0) as u32;
+        let track = card.layout.shape.width - 2.0 * SIDE;
+        let width = card::segment_width(track);
+        let middle =
+            |at: usize| (SIDE + at as f64 * (width + card::SEGMENT_GAP) + width / 2.0) as u32;
+        let lit = |share: f64| {
+            let pixmap = paint(&Frame {
+                countdown_share: Some(share),
+                ..card_frame(&show, &card, &[])
+            });
+            (0..card::SEGMENTS)
+                .map(|at| near(rgba(&pixmap, middle(at), row), BONE))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lit(1.0), [true; 5]);
+        assert_eq!(lit(0.5), [false, true, true, true, false]);
+        assert_eq!(lit(0.0), [false; 5]);
+    }
+
+    #[test]
+    fn the_hint_paints_under_the_words() {
+        let show = Show::Answering("yes".into());
+        let card = counting(&show, false, true);
+        let hint = card
+            .layout
+            .blocks
+            .last()
+            .and_then(|block| block.lines.last())
+            .expect("the hint");
+        assert_eq!(hint.line, "Keep talking to add more");
+        let pixmap = paint(&Frame {
+            scale: 2,
+            countdown_share: Some(0.5),
+            ..card_frame(&show, &card, &[])
+        });
+        let bottom = hint.top + card::Cut::Hint.line_height();
+        assert!(count(&pixmap, bytes(MUTED), hint.top, bottom, 2.0) > 0);
     }
 
     fn rgba(pixmap: &Pixmap, x: u32, y: u32) -> [u8; 4] {
@@ -640,7 +1247,7 @@ mod tests {
     #[test]
     fn the_width_is_inset_figure_gap_words_and_tail() {
         let show = Show::YourTurn;
-        let line = words::line("Your turn", Cut::End, 1000.0);
+        let line = words::line("Your turn", Trim::End, 1000.0);
         let span = INSET + FIGURE + WORDS_GAP + f64::from(line.width) + WORDS_TAIL;
         let height = (TRAVEL + CAPSULE) as u32;
         assert_eq!(
@@ -670,6 +1277,19 @@ mod tests {
             size(&frame(&show, line.as_ref(), &[])),
             (one.width(), one.height())
         );
+    }
+
+    #[test]
+    fn the_pulse_moves_each_dot_in_turn() {
+        let dots = |seconds: f64| {
+            Live::of(&frame(&Show::Working, None, &[(Move::Pulse, seconds)]))
+                .dots
+                .map(|dot| dot.opacity)
+        };
+        assert_eq!(dots(0.0), [0.45, 0.45, 0.45]);
+        let later = dots(0.8);
+        assert!((later[0] - 1.0).abs() < 0.01, "{later:?}");
+        assert!(later[2] < 0.8, "{later:?}");
     }
 
     #[test]
@@ -782,9 +1402,10 @@ mod tests {
         let clocks = [0.0, 0.05, 0.15, 0.3, 0.5, 0.9, 1.5, 3.0];
         for show in every_show() {
             let line = line_of(&show);
+            let laid = laid(&show, "The build is red. Retry it?");
             for entrance in [Entrance::Fresh, Entrance::SameWords, Entrance::NewWords] {
                 for calm in [false, true] {
-                    let steps = moves(&show, entrance, calm);
+                    let steps = moves(&Scene::of(show.clone(), 1), entrance, calm);
                     for (index, &clock) in clocks.iter().enumerate() {
                         let mut timed: Vec<_> = steps.iter().map(|&step| (step, clock)).collect();
                         if let Some(leave) = leaving(&show, calm) {
@@ -797,6 +1418,20 @@ mod tests {
                         };
                         let pixmap = paint(&frame);
                         assert_eq!((pixmap.width(), pixmap.height()), size(&frame));
+                        let Some(laid) = &laid else {
+                            continue;
+                        };
+                        let card = |height_from| Frame {
+                            card: Some(laid),
+                            height_from,
+                            level: clock.min(1.0),
+                            ..frame
+                        };
+                        for height_from in [None, Some((CAPSULE, clock)), Some((400.0, clock))] {
+                            let frame = card(height_from);
+                            let pixmap = paint(&frame);
+                            assert_eq!((pixmap.width(), pixmap.height()), size(&frame));
+                        }
                     }
                 }
             }

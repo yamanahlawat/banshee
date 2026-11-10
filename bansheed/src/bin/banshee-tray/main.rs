@@ -14,11 +14,15 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 mod capsule;
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+mod card;
 mod chip;
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), expect(dead_code))]
 mod figure;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod gesture;
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+mod glyphs;
 #[cfg(any(target_os = "linux", test))]
 mod paint;
 #[cfg(target_os = "macos")]
@@ -40,8 +44,9 @@ mod tray {
     use banshee_common::feedback::FeedbackMode;
     use banshee_common::{
         Activity, BANSHEE_CONFIGURE, BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_HISTORY,
-        BANSHEE_LEVEL, BANSHEE_LIST_VOICES, BANSHEE_STATE_CHANGED, BANSHEE_STATUS, BANSHEE_WORDS,
-        DownloadState, EVENT_CUES, EVENT_DOWNLOADS, EVENT_LEVEL, EVENT_STATE, EVENT_WORDS, utils,
+        BANSHEE_LEVEL, BANSHEE_LIST_VOICES, BANSHEE_QUESTION, BANSHEE_STATE_CHANGED,
+        BANSHEE_STATUS, BANSHEE_WORDS, DownloadState, EVENT_CUES, EVENT_DOWNLOADS, EVENT_LEVEL,
+        EVENT_QUESTION, EVENT_STATE, EVENT_WORDS, utils,
     };
     use serde::Deserialize;
     use serde_json::Value;
@@ -285,6 +290,7 @@ mod tray {
         Draws(bool),
         Quit,
         Open,
+        Clicked,
         Start,
         StartFinished {
             succeeded: bool,
@@ -296,6 +302,12 @@ mod tray {
         /// The capsule's Wayland connection closed.
         #[cfg(target_os = "linux")]
         Lost,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Open {
+        Window,
+        MissedQuestion,
     }
 
     trait Surface {
@@ -327,7 +339,7 @@ mod tray {
             return None;
         };
         let open = Box::new(move || {
-            postbox.post(Message::Open);
+            postbox.post(Message::Clicked);
         });
         Some(Box::new(super::panel::Panel::new(mtm, open)))
     }
@@ -350,7 +362,7 @@ mod tray {
         let opener = postbox.clone();
         let capsule = super::capsule::Capsule::open(
             move || {
-                opener.post(Message::Open);
+                opener.post(Message::Clicked);
             },
             move || {
                 postbox.post(Message::Lost);
@@ -923,6 +935,7 @@ mod tray {
         starting: Start,
         run_start: Box<dyn Fn(P)>,
         run_pick: Box<dyn Fn(P, Pick)>,
+        open: Box<dyn Fn(Open)>,
         clock: Box<dyn Fn() -> Instant>,
     }
 
@@ -944,6 +957,9 @@ mod tray {
                 starting: Start::Ready,
                 run_start: Box::new(|postbox| spawn_start(postbox, start_the_daemon)),
                 run_pick: Box::new(|postbox, pick| spawn_pick(postbox, pick)),
+                open: Box::new(|open| {
+                    open_the_window(open).unwrap_or_else(|error| log::error!("{error}"));
+                }),
                 clock: Box::new(Instant::now),
             }
         }
@@ -1092,7 +1108,21 @@ mod tray {
                     unreachable!("serve ends the tray before a lost connection reaches update")
                 }
                 Message::Open => {
-                    open_the_window().unwrap_or_else(|error| log::error!("{error}"));
+                    (self.open)(Open::Window);
+                    return Step::Stay;
+                }
+                Message::Clicked => {
+                    let missed = matches!(
+                        self.scene.as_ref().map(|scene| &scene.show),
+                        Some(chip::Show::Missed { .. })
+                    );
+                    if missed {
+                        (self.open)(Open::MissedQuestion);
+                        self.chip.feed(chip::Input::Clicked, Instant::now());
+                        self.redraw();
+                    } else {
+                        (self.open)(Open::Window);
+                    }
                     return Step::Stay;
                 }
                 Message::CopyLast => {
@@ -1204,6 +1234,15 @@ mod tray {
         })
     }
 
+    fn message_of(method: &str, params: &Value) -> Option<Message> {
+        let text = params.get("text").and_then(Value::as_str)?.to_string();
+        match method {
+            BANSHEE_WORDS => Some(Message::Chip(chip::Input::Words(text))),
+            BANSHEE_QUESTION => Some(Message::Chip(chip::Input::Question(text))),
+            _ => None,
+        }
+    }
+
     /// Any failure to read the socket is the daemon being unreachable: a state to show, not an
     /// error to report. `to_draw` asks for the cue, level and words events too, and silences
     /// the earcons `visual` gives the screen instead.
@@ -1216,6 +1255,7 @@ mod tray {
                 EVENT_CUES,
                 EVENT_LEVEL,
                 EVENT_WORDS,
+                EVENT_QUESTION,
             ]
         } else {
             &[EVENT_STATE, EVENT_DOWNLOADS]
@@ -1276,15 +1316,7 @@ mod tray {
                                 None => true,
                             }
                         }
-                        BANSHEE_WORDS => {
-                            match notification.params.get("text").and_then(Value::as_str) {
-                                Some(text) => {
-                                    send(Message::Chip(chip::Input::Words(text.to_string())))
-                                }
-                                None => true,
-                            }
-                        }
-                        _ => true,
+                        method => message_of(method, &notification.params).is_none_or(send),
                     };
                     if !delivered {
                         return;
@@ -1515,14 +1547,16 @@ mod tray {
     // Not `open`, which resolves the bundle id and starts nothing when a
     // second Banshee.app is registered under it. The window is this binary's
     // sibling, so run it directly.
-    fn open_the_window() -> Result<(), Box<dyn std::error::Error>> {
+    fn open_the_window(open: Open) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::process::CommandExt;
 
+        let mut window = utils::sibling_command("banshee-app")?;
+        if open == Open::MissedQuestion {
+            window.arg(banshee_common::MISSED_FLAG);
+        }
         // Its own process group, or it dies with this one. launchd signals
         // the whole group when it boots the job out, and a reinstall does.
-        utils::sibling_command("banshee-app")?
-            .process_group(0)
-            .spawn()?;
+        window.process_group(0).spawn()?;
         Ok(())
     }
 
@@ -1746,6 +1780,79 @@ mod tray {
             assert!(app.scene.is_none());
         }
 
+        fn opening_app() -> (
+            App<std::sync::mpsc::Sender<Message>>,
+            std::rc::Rc<std::cell::RefCell<Vec<Open>>>,
+        ) {
+            let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut app = App::new(std::sync::mpsc::channel::<Message>().0);
+            let record = opened.clone();
+            app.open = Box::new(move |open| record.borrow_mut().push(open));
+            (app, opened)
+        }
+
+        fn drawn(app: &App<std::sync::mpsc::Sender<Message>>) -> Option<chip::Show> {
+            app.scene.as_ref().map(|scene| scene.show.clone())
+        }
+
+        fn miss_a_question(app: &mut App<std::sync::mpsc::Sender<Message>>) {
+            use banshee_common::cue::{Reason, ReasonCode, Target};
+
+            let now = Instant::now();
+            app.chip
+                .feed(chip::Input::Question("Ship it?".to_string()), now);
+            for signal in [
+                Signal::Arm,
+                Signal::Disarm,
+                Signal::Error {
+                    reason: Reason::new(ReasonCode::Silence, None),
+                    target: Some(Target::Answer),
+                },
+            ] {
+                app.chip.feed(chip::Input::Signal(signal), now);
+            }
+            app.redraw();
+        }
+
+        #[test]
+        fn a_click_on_the_missed_pill_clears_it_and_opens_history_at_the_question() {
+            let (mut app, opened) = opening_app();
+            miss_a_question(&mut app);
+            assert!(matches!(drawn(&app), Some(chip::Show::Missed { .. })));
+            app.handle(Message::Clicked);
+            assert_eq!(*opened.borrow(), [Open::MissedQuestion]);
+            assert_eq!(drawn(&app), None);
+        }
+
+        #[test]
+        fn a_click_on_a_broken_pill_opens_the_window_plainly() {
+            let (mut app, opened) = opening_app();
+            app.chip.feed(
+                chip::Input::Signal(Signal::Error {
+                    reason: banshee_common::cue::Reason::new(
+                        banshee_common::cue::ReasonCode::PipelineBroken,
+                        None,
+                    ),
+                    target: None,
+                }),
+                Instant::now(),
+            );
+            app.redraw();
+            assert!(matches!(drawn(&app), Some(chip::Show::Broken(_))));
+            app.handle(Message::Clicked);
+            assert_eq!(*opened.borrow(), [Open::Window]);
+            assert!(matches!(drawn(&app), Some(chip::Show::Broken(_))));
+        }
+
+        #[test]
+        fn the_menus_open_leaves_the_missed_pill() {
+            let (mut app, opened) = opening_app();
+            miss_a_question(&mut app);
+            app.handle(Message::Open);
+            assert_eq!(*opened.borrow(), [Open::Window]);
+            assert!(matches!(drawn(&app), Some(chip::Show::Missed { .. })));
+        }
+
         #[test]
         fn a_cue_line_this_tray_does_not_know_is_skipped() {
             assert!(signal_of(&serde_json::json!({"cue": "levitate"})).is_none());
@@ -1753,6 +1860,18 @@ mod tray {
                 signal_of(&serde_json::json!({"cue": "arm"})),
                 Some(Signal::Arm)
             );
+        }
+
+        #[test]
+        fn the_question_line_feeds_the_chip() {
+            let message = message_of(
+                banshee_common::BANSHEE_QUESTION,
+                &serde_json::json!({"text": "Ship it?"}),
+            );
+            assert!(matches!(
+                message,
+                Some(Message::Chip(chip::Input::Question(text))) if text == "Ship it?"
+            ));
         }
 
         const GLYPHS: [Glyph; 7] = [

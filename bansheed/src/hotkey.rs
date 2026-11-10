@@ -321,8 +321,13 @@ fn verdict(p_complete: f32) -> Verdict {
     }
 }
 
+/// The silence run, in chunks, at which the next check runs.
+fn due_at(checks: u32, endpoint_chunks: usize) -> usize {
+    endpoint_chunks * (checks as usize + 1)
+}
+
 fn check_due(silence_run: usize, checks: u32, endpoint_chunks: usize) -> bool {
-    silence_run >= endpoint_chunks * (checks as usize + 1)
+    silence_run >= due_at(checks, endpoint_chunks)
 }
 
 /// The audio a check hears: the first judges the speech, trimmed where the
@@ -344,6 +349,40 @@ fn judged(
 
 fn seconds(chunks: usize) -> f64 {
     (chunks as u64 * CHUNK_MS) as f64 / 1000.0
+}
+
+fn remaining_ms(silence_run: usize, checks: u32, endpoint_chunks: usize) -> u64 {
+    due_at(checks, endpoint_chunks).saturating_sub(silence_run) as u64 * CHUNK_MS
+}
+
+/// The signal a phase move carries. Quiet goes out when a check leaves the
+/// pause unfinished. With no model to judge, Quiet goes out as the silence
+/// run starts. Speech goes out when a pause that sent a Quiet ends.
+fn edge(before: Phase, after: Phase, endpoint_chunks: usize, judging: bool) -> Option<Signal> {
+    let (
+        Phase::InSpeech {
+            silence_run: was_silent,
+            checks: checked,
+            ..
+        },
+        Phase::InSpeech {
+            silence_run,
+            checks,
+            ..
+        },
+    ) = (before, after)
+    else {
+        return None;
+    };
+    if was_silent > 0 && silence_run == 0 && (!judging || checked > 0) {
+        Some(Signal::Speech)
+    } else if (!judging && was_silent == 0 && silence_run > 0) || checks > checked {
+        Some(Signal::Quiet {
+            remaining_ms: remaining_ms(silence_run, checks, endpoint_chunks),
+        })
+    } else {
+        None
+    }
 }
 
 /// The detector has just confirmed that the answer began.
@@ -1430,6 +1469,20 @@ impl Pipeline {
         judged
     }
 
+    fn start_afresh(&mut self, phase: &mut Phase, endpoint_chunks: usize, judging: bool) {
+        let mut next = *phase;
+        afresh(&mut self.vad, &mut next);
+        self.shift(phase, next, endpoint_chunks, judging);
+    }
+
+    /// Moves `phase` to `next`, sending the edge between them.
+    fn shift(&self, phase: &mut Phase, next: Phase, endpoint_chunks: usize, judging: bool) {
+        if let Some(signal) = edge(*phase, next, endpoint_chunks, judging) {
+            self.cues.emit(signal);
+        }
+        *phase = next;
+    }
+
     // Confirms onset, then ends on trailing silence; the audio comes back at
     // 16 kHz. `Heard::Silence` and `Heard::Closed` are an answer that never
     // came; `Err` is a listen that broke.
@@ -1440,6 +1493,7 @@ impl Pipeline {
         self.vad.reset_state();
         let vad_threshold = self.state.vad_threshold();
         let endpoint_chunks = (self.state.endpoint_silence_ms() / CHUNK_MS).max(1) as usize;
+        let judging = self.judge.resident();
         let deadline = Instant::now() + timeout;
         let hard_deadline = deadline + MAX_ANSWER;
 
@@ -1505,7 +1559,7 @@ impl Pipeline {
             if suppressed {
                 suppressed = false;
                 capture.reset();
-                afresh(&mut self.vad, &mut phase);
+                self.start_afresh(&mut phase, endpoint_chunks, judging);
             }
 
             // The microphone moved under this answer. What was said already is
@@ -1513,7 +1567,7 @@ impl Pipeline {
             // kept is a window holding the old device's audio.
             if capture.read(&self.source, &mut audio)? {
                 log::info!("the microphone moved while a question was listening");
-                afresh(&mut self.vad, &mut phase);
+                self.start_afresh(&mut phase, endpoint_chunks, judging);
             }
 
             // Manual capture needs no VAD; the release is the endpoint
@@ -1546,7 +1600,7 @@ impl Pipeline {
                 {
                     log::info!("answer resumed after {:.1} s of silence", seconds(paused));
                 }
-                phase = next;
+                self.shift(&mut phase, next, endpoint_chunks, judging);
             }
             while feed_stream(&mut *self.speech_to_text, &self.state, &audio, &mut fed) {}
 
@@ -1565,11 +1619,12 @@ impl Pipeline {
                 );
                 match self.hear_turn(heard, &check, seconds(endpoint_chunks)) {
                     Verdict::Unfinished => {
-                        phase = Phase::InSpeech {
+                        let next = Phase::InSpeech {
                             silence_run,
                             start,
                             checks: checks + 1,
                         };
+                        self.shift(&mut phase, next, endpoint_chunks, judging);
                     }
                     Verdict::Finished => {
                         capture.finish(&mut audio)?;
@@ -2311,7 +2366,7 @@ mod utterance_tests {
     fn an_answer_sends_onset_once_as_the_detector_confirms_speech() {
         let (heard, signals) = listened(&spoken_then_quiet(), None);
         assert!(matches!(heard, Ok(Heard::Audio(_))));
-        assert_eq!(signals, [Signal::Onset]);
+        assert_eq!(without_pauses(signals), [Signal::Onset]);
     }
 
     #[test]
@@ -2341,7 +2396,24 @@ mod utterance_tests {
     /// opens. The audio arrives in sixteenth-second slices, so the endpoint is
     /// judged between slices as it is on a live microphone.
     fn listened_with_quiet_length(audio: &[f32], quiet_ms: u64, judge: ScriptedJudge) -> Vec<f32> {
+        listened_through_quiet(audio, quiet_ms, judge).0
+    }
+
+    fn listened_signals_with_judge(
+        audio: &[f32],
+        quiet_ms: u64,
+        judge: ScriptedJudge,
+    ) -> Vec<Signal> {
+        listened_through_quiet(audio, quiet_ms, judge).1
+    }
+
+    fn listened_through_quiet(
+        audio: &[f32],
+        quiet_ms: u64,
+        judge: ScriptedJudge,
+    ) -> (Vec<f32>, Vec<Signal>) {
         let (cues, _sounds) = Cues::recording();
+        let mut subscribed = cues.subscribe_signals();
         let state = crate::test_support::daemon_state_with_cues(cues.clone());
         let session = state.arm_for_ask().unwrap();
         assert!(state.open_answer(session));
@@ -2360,10 +2432,78 @@ mod utterance_tests {
         // wait for it is wall time, so it is long enough for a slow runner.
         let heard = pipeline.listen_for_answer(Duration::from_secs(5), session);
         feeding.join().unwrap();
+        let mut signals = Vec::new();
+        while let Ok(signal) = subscribed.try_recv() {
+            signals.push(signal);
+        }
         match heard {
-            Ok(Heard::Audio(samples)) => samples,
+            Ok(Heard::Audio(samples)) => (samples, signals),
             _ => panic!("the answer must be heard as audio"),
         }
+    }
+
+    fn is_quiet(signal: &Signal) -> bool {
+        matches!(signal, Signal::Quiet { .. })
+    }
+
+    fn without_pauses(mut signals: Vec<Signal>) -> Vec<Signal> {
+        signals.retain(|signal| !is_quiet(signal) && *signal != Signal::Speech);
+        signals
+    }
+
+    /// Two quiet edges in a row: only a check that leaves a pause unfinished
+    /// sends a second one before speech returns. The test speech dips under
+    /// the detector for a chunk, so a pause can also open and close inside it.
+    fn refilled(pair: &[Signal]) -> bool {
+        pair.iter().all(is_quiet)
+    }
+
+    #[test]
+    fn with_a_turn_model_each_quiet_edge_is_an_unfinished_verdict() {
+        let judge = ScriptedJudge::answering(held_through_the_gap());
+        let checks = Arc::clone(&judge.heard);
+        let signals = listened_signals_with_judge(&speech_gap_speech(), 800, judge);
+        let unfinished = checks
+            .lock()
+            .unwrap()
+            .len()
+            .checked_sub(1)
+            .expect("the judge heard at least one check");
+        assert_eq!(
+            signals.iter().filter(|signal| is_quiet(signal)).count(),
+            unfinished,
+            "{signals:?}"
+        );
+        assert!(
+            matches!(signals[..], [Signal::Onset, Signal::Quiet { .. }, ..]),
+            "{signals:?}"
+        );
+        let refill = signals
+            .windows(2)
+            .position(refilled)
+            .expect("an unfinished check sends a second quiet edge");
+        let speech = signals
+            .iter()
+            .rposition(|signal| *signal == Signal::Speech)
+            .expect("speech returns after the gap");
+        assert!(refill < speech, "{signals:?}");
+        assert_eq!(signals.last(), Some(&Signal::Speech), "{signals:?}");
+        assert_eq!(
+            signals
+                .iter()
+                .filter(|signal| **signal == Signal::Speech)
+                .count(),
+            1,
+            "only the resume after the held gap is speech: {signals:?}"
+        );
+    }
+
+    #[test]
+    fn no_turn_model_sends_one_quiet_edge_then_the_answer_ends() {
+        let signals =
+            listened_signals_with_judge(&spoken_then_quiet(), 800, ScriptedJudge::unloaded());
+        assert!(!signals.windows(2).any(refilled), "{signals:?}");
+        assert!(signals.last().is_some_and(is_quiet), "{signals:?}");
     }
 
     #[test]
@@ -4418,7 +4558,7 @@ mod utterance_tests {
             streamed, whole,
             "the full pass reads the same audio either way"
         );
-        assert_eq!(signals, [Signal::Onset]);
+        assert_eq!(without_pauses(signals), [Signal::Onset]);
         assert_eq!(calls.first(), Some(&Call::Begin));
         assert_eq!(
             fed_samples(&calls),
@@ -5550,8 +5690,8 @@ mod tests {
 #[cfg(test)]
 mod phase_tests {
     use super::{
-        ONSET_CHUNKS, PREROLL_CHUNKS, Phase, Verdict, advance, afresh, check_due, judged, onset,
-        verdict,
+        CHUNK_MS, ONSET_CHUNKS, PREROLL_CHUNKS, Phase, Signal, Verdict, advance, afresh, check_due,
+        edge, judged, onset, verdict,
     };
     use crate::speech_to_text::vad::{Detector, VAD_CHUNK};
 
@@ -5703,6 +5843,86 @@ mod phase_tests {
         let audio = vec![0.0; 10 + 5 * VAD_CHUNK];
         let heard = judged(&audio, 10, 10 + 5 * VAD_CHUNK, 9, 0);
         assert!(heard.is_empty(), "{} samples", heard.len());
+    }
+
+    fn speaking(silence_run: usize, checks: u32) -> Phase {
+        Phase::InSpeech {
+            silence_run,
+            start: 512,
+            checks,
+        }
+    }
+
+    #[test]
+    fn without_a_turn_model_the_first_silent_chunk_counts_to_the_cut() {
+        assert_eq!(
+            edge(speaking(0, 0), speaking(1, 0), 78, false),
+            Some(Signal::Quiet {
+                remaining_ms: 77 * CHUNK_MS
+            })
+        );
+    }
+
+    #[test]
+    fn with_a_turn_model_the_first_silent_chunk_sends_nothing() {
+        assert_eq!(edge(speaking(0, 0), speaking(1, 0), 78, true), None);
+    }
+
+    #[test]
+    fn a_longer_silence_run_adds_no_edge() {
+        assert_eq!(edge(speaking(1, 0), speaking(2, 0), 78, false), None);
+    }
+
+    #[test]
+    fn speech_after_silence_is_an_edge() {
+        assert_eq!(
+            edge(speaking(5, 0), speaking(0, 0), 78, false),
+            Some(Signal::Speech)
+        );
+    }
+
+    #[test]
+    fn with_a_turn_model_speech_after_an_unfinished_check_is_an_edge() {
+        assert_eq!(
+            edge(speaking(80, 1), speaking(0, 0), 78, true),
+            Some(Signal::Speech)
+        );
+    }
+
+    #[test]
+    fn with_a_turn_model_speech_after_an_unjudged_pause_sends_nothing() {
+        assert_eq!(edge(speaking(5, 0), speaking(0, 0), 78, true), None);
+    }
+
+    #[test]
+    fn an_unfinished_check_refills_the_countdown() {
+        assert_eq!(
+            edge(speaking(78, 0), speaking(78, 1), 78, true),
+            Some(Signal::Quiet {
+                remaining_ms: 78 * CHUNK_MS
+            })
+        );
+    }
+
+    #[test]
+    fn waiting_and_manual_never_count() {
+        let held = Phase::Manual { start: 0 };
+        for (before, after) in [
+            (
+                Phase::Waiting { speech_run: 0 },
+                Phase::Waiting { speech_run: 1 },
+            ),
+            (held, held),
+            (Phase::Waiting { speech_run: 2 }, speaking(0, 0)),
+        ] {
+            for judging in [false, true] {
+                assert_eq!(
+                    edge(before, after, 78, judging),
+                    None,
+                    "{before:?} to {after:?}"
+                );
+            }
+        }
     }
 
     #[test]

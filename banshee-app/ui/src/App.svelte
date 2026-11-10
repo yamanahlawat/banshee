@@ -39,6 +39,7 @@
   import {
     followSaveHistory,
     formatCount,
+    newestUnanswered,
     readAll,
     readLatest,
     readNewest,
@@ -49,6 +50,7 @@
   import { loadTable } from './lib/settings';
   import { forgetTheAsk } from './lib/downloads';
   import {
+    launchMissed,
     listen,
     listVoices,
     restartDaemon,
@@ -56,6 +58,7 @@
     status,
     type Down,
     type DownloadProgress,
+    type Reopened,
     type Voices,
   } from './lib/tauri';
   import { humanize } from './lib/hotkey';
@@ -406,6 +409,12 @@
     agentsRead = gotAgents;
   }
 
+  function openAt(missed: boolean) {
+    const chosen = missed ? (newestUnanswered($table.rows)?.id ?? null) : null;
+    view.set({ query: '', chosen });
+    if (chosen !== null) history?.reveal(chosen);
+  }
+
   onMount(() => {
     // Focus alone misses a window unhidden without the pointer landing in it.
     document.addEventListener('visibilitychange', onReturn);
@@ -459,15 +468,18 @@
       listen<Down>('daemon:down', (e) => daemon.update((s) => ({ ...s, down: e.payload.reason }))),
       // Opening the window moves no focus: the user is always inside another
       // application.
-      listen('app:reopened', () => {
-        view.set({ query: '', chosen: null });
+      listen<Reopened>('app:reopened', async (e) => {
+        openAt(false);
         reopened += 1;
         show('History');
-        return readDaemon();
+        await readDaemon();
+        if (e.payload.missed) openAt(true);
       }),
     ]);
+    const missed = launchMissed();
     // The sidebar needs neither, so it does not queue behind the whole-table read.
     await Promise.all([loadTable(), readDaemon(), readTheRest()]);
+    if (await missed) openAt(true);
   });
 </script>
 

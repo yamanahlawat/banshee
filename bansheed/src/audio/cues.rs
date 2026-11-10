@@ -90,7 +90,11 @@ pub fn cue_of(signal: &Signal) -> Option<Cue> {
         Signal::Error { .. } => Some(Cue::Error),
         Signal::Arm => Some(Cue::Arm),
         Signal::Disarm => Some(Cue::Disarm),
-        Signal::Answered { .. } | Signal::Cancelled { .. } | Signal::Onset => None,
+        Signal::Answered { .. }
+        | Signal::Cancelled { .. }
+        | Signal::Onset
+        | Signal::Quiet { .. }
+        | Signal::Speech => None,
     }
 }
 
@@ -282,6 +286,12 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn the_countdown_edges_make_no_sound() {
+        assert_eq!(cue_of(&Signal::Quiet { remaining_ms: 1 }), None);
+        assert_eq!(cue_of(&Signal::Speech), None);
     }
 
     #[test]

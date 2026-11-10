@@ -150,6 +150,9 @@ pub const BANSHEE_LEVEL: &str = "banshee.level";
 /// `{"text": ...}`: the committed words of the recording in progress, and an
 /// empty text when a recording ends.
 pub const BANSHEE_WORDS: &str = "banshee.words";
+/// `{"text": ...}`: the question an agent is asking, raw as the agent sent it,
+/// and an empty text once it ends.
+pub const BANSHEE_QUESTION: &str = "banshee.question";
 
 /// The codes a reply carries. JSON-RPC reserves -32700 to -32600; the
 /// -32000 block is this daemon's, one code per fix a client can offer.
@@ -178,6 +181,11 @@ pub const EVENT_DOWNLOADS: &str = "downloads";
 pub const EVENT_CUES: &str = "cues";
 pub const EVENT_LEVEL: &str = "level";
 pub const EVENT_WORDS: &str = "words";
+pub const EVENT_QUESTION: &str = "question";
+
+/// The tray starts the window with this argument to open History at the newest
+/// missed question.
+pub const MISSED_FLAG: &str = "--missed";
 
 /// The microphone the daemon records from. A `banshee.status` reply and a
 /// `state_changed` push both carry it, so a subscriber reads it from every

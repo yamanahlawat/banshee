@@ -118,7 +118,7 @@ core-graphics = "0.25"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSDictionary", "NSValue", "NSGeometry", "NSObject", "NSData", "NSEnumerator", "NSURL", "NSError"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-quartz-core", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSPanel", "NSScreen", "NSColor", "NSWorkspace", "NSRunningApplication", "libc", "NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityProtocols", "NSGraphics", "NSEvent", "NSPasteboard", "NSPasteboardItem"] }
-objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "block2", "CABase", "CAAnimation", "CALayer", "CAMediaTiming", "CAMediaTimingFunction", "CAShapeLayer", "CATransaction", "CATransform3D"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "block2", "CABase", "CAAnimation", "CAGradientLayer", "CALayer", "CAMediaTiming", "CAMediaTimingFunction", "CAShapeLayer", "CATransaction", "CATransform3D"] }
 # The completion a transaction runs once its animations end.
 block2 = "0.6"
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGPath", "CGColor"] }

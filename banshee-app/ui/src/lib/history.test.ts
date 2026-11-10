@@ -10,6 +10,7 @@ import {
   forget,
   formatCount,
   newestFirst,
+  newestUnanswered,
   readAll,
   readAfter,
   followSaveHistory,
@@ -238,6 +239,20 @@ describe('rowFlag', () => {
   it('flags nothing for a transcribed row', () => {
     expect(rowFlag(row({}))).toBeNull();
     expect(rowFlag(row({ kind: 'dictation' }))).toBeNull();
+  });
+});
+
+describe('newestUnanswered', () => {
+  it('newestUnanswered picks the newest no_answer question and ignores dictations and closed questions', () => {
+    const rows = [
+      row({ id: 6, kind: 'dictation', outcome: 'no_answer' }),
+      row({ id: 5, outcome: 'closed' }),
+      row({ id: 4, outcome: 'transcribed', text: 'Yes' }),
+      row({ id: 3, question: 'Deploy now?', outcome: 'no_answer' }),
+      row({ id: 2, question: 'Ship it?', outcome: 'no_answer' }),
+    ];
+    expect(newestUnanswered(rows)?.id).toBe(3);
+    expect(newestUnanswered(rows.slice(0, 3))).toBeNull();
   });
 });
 

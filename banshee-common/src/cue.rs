@@ -81,6 +81,13 @@ pub enum Signal {
         target: Target,
     },
     Onset,
+    /// A check judged a pause in an answer unfinished. With no turn model, the
+    /// pause began. `remaining_ms` of quiet end the answer unless a check
+    /// holds it.
+    Quiet {
+        remaining_ms: u64,
+    },
+    Speech,
     /// A dictation went to the clipboard instead of being typed.
     Copied,
 }
@@ -133,6 +140,11 @@ mod tests {
             (r#"{"cue":"disarm"}"#, Signal::Disarm),
             (r#"{"cue":"onset"}"#, Signal::Onset),
             (
+                r#"{"cue":"quiet","remaining_ms":2468}"#,
+                Signal::Quiet { remaining_ms: 2468 },
+            ),
+            (r#"{"cue":"speech"}"#, Signal::Speech),
+            (
                 r#"{"cue":"cancelled","target":"dictate"}"#,
                 Signal::Cancelled {
                     target: Target::Dictate,
@@ -176,6 +188,8 @@ mod tests {
                 target: Target::Dictate,
             },
             Signal::Onset,
+            Signal::Quiet { remaining_ms: 2468 },
+            Signal::Speech,
             Signal::Copied,
         ] {
             let line = serde_json::to_string(&signal).unwrap();

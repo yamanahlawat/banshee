@@ -72,6 +72,10 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   measured.
 - Nothing has tested a logout and login with the login items. CI registers, restarts, stops
   and removes them on a runner, but cannot log in again.
+- The dictation pill keeps the figure and no rim while the question card has the new glyphs
+  and the rim, so the two differ in style until the pill's own item.
+- Holding the hotkey during an answer drops the words so far (hotkey.rs, publish_words(""));
+  the card shows them vanish and "Your turn" return.
 
 ## Listening and speaking
 
@@ -97,11 +101,16 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   ignore the shaper's glyph offsets.
 - No hand cursor shows over a clickable failure on Linux, and a click in the capsule's corner
   goes nowhere.
-- On Linux, Reduce Motion and high contrast are not read.
+- On Linux, Reduce Motion and high contrast are not read, so the card's countdown glides
+  where macOS steps it.
 - The Linux capsule uses integer scale only; a fractional scale draws it soft.
 - Live words in characters the Archivo Latin subset lacks are left out on Linux.
 - The Linux capsule's per-frame cost is unmeasured: it allocates its masks, pixmap and buffer
   each frame, and live words reshape the whole transcript on every partial.
+- The Linux card's bars take the raw microphone level, while macOS eases them over one level
+  step.
+- If Banshee speaks during a pause in an answer, the silence count freezes until it stops,
+  so the card's countdown line runs out early. Not measured.
 - An idea for answers: use the unusual words in an agent's question as vocabulary for that
   answer.
 - A listening model download that fails for a reason other than a licence reaches the window
@@ -173,6 +182,8 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - Buttons show they can be pressed only on hover.
 - Speech settings have no panel of their own.
 - A screen reader hears a segmented control change only after the daemon answers.
+- In a wide window, the History list does not scroll to the missed question's row. The
+  detail pane shows the question.
 
 ## Build and tests
 

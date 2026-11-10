@@ -279,6 +279,9 @@ pub fn quiet_speech() -> SpeechPlayer {
 /// A line with this text never ends, which is what a stalled backend looks like.
 pub const STALLS: &str = "This line stalls.";
 
+/// A line with this text is refused when the backend is asked to start it.
+pub const REFUSED: &str = "This line is refused.";
+
 struct Held {
     until: Option<std::time::Instant>,
     cut_short: Arc<std::sync::atomic::AtomicBool>,
@@ -309,6 +312,11 @@ impl TtsBackend for HoldingBackend {
         _voice: Option<&str>,
     ) -> Result<Box<dyn ActiveUtterance>, banshee_common::error::BansheeError> {
         self.spoken.lock().unwrap().push(text.to_string());
+        if text == REFUSED {
+            return Err(banshee_common::error::BansheeError::Rejected(
+                text.to_string(),
+            ));
+        }
         Ok(Box::new(Held {
             until: (text != STALLS).then(|| std::time::Instant::now() + self.hold),
             cut_short: Arc::clone(&self.cut_short),

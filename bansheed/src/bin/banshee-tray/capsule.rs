@@ -35,8 +35,7 @@ use tiny_skia::Pixmap;
 
 use crate::chip::Scene;
 use crate::figure::{ABOVE_DEFAULT_DOCK, CAPSULE, TRAVEL};
-use crate::paint;
-use crate::renderer::{Order, Rect, Renderer, room_on, to_argb};
+use crate::renderer::{Order, Rect, Renderer, card_room_on, room_on, to_argb};
 
 enum Command {
     Show(Option<Scene>),
@@ -49,8 +48,8 @@ pub struct Capsule {
 
 impl Capsule {
     /// `None` when the desktop has no layer shell to draw on. `open` runs on
-    /// the capsule's thread when a click lands on a failure, and `lost` once
-    /// the connection ends.
+    /// the capsule's thread when a click lands on a scene that takes clicks,
+    /// and `lost` once the connection ends.
     pub fn open(
         open: impl Fn() + Send + 'static,
         lost: impl FnOnce() + Send + 'static,
@@ -200,9 +199,7 @@ fn connect(
 
 struct Shown {
     layer: LayerSurface,
-    /// The logical size last asked for.
-    asked: (u32, u32),
-    /// The compositor configured the surface since the last ask, so a buffer may follow.
+    /// The first configure came, so a buffer may follow.
     ready: bool,
     /// A frame callback is pending.
     waiting: bool,
@@ -247,6 +244,7 @@ impl Stage {
             Command::Show(scene) => {
                 if let Some(width) = self.output_width() {
                     self.renderer.room = room_on(width);
+                    self.renderer.card_room = card_room_on(width);
                 }
                 let orders = self.renderer.show(scene.as_ref(), now);
                 self.carry_out(orders, now);
@@ -268,7 +266,7 @@ impl Stage {
     }
 
     fn create(&mut self, now: Instant) -> Option<Shown> {
-        let asked = self.renderer.picture(now, 1, paint::size)?;
+        let (width, height) = self.renderer.open(now)?;
         self.scale = self.largest_scale();
         let surface =
             self.compositor
@@ -285,11 +283,10 @@ impl Stage {
         layer.set_exclusive_zone(0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         set_clickable(&self.compositor, &layer, None);
-        layer.set_size(asked.0, asked.1);
+        layer.set_size(width, height);
         layer.commit();
         Some(Shown {
             layer,
-            asked,
             ready: false,
             waiting: false,
             clickable: None,
@@ -360,32 +357,22 @@ impl Stage {
         if !shown.ready || shown.waiting {
             return;
         }
-        let asked = shown.asked;
-        let painted = self.renderer.picture(now, self.scale, |frame| {
-            let size = paint::size(frame);
-            if size == asked {
-                Ok(paint::paint(frame))
-            } else {
-                Err(size)
-            }
-        });
-        match painted {
-            None => {}
-            Some(Err((width, height))) => {
-                shown.layer.set_size(width, height);
-                shown.layer.commit();
-                shown.asked = (width, height);
-                shown.ready = false;
-            }
-            Some(Ok(pixmap)) => {
-                self.renderer.stale = false;
-                let live = self.renderer.live(now);
-                if let Err(error) =
-                    present(&mut self.pool, &self.qh, shown, &pixmap, self.scale, live)
-                {
-                    log::error!("the capsule's frame did not reach the screen: {error}");
-                }
-            }
+        let Some(draw) = self.renderer.draw(now, self.scale) else {
+            return;
+        };
+        if let Some((width, height)) = draw.resize {
+            shown.layer.set_size(width, height);
+        }
+        let live = self.renderer.live(now);
+        if let Err(error) = present(
+            &mut self.pool,
+            &self.qh,
+            shown,
+            &draw.pixmap,
+            self.scale,
+            live,
+        ) {
+            log::error!("the capsule's frame did not reach the screen: {error}");
         }
     }
 }

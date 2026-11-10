@@ -1,6 +1,6 @@
 use banshee_common::utils::{banshee_dir, make_owner_only, socket_path};
 use banshee_common::{
-    BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED,
+    BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_LEVEL, BANSHEE_QUESTION, BANSHEE_STATE_CHANGED,
     BANSHEE_SUBSCRIBE, BANSHEE_WORDS, JsonRpcNotification, JsonRpcRequest, error::BansheeError,
 };
 use std::fs;
@@ -327,6 +327,7 @@ struct Events {
     cues: bool,
     level: bool,
     words: bool,
+    question: bool,
     draws: bool,
 }
 
@@ -349,6 +350,7 @@ fn requested_events(params: Option<&serde_json::Value>) -> Events {
         cues: asked(banshee_common::EVENT_CUES),
         level: asked(banshee_common::EVENT_LEVEL),
         words: asked(banshee_common::EVENT_WORDS),
+        question: asked(banshee_common::EVENT_QUESTION),
         draws: params
             .and_then(|params| params.get("draws"))
             .and_then(serde_json::Value::as_bool)
@@ -397,11 +399,14 @@ async fn push_level(writer: Arc<Mutex<OwnedWriteHalf>>, mut level: watch::Receiv
     }
 }
 
-async fn push_words(writer: Arc<Mutex<OwnedWriteHalf>>, mut words: watch::Receiver<String>) {
-    while words.changed().await.is_ok() {
-        let text = words.borrow_and_update().clone();
-        let notification =
-            JsonRpcNotification::new(BANSHEE_WORDS, serde_json::json!({"text": text}));
+async fn push_text(
+    writer: Arc<Mutex<OwnedWriteHalf>>,
+    method: &'static str,
+    mut texts: watch::Receiver<String>,
+) {
+    while texts.changed().await.is_ok() {
+        let text = texts.borrow_and_update().clone();
+        let notification = JsonRpcNotification::new(method, serde_json::json!({"text": text}));
         if write_line(&mut *writer.lock().await, &notification)
             .await
             .is_err()
@@ -543,6 +548,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
     let mut pushing_cues: Option<tokio::task::JoinHandle<()>> = None;
     let mut pushing_level: Option<tokio::task::JoinHandle<()>> = None;
     let mut pushing_words: Option<tokio::task::JoinHandle<()>> = None;
+    let mut pushing_question: Option<tokio::task::JoinHandle<()>> = None;
     let mut drawn: Option<crate::audio::cues::Drawn> = None;
     let mut watching_level: Option<crate::state::LevelWatch> = None;
     // A request that arrived while an earlier call was still running. The
@@ -587,6 +593,8 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             (asked.level && pushing_level.is_none()).then(|| state.subscribe_level());
         let opening_words =
             (asked.words && pushing_words.is_none()).then(|| state.subscribe_words());
+        let opening_question =
+            (asked.question && pushing_question.is_none()).then(|| state.subscribe_question());
         if asked.cues && asked.draws && drawn.is_none() {
             drawn = Some(state.cues().drawn());
         }
@@ -641,7 +649,14 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
             pushing_level = Some(tokio::spawn(push_level(Arc::clone(&writer), level)));
         }
         if let Some(words) = opening_words {
-            pushing_words = Some(tokio::spawn(push_words(Arc::clone(&writer), words)));
+            let writer = Arc::clone(&writer);
+            pushing_words = Some(tokio::spawn(push_text(writer, BANSHEE_WORDS, words)));
+        }
+        if let Some(mut question) = opening_question {
+            // A tray that subscribes while an agent asks still gets the question.
+            question.mark_changed();
+            let writer = Arc::clone(&writer);
+            pushing_question = Some(tokio::spawn(push_text(writer, BANSHEE_QUESTION, question)));
         }
     }
 
@@ -651,6 +666,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         pushing_cues,
         pushing_level,
         pushing_words,
+        pushing_question,
     ]
     .into_iter()
     .flatten()

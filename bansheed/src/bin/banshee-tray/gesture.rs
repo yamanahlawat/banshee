@@ -36,6 +36,7 @@ pub enum Property {
     Dash,
     Gap,
     Width,
+    Height,
 }
 
 /// One property through `values` at `key_times`, eased per segment by
@@ -282,6 +283,40 @@ pub fn chip_width(from: f64, to: f64) -> Track {
     }
 }
 
+pub fn chip_height(from: f64, to: f64) -> Track {
+    Track {
+        property: Property::Height,
+        ..chip_width(from, to)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub fn drain(share: f64, width: f64, lasts: f64) -> Track {
+    Track {
+        property: Property::Width,
+        key_times: ENDS,
+        values: Cow::Owned(vec![share * width, 0.0]),
+        curves: &[LINEAR],
+        duration: lasts,
+        delay: 0.0,
+        end: End::Hold,
+    }
+}
+
+pub fn dot_pulse(index: usize) -> Vec<Track> {
+    gesture(
+        [(
+            Property::Opacity,
+            &[0.0, 0.5, 1.0],
+            Cow::Borrowed(&[0.45, 1.0, 0.45]),
+            &[SWAY, SWAY],
+        )],
+        1.6,
+        0.25 * index as f64,
+        End::Repeat,
+    )
+}
+
 pub fn float_out() -> Vec<Track> {
     const TIMES: &[f64] = &[0.0, 0.25, 1.0];
     gesture(
@@ -455,11 +490,14 @@ mod tests {
             outline_breaks(100.0),
             words_reveal(40.0),
             vec![chip_width(44.0, 120.0)],
+            vec![chip_height(44.0, 300.0)],
+            dot_pulse(0),
             float_out(),
             frame_sink(),
             failure_exit(),
             fade_in(0.0),
             fade_out(),
+            vec![drain(1.0, 200.0, 2.0)],
         ]
     }
 
@@ -555,5 +593,34 @@ mod tests {
             assert!(close(first, again), "x {x}: {first} then {again}");
             assert!(first != 0.0, "x {x}");
         }
+    }
+
+    #[test]
+    fn the_dots_pulse_between_their_two_strengths() {
+        let dot = one(dot_pulse(0));
+        for (elapsed, expected) in [(0.0, 0.45), (0.8, 1.0), (1.6, 0.45)] {
+            let value = at(&dot, elapsed, 1.0);
+            assert!((value - expected).abs() < 0.01, "{elapsed}: {value}");
+        }
+        assert_eq!(lasts(&dot_pulse(0)), None);
+        let later = one(dot_pulse(1));
+        assert!((at(&later, 0.0, 1.0) - 0.45).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_drain_closes_linearly_and_holds() {
+        let track = drain(1.0, 200.0, 2.0);
+        assert_eq!(track.property, Property::Width);
+        assert!(close(at(&track, 1.0, 0.0), 100.0));
+        assert_eq!(at(&track, 2.5, 0.0), 0.0);
+        assert_eq!(lasts(&[drain(1.0, 200.0, 2.0)]), Some(2.0));
+    }
+
+    #[test]
+    fn the_height_track_mirrors_the_width_track() {
+        let height = chip_height(44.0, 300.0);
+        assert_eq!(height.property, Property::Height);
+        assert_eq!(height.duration, CHIP_WIDTH_LASTS);
+        assert_eq!(*height.values, [44.0, 300.0]);
     }
 }

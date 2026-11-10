@@ -4,10 +4,29 @@ use banshee_common::{AgentRow, NO_AUDIO, PlannedChange, rpc_code, utils};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
 use tokio::sync::Mutex;
 
 pub const NO_HOME_DIR: &str = "Banshee cannot find your home directory.";
+
+/// What the process was started to show: `--missed` from a click on the
+/// tray's missed pill.
+pub struct Launch {
+    missed: AtomicBool,
+}
+
+impl Launch {
+    pub fn new(missed: bool) -> Self {
+        Launch {
+            missed: AtomicBool::new(missed),
+        }
+    }
+
+    fn take(&self) -> bool {
+        self.missed.swap(false, Ordering::Relaxed)
+    }
+}
 
 /// The path resolves once, so a missing home directory cannot stop the window opening.
 pub struct Daemon {
@@ -135,12 +154,20 @@ pub async fn retrying<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Daemon, never_reached_the_daemon};
+    use super::{Daemon, Launch, never_reached_the_daemon};
     use crate::calls::CommandError;
     use crate::socket::{RpcError, SOCKET_CLOSED};
     use banshee_common::rpc_code;
     use std::path::PathBuf;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn a_missed_launch_is_read_once() {
+        let launch = Launch::new(true);
+        assert!(launch.take());
+        assert!(!launch.take());
+        assert!(!Launch::new(false).take());
+    }
 
     fn daemon(path: Option<&str>) -> Daemon {
         Daemon {
@@ -380,6 +407,12 @@ mod tests {
             serde_json::to_value(banshee_common::settings::SETTINGS).unwrap()
         );
     }
+}
+
+/// True for the first call only.
+#[tauri::command]
+pub fn launch_missed(launch: State<'_, Launch>) -> bool {
+    launch.take()
 }
 
 /// The table of settings the daemon takes, as the window reads it. No socket
