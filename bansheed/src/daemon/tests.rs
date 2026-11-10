@@ -335,6 +335,49 @@ async fn a_words_subscriber_hears_the_words_and_their_end() {
     assert_eq!(pushed["params"]["text"], "", "the recording ended");
 }
 
+#[tokio::test]
+async fn a_new_question_subscriber_gets_the_live_question_at_once() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    state.publish_question("Ship it?");
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["question"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_QUESTION);
+    assert_eq!(pushed["params"], serde_json::json!({"text": "Ship it?"}));
+}
+
+#[tokio::test]
+async fn a_cues_only_subscriber_never_receives_the_question() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["cues"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+
+    state.publish_question("Ship it?");
+    state.cues().emit(crate::audio::cues::Signal::Arm);
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_CUE);
+    assert!(
+        tokio::time::timeout(SILENT, lines.next_line())
+            .await
+            .is_err(),
+        "the question was pushed to a cues subscriber"
+    );
+}
+
 // The select loop is the only thing that writes a notification, so no unit
 // test reaches it. These drive a real socket.
 #[tokio::test]

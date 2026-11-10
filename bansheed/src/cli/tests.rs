@@ -628,11 +628,16 @@ async fn watch_into_a_file_never_reads_as_a_closed_reader() {
 }
 
 #[test]
-fn only_cues_level_and_words_can_be_watched_as_events() {
-    let names = vec!["cues".to_string(), "level".to_string(), "words".to_string()];
+fn only_cues_level_words_and_question_can_be_watched_as_events() {
+    let names = vec![
+        "cues".to_string(),
+        "level".to_string(),
+        "words".to_string(),
+        "question".to_string(),
+    ];
     assert_eq!(
         super::watched_events(&names).unwrap(),
-        vec!["cues", "level", "words"]
+        vec!["cues", "level", "words", "question"]
     );
     assert!(super::watched_events(&["downloads".to_string()]).is_err());
 }

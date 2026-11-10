@@ -20,6 +20,7 @@ export function mockTauri() {
     historyAudio: vi.fn(() => Promise.resolve(new ArrayBuffer(0))),
     retry: vi.fn(),
     listen: vi.fn(),
+    launchMissed: vi.fn(() => Promise.resolve(false)),
     copyText: vi.fn(() => Promise.resolve()),
     clearHistory: vi.fn(() => Promise.resolve()),
     settingsTable: vi.fn(() => Promise.resolve(mockTable)),

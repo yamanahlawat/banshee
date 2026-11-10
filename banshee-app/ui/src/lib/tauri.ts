@@ -41,6 +41,7 @@ export type PlannedChange = { path: string | null; diff: string };
 /// them, and `total` is null when the server sent no Content-Length.
 export type { Progress as DownloadProgress } from './daemon';
 export type Down = { reason: string };
+export type Reopened = { missed: boolean };
 export type HistoryRow = {
   id: string | number;
   kind: 'dictation' | 'question';
@@ -125,6 +126,11 @@ export function copyText(text: string): Promise<void> {
 /// Opens the licence of a listening model, named by its id.
 export function openLicence(model: string): Promise<void> {
   return call('open_licence', { model });
+}
+
+/// Whether the tray started this process for a missed question, true once.
+export function launchMissed(): Promise<boolean> {
+  return call('launch_missed');
 }
 
 export function startDaemon(): Promise<void> {

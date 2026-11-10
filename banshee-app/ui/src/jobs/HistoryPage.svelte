@@ -99,6 +99,12 @@
     detail?.togglePlay();
   }
 
+  /// Opens the row in the list's place below the shared width, and moves no focus.
+  export function reveal(id: Id) {
+    choose(id);
+    if (!wide) opened = id;
+  }
+
   export async function back() {
     opened = null;
     await list?.focus();

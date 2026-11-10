@@ -33,6 +33,7 @@ fn key_path(property: Property) -> &'static str {
         Property::DashPhase => "lineDashPhase",
         Property::Dash | Property::Gap => "lineDashPattern",
         Property::Width => "bounds.size.width",
+        Property::Height => "bounds.size.height",
     }
 }
 
@@ -208,6 +209,18 @@ pub fn chip_width(from: CGFloat, to: CGFloat) -> Retained<CAAnimation> {
     animation(&[gesture::chip_width(from, to)])
 }
 
+pub fn chip_height(from: CGFloat, to: CGFloat) -> Retained<CAAnimation> {
+    animation(&[gesture::chip_height(from, to)])
+}
+
+pub fn drain(share: f64, width: CGFloat, lasts: f64) -> Retained<CAAnimation> {
+    animation(&[gesture::drain(share, width, lasts)])
+}
+
+pub fn dot_pulse(index: usize) -> Retained<CAAnimation> {
+    animation(&gesture::dot_pulse(index))
+}
+
 pub fn float_out() -> Retained<CAAnimation> {
     animation(&gesture::float_out())
 }
@@ -276,6 +289,25 @@ mod tests {
         let tilt = head_tilt();
         assert!(!tilt.isRemovedOnCompletion());
         assert_eq!(tilt.beginTime(), 0.0);
+    }
+
+    #[test]
+    fn the_drain_track_is_linear_from_the_share() {
+        let animation = drain(0.5, 200.0, 2.0);
+        let track = tracks(&animation).remove(0);
+        let values = track.values().unwrap();
+        let value = |at| {
+            values
+                .objectAtIndex(at)
+                .downcast::<NSNumber>()
+                .unwrap()
+                .as_f64()
+        };
+        assert_eq!(value(0), 100.0);
+        assert_eq!(value(values.count() - 1), 0.0);
+        assert_eq!(animation.duration(), 2.0);
+        // SAFETY: Core Animation defines the fill modes as immutable constants.
+        assert_eq!(&*animation.fillMode(), unsafe { kCAFillModeForwards });
     }
 
     #[test]

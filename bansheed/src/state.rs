@@ -566,6 +566,8 @@ pub struct DaemonState {
     level_watchers: Arc<watch::Sender<usize>>,
     // The committed words of the recording in progress, empty between recordings.
     words: watch::Sender<String>,
+    // The question an agent is asking, empty once it ends.
+    question: watch::Sender<String>,
     withdrawals: Mutex<Withdrawals>,
     // The route of the last switch handed to the listener, which may still
     // wait in its queue.
@@ -678,6 +680,7 @@ impl DaemonState {
             level: watch::channel(0.0).0,
             level_watchers: Arc::new(watch::channel(0).0),
             words: watch::channel(String::new()).0,
+            question: watch::channel(String::new()).0,
             withdrawals: Mutex::new(Withdrawals::default()),
             asked_listener: Mutex::new(asked_listener),
         }
@@ -2044,6 +2047,14 @@ impl DaemonState {
 
     pub fn subscribe_words(&self) -> watch::Receiver<String> {
         self.words.subscribe()
+    }
+
+    pub fn publish_question(&self, text: &str) {
+        self.question.send_replace(text.to_string());
+    }
+
+    pub fn subscribe_question(&self) -> watch::Receiver<String> {
+        self.question.subscribe()
     }
 
     /// Whether a client shows the words. Each subscriber's push task holds a

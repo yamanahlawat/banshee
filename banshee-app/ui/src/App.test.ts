@@ -36,6 +36,7 @@ vi.mock('./lib/tauri', async () => (await import('./lib/tauri.mock')).mockTauri(
 import {
   detectAgents,
   history,
+  launchMissed,
   listen,
   listVoices,
   listDevices,
@@ -184,7 +185,7 @@ it('lands on History when the window is reopened', async () => {
   await choose('Listening');
   await waitFor(() => expect(page('Listening')).toBeTruthy());
 
-  pushes.get('app:reopened')?.({ payload: null });
+  pushes.get('app:reopened')?.({ payload: { missed: false } });
 
   await waitFor(() => expect(screen.queryByRole('region', { name: 'Listening' })).toBeNull());
   expect(page('History')).toBeTruthy();
@@ -379,7 +380,7 @@ it('follows the newest row again when the window is reopened', async () => {
   const newest = await screen.findByRole('option', { name: /^The newest one\./ });
   expect(newest.getAttribute('aria-selected')).toBe('false');
 
-  pushes.get('app:reopened')?.({ payload: null });
+  pushes.get('app:reopened')?.({ payload: { missed: false } });
   await waitFor(() =>
     expect(
       screen.getByRole('option', { name: /^The newest one\./ }).getAttribute('aria-selected'),
@@ -396,9 +397,64 @@ it('empties the search when the window is reopened', async () => {
   await fireEvent.input(find, { target: { value: 'older' } });
   await waitFor(() => expect(screen.getAllByRole('option').length).toBe(1));
 
-  pushes.get('app:reopened')?.({ payload: null });
+  pushes.get('app:reopened')?.({ payload: { missed: false } });
   await waitFor(() => expect(screen.getAllByRole('option').length).toBe(2));
   expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('');
+});
+
+const selectedRow = () => screen.getByRole('region', { name: 'Selected row' });
+
+it('lands on the newest unanswered question when reopened for a missed one', async () => {
+  vi.mocked(history).mockResolvedValue([
+    asked(3, { question: 'Should I update the reports?', timestamp: stamp(8) }),
+    ...rows,
+  ]);
+  render(App);
+  await listed();
+  expect(within(selectedRow()).queryByText('Should I update the reports?')).toBeNull();
+
+  pushes.get('app:reopened')?.({ payload: { missed: true } });
+  await waitFor(() =>
+    expect(within(selectedRow()).getByText('Should I update the reports?')).toBeTruthy(),
+  );
+  expect(
+    screen
+      .getByRole('option', { name: /^Agent asked Should I update the reports\?/ })
+      .getAttribute('aria-selected'),
+  ).toBe('true');
+});
+
+it('lands on the newest unanswered question when launched for a missed one', async () => {
+  vi.mocked(history).mockResolvedValue([
+    asked(3, { question: 'Should I update the reports?', timestamp: stamp(8) }),
+    ...rows,
+  ]);
+  vi.mocked(launchMissed).mockResolvedValueOnce(true);
+  render(App);
+  await waitFor(() =>
+    expect(within(selectedRow()).getByText('Should I update the reports?')).toBeTruthy(),
+  );
+});
+
+it('a reopen with no target follows the newest row', async () => {
+  vi.mocked(history).mockResolvedValue([
+    asked(3, { question: 'Should I update the reports?', timestamp: stamp(8) }),
+    ...rows,
+  ]);
+  render(App);
+  await listed();
+  const older = () => screen.getByRole('option', { name: /^the older one,/ });
+  await fireEvent.click(older());
+
+  pushes.get('app:reopened')?.({ payload: { missed: false } });
+  await waitFor(() =>
+    expect(
+      screen
+        .getByRole('option', { name: /^Yes, open the pull request\./ })
+        .getAttribute('aria-selected'),
+    ).toBe('true'),
+  );
+  expect(get(view).chosen).toBeNull();
 });
 
 // The list below keeps its height only while the stack scrolls on its own.
@@ -2282,6 +2338,36 @@ describe('below the width the sidebar folds at', () => {
     expect(drawer()).toBeNull();
     expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('older');
     expect(screen.getAllByRole('option').length).toBe(1);
+  });
+
+  it('opens the missed question in place of the list when reopened for it', async () => {
+    vi.mocked(history).mockResolvedValue([
+      asked(3, { question: 'Should I update the reports?', timestamp: stamp(8) }),
+      ...rows,
+    ]);
+    render(App);
+    await listed();
+    expect(screen.queryByRole('region', { name: 'Selected row' })).toBeNull();
+    const focused = document.activeElement;
+
+    pushes.get('app:reopened')?.({ payload: { missed: true } });
+    await waitFor(() =>
+      expect(within(selectedRow()).getByText('Should I update the reports?')).toBeTruthy(),
+    );
+    expect(screen.getByRole('button', { name: 'Back to History' })).toBeTruthy();
+    expect(document.activeElement).toBe(focused);
+  });
+
+  it('opens the missed question in place of the list when launched for it', async () => {
+    vi.mocked(history).mockResolvedValue([
+      asked(3, { question: 'Should I update the reports?', timestamp: stamp(8) }),
+      ...rows,
+    ]);
+    vi.mocked(launchMissed).mockResolvedValueOnce(true);
+    render(App);
+    await waitFor(() =>
+      expect(within(selectedRow()).getByText('Should I update the reports?')).toBeTruthy(),
+    );
   });
 
   it('puts Back in the toolbar while a row is open, and it returns to the same option', async () => {

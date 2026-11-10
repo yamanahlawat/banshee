@@ -1,7 +1,7 @@
 //! Which moves each scene plays, independent of what draws them.
 
-use crate::chip::{Show, words_of};
-use crate::figure::{self, CAPSULE, Pose, WORKING_DEPTH};
+use crate::chip::{Done, Scene, Show, words_of};
+use crate::figure::{self, Pose, WORKING_DEPTH};
 
 /// What a scene plays. Each names one gesture, or the fade that stands in
 /// for it under Reduce Motion.
@@ -23,6 +23,7 @@ pub enum Move {
     Breaks,
     Words,
     WordsFade,
+    Pulse,
     Float,
     FrameSink,
     FailureExit,
@@ -41,13 +42,30 @@ pub enum Entrance {
 }
 
 /// The moves a scene plays as its serial moves. `calm` is Reduce Motion.
-pub fn moves(show: &Show, entrance: Entrance, calm: bool) -> Vec<Move> {
+pub fn moves(scene: &Scene, entrance: Entrance, calm: bool) -> Vec<Move> {
+    let show = &scene.show;
     let mut moves = Vec::new();
+    if is_card(scene) {
+        match entrance {
+            Entrance::Fresh => moves.push(if calm { Move::FadeIn } else { Move::Rise }),
+            Entrance::SameWords => return moves,
+            Entrance::NewWords => {}
+        }
+        if matches!(show, Show::Working) && !calm {
+            moves.push(Move::Pulse);
+        }
+        moves.push(Move::WordsFade);
+        return moves;
+    }
     if entrance == Entrance::Fresh {
         moves.push(if calm { Move::FadeIn } else { Move::Rise });
         if !calm && matches!(show, Show::Recording(_)) {
             moves.push(Move::Emerge);
         }
+    }
+    if matches!(show, Show::Done(Done::Sent)) {
+        moves.push(Move::WordsFade);
+        return moves;
     }
     if entrance == Entrance::SameWords {
         moves.extend_from_slice(opening(calm));
@@ -57,19 +75,30 @@ pub fn moves(show: &Show, entrance: Entrance, calm: bool) -> Vec<Move> {
         (Show::Recording(_), false) => &[Move::Kindle][..],
         (Show::Recording(_), true) => &[Move::KindleFade],
         (Show::Working, false) => &[Move::Hover, Move::Orbit],
-        (Show::YourTurn, false) => &[Move::Cups],
+        (Show::YourTurn | Show::Reading, false) => &[Move::Cups],
         (Show::NothingHeard(_), false) => &[Move::Shake, Move::Breaks],
         (Show::Broken(_), false) => &[Move::Strain, Move::Breaks],
         (Show::Done(_), false) => &[Move::Float, Move::FrameSink],
         (Show::Done(_), true) => &[Move::FadeOut],
-        (Show::Copied, _) => &[],
+        (Show::Copied | Show::Missed { .. }, _) => &[],
         (Show::Answering(_), calm) => opening(calm),
-        (Show::Working | Show::YourTurn | Show::NothingHeard(_) | Show::Broken(_), true) => &[],
+        (
+            Show::Working
+            | Show::YourTurn
+            | Show::Reading
+            | Show::NothingHeard(_)
+            | Show::Broken(_),
+            true,
+        ) => &[],
     });
     if words_of(show).is_some() {
         moves.push(if calm { Move::WordsFade } else { Move::Words });
     }
     moves
+}
+
+pub fn is_card(scene: &Scene) -> bool {
+    scene.question.is_some()
 }
 
 /// What the answer plays as it opens: the fill, and the head tilting in to
@@ -102,7 +131,7 @@ pub fn wears_headphones(show: &Show) -> bool {
 
 /// A click on the capsule opens the window.
 pub fn takes_clicks(show: &Show) -> bool {
-    matches!(show, Show::Broken(_))
+    matches!(show, Show::Broken(_) | Show::Missed { .. })
 }
 
 /// The figure's pose outside the voice states: the hem deeper while Working,
@@ -123,11 +152,11 @@ pub fn centred(midline: f64, width: f64) -> f64 {
     midline - width / 2.0
 }
 
-/// How a scene leaves when none follows it. `None` for Done: its float has
-/// already carried it out.
+/// How a scene leaves when none follows it. `None` for a typed Done: its
+/// float has already carried it out.
 pub fn leaving(show: &Show, calm: bool) -> Option<Move> {
     match show {
-        Show::Done(_) => None,
+        Show::Done(Done::Typed) => None,
         _ => Some(if calm {
             Move::FadeOut
         } else {
@@ -136,60 +165,62 @@ pub fn leaving(show: &Show, calm: bool) -> Option<Move> {
     }
 }
 
-/// A surface holds the capsule at its top, the clear space below it, and room
-/// on both sides during a width transition. Only a point in the rounded shape
-/// of the centred capsule, `capsule` wide, counts. `y` runs down from the top.
-pub fn in_capsule(view_width: f64, capsule: f64, x: f64, y: f64) -> bool {
-    let radius = CAPSULE / 2.0;
-    let x = x - (view_width - capsule) / 2.0;
-    let centre_x = x.clamp(radius, (capsule - radius).max(radius));
-    (x - centre_x).hypot(y - radius) <= radius
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chip::Done;
-    use crate::figure::TRAVEL;
-
-    #[test]
-    fn a_click_lands_only_inside_the_capsules_rounded_shape() {
-        for (x, y) in [(2.0, 22.0), (98.0, 22.0), (50.0, 22.0)] {
-            assert!(in_capsule(100.0, 100.0, x, y), "({x}, {y})");
-        }
-        for (x, y) in [(0.0, 0.0), (100.0, 0.0), (0.0, 44.0), (100.0, 44.0)] {
-            assert!(!in_capsule(100.0, 100.0, x, y), "({x}, {y})");
-        }
-    }
-
-    #[test]
-    fn a_click_in_the_clear_space_below_the_capsule_misses() {
-        for y in [
-            CAPSULE + 1.0,
-            CAPSULE + TRAVEL / 2.0,
-            CAPSULE + TRAVEL - 1.0,
-        ] {
-            assert!(!in_capsule(100.0, 100.0, 50.0, y), "y {y}");
-        }
-    }
-
-    #[test]
-    fn a_click_beside_a_narrower_centred_capsule_misses() {
-        for x in [2.0, 18.0, 122.0, 138.0] {
-            assert!(!in_capsule(140.0, 100.0, x, 22.0), "x {x}");
-        }
-        for x in [22.0, 70.0, 118.0] {
-            assert!(in_capsule(140.0, 100.0, x, 22.0), "x {x}");
-        }
-    }
 
     #[test]
     fn copied_shows_its_word_with_no_failure_move() {
         use Move::*;
-        assert_eq!(moves(&Show::Copied, Entrance::NewWords, false), [Words]);
-        assert_eq!(moves(&Show::Copied, Entrance::Fresh, false), [Rise, Words]);
-        assert_eq!(moves(&Show::Copied, Entrance::NewWords, true), [WordsFade]);
+        assert_eq!(
+            moves(&Scene::of(Show::Copied, 1), Entrance::NewWords, false),
+            [Words]
+        );
+        assert_eq!(
+            moves(&Scene::of(Show::Copied, 1), Entrance::Fresh, false),
+            [Rise, Words]
+        );
+        assert_eq!(
+            moves(&Scene::of(Show::Copied, 1), Entrance::NewWords, true),
+            [WordsFade]
+        );
         assert_eq!(leaving(&Show::Copied, false), Some(FailureExit));
+    }
+
+    fn card(show: Show) -> Scene {
+        Scene {
+            question: Some("q?".into()),
+            ..Scene::of(show, 1)
+        }
+    }
+
+    #[test]
+    fn a_card_plays_only_the_fade_in_the_pulse_and_the_words_fade() {
+        use Move::*;
+        assert_eq!(
+            moves(&card(Show::Working), Entrance::NewWords, false),
+            [Pulse, WordsFade]
+        );
+        assert_eq!(
+            moves(&card(Show::Reading), Entrance::Fresh, false),
+            [Rise, WordsFade]
+        );
+        assert_eq!(
+            moves(
+                &card(Show::Answering("yes".into())),
+                Entrance::SameWords,
+                false
+            ),
+            []
+        );
+        assert_eq!(
+            moves(&card(Show::Working), Entrance::NewWords, true),
+            [WordsFade]
+        );
+        assert_eq!(
+            moves(&card(Show::Reading), Entrance::Fresh, true),
+            [FadeIn, WordsFade]
+        );
     }
 
     fn failures() -> [Show; 2] {
@@ -210,14 +241,15 @@ mod tests {
             broken,
             Show::Done(Done::Typed),
             Show::Copied,
+            Show::Reading,
         ]
     }
 
     #[test]
     fn only_a_scene_from_none_rises_and_only_recording_emerges() {
         for show in every_show() {
-            let entering = moves(&show, Entrance::Fresh, false);
-            let staying = moves(&show, Entrance::NewWords, false);
+            let entering = moves(&Scene::of(show.clone(), 1), Entrance::Fresh, false);
+            let staying = moves(&Scene::of(show.clone(), 1), Entrance::NewWords, false);
             assert_eq!(entering.first(), Some(&Move::Rise), "{show:?}");
             assert!(!staying.contains(&Move::Rise), "{show:?}");
             assert_eq!(
@@ -233,24 +265,31 @@ mod tests {
     fn each_state_plays_its_own_gesture() {
         use Move::*;
         assert_eq!(
-            moves(&Show::YourTurn, Entrance::NewWords, false),
+            moves(&Scene::of(Show::YourTurn, 1), Entrance::NewWords, false),
             [Cups, Words]
         );
         assert_eq!(
-            moves(&Show::Answering(String::new()), Entrance::NewWords, false),
+            moves(
+                &Scene::of(Show::Answering(String::new()), 1),
+                Entrance::NewWords,
+                false
+            ),
             [Open, Tilt, Words]
         );
         let [nothing_heard, broken] = failures();
         assert_eq!(
-            moves(&nothing_heard, Entrance::NewWords, false),
+            moves(&Scene::of(nothing_heard, 1), Entrance::NewWords, false),
             [Shake, Breaks, Words]
         );
         assert_eq!(
-            moves(&broken, Entrance::NewWords, false),
+            moves(&Scene::of(broken, 1), Entrance::NewWords, false),
             [Strain, Breaks, Words]
         );
         let done = Show::Done(Done::Typed);
-        assert_eq!(moves(&done, Entrance::NewWords, false), [Float, FrameSink]);
+        assert_eq!(
+            moves(&Scene::of(done, 1), Entrance::NewWords, false),
+            [Float, FrameSink]
+        );
     }
 
     #[test]
@@ -264,11 +303,19 @@ mod tests {
     fn answering_in_place_only_opens_and_drops_the_words_reveal() {
         use Move::*;
         assert_eq!(
-            moves(&Show::Answering(String::new()), Entrance::SameWords, false),
+            moves(
+                &Scene::of(Show::Answering(String::new()), 1),
+                Entrance::SameWords,
+                false
+            ),
             [Open, Tilt]
         );
         assert_eq!(
-            moves(&Show::Answering(String::new()), Entrance::SameWords, true),
+            moves(
+                &Scene::of(Show::Answering(String::new()), 1),
+                Entrance::SameWords,
+                true
+            ),
             [OpenFade]
         );
     }
@@ -321,25 +368,58 @@ mod tests {
     fn reduce_motion_keeps_only_the_fades() {
         use Move::*;
         assert_eq!(
-            moves(&Show::Recording(String::new()), Entrance::Fresh, true),
+            moves(
+                &Scene::of(Show::Recording(String::new()), 1),
+                Entrance::Fresh,
+                true
+            ),
             [FadeIn, KindleFade]
         );
-        assert_eq!(moves(&Show::Working, Entrance::NewWords, true), []);
         assert_eq!(
-            moves(&Show::YourTurn, Entrance::Fresh, true),
+            moves(&Scene::of(Show::Working, 1), Entrance::NewWords, true),
+            []
+        );
+        assert_eq!(
+            moves(&Scene::of(Show::YourTurn, 1), Entrance::Fresh, true),
             [FadeIn, WordsFade]
         );
         assert_eq!(
-            moves(&Show::Answering(String::new()), Entrance::NewWords, true),
+            moves(
+                &Scene::of(Show::Answering(String::new()), 1),
+                Entrance::NewWords,
+                true
+            ),
             [OpenFade, WordsFade]
         );
         for fault in failures() {
-            assert_eq!(moves(&fault, Entrance::NewWords, true), [WordsFade]);
+            assert_eq!(
+                moves(&Scene::of(fault, 1), Entrance::NewWords, true),
+                [WordsFade]
+            );
         }
         assert_eq!(
-            moves(&Show::Done(Done::Sent), Entrance::NewWords, true),
+            moves(
+                &Scene::of(Show::Done(Done::Typed), 1),
+                Entrance::NewWords,
+                true
+            ),
             [FadeOut]
         );
+    }
+
+    #[test]
+    fn sent_fades_its_words_in_and_sinks_out() {
+        use Move::*;
+        let sent = Show::Done(Done::Sent);
+        for calm in [false, true] {
+            assert_eq!(
+                moves(&Scene::of(sent.clone(), 1), Entrance::NewWords, calm),
+                [WordsFade]
+            );
+        }
+        assert_eq!(leaving(&sent, false), Some(FailureExit));
+        assert_eq!(leaving(&sent, true), Some(FadeOut));
+        assert_eq!(leaving(&Show::Done(Done::Typed), false), None);
     }
 
     #[test]
@@ -356,6 +436,28 @@ mod tests {
         {
             assert_eq!(leaving(&show, false), Some(Move::FailureExit), "{show:?}");
             assert_eq!(leaving(&show, true), Some(Move::FadeOut), "{show:?}");
+        }
+    }
+
+    #[test]
+    fn a_broken_scene_and_a_missed_pill_take_clicks() {
+        let missed = Show::Missed {
+            count: 1,
+            ask: String::new(),
+        };
+        assert!(takes_clicks(&missed));
+        assert!(takes_clicks(&Show::Broken("x".into())));
+        for show in [
+            Show::Recording(String::new()),
+            Show::Working,
+            Show::YourTurn,
+            Show::Answering(String::new()),
+            Show::NothingHeard("x".into()),
+            Show::Done(Done::Typed),
+            Show::Copied,
+            Show::Reading,
+        ] {
+            assert!(!takes_clicks(&show), "{show:?}");
         }
     }
 }

@@ -3,13 +3,14 @@
 
 use std::time::{Duration, Instant};
 
-use crate::chip::{Scene, Show, words_of};
-use crate::figure::{self, AROUND_WORDS, CAPSULE, LEVEL_STEP, Pose, SCREEN_MARGIN, Voice, seconds};
+use tiny_skia::Pixmap;
+
+use crate::card::{self, Shape};
+use crate::chip::{Scene, words_of};
+use crate::figure::{self, AROUND_WORDS, LEVEL_STEP, Pose, SCREEN_MARGIN, Voice, seconds};
 use crate::gesture;
-use crate::paint::{self, Frame};
-use crate::scenes::{
-    Entrance, Move, answer_opens, holds_the_voice, in_capsule, leaving, moves, takes_clicks,
-};
+use crate::paint::{self, Card, Frame};
+use crate::scenes::{Entrance, Move, answer_opens, holds_the_voice, leaving, moves, takes_clicks};
 use crate::words::{self, Line};
 
 /// `(x, y, width, height)` in surface logical pixels.
@@ -22,6 +23,14 @@ pub enum Order {
     Destroy,
 }
 
+/// One commit: the logical size to ask for, when it changes, and the frame to
+/// attach. A size committed without its frame shows the last buffer at the
+/// new size.
+pub struct Draw {
+    pub resize: Option<(u32, u32)>,
+    pub pixmap: Pixmap,
+}
+
 pub struct Renderer {
     /// On the surface, through its leave too.
     scene: Option<Scene>,
@@ -30,8 +39,12 @@ pub struct Renderer {
     moves: Vec<(Move, Instant, Option<f64>)>,
     leave_ends: Option<Instant>,
     line: Option<Line>,
+    card: Option<Card>,
     /// The width the capsule grows or shrinks from, and when that began.
     width_from: Option<(f64, Instant)>,
+    /// The height the card grows or shrinks from, and when that began.
+    height_from: Option<(f64, Instant)>,
+    fonts: words::Fonts,
     voice: Voice,
     voice_since: Option<Instant>,
     /// The pose the last level sample set, eased into from `pose_from`
@@ -39,10 +52,14 @@ pub struct Renderer {
     pose: Pose,
     pose_from: Pose,
     heard: Option<Instant>,
+    level: f64,
+    /// The surface's logical size, which never shrinks until the surface goes.
+    surface_size: (u32, u32),
     /// A frame is owed: the picture changed, or the surface asked for one.
     pub stale: bool,
     /// Logical pixels the words may take.
     pub room: f64,
+    pub card_room: f64,
 }
 
 impl Renderer {
@@ -52,14 +69,20 @@ impl Renderer {
             moves: Vec::new(),
             leave_ends: None,
             line: None,
+            card: None,
             width_from: None,
+            height_from: None,
+            fonts: words::Fonts,
             voice: Voice::default(),
             voice_since: None,
             pose: figure::pose(0.0, 0.0, false),
             pose_from: figure::pose(0.0, 0.0, false),
             heard: None,
+            level: 0.0,
+            surface_size: (0, 0),
             stale: false,
             room: f64::INFINITY,
+            card_room: card::room(f64::INFINITY),
         }
     }
 
@@ -72,11 +95,16 @@ impl Renderer {
             self.clear();
             orders.push(Order::Destroy);
         }
+        if self.scene.as_ref() == Some(scene) {
+            return orders;
+        }
+        let card = card::layout(scene, self.card_room, false, now, &self.fonts).map(Card::new);
         let entrance = match &self.scene {
             None => Entrance::Fresh,
-            Some(shown) if shown == scene => return orders,
-            Some(shown) if shown.serial == scene.serial => {
-                self.lay_words(&scene.show, now);
+            Some(shown)
+                if shown.serial == scene.serial && self.card.is_some() == card.is_some() =>
+            {
+                self.lay_words(scene, card, now);
                 self.scene = Some(scene.clone());
                 return orders;
             }
@@ -94,8 +122,9 @@ impl Renderer {
         self.voice_since = Some(now);
         self.pose = figure::pose(0.0, 0.0, false);
         self.heard = None;
-        self.lay_words(&scene.show, now);
-        let started = moves(&scene.show, entrance, false);
+        self.level = 0.0;
+        self.lay_words(scene, card, now);
+        let started = moves(scene, entrance, false);
         self.moves.extend(
             started
                 .into_iter()
@@ -105,13 +134,21 @@ impl Renderer {
         orders
     }
 
-    /// Sets the words and sizes the capsule to them, from the width it shows
-    /// now when a scene already shows.
-    fn lay_words(&mut self, show: &Show, now: Instant) {
-        let from = self.widths(now).map(|(_, shown)| shown);
-        self.line = words_of(show).map(|(text, cut)| words::line(text, cut, self.room as f32));
-        let to = paint::width(self.line.as_ref());
-        self.width_from = from.filter(|&from| from != to).map(|from| (from, now));
+    /// Sets the words or the card and sizes the capsule to them, from the
+    /// size it shows now when a scene already shows.
+    fn lay_words(&mut self, scene: &Scene, card: Option<Card>, now: Instant) {
+        let from = self.picture(now, 1, |frame| {
+            (paint::shown_width(frame), paint::shown_height(frame))
+        });
+        self.card = card;
+        self.line = words_of(&scene.show)
+            .filter(|_| self.card.is_none())
+            .map(|(text, cut)| words::line(text, cut, self.room as f32));
+        let layout = self.card.as_ref().map(|card| &card.layout);
+        let (width, height) = paint::target(self.line.as_ref(), layout);
+        let moved = |from: f64, to: f64| (from != to).then_some((from, now));
+        self.width_from = from.and_then(|(from, _)| moved(from, width));
+        self.height_from = from.and_then(|(_, from)| moved(from, height));
         self.stale = true;
     }
 
@@ -147,22 +184,29 @@ impl Renderer {
     }
 
     pub fn level(&mut self, peak: f32, now: Instant) {
-        let hears = self.leave_ends.is_none()
-            && self
-                .scene
-                .as_ref()
-                .is_some_and(|scene| holds_the_voice(&scene.show));
-        if !hears {
+        let Some(scene) = self.scene.as_ref().filter(|_| self.leave_ends.is_none()) else {
+            return;
+        };
+        let bars = self
+            .card
+            .as_ref()
+            .is_some_and(|card| card.layout.follows_the_level());
+        let figure = self.card.is_none() && holds_the_voice(&scene.show);
+        if !bars && !figure {
             return;
         }
         let level = self.voice.hear(peak, now);
+        self.stale = true;
+        if bars {
+            self.level = level;
+            return;
+        }
         let t_ms = self
             .voice_since
             .map_or(0.0, |since| seconds(since, now) * 1000.0);
         self.pose_from = self.pose_at(now);
         self.pose = figure::pose(level, t_ms, false);
         self.heard = Some(now);
-        self.stale = true;
     }
 
     /// Whether frames still change with nothing new coming in.
@@ -174,7 +218,17 @@ impl Renderer {
         let easing = self
             .heard
             .is_some_and(|heard| seconds(heard, now) < LEVEL_STEP);
-        moving || easing || self.transition(now).is_some()
+        let counting = self.countdown_share(now).is_some_and(|share| share > 0.0);
+        moving
+            || easing
+            || counting
+            || self.transition(now).is_some()
+            || self.height_transition(now).is_some()
+    }
+
+    fn countdown_share(&self, now: Instant) -> Option<f64> {
+        let countdown = self.scene.as_ref()?.countdown?;
+        Some(card::share_left(countdown, now))
     }
 
     /// The pose part way from the one before the last sample to the last, at a
@@ -189,9 +243,11 @@ impl Renderer {
 
     /// The width transition's from-width and seconds so far, while it runs.
     fn transition(&self, now: Instant) -> Option<(f64, f64)> {
-        let (from, started) = self.width_from?;
-        let elapsed = seconds(started, now);
-        (elapsed < gesture::CHIP_WIDTH_LASTS).then_some((from, elapsed))
+        running(self.width_from, now)
+    }
+
+    fn height_transition(&self, now: Instant) -> Option<(f64, f64)> {
+        running(self.height_from, now)
     }
 
     /// Hands `use_frame` the frame at `now`. `None` with nothing on the surface.
@@ -213,34 +269,54 @@ impl Renderer {
             pose: self.pose_at(now),
             line: self.line.as_ref(),
             width_from: self.transition(now),
+            card: self.card.as_ref(),
+            height_from: self.height_transition(now),
+            level: self.level,
+            countdown_share: self.countdown_share(now),
             scale,
+            at_least: self.surface_size,
         }))
     }
 
-    /// The surface's span and the capsule's width as it shows at `now`. `None`
-    /// with nothing on the surface.
-    fn widths(&self, now: Instant) -> Option<(f64, f64)> {
-        self.scene.as_ref()?;
-        Some(paint::widths(self.line.as_ref(), self.transition(now)))
+    /// The logical size a new surface asks for.
+    pub fn open(&mut self, now: Instant) -> Option<(u32, u32)> {
+        self.surface_size = self.picture(now, 1, paint::size)?;
+        Some(self.surface_size)
     }
 
-    /// The capsule's rectangle while a failure shows and takes clicks.
+    /// What the surface commits next.
+    pub fn draw(&mut self, now: Instant, scale: u32) -> Option<Draw> {
+        let (size, pixmap) = self.picture(now, scale, |frame| {
+            (paint::size(frame), paint::paint(frame))
+        })?;
+        self.stale = false;
+        let resize = (size != self.surface_size).then_some(size);
+        self.surface_size = size;
+        Some(Draw { resize, pixmap })
+    }
+
+    /// The capsule's or the pill's rectangle while it takes clicks.
     pub fn input_region(&self, now: Instant) -> Option<Rect> {
-        let (span, width, top) = self.clickable(now)?;
-        let x = ((span - width) / 2.0).floor();
-        Some((x as i32, top as i32, width.ceil() as i32, CAPSULE as i32))
+        let (span, shape, top) = self.clickable(now)?;
+        let x = ((span - shape.width) / 2.0).floor();
+        Some((
+            x as i32,
+            top as i32,
+            shape.width.ceil() as i32,
+            shape.height.ceil() as i32,
+        ))
     }
 
     /// Whether a press at `(x, y)`, surface logical pixels, lands on a
-    /// capsule that takes clicks.
+    /// capsule or a pill that takes clicks.
     pub fn opens_at(&self, x: f64, y: f64, now: Instant) -> bool {
         self.clickable(now)
-            .is_some_and(|(span, width, top)| in_capsule(span, width, x, y - top))
+            .is_some_and(|(span, shape, top)| card::in_shape(span, shape, x, y - top))
     }
 
-    /// The surface's span, the capsule's width and its top edge to the whole
-    /// pixel, while a failure shows and is not on its way out.
-    fn clickable(&self, now: Instant) -> Option<(f64, f64, f64)> {
+    /// The surface's span, the shape as it shows and its top edge to the whole
+    /// pixel, while a scene that takes clicks shows and is not on its way out.
+    fn clickable(&self, now: Instant) -> Option<(f64, Shape, f64)> {
         let clicks = self
             .scene
             .as_ref()
@@ -249,8 +325,11 @@ impl Renderer {
             return None;
         }
         self.picture(now, 1, |frame| {
-            let (span, width) = paint::widths(frame.line, frame.width_from);
-            (span, width, paint::capsule_top(frame).round())
+            (
+                f64::from(paint::size(frame).0),
+                paint::shown_shape(frame),
+                paint::capsule_top(frame).round(),
+            )
         })
     }
 
@@ -259,14 +338,27 @@ impl Renderer {
         self.moves.clear();
         self.leave_ends = None;
         self.line = None;
+        self.card = None;
         self.width_from = None;
+        self.height_from = None;
+        self.surface_size = (0, 0);
     }
+}
+
+fn running(from: Option<(f64, Instant)>, now: Instant) -> Option<(f64, f64)> {
+    let (from, started) = from?;
+    let elapsed = seconds(started, now);
+    (elapsed < gesture::CHIP_WIDTH_LASTS).then_some((from, elapsed))
 }
 
 /// The words' room on an output `width` logical pixels wide, with the capsule
 /// centred and clear of both sides.
 pub fn room_on(width: i32) -> f64 {
     f64::from(width) - 2.0 * SCREEN_MARGIN - AROUND_WORDS
+}
+
+pub fn card_room_on(width: i32) -> f64 {
+    card::room(f64::from(width) - 2.0 * SCREEN_MARGIN)
 }
 
 /// tiny-skia's premultiplied RGBA as `wl_shm` ARGB8888, a premultiplied
@@ -286,14 +378,16 @@ pub fn to_argb(rgba: &[u8], argb: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chip::Done;
+    use crate::card::{CARD_WIDTH, SIDE};
+    use crate::chip::{Countdown, Done, Show};
+    use crate::figure::{CAPSULE, TRAVEL};
 
     fn at(t0: Instant, ms: u64) -> Instant {
         t0 + Duration::from_millis(ms)
     }
 
     fn scene(show: Show, serial: u64) -> Scene {
-        Scene { show, serial }
+        Scene::of(show, serial)
     }
 
     #[test]
@@ -359,7 +453,7 @@ mod tests {
             None,
             "a rise has no width to grow from"
         );
-        let before = renderer.widths(at(t0, 500)).map(|(_, shown)| shown);
+        let before = renderer.picture(at(t0, 500), 1, paint::shown_width);
         let longer = scene(Show::Recording("hi there, how are you".into()), 1);
         renderer.show(Some(&longer), at(t0, 500));
         let (from, _) = renderer.transition(at(t0, 500)).expect("the width moves");
@@ -459,8 +553,15 @@ mod tests {
         assert_eq!(settled.1, 0);
     }
 
+    fn missed() -> Show {
+        Show::Missed {
+            count: 1,
+            ask: "ask".into(),
+        }
+    }
+
     #[test]
-    fn only_a_broken_scene_takes_clicks() {
+    fn only_a_broken_or_missed_scene_takes_clicks() {
         let t0 = Instant::now();
         let others = [
             Show::Recording("hi".into()),
@@ -469,13 +570,17 @@ mod tests {
             Show::Answering("ok".into()),
             Show::NothingHeard("Nothing heard".into()),
             Show::Done(Done::Typed),
+            Show::Done(Done::Sent),
             Show::Copied,
+            Show::Reading,
         ];
         for show in others {
-            let mut renderer = Renderer::new();
-            renderer.show(Some(&scene(show.clone(), 1)), t0);
-            assert_eq!(renderer.input_region(at(t0, 500)), None, "{show:?}");
-            assert!(!renderer.opens_at(20.0, 22.0, at(t0, 500)), "{show:?}");
+            for scene in [scene(show.clone(), 1), card(show.clone(), 1)] {
+                let mut renderer = Renderer::new();
+                renderer.show(Some(&scene), t0);
+                assert_eq!(renderer.input_region(at(t0, 500)), None, "{show:?}");
+                assert!(!renderer.opens_at(20.0, 22.0, at(t0, 500)), "{show:?}");
+            }
         }
         let mut renderer = Renderer::new();
         assert_eq!(renderer.input_region(t0), None, "nothing shows");
@@ -483,6 +588,39 @@ mod tests {
         let (x, y, width, height) = renderer.input_region(at(t0, 500)).expect("a failure");
         assert_eq!((x, y, height), (0, 0, CAPSULE as i32));
         assert_eq!(f64::from(width), paint::width(renderer.line.as_ref()));
+
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&scene(missed(), 1)), t0);
+        let shape = renderer
+            .card
+            .as_ref()
+            .map(|card| card.layout.shape)
+            .expect("a layout");
+        assert_eq!(
+            renderer.input_region(at(t0, 500)),
+            Some((0, 0, shape.width.ceil() as i32, shape.height.ceil() as i32))
+        );
+    }
+
+    #[test]
+    fn a_press_inside_the_missed_pill_opens_the_window() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&scene(missed(), 1)), t0);
+        let shape = renderer
+            .card
+            .as_ref()
+            .map(|card| card.layout.shape)
+            .expect("a layout");
+        let (width, height) = (shape.width, shape.height);
+        let now = at(t0, 500);
+        assert!(renderer.opens_at(width / 2.0, height / 2.0, now));
+        assert!(
+            renderer.opens_at(width / 2.0, height - 2.0, now),
+            "the second line"
+        );
+        assert!(!renderer.opens_at(1.0, 1.0, now), "the corner");
+        assert!(!renderer.opens_at(width / 2.0, height + 2.0, now), "below");
     }
 
     #[test]
@@ -526,6 +664,218 @@ mod tests {
         assert_eq!(start.2, narrow.2, "it grows from the width it shows");
         assert!(end.2 > start.2);
         assert!(start.0 > 0 && end.0 == 0, "{start:?} {end:?}");
+    }
+
+    fn card(show: Show, serial: u64) -> Scene {
+        Scene {
+            question: Some("The build is red. Retry it?".into()),
+            ..scene(show, serial)
+        }
+    }
+
+    #[test]
+    fn a_card_grows_from_the_height_it_shows() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&card(Show::Reading, 1)), t0);
+        let reading = renderer
+            .picture(at(t0, 500), 1, paint::shown_height)
+            .expect("a scene shows");
+        let words = vec!["alpha"; 30].join(" ");
+        renderer.show(Some(&card(Show::Answering(words), 2)), at(t0, 500));
+        let (from, _) = renderer.height_from.expect("the height moves");
+        assert_eq!(from, reading);
+        let answering = renderer
+            .card
+            .as_ref()
+            .map(|card| card.layout.shape.height.ceil())
+            .expect("a card");
+        assert!(answering > reading, "{answering} {reading}");
+        let size = renderer.picture(at(t0, 500), 1, paint::size);
+        assert_eq!(size, Some((CARD_WIDTH as u32, (TRAVEL + answering) as u32)));
+        assert!(renderer.live(at(t0, 600)));
+        assert!(!renderer.live(at(t0, 1500)));
+    }
+
+    #[test]
+    fn the_card_shrinks_to_the_sent_pill_from_its_shown_size() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&card(Show::Working, 1)), t0);
+        let height = renderer
+            .card
+            .as_ref()
+            .map(|card| card.layout.shape.height.ceil())
+            .expect("a card");
+        let t = at(t0, 1000);
+        let sent = scene(Show::Done(Done::Sent), 2);
+        renderer.show(Some(&sent), t);
+        assert_eq!(renderer.height_from, Some((height, t)));
+        assert_eq!(renderer.width_from, Some((CARD_WIDTH, t)));
+        let shape = renderer.card.as_ref().map(|card| card.layout.shape);
+        assert!(
+            shape.is_some_and(|shape| shape.height == CAPSULE && shape.radius == CAPSULE / 2.0),
+            "{shape:?}"
+        );
+        assert!(renderer.line.is_none());
+    }
+
+    fn pixels(draw: &Draw) -> (u32, u32) {
+        (draw.pixmap.width(), draw.pixmap.height())
+    }
+
+    #[test]
+    fn the_surface_keeps_the_card_size_once_the_card_shrinks_to_the_sent_pill() {
+        for scale in [1, 2] {
+            let t0 = Instant::now();
+            let mut renderer = Renderer::new();
+            renderer.show(Some(&card(Show::Working, 1)), t0);
+            let card_size = renderer.open(t0).expect("a card");
+            let first = renderer.draw(t0, scale).expect("a card");
+            assert_eq!(first.resize, None);
+            renderer.show(Some(&scene(Show::Done(Done::Sent), 2)), at(t0, 1000));
+            for ms in [1100, 2000, 5000] {
+                let draw = renderer.draw(at(t0, ms), scale).expect("a pill");
+                assert_eq!(draw.resize, None, "at {ms} ms, scale {scale}");
+                assert_eq!(
+                    pixels(&draw),
+                    (card_size.0 * scale, card_size.1 * scale),
+                    "at {ms} ms, scale {scale}"
+                );
+            }
+            let top = renderer
+                .picture(at(t0, 5000), 1, paint::capsule_top)
+                .expect("a pill");
+            assert_eq!(top, f64::from(card_size.1) - TRAVEL - CAPSULE);
+        }
+    }
+
+    #[test]
+    fn a_growing_surface_asks_for_its_size_with_the_frame_that_fills_it() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&scene(Show::Recording("hi".into()), 1)), t0);
+        let short = renderer.open(t0).expect("a pill");
+        renderer.draw(t0, 2).expect("a pill");
+        let longer = Show::Recording("hi there, how are you doing today".into());
+        renderer.show(Some(&scene(longer, 1)), at(t0, 500));
+        let draw = renderer.draw(at(t0, 1500), 2).expect("a pill");
+        let (width, height) = draw.resize.expect("the surface grows");
+        assert!(width > short.0, "{width} {}", short.0);
+        assert_eq!(pixels(&draw), (width * 2, height * 2));
+        renderer.show(Some(&scene(Show::Recording("hi".into()), 1)), at(t0, 1500));
+        let draw = renderer.draw(at(t0, 3000), 2).expect("a pill");
+        assert_eq!(draw.resize, None, "it never shrinks while it shows");
+    }
+
+    #[test]
+    fn a_fresh_surface_starts_at_its_own_size() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&card(Show::Working, 1)), t0);
+        renderer.open(t0).expect("a card");
+        renderer.draw(t0, 1).expect("a card");
+        renderer.show(None, at(t0, 1000));
+        let ends = renderer.deadline().expect("a leave has an end");
+        assert_eq!(renderer.tick(ends), [Order::Destroy]);
+        renderer.show(Some(&scene(Show::Working, 2)), at(t0, 5000));
+        let size = renderer.picture(at(t0, 5000), 1, paint::size);
+        assert_eq!(size, Some((CAPSULE as u32, (TRAVEL + CAPSULE) as u32)));
+    }
+
+    #[test]
+    fn a_serial_keeps_its_moves_only_while_its_layout_stays() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&card(Show::Working, 1)), t0);
+        renderer.show(
+            Some(&card(Show::NothingHeard("Nothing heard".into()), 1)),
+            at(t0, 500),
+        );
+        assert!(renderer.card.is_none());
+        let steps: Vec<_> = renderer.moves.iter().map(|&(step, ..)| step).collect();
+        assert!(!steps.contains(&Move::Pulse), "{steps:?}");
+    }
+
+    #[test]
+    fn a_countdown_keeps_the_frames_coming_until_it_closes() {
+        let t0 = Instant::now();
+        let answering = card(Show::Answering("yes".into()), 1);
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&answering), t0);
+        let since = at(t0, 5000);
+        assert!(!renderer.live(since));
+        let countdown = Countdown {
+            since,
+            lasts: Duration::from_millis(2500),
+            teach: false,
+        };
+        let counting = Scene {
+            countdown: Some(countdown),
+            ..answering
+        };
+        renderer.show(Some(&counting), since);
+        assert!(renderer.live(since + Duration::from_secs(1)));
+        assert!(!renderer.live(since + countdown.lasts + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn a_scene_with_a_question_has_a_layout_and_a_pill_has_none() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&card(Show::YourTurn, 1)), t0);
+        assert!(renderer.card.is_some());
+        renderer.show(Some(&scene(Show::YourTurn, 2)), at(t0, 500));
+        assert!(renderer.card.is_none());
+    }
+
+    #[test]
+    fn a_question_that_clears_at_one_serial_turns_the_card_into_the_pill() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&card(Show::Working, 1)), t0);
+        let orders = renderer.show(Some(&scene(Show::Working, 1)), at(t0, 500));
+        assert_eq!(orders, []);
+        assert!(renderer.card.is_none());
+        let steps: Vec<_> = renderer.moves.iter().map(|&(step, ..)| step).collect();
+        assert!(steps.contains(&Move::Orbit), "{steps:?}");
+        assert!(!steps.contains(&Move::Pulse), "{steps:?}");
+    }
+
+    #[test]
+    fn a_card_follows_the_level_only_while_it_waits_for_or_hears_the_answer() {
+        let t0 = Instant::now();
+        let level = |renderer: &Renderer, ms| {
+            renderer
+                .picture(at(t0, ms), 1, |frame| frame.level)
+                .expect("a scene shows")
+        };
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&card(Show::Working, 1)), t0);
+        renderer.level(1.0, at(t0, 100));
+        assert_eq!(level(&renderer, 100), 0.0);
+        renderer.show(Some(&card(Show::YourTurn, 2)), at(t0, 200));
+        renderer.level(1.0, at(t0, 300));
+        assert!(level(&renderer, 300) > 0.0);
+        renderer.show(Some(&card(Show::Reading, 3)), at(t0, 400));
+        assert_eq!(level(&renderer, 400), 0.0);
+        let counting = Scene {
+            countdown: Some(Countdown {
+                since: at(t0, 500),
+                lasts: Duration::from_millis(2500),
+                teach: false,
+            }),
+            ..card(Show::Answering("yes".into()), 4)
+        };
+        renderer.show(Some(&counting), at(t0, 500));
+        renderer.level(1.0, at(t0, 600));
+        assert_eq!(level(&renderer, 600), 0.0);
+    }
+
+    #[test]
+    fn the_card_room_is_the_card_clear_of_both_screen_margins() {
+        assert_eq!(card_room_on(1920), CARD_WIDTH - 2.0 * SIDE);
+        assert_eq!(card_room_on(400), 400.0 - 2.0 * SCREEN_MARGIN - 2.0 * SIDE);
     }
 
     #[test]

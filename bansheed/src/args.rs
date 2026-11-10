@@ -40,7 +40,7 @@ pub enum CommandType {
         /// Emit Waybar custom-module JSON instead of one word
         #[clap(long)]
         waybar: bool,
-        /// Print these events as JSON lines instead: cues, level, words
+        /// Print these events as JSON lines instead: cues, level, words, question
         #[clap(long, value_delimiter = ',', conflicts_with = "waybar")]
         events: Vec<String>,
     },

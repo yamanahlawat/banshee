@@ -158,6 +158,11 @@ export function marked(text: string, needle: string): { text: string; hit: boole
     .filter((part) => part.text !== '');
 }
 
+/// Rows are newest first, so the first match is the newest.
+export function newestUnanswered(rows: HistoryRow[]): HistoryRow | null {
+  return rows.find((row) => row.kind === 'question' && row.outcome === 'no_answer') ?? null;
+}
+
 export function rowFlag(row: HistoryRow): string | null {
   if (row.kind === 'dictation') return row.outcome === 'failed' ? row.reason : null;
   switch (row.outcome) {

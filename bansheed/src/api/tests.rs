@@ -2428,6 +2428,121 @@ async fn a_question_is_spoken_clean_and_reaches_the_listener_as_sent() {
 }
 
 #[tokio::test]
+async fn history_keeps_the_raw_question_the_card_shows_clean() {
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let crate::test_support::HoldingSpeech { state, .. } =
+        crate::test_support::daemon_state_holding_speech(
+            std::time::Duration::from_millis(10),
+            commands,
+        );
+    let published = state.subscribe_question();
+    let (shown, on_the_card) = std::sync::mpsc::channel();
+
+    let session_state = Arc::clone(&state);
+    std::thread::spawn(move || {
+        let Ok(ConsumerCommand::Ask(ask)) = command_receiver.recv() else {
+            return;
+        };
+        let _ = shown.send(published.borrow().clone());
+        session_state.keep(&NewEntry::question(
+            &ask.question,
+            Some("no"),
+            Outcome::Transcribed,
+            None,
+        ));
+        session_state.set_recording_mode(RecordingMode::Idle);
+        let _ = ask.reply.send(Ok("no".to_string()));
+    });
+
+    dispatch(
+        request(
+            BANSHEE_ASK_USER,
+            Some(serde_json::json!({"question": "Run \u{202E}now?"})),
+        ),
+        &state,
+    )
+    .await;
+
+    assert_eq!(on_the_card.recv().unwrap(), "Run \u{202E}now?");
+    let rows = state.history(None, None).unwrap();
+    assert_eq!(rows[0].question.as_deref(), Some("Run \u{202E}now?"));
+}
+
+#[tokio::test]
+async fn every_exit_after_the_arm_ends_the_published_question() {
+    // A refused line publishes and ends within one poll, so only the end is seen
+    let (commands, _consumer) = std::sync::mpsc::channel();
+    let held = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_millis(10),
+        commands,
+    );
+    let refused = held.state.subscribe_question();
+    spawn_question(&held.state, crate::test_support::REFUSED)
+        .await
+        .unwrap();
+    assert_eq!(*refused.borrow(), "");
+    assert!(refused.has_changed().unwrap());
+
+    let (commands, _consumer) = std::sync::mpsc::channel();
+    let held = crate::test_support::daemon_state_holding_speech(
+        std::time::Duration::from_millis(10),
+        commands,
+    );
+    let mut stalled = held.state.subscribe_question();
+    let asking = spawn_question(&held.state, crate::test_support::STALLS);
+    stalled.changed().await.unwrap();
+    assert_eq!(*stalled.borrow_and_update(), crate::test_support::STALLS);
+    asking.await.unwrap();
+    assert_eq!(*stalled.borrow(), "");
+    assert!(stalled.has_changed().unwrap());
+
+    let (commands, command_receiver) = std::sync::mpsc::channel();
+    let state = test_state(commands);
+    let mut dropped = state.subscribe_question();
+    let asking = spawn_ask(&state);
+    let _ask = tokio::task::spawn_blocking(move || command_receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(*dropped.borrow_and_update(), "Ready to ship?");
+    asking.abort();
+    wait_for(&state, "the dropped ask ends the question", |state| {
+        state.subscribe_question().borrow().is_empty()
+    })
+    .await;
+    assert!(dropped.has_changed().unwrap());
+}
+
+#[tokio::test]
+async fn the_question_is_published_before_it_is_spoken() {
+    let (commands, _consumer) = std::sync::mpsc::channel();
+    let crate::test_support::HoldingSpeech { state, spoken, .. } =
+        crate::test_support::daemon_state_holding_speech(
+            std::time::Duration::from_millis(10),
+            commands,
+        );
+    state
+        .speech()
+        .speak(crate::test_support::STALLS, false, None)
+        .unwrap();
+    let mut question = state.subscribe_question();
+    let asking = spawn_ask(&state);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), question.changed())
+        .await
+        .expect("the question was never published")
+        .unwrap();
+    assert_eq!(*question.borrow(), "Ready to ship?");
+    assert_eq!(
+        *spoken.lock().unwrap(),
+        [crate::test_support::STALLS],
+        "the card is up while the question waits behind a line"
+    );
+    asking.abort();
+    state.speech().stop();
+}
+
+#[tokio::test]
 async fn a_question_refused_before_the_pipeline_stands_still_counts() {
     let state = test_state(std::sync::mpsc::channel().0);
     state.set_mic(crate::state::Mic::Starting);

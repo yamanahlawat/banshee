@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An agent's question shows on screen while you answer.** When an agent asks, the capsule
+  becomes a card above the Dock: the whole question, with the ask in larger type, and a row
+  that says whether Banshee is speaking, listening or transcribing. Clicks pass through it.
+  History keeps the whole question. When you pause and Banshee hears you as unfinished, the
+  line between the question and your words closes in from both ends. Speaking fills it
+  again. If you stay quiet and Banshee still hears you as unfinished, it refills and runs
+  again. Until Banshee has the turn detection model, the line runs from the first pause. The
+  window or `banshee setup` fetches the model. "Keep talking to add more" shows under your
+  words the first time the line runs after the tray starts. On macOS with Reduce Motion, the
+  line goes out in five steps. When the answer is sent, the card shrinks to a pill that says
+  Sent. A question nobody answered becomes a small pill, "You missed a question", that stays
+  until you click it. The click opens History at that question. A second missed question
+  makes it "You missed 2 questions". VoiceOver reads the pill as a button. On Linux the card
+  shows on the same desktops as the capsule.
 - **A pause to think rarely ends your answer to an agent now.** After the pause, Banshee
   checks whether you sound finished. If you don't, it keeps listening and checks again after
   each further pause of the same length. Speaking again starts the checks over. An existing

@@ -372,8 +372,9 @@ fn watched_events(names: &[String]) -> Result<Vec<&'static str>, BansheeError> {
             "cues" => Ok(banshee_common::EVENT_CUES),
             "level" => Ok(banshee_common::EVENT_LEVEL),
             "words" => Ok(banshee_common::EVENT_WORDS),
+            "question" => Ok(banshee_common::EVENT_QUESTION),
             other => Err(BansheeError::Rejected(format!(
-                "'{other}' is not an event watch prints. Use cues, level or words."
+                "'{other}' is not an event watch prints. Use cues, level, words or question."
             ))),
         })
         .collect()
