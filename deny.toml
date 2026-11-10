@@ -19,6 +19,7 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant, under zbus 5 through ksni and tauri-plugin-single-instance" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names, under zbus 5 through ksni and tauri-plugin-single-instance" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, under zbus 5 through ksni and tauri-plugin-single-instance" },
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.38, held by rusqlite_migration 2.6 at rusqlite 0.40; its 0.41 upgrade is open upstream (cljoly/rusqlite_migration#370). Exposure needs a database and -wal written into ~/.banshee" },
 ]
 
 [licenses]
