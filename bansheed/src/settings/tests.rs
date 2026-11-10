@@ -580,6 +580,32 @@ fn a_transcription_server_chosen_while_the_model_downloads_is_queued_ahead_of_th
     );
 }
 
+/// The daemon speaks any problem id it has not reported, so a switch must add none.
+#[test]
+fn a_switch_to_a_server_still_in_the_queue_raises_no_new_problem() {
+    let (commands, _taken) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
+    let parakeet =
+        banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap();
+    state.install_listener(Route::Local, Listening::Missing(parakeet));
+    pretend_downloaded(&state, state.vad_model());
+    let ids = || crate::daemon::ids_of(&crate::daemon::problems(&state));
+    let before = ids();
+
+    configure_in_scratch(
+        Some(&state),
+        assignments(&[("stt.provider", "remote".into())]),
+        true,
+    )
+    .unwrap();
+
+    let after = ids();
+    assert!(
+        after.iter().all(|id| before.contains(id)),
+        "before {before:?}, after {after:?}"
+    );
+}
+
 /// The route of every listener `taken` holds a `Replace` for, in order.
 fn replaces(taken: &std::sync::mpsc::Receiver<ConsumerCommand>) -> Vec<Route> {
     taken

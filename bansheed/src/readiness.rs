@@ -33,6 +33,7 @@ fn ranked(state: &DaemonState, pipeline: &Pipeline, grants: Vec<Blocker>) -> Vec
 //
 // Outside an open pipeline the start may have failed before any listener was
 // built, so this checks the model the file names, which the next start loads.
+// A file that names a server names no model, so the listener in force answers.
 fn must_be_on_disk<'a>(
     pipeline: &Pipeline,
     loaded: Option<&'a str>,
@@ -42,7 +43,7 @@ fn must_be_on_disk<'a>(
     let speech = if matches!(pipeline, Pipeline::Open) {
         loaded
     } else {
-        asked
+        asked.or(loaded)
     };
     speech.into_iter().chain([detector]).collect()
 }
@@ -151,6 +152,13 @@ mod tests {
     fn a_pipeline_still_opening_is_judged_on_what_the_config_asks_for() {
         let names = must_be_on_disk(&Pipeline::Opening, Some(ASKED), Some(LOADED), VAD);
         assert_eq!(names, vec![LOADED, VAD]);
+    }
+
+    #[test]
+    fn a_broken_pipeline_under_a_server_still_to_land_is_judged_on_the_model_it_waits_for() {
+        let dead = Pipeline::Broken(RecordingError::NoListeningModel("parakeet"));
+        let names = must_be_on_disk(&dead, Some(ASKED), None, VAD);
+        assert_eq!(names, vec![ASKED, VAD]);
     }
 
     #[test]
