@@ -11,8 +11,9 @@ use rusqlite_migration::{M, Migrations};
 
 use crate::config::KeepAudio;
 
-const MIGRATIONS: &[M<'static>] = &[M::up(
-    "CREATE TABLE IF NOT EXISTS transcriptions (
+const MIGRATIONS: &[M<'static>] = &[
+    M::up(
+        "CREATE TABLE IF NOT EXISTS transcriptions (
          id INTEGER PRIMARY KEY, text TEXT NOT NULL,
          timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
      CREATE TABLE history (
@@ -29,7 +30,9 @@ const MIGRATIONS: &[M<'static>] = &[M::up(
                      THEN timestamp ELSE replace(timestamp, ' ', 'T') || 'Z' END
            FROM transcriptions ORDER BY id;
      DROP TABLE transcriptions;",
-)];
+    ),
+    M::up("ALTER TABLE history ADD COLUMN client TEXT;"),
+];
 
 pub fn open(keep: KeepAudio) -> Result<Store, BansheeError> {
     let path =
@@ -114,6 +117,7 @@ pub struct Entry {
     pub outcome: Outcome,
     pub reason: Option<String>,
     pub timestamp: String,
+    pub client: Option<String>,
     pub audio: Option<audio::Kept>,
 }
 
@@ -123,6 +127,7 @@ pub struct NewEntry<'a> {
     pub text: Option<&'a str>,
     pub outcome: Outcome,
     pub reason: Option<&'a str>,
+    pub client: Option<&'a str>,
     /// The clip at 16 kHz, kept as the row's audio unless Keep audio is off.
     /// Empty when the row has none.
     pub audio: &'a [f32],
@@ -136,6 +141,7 @@ impl<'a> NewEntry<'a> {
             text: Some(text),
             outcome: Outcome::Transcribed,
             reason: None,
+            client: None,
             audio: &[],
         }
     }
@@ -147,6 +153,7 @@ impl<'a> NewEntry<'a> {
             text: None,
             outcome: Outcome::Failed,
             reason: Some(reason),
+            client: None,
             audio: &[],
         }
     }
@@ -163,8 +170,13 @@ impl<'a> NewEntry<'a> {
             text,
             outcome,
             reason,
+            client: None,
             audio: &[],
         }
+    }
+
+    pub fn with_client(self, client: Option<&'a str>) -> Self {
+        Self { client, ..self }
     }
 
     pub fn with_audio(self, samples: &'a [f32]) -> Self {
@@ -187,21 +199,22 @@ pub fn stamp_now() -> String {
 
 pub fn insert(conn: &Connection, entry: &NewEntry) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO history (kind, question, text, outcome, reason, timestamp)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO history (kind, question, text, outcome, reason, timestamp, client)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         rusqlite::params![
             entry.kind,
             entry.question,
             entry.text,
             entry.outcome,
             entry.reason,
-            stamp_now()
+            stamp_now(),
+            entry.client
         ],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
-const COLUMNS: &str = "id, kind, question, text, outcome, reason, timestamp";
+const COLUMNS: &str = "id, kind, question, text, outcome, reason, timestamp, client";
 
 fn entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
     Ok(Entry {
@@ -212,6 +225,7 @@ fn entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         outcome: row.get(4)?,
         reason: row.get(5)?,
         timestamp: row.get(6)?,
+        client: row.get(7)?,
         audio: None,
     })
 }
@@ -391,6 +405,40 @@ mod tests {
         assert_eq!(rows[0].text.as_deref(), Some("older"));
         assert_eq!(rows[0].timestamp, "2026-08-27T12:07:24Z");
         assert_eq!(rows[1].timestamp, "2026-08-27T17:37:24+05:30");
+    }
+
+    #[test]
+    fn a_database_from_before_the_client_column_opens_and_keeps_its_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATIONS[..1])
+            .to_latest(&mut conn)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO history (kind, question, text, outcome, reason, timestamp)
+             VALUES ('dictation', NULL, 'old words', 'transcribed', NULL, '2026-08-27T12:07:24Z')",
+            [],
+        )
+        .unwrap();
+        prepare(&mut conn).unwrap();
+        let rows = list(&conn, None, None).unwrap();
+        assert_eq!(rows[0].text.as_deref(), Some("old words"));
+        assert_eq!(rows[0].client, None);
+    }
+
+    #[test]
+    fn a_row_keeps_the_client_it_was_given_and_none_otherwise() {
+        let conn = memory();
+        insert(&conn, &NewEntry::dictation("mine")).unwrap();
+        insert(
+            &conn,
+            &NewEntry::dictation("theirs").with_client(Some("banshee")),
+        )
+        .unwrap();
+        let rows = list(&conn, None, None).unwrap();
+        assert_eq!(rows[0].client, None);
+        assert_eq!(rows[1].client.as_deref(), Some("banshee"));
+        let json = serde_json::to_value(&rows[0]).unwrap();
+        assert!(json["client"].is_null());
     }
 
     #[test]

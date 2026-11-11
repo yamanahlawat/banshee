@@ -1238,7 +1238,13 @@ mod tray {
         let text = params.get("text").and_then(Value::as_str)?.to_string();
         match method {
             BANSHEE_WORDS => Some(Message::Chip(chip::Input::Words(text))),
-            BANSHEE_QUESTION => Some(Message::Chip(chip::Input::Question(text))),
+            BANSHEE_QUESTION => {
+                let client = params.get("client").and_then(Value::as_str);
+                Some(Message::Chip(chip::Input::Question {
+                    text,
+                    client: client.map(str::to_string),
+                }))
+            }
             _ => None,
         }
     }
@@ -1799,8 +1805,13 @@ mod tray {
             use banshee_common::cue::{Reason, ReasonCode, Target};
 
             let now = Instant::now();
-            app.chip
-                .feed(chip::Input::Question("Ship it?".to_string()), now);
+            app.chip.feed(
+                chip::Input::Question {
+                    text: "Ship it?".to_string(),
+                    client: None,
+                },
+                now,
+            );
             for signal in [
                 Signal::Arm,
                 Signal::Disarm,
@@ -1863,14 +1874,21 @@ mod tray {
         }
 
         #[test]
-        fn the_question_line_feeds_the_chip() {
-            let message = message_of(
-                banshee_common::BANSHEE_QUESTION,
-                &serde_json::json!({"text": "Ship it?"}),
-            );
+        fn the_question_line_feeds_the_chip_its_asker() {
+            let params = serde_json::json!({"text": "Ship it?", "client": "claude"});
             assert!(matches!(
-                message,
-                Some(Message::Chip(chip::Input::Question(text))) if text == "Ship it?"
+                message_of(BANSHEE_QUESTION, &params),
+                Some(Message::Chip(chip::Input::Question { text, client }))
+                    if text == "Ship it?" && client.as_deref() == Some("claude")
+            ));
+        }
+
+        #[test]
+        fn an_ended_question_line_names_nobody() {
+            let params = serde_json::json!({"text": "", "client": null});
+            assert!(matches!(
+                message_of(BANSHEE_QUESTION, &params),
+                Some(Message::Chip(chip::Input::Question { text, client: None })) if text.is_empty()
             ));
         }
 

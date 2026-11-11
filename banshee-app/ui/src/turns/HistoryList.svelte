@@ -276,7 +276,7 @@
           <p class="words user"><Marked text={row.text ?? ''} needle={query} />{@render when()}</p>
         {:else if row.outcome === 'transcribed'}
           <p class="words agent one">
-            <span class="sr">Agent asked</span>
+            <span class="sr">{row.client ?? 'Agent'} asked</span>
             <Marked text={row.question ?? ''} needle={query} />
           </p>
           <p class="words user one">
@@ -285,13 +285,14 @@
           </p>
         {:else}
           <p class="words agent">
-            <span class="sr">Agent asked</span>
+            <span class="sr">{row.client ?? 'Agent'} asked</span>
             <Marked text={row.question ?? ''} needle={query} />{@render when()}
           </p>
         {/if}
         <span class="meta" aria-hidden="true">
           {#if dated}<span>{day}</span>{/if}
           <span class="mono time">{time}</span>
+          {#if row.client}<span class="client">{row.client}</span>{/if}
           {#if flag}<span class="flag">{flag}</span>{/if}
         </span>
       </div>

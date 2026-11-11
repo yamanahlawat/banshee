@@ -13,6 +13,7 @@ use banshee_common::{
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
+use crate::client::Caller;
 use crate::connect;
 use crate::history::{Kind, NewEntry, Outcome};
 use crate::permissions;
@@ -202,14 +203,10 @@ impl<'a> Params<'a> {
     }
 }
 
-fn count_speech(
-    params: &Params<'_>,
-    daemon_state: &DaemonState,
-) -> Result<(), Box<JsonRpcResponse>> {
-    if let Some(agent_pid) = params.optional_pid("agent_pid")? {
-        daemon_state.spoken().spoke(agent_pid);
+fn count_speech(agent: Option<u32>, daemon_state: &DaemonState) {
+    if let Some(agent) = agent {
+        daemon_state.spoken().spoke(agent);
     }
-    Ok(())
 }
 
 // The daemon started without a pipeline. The code says which fix applies, so a
@@ -237,7 +234,7 @@ struct EndsTheSession<'a> {
 impl Drop for EndsTheSession<'_> {
     fn drop(&mut self) {
         self.state.disarm(self.session);
-        self.state.publish_question("");
+        self.state.publish_question("", None);
     }
 }
 
@@ -475,7 +472,7 @@ fn live_state_at(
     live
 }
 
-fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>, caller: &Caller) -> JsonRpcResponse {
     let raw_text = match params.str("text") {
         Ok(value) => value,
         Err(response) => return *response,
@@ -488,9 +485,7 @@ fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse
         Ok(value) => value,
         Err(response) => return *response,
     };
-    if let Err(response) = count_speech(&params, daemon_state) {
-        return *response;
-    }
+    count_speech(caller.client().agent, daemon_state);
 
     let clean_text = sanitize(raw_text);
 
@@ -539,12 +534,24 @@ fn restart(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRespon
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
 }
 
-fn record_start(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+/// Logs only a start that opens the microphone to record.
+fn log_the_recording(daemon_state: &DaemonState, caller: &Caller) {
+    if daemon_state.recording_mode() == RecordingMode::PushToTalk {
+        log::info!("The microphone opens for {}, to record", caller.client());
+    }
+}
+
+fn record_start(
+    params: Params<'_>,
+    daemon_state: &Arc<DaemonState>,
+    caller: &Caller,
+) -> JsonRpcResponse {
     // Checked before the transition, so -32004 keeps meaning "busy"
     if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
         return *response;
     }
     if daemon_state.record_start() {
+        log_the_recording(daemon_state, caller);
         JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
     } else {
         JsonRpcResponse::error(
@@ -560,11 +567,16 @@ fn record_stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRe
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
 }
 
-fn record_toggle(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+fn record_toggle(
+    params: Params<'_>,
+    daemon_state: &Arc<DaemonState>,
+    caller: &Caller,
+) -> JsonRpcResponse {
     if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
         return *response;
     }
     let recording = daemon_state.record_toggle();
+    log_the_recording(daemon_state, caller);
     JsonRpcResponse::success(params.id(), serde_json::json!({"recording": recording}))
 }
 
@@ -626,19 +638,26 @@ async fn question_played(
 
 /// Keeps a question that was never put to the owner, with the message the
 /// agent receives, and hands that refusal back.
-fn unasked(state: &DaemonState, question: &str, refusal: JsonRpcResponse) -> JsonRpcResponse {
+fn unasked(
+    state: &DaemonState,
+    question: &str,
+    client: Option<&str>,
+    refusal: JsonRpcResponse,
+) -> JsonRpcResponse {
     if let JsonRpcResponse::Error { error, .. } = &refusal {
-        state.keep(&NewEntry::question(
-            question,
-            None,
-            Outcome::Unasked,
-            Some(&error.message),
-        ));
+        state.keep(
+            &NewEntry::question(question, None, Outcome::Unasked, Some(&error.message))
+                .with_client(client),
+        );
     }
     refusal
 }
 
-async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+async fn ask_user(
+    params: Params<'_>,
+    daemon_state: &Arc<DaemonState>,
+    caller: &Caller,
+) -> JsonRpcResponse {
     let question = match params.str("question") {
         Ok(value) => value,
         Err(response) => return *response,
@@ -647,9 +666,9 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         Ok(value) => value.min(MAX_ASK_WAIT_MS),
         Err(response) => return *response,
     };
-    if let Err(response) = count_speech(&params, daemon_state) {
-        return *response;
-    }
+    let client = caller.client();
+    let name = client.name.as_deref();
+    count_speech(client.agent, daemon_state);
 
     // Dropping this call is how a waiting question leaves the line. Armed
     // before the question plays, so a press while Banshee talks holds to
@@ -659,7 +678,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         Err(pipeline) => {
             let refusal = *not_recording(params.id(), &pipeline)
                 .expect("arm_in_turn gives back only a pipeline that is not open");
-            return unasked(daemon_state, question, refusal);
+            return unasked(daemon_state, question, name, refusal);
         }
     };
 
@@ -671,7 +690,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         session,
     };
 
-    daemon_state.publish_question(question);
+    daemon_state.publish_question(question, name);
 
     let clean_question = sanitize(question);
     // Queued behind what is already said. Every line after it waits for the
@@ -684,7 +703,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
                 rpc_code::INTERNAL,
                 format!("Failed to speak question: {e}"),
             );
-            return unasked(daemon_state, question, refusal);
+            return unasked(daemon_state, question, name, refusal);
         }
     };
 
@@ -705,7 +724,7 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
                 rpc_code::INTERNAL,
                 "The question was not spoken.",
             );
-            return unasked(daemon_state, question, refusal);
+            return unasked(daemon_state, question, name, refusal);
         }
         Asked::Stalled => {
             daemon_state.speech().stop();
@@ -714,20 +733,22 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
                 rpc_code::INTERNAL,
                 "Question playback did not finish.",
             );
-            return unasked(daemon_state, question, refusal);
+            return unasked(daemon_state, question, name, refusal);
         }
     }
 
+    log::info!("The microphone opens for {client}, to hear an answer");
     let (reply, answer) = tokio::sync::oneshot::channel();
     let command = ConsumerCommand::Ask(AskCommand {
         reply,
         question: question.to_string(),
+        client: client.name.clone(),
         timeout: Duration::from_millis(timeout_ms),
         session,
     });
     if daemon_state.commands().send(command).is_err() {
         let refusal = JsonRpcResponse::error(params.id(), rpc_code::INTERNAL, NO_PIPELINE);
-        return unasked(daemon_state, question, refusal);
+        return unasked(daemon_state, question, name, refusal);
     }
 
     match answer.await {
@@ -746,7 +767,11 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     }
 }
 
-async fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+async fn configure(
+    params: Params<'_>,
+    daemon_state: &Arc<DaemonState>,
+    caller: &Caller,
+) -> JsonRpcResponse {
     let Some(requested) = params.get("settings") else {
         return JsonRpcResponse::error(
             params.id(),
@@ -770,8 +795,16 @@ async fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
     };
 
     let state = Arc::clone(daemon_state);
+    let caller = *caller;
     off_the_worker(params.id(), move || {
         let outcome = settings::configure(Some(&state), assignments, persist)?;
+        if outcome.applied.iter().any(|key| key == "audio.keep_open") {
+            log::info!(
+                "audio.keep_open is {}, set by {}",
+                state.keep_open(),
+                caller.client()
+            );
+        }
         Ok(serde_json::json!({
             "ok": true,
             "applied": outcome.applied,
@@ -1074,19 +1107,23 @@ fn open_permission(params: Params<'_>) -> JsonRpcResponse {
     }
 }
 
-pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+pub async fn dispatch(
+    request: JsonRpcRequest,
+    daemon_state: &Arc<DaemonState>,
+    caller: &Caller,
+) -> JsonRpcResponse {
     let params = Params::new(&request);
     match request.method.as_str() {
-        BANSHEE_SPEAK => speak(params, daemon_state),
+        BANSHEE_SPEAK => speak(params, daemon_state, caller),
         BANSHEE_STOP_SPEAKING => stop_speaking(params, daemon_state),
         BANSHEE_STOP => stop(params, daemon_state),
         BANSHEE_RESTART => restart(params, daemon_state),
-        BANSHEE_RECORD_START => record_start(params, daemon_state),
+        BANSHEE_RECORD_START => record_start(params, daemon_state, caller),
         BANSHEE_RECORD_STOP => record_stop(params, daemon_state),
-        BANSHEE_RECORD_TOGGLE => record_toggle(params, daemon_state),
-        BANSHEE_ASK_USER => ask_user(params, daemon_state).await,
+        BANSHEE_RECORD_TOGGLE => record_toggle(params, daemon_state, caller),
+        BANSHEE_ASK_USER => ask_user(params, daemon_state, caller).await,
         BANSHEE_TURN_ENDED => turn_ended(params, daemon_state),
-        BANSHEE_CONFIGURE => configure(params, daemon_state).await,
+        BANSHEE_CONFIGURE => configure(params, daemon_state, caller).await,
         BANSHEE_DOWNLOAD_MODELS => download_models(params, daemon_state),
         BANSHEE_LIST_VOICES => list_voices(params, daemon_state),
         BANSHEE_LIST_INPUT_DEVICES => list_input_devices(params, daemon_state),

@@ -166,6 +166,7 @@ const row = (over: Partial<HistoryRow>): HistoryRow => ({
   outcome: 'transcribed',
   reason: null,
   timestamp: '2026-08-27T09:00:00Z',
+  client: null,
   audio: null,
   ...over,
 });

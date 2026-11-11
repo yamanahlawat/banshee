@@ -105,6 +105,7 @@ harfrust = "0.15.0"
 skrifa = "0.49.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
 # The menu bar indicator's loop. winit runs it because tray-icon tests against
 # it and it commits to no toolkit. KSNI runs its own thread everywhere else.
 winit = "0.30.13"

@@ -7,19 +7,11 @@ today, and `CHANGELOG.md` holds what has shipped.
 
 ## Next
 
-1. **Every microphone use names its client.** When the microphone opens, Banshee names the
-   program that asked for it, and the log records it. The daemon reads the name of the
-   connected process from the operating system. A process can still rename itself or run a
-   renamed copy of a program, so the name is a lead to check. For the MCP shim and the
-   turn-end hooks, the daemon reads the parent process. What each agent's parent shows isn't
-   measured yet. The capsule shows it on macOS. Where Linux shows it is still open. Any
-   process running as you can still reach the socket and read `banshee.db`. This item makes
-   each use visible.
-2. **Linux packaging:** an AppImage and an AUR package, so the window and the tray install
+1. **Linux packaging:** an AppImage and an AUR package, so the window and the tray install
    without a source clone. Release builds already target AVX2 on x86_64 and plain armv8-a on
    aarch64. A GPU build (Vulkan, CUDA or ROCm) is tried
    here; none is measured yet. It comes before notarization because it can start today.
-3. **Notarization,** once a Developer ID is affordable. SentinelOne doesn't flag Handy,
+2. **Notarization,** once a Developer ID is affordable. SentinelOne doesn't flag Handy,
    which is notarized and starts at login through `SMAppService`. Which of the two stops the
    flag isn't measured. Check the flag once the `SMAppService` release ships, before paying
    for a Developer ID.

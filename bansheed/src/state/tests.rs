@@ -1555,8 +1555,14 @@ fn a_change_count_moves_by_one_per_bump_and_wakes_a_subscriber() {
 fn a_question_is_published_and_cleared() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
     let question = state.subscribe_question();
-    state.publish_question("Ship it?");
-    assert_eq!(*question.borrow(), "Ship it?");
-    state.publish_question("");
-    assert_eq!(*question.borrow(), "");
+    state.publish_question("Ship it?", Some("claude"));
+    assert_eq!(
+        *question.borrow(),
+        crate::state::Question {
+            text: "Ship it?".to_string(),
+            client: Some("claude".to_string()),
+        }
+    );
+    state.publish_question("", None);
+    assert_eq!(*question.borrow(), crate::state::Question::default());
 }

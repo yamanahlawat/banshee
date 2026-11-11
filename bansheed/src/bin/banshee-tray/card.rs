@@ -21,6 +21,7 @@ pub const SIDE: f64 = 20.0;
 /// The grip row's 22 plus the body's top 6.
 pub const TOP: f64 = 28.0;
 pub const BODY_BOTTOM: f64 = 14.0;
+pub const NAME_GAP: f64 = 8.0;
 pub const CONTEXT_GAP: f64 = 8.0;
 pub const AFTER_GAP: f64 = 6.0;
 pub const MORE_GAP: f64 = 4.0;
@@ -76,23 +77,25 @@ pub enum Cut {
     Label,
     Hint,
     Chip,
+    Name,
 }
 
 impl Cut {
-    pub const ALL: [Cut; 6] = [
+    pub const ALL: [Cut; 7] = [
         Cut::Context,
         Cut::Ask,
         Cut::User,
         Cut::Label,
         Cut::Hint,
         Cut::Chip,
+        Cut::Name,
     ];
 
     pub fn weight(self) -> f64 {
         match self {
             Cut::Context | Cut::Ask => 350.0,
             Cut::User => 800.0,
-            Cut::Label => 650.0,
+            Cut::Label | Cut::Name => 650.0,
             Cut::Hint => 400.0,
             Cut::Chip => 600.0,
         }
@@ -102,7 +105,7 @@ impl Cut {
         match self {
             Cut::Context | Cut::Ask => 84.0,
             Cut::User => 112.0,
-            Cut::Label | Cut::Hint | Cut::Chip => 100.0,
+            Cut::Label | Cut::Hint | Cut::Chip | Cut::Name => 100.0,
         }
     }
 
@@ -110,7 +113,7 @@ impl Cut {
         match self {
             Cut::Context | Cut::User | Cut::Label => 15.0,
             Cut::Ask => 22.0,
-            Cut::Hint | Cut::Chip => 13.0,
+            Cut::Hint | Cut::Chip | Cut::Name => 13.0,
         }
     }
 
@@ -118,7 +121,7 @@ impl Cut {
     pub fn tracking(self) -> f64 {
         match self {
             Cut::Ask | Cut::User => -0.01,
-            Cut::Context | Cut::Label | Cut::Hint | Cut::Chip => 0.0,
+            Cut::Context | Cut::Label | Cut::Hint | Cut::Chip | Cut::Name => 0.0,
         }
     }
 
@@ -127,7 +130,7 @@ impl Cut {
             * match self {
                 Cut::Context => 1.45,
                 Cut::Ask => 1.25,
-                Cut::User | Cut::Label | Cut::Hint | Cut::Chip => 1.35,
+                Cut::User | Cut::Label | Cut::Hint | Cut::Chip | Cut::Name => 1.35,
             }
     }
 }
@@ -371,6 +374,15 @@ pub fn layout(
     let width = room + 2.0 * SIDE;
     let mut blocks = Vec::new();
     let mut y = TOP;
+
+    if let Some(client) = scene.client.as_deref() {
+        let line = fit(client, room, Trim::End, |line| {
+            measure.width(line, Cut::Name)
+        });
+        let name = block(vec![line], Cut::Name, Ink::Muted, SIDE, SIDE, None);
+        y = SIDE + name.height + NAME_GAP;
+        blocks.push(name);
+    }
 
     let (context, context_cut) = set(&parts.context, Cut::Context, room, MAX_LINES, measure);
     if !context.is_empty() {
@@ -682,6 +694,92 @@ mod tests {
             &Mono::new(),
         )
         .unwrap()
+    }
+
+    fn asked_by(client: &str) -> Scene {
+        Scene {
+            client: Some(client.into()),
+            ..scene(Show::Reading, "The build is red. Retry it?")
+        }
+    }
+
+    #[test]
+    fn the_name_is_the_first_line_in_muted_ink_and_the_text_follows_eight_below() {
+        let card = layout(
+            &asked_by("claude"),
+            ROOM,
+            false,
+            Instant::now(),
+            &Mono::new(),
+        )
+        .unwrap();
+        let name = &card.blocks[0];
+        assert_eq!(name.lines.len(), 1);
+        assert_eq!(
+            (
+                name.lines[0].line.as_str(),
+                name.lines[0].cut,
+                name.lines[0].ink
+            ),
+            ("claude", Cut::Name, Ink::Muted)
+        );
+        assert_eq!((name.lines[0].x, name.top), (SIDE, SIDE));
+        assert!(close(
+            card.blocks[1].top,
+            SIDE + Cut::Name.line_height() + NAME_GAP
+        ));
+    }
+
+    #[test]
+    fn a_named_card_sets_its_name_at_the_side_inset_and_is_no_wider() {
+        let named = layout(
+            &asked_by("claude"),
+            ROOM,
+            false,
+            Instant::now(),
+            &Mono::new(),
+        )
+        .unwrap();
+        let bare = laid(Show::Reading, "The build is red. Retry it?");
+        assert!(close(
+            named.shape.height - bare.shape.height,
+            SIDE + Cut::Name.line_height() + NAME_GAP - TOP
+        ));
+        assert_eq!(named.shape.width, bare.shape.width);
+        assert_eq!(named.blocks.len(), bare.blocks.len() + 1);
+    }
+
+    #[test]
+    fn a_long_name_stays_one_line_cut_at_the_end() {
+        let mono = Mono::new();
+        let card = layout(
+            &asked_by(&"a".repeat(200)),
+            ROOM,
+            false,
+            Instant::now(),
+            &mono,
+        )
+        .unwrap();
+        let name = &card.blocks[0];
+        assert_eq!(name.lines.len(), 1);
+        let line = &name.lines[0].line;
+        assert!(line.starts_with('a') && line.ends_with(ELLIPSIS));
+        assert!(mono.width(line, Cut::Name) <= ROOM);
+    }
+
+    #[test]
+    fn the_name_cut_is_banshees_label_at_hint_size() {
+        assert_eq!(
+            (
+                Cut::Name.weight(),
+                Cut::Name.width(),
+                Cut::Name.size(),
+                Cut::Name.tracking()
+            ),
+            (650.0, 100.0, 13.0, 0.0)
+        );
+        assert!(close(Cut::Name.line_height(), 13.0 * 1.35));
+        assert_eq!(Cut::ALL[Cut::Name as usize], Cut::Name);
     }
 
     fn block_of(layout: &Layout, cut: Cut) -> &Block {
