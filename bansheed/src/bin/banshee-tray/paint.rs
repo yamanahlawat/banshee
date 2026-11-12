@@ -9,8 +9,8 @@ use tiny_skia::{
 
 use crate::card::{
     self, Block, CHIP_BORDER, ChipBox, DRAIN_HEIGHT, DRAIN_RADIUS, Divider, DividerKind, Layout,
-    MUTED, PlacedGlyph, RIM, RIM_WIDTH, SEGMENT_GAP, SEGMENT_HEIGHT, SEGMENT_OFF, SEGMENTS, SIDE,
-    Shape, Text,
+    MUTED, PlacedGlyph, RIM, RIM_WIDTH, SEGMENT_GAP, SEGMENT_HEIGHT, SEGMENT_OFF, SEGMENT_RADIUS,
+    SEGMENTS, SIDE, Shape, TRACK_RADIUS, Text,
 };
 use crate::chip::{Show, segments_lit};
 use crate::figure::{
@@ -187,18 +187,32 @@ pub fn paint(frame: &Frame) -> Pixmap {
     group(&mut pixmap, live.capsule.opacity, |canvas| {
         canvas.fill_path(&shape, &ink(RUST, 1.0), FillRule::Winding, capsule, None);
         if let Some(card) = frame.card {
-            return paint_card(canvas, frame, card, shown, &live, capsule, &clip);
+            paint_card(canvas, frame, card, &live, capsule, &clip);
+        } else {
+            let pill = body(frame, capsule);
+            let opacity = live.exit.opacity * live.entry.opacity;
+            group(canvas, opacity, |canvas| {
+                paint_figure(canvas, frame, &live, pill, &clip)
+            });
+            if let Some((line, path)) = words(frame) {
+                paint_words(canvas, line, path, &live, pill, &clip);
+            }
         }
-        let pill = body(frame, capsule);
-        let opacity = live.exit.opacity * live.entry.opacity;
-        group(canvas, opacity, |canvas| {
-            paint_figure(canvas, frame, &live, pill, &clip)
-        });
-        if let Some((line, path)) = words(frame) {
-            paint_words(canvas, line, path, &live, pill, &clip);
-        }
+        paint_rim(canvas, shown, capsule);
     });
     pixmap
+}
+
+/// Over the contents, as Core Animation lays a layer's border over its sublayers.
+fn paint_rim(canvas: &mut Pixmap, shown: Shape, at: Transform) {
+    let inset = RIM_WIDTH / 2.0;
+    let rim = rounded(
+        (shown.width - RIM_WIDTH) as f32,
+        (shown.height - RIM_WIDTH) as f32,
+        (shown.radius - inset) as f32,
+    );
+    let rim_at = at.pre_translate(inset as f32, inset as f32);
+    canvas.stroke_path(&rim, &ink(RIM, 1.0), &stroke(RIM_WIDTH), rim_at, None);
 }
 
 /// Where the contents sit in a shape whose top is at `at`: held to its bottom
@@ -212,21 +226,11 @@ fn paint_card(
     canvas: &mut Pixmap,
     frame: &Frame,
     card: &Card,
-    shown: Shape,
     live: &Live,
     at: Transform,
     clip: &Mask,
 ) {
     let layout = &card.layout;
-    let inset = RIM_WIDTH / 2.0;
-    let rim = rounded(
-        (shown.width - RIM_WIDTH) as f32,
-        (shown.height - RIM_WIDTH) as f32,
-        (layout.shape.radius - inset) as f32,
-    );
-    let rim_at = at.pre_translate(inset as f32, inset as f32);
-    canvas.stroke_path(&rim, &ink(RIM, 1.0), &stroke(RIM_WIDTH), rim_at, None);
-
     let body = body(frame, at);
     let mut blocks = layout.blocks.iter().zip(&card.lines);
     let Some((answer, answer_lines)) = blocks.next_back() else {
@@ -293,20 +297,23 @@ fn paint_divider(
                 let shown = if lit.contains(&index) {
                     ink(BONE, 1.0)
                 } else {
-                    ink(MUTED, SEGMENT_OFF)
+                    ink(SEGMENT_OFF, 1.0)
                 };
                 let x = index as f64 * (width + SEGMENT_GAP);
                 let segment_at = at.pre_translate(x as f32, 0.0);
-                canvas.fill_rect(line(width, SEGMENT_HEIGHT), &shown, segment_at, Some(clip));
+                let segment = rounded(width as f32, SEGMENT_HEIGHT as f32, SEGMENT_RADIUS as f32);
+                canvas.fill_path(&segment, &shown, FillRule::Winding, segment_at, Some(clip));
             }
             return;
         }
     };
     let muted = ink(MUTED, 1.0);
-    canvas.fill_rect(line(track, divider.height), &muted, at, Some(clip));
     let Some(laid) = laid else {
+        canvas.fill_rect(line(track, divider.height), &muted, at, Some(clip));
         return;
     };
+    let rail = rounded(track as f32, divider.height as f32, TRACK_RADIUS as f32);
+    canvas.fill_path(&rail, &muted, FillRule::Winding, at, Some(clip));
     let width = share.unwrap_or(laid) * track;
     if width > 0.0 {
         let radius = DRAIN_RADIUS.min(width / 2.0);
@@ -817,6 +824,7 @@ mod tests {
             Show::NothingHeard("Nothing heard".into()),
             Show::Broken("Banshee cannot record".into()),
             Show::Done(Done::Typed),
+            Show::Done(Done::Sent),
             Show::Copied,
             Show::Reading,
         ]
@@ -932,44 +940,40 @@ mod tests {
     }
 
     #[test]
-    fn the_sent_pill_paints_its_rim_and_sent() {
+    fn the_sent_pill_paints_its_figure_and_sent() {
         let show = Show::Done(Done::Sent);
-        let card = laid_from(&Scene::of(show.clone(), 1), false).expect("a layout");
-        let scale = 2;
-        let pixmap = paint(&Frame {
-            scale,
-            ..card_frame(&show, &card, &[])
-        });
-        let at = |logical: f64| (logical * f64::from(scale)) as u32;
-        let width = card.layout.shape.width.ceil();
-        assert_eq!(pixmap.width(), at(width));
-
-        let stadium = rounded(width as f32, CAPSULE as f32, (CAPSULE / 2.0) as f32);
-        let mut expected = Pixmap::new(pixmap.width(), pixmap.height()).expect("a frame's size");
-        let placed = Transform::from_scale(scale as f32, scale as f32);
-        expected.fill_path(&stadium, &ink(RIM, 1.0), FillRule::Winding, placed, None);
-        for y in 0..pixmap.height() {
-            for x in 0..pixmap.width() {
-                let (found, wanted) = (rgba(&pixmap, x, y)[3], rgba(&expected, x, y)[3]);
-                if wanted == 0 || wanted == 0xFF {
-                    assert_eq!(found, wanted, "({x}, {y})");
-                }
-            }
-        }
-
-        assert!(near(rgba(&pixmap, at(0.75), at(CAPSULE / 2.0)), bytes(RIM)));
-
-        let block = &card.layout.blocks[0];
-        let sent = &block.lines[0];
-        assert_eq!(sent.line, "Sent");
-        let label = &card.lines[0][0];
-        let (top, bottom) = (sent.top, sent.top + card::Cut::Label.line_height());
-        let columns = at(sent.x)..at(sent.x + f64::from(label.width));
-        let bone = (at(top)..at(bottom))
-            .flat_map(|y| columns.clone().map(move |x| (x, y)))
+        let line = line_of(&show).expect("the pill's word");
+        let pixmap = paint(&frame(&show, Some(&line), &[]));
+        assert_eq!(pixmap.width(), width(Some(&line)) as u32);
+        let words = (WORDS_LEFT as u32..pixmap.width())
+            .flat_map(|x| (0..CAPSULE as u32).map(move |y| (x, y)))
             .filter(|&(x, y)| near(rgba(&pixmap, x, y), BONE))
             .count();
-        assert!(bone > 0);
+        assert!(words > 0);
+        let (rust, bone) = outline_inks(&show);
+        assert!(rust == 0 && bone > 0, "{rust} rust, {bone} bone");
+    }
+
+    #[test]
+    fn every_pill_paints_the_rim_on_its_edge() {
+        let middle = CAPSULE as u32 / 2;
+        let edges = |pixmap: &Pixmap, width: u32| {
+            [0, width - 1].map(|x| near(rgba(pixmap, x, middle), bytes(RIM)))
+        };
+        for show in every_show() {
+            let line = line_of(&show);
+            let frame = frame(&show, line.as_ref(), &[]);
+            let pixmap = paint(&frame);
+            assert_eq!(edges(&pixmap, size(&frame).0), [true; 2], "{show:?}");
+        }
+        let missed = Show::Missed {
+            count: 1,
+            ask: String::new(),
+        };
+        let card = laid_from(&Scene::of(missed.clone(), 1), false).expect("a layout");
+        let pixmap = paint(&card_frame(&missed, &card, &[]));
+        let width = card.layout.shape.width.ceil() as u32;
+        assert_eq!(edges(&pixmap, width), [true; 2]);
     }
 
     #[test]
@@ -1100,6 +1104,72 @@ mod tests {
         assert_eq!(lit(1.0), [true; 5]);
         assert_eq!(lit(0.5), [false, true, true, true, false]);
         assert_eq!(lit(0.0), [false; 5]);
+    }
+
+    fn linear(channel: u8) -> f64 {
+        let value = f64::from(channel) / 255.0;
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn luminance(hex: u32) -> f64 {
+        let [red, green, blue] = [16, 8, 0].map(|shift| linear((hex >> shift) as u8));
+        0.2126 * red + 0.7152 * green + 0.0722 * blue
+    }
+
+    fn contrast(first: u32, second: u32) -> f64 {
+        let (high, low) = (luminance(first), luminance(second));
+        (high.max(low) + 0.05) / (high.min(low) + 0.05)
+    }
+
+    #[test]
+    fn an_unlit_segment_is_a_solid_colour_that_stands_off_the_rust_by_three_to_one() {
+        assert!(contrast(SEGMENT_OFF, figure::RUST) >= 3.0);
+        let show = Show::Answering("yes".into());
+        let card = counting(&show, true, false);
+        let divider = card.layout.divider.as_ref().expect("a divider");
+        let row = (divider.top + divider.height / 2.0) as u32;
+        let track = card.layout.shape.width - 2.0 * SIDE;
+        let width = card::segment_width(track);
+        let pixmap = paint(&Frame {
+            countdown_share: Some(0.0),
+            ..card_frame(&show, &card, &[])
+        });
+        let middle = (SIDE + width / 2.0) as u32;
+        assert!(near(rgba(&pixmap, middle, row), bytes(SEGMENT_OFF)));
+    }
+
+    #[test]
+    fn the_track_and_each_segment_end_round() {
+        let show = Show::Answering("yes".into());
+        let card = counting(&show, true, false);
+        let divider = card.layout.divider.as_ref().expect("a divider");
+        let top = divider.top as u32;
+        let pixmap = paint(&Frame {
+            countdown_share: Some(1.0),
+            scale: 4,
+            ..card_frame(&show, &card, &[])
+        });
+        let corner = rgba(&pixmap, SIDE as u32 * 4, top * 4);
+        assert!(!near(corner, BONE), "{corner:?}");
+        let inside = rgba(&pixmap, SIDE as u32 * 4 + 4, top * 4 + 6);
+        assert!(near(inside, BONE), "{inside:?}");
+
+        let track = counting(&show, false, false);
+        let divider = track.layout.divider.as_ref().expect("a divider");
+        let row = ((divider.top + divider.height / 2.0) * 4.0) as u32;
+        let pixmap = paint(&Frame {
+            countdown_share: Some(0.0),
+            scale: 4,
+            ..card_frame(&show, &track, &[])
+        });
+        let top = (divider.top * 4.0) as u32;
+        let corner = rgba(&pixmap, SIDE as u32 * 4, top);
+        assert!(!near(corner, bytes(MUTED)), "{corner:?}");
+        assert!(near(rgba(&pixmap, SIDE as u32 * 4 + 8, row), bytes(MUTED)));
     }
 
     #[test]

@@ -81,14 +81,20 @@
     gap: 6px;
     width: 220px;
     max-width: 100%;
+    min-height: var(--control-height);
     padding: 5px 10px;
-    border: 1px solid var(--rule);
+    border: 1px solid var(--dim);
     border-radius: var(--radius);
     color: var(--dim);
   }
 
   .search:focus-within {
-    border-color: var(--ink);
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .search input:focus-visible {
+    outline: none;
   }
 
   input {
@@ -101,7 +107,6 @@
     font: inherit;
     font-size: 13px;
     line-height: 1.45;
-    outline: none;
   }
 
   input::-webkit-search-cancel-button {

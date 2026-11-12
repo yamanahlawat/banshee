@@ -26,7 +26,7 @@ pub const ABOVE_DEFAULT_DOCK: f64 = dock_height(DOCK_TILE_DEFAULT) + ABOVE_DOCK;
 pub const fn dock_height(tile: f64) -> f64 {
     tile + DOCK_ABOVE_TILE
 }
-pub const WORDS_SIZE: f64 = 16.0;
+pub const WORDS_SIZE: f64 = 17.0;
 pub const WORDS_TRACKING: f64 = -0.015;
 pub const WORDS_WEIGHT: f64 = 750.0;
 pub const WORDS_WIDTH: f64 = 106.0;

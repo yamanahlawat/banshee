@@ -59,13 +59,8 @@ describe('the frame', () => {
     expect(region.getAttribute('aria-live')).toBeNull();
   });
 
-  it('names the asker on the date line', () => {
+  it('leaves the asker off the date line', () => {
     show(asked('no_answer', { client: 'claude' }));
-    expect(screen.getByRole('heading', { name: 'Today at 14:32, claude' })).toBeTruthy();
-  });
-
-  it('leaves the date line alone for a row with no client', () => {
-    show(asked('no_answer'));
     expect(screen.getByRole('heading', { name: 'Today at 14:32' })).toBeTruthy();
   });
 
@@ -118,16 +113,42 @@ describe('a failed dictation', () => {
 });
 
 describe('a question', () => {
-  it('answered: question, rule, answer, and both copies', async () => {
-    const { container } = show(asked('transcribed', { text: 'The release branch.' }));
-    expect(screen.getByText('Which branch should I use?')).toBeTruthy();
-    expect(screen.getByText('The release branch.')).toBeTruthy();
-    expect(container.querySelector('hr')).toBeTruthy();
+  // Each child of the detail in order, as a tag and its words.
+  const blocks = (container: HTMLElement) =>
+    [...container.querySelector('.detail')!.children].map((one) =>
+      one.tagName === 'HR'
+        ? 'rule'
+        : `${one.className.includes('caption') ? 'caption' : one.tagName}: ${one.textContent?.trim()}`,
+    );
+
+  it('answered: who asked, the question, rule, who answered, the answer, and both copies', async () => {
+    const { container } = show(
+      asked('transcribed', { text: 'The release branch.', client: 'claude' }),
+    );
+    expect(blocks(container).slice(1, 6)).toEqual([
+      'caption: claude asked',
+      'P: Which branch should I use?',
+      'rule',
+      'caption: You answered',
+      'P: The release branch.',
+    ]);
+    expect(screen.getByText('claude asked').classList.contains('caps')).toBe(true);
+    expect(screen.getByText('You answered').closest('[aria-hidden="true"]')).toBeNull();
     expect(buttons()).toEqual(['Copy answer', 'Copy question']);
     await fireEvent.click(screen.getByRole('button', { name: 'Copy question' }));
     expect(copyText).toHaveBeenCalledWith('Which branch should I use?');
     await fireEvent.click(screen.getByRole('button', { name: 'Copy answer' }));
     expect(copyText).toHaveBeenCalledWith('The release branch.');
+  });
+
+  it('says an agent asked when no client is stored, and no one answered when no answer came', () => {
+    const { container } = show(asked('no_answer'));
+    expect(blocks(container).slice(1, 4)).toEqual([
+      'caption: An agent asked',
+      'P: Which branch should I use?',
+      'rule',
+    ]);
+    expect(screen.queryByText('You answered')).toBeNull();
   });
 
   it.each([

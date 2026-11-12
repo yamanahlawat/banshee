@@ -37,8 +37,8 @@ use objc2_quartz_core::{
 
 use super::card::{
     self, Block, CHIP_BORDER, ChipBox, Cut, DRAIN_HEIGHT, DRAIN_RADIUS, DividerKind, Layout, MUTED,
-    Measure, PlacedGlyph, RIM, RIM_WIDTH, SEGMENT_GAP, SEGMENT_HEIGHT, SEGMENT_OFF, SEGMENTS, SIDE,
-    Shape, Text, lit_segments, segment_width, share_left,
+    Measure, PlacedGlyph, RIM, RIM_WIDTH, SEGMENT_GAP, SEGMENT_HEIGHT, SEGMENT_OFF, SEGMENT_RADIUS,
+    SEGMENTS, SIDE, Shape, TRACK_RADIUS, Text, lit_segments, segment_width, share_left,
 };
 use super::chip::{Scene, Show, Trim, missed_name, segments_lit, words_of};
 use super::figure::{
@@ -361,6 +361,8 @@ impl Layers {
         let capsule = CALayer::new();
         capsule.setBackgroundColor(Some(&rust));
         capsule.setCornerRadius(CAPSULE / 2.0);
+        capsule.setBorderWidth(RIM_WIDTH);
+        capsule.setBorderColor(Some(&color(RIM, 1.0)));
         capsule.setMasksToBounds(true);
         capsule.setAnchorPoint(CGPoint::new(0.5, 0.0));
 
@@ -628,7 +630,7 @@ pub struct Panel {
     outline_length: CGFloat,
     place: Option<Place>,
     on_screen: Option<Scene>,
-    /// The card or the pill with a rim on screen.
+    /// The card or the Missed pill on screen.
     layout: Option<Layout>,
     calm: bool,
     voice: Voice,
@@ -812,14 +814,9 @@ impl Panel {
         match card {
             Some(shape) => {
                 capsule.setCornerRadius(shape.radius);
-                capsule.setBorderWidth(RIM_WIDTH);
-                capsule.setBorderColor(Some(&color(RIM, 1.0)));
                 layers.words.setHidden(true);
             }
-            None => {
-                capsule.setCornerRadius(CAPSULE / 2.0);
-                capsule.setBorderWidth(0.0);
-            }
+            None => capsule.setCornerRadius(CAPSULE / 2.0),
         }
         layers.figure.setHidden(card.is_some());
         self.card.body.setHidden(card.is_none());
@@ -1240,6 +1237,9 @@ impl CardLayers {
         drain.setBackgroundColor(Some(&color(BONE, 1.0)));
         drain.setCornerRadius(DRAIN_RADIUS);
         let segments = std::array::from_fn(|_| CALayer::new());
+        for segment in &segments {
+            segment.setCornerRadius(SEGMENT_RADIUS);
+        }
         let answer = CALayer::new();
         let glyph = CALayer::new();
         glyph.setBounds(rect(0.0, 0.0, SLOT, GLYPH));
@@ -1319,17 +1319,20 @@ impl CardLayers {
                         lasts,
                         since,
                     } => {
+                        self.divider.setCornerRadius(TRACK_RADIUS);
                         let remaining = lasts.as_secs_f64() * share;
                         self.drain_from(share, track.size.width, remaining, since);
                         (true, true, false)
                     }
                     DividerKind::Stepped { lit } => {
+                        self.divider.setCornerRadius(0.0);
                         self.stop_drain();
                         self.lay_segments(track);
                         self.light(lit);
                         (false, false, true)
                     }
                     DividerKind::Thin => {
+                        self.divider.setCornerRadius(0.0);
                         self.stop_drain();
                         (true, false, false)
                     }
@@ -1384,7 +1387,7 @@ impl CardLayers {
 
     fn light(&self, lit: usize) {
         let lit = lit_segments(lit);
-        let (on, off) = (color(BONE, 1.0), color(MUTED, SEGMENT_OFF));
+        let (on, off) = (color(BONE, 1.0), color(SEGMENT_OFF, 1.0));
         for (at, segment) in self.segments.iter().enumerate() {
             let shown = if lit.contains(&at) { &on } else { &off };
             segment.setBackgroundColor(Some(shown));

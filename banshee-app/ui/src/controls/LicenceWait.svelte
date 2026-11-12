@@ -15,11 +15,11 @@
   <code class="mono command">{model.accept_command}</code>
   <div class="links">
     <button
-      class="caps btn-underline"
+      class="btn-underline"
       aria-label={`Read the licence for ${model.label}`}
       on:click={() => readLicence(model)}>Read the licence</button
     >
-    <button class="caps btn-underline" on:click={() => copy(model.accept_command, copyId)}>
+    <button class="btn-underline" on:click={() => copy(model.accept_command, copyId)}>
       {$copied === copyId ? 'Copied' : 'Copy'}
       <span class="sr">the command</span>
     </button>
@@ -43,7 +43,7 @@
   }
 
   .command {
-    font-size: 12px;
+    font-size: 13px;
     overflow-wrap: anywhere;
   }
 

@@ -59,8 +59,6 @@
   // `models.unload_after` counts whole minutes and 0 is never, so no choice
   // unloads at the end of a use.
   const UNLOAD = [0, 2, 5, 10, 15, 60];
-  const MORE = 'microphone-more';
-  let more = false;
   let devices: Devices = { devices: [], current: null };
   let adding = false;
   let field: HTMLInputElement | undefined;
@@ -212,7 +210,7 @@
   }
 </script>
 
-<Row name="Input" block setting="audio.input_device">
+<Row name="Input" setting="audio.input_device">
   <Picker label="Input device" value={current} change={(next) => write('audio.input_device', next)}>
     <option value={SYSTEM_DEVICE}>{deviceLabel($daemon.live.audio_device)}</option>
     {#each options as name (name)}
@@ -234,7 +232,7 @@
   />
 </Row>
 
-<Row name="End of speech" block setting="stt.endpoint_silence_ms">
+<Row name="End of speech" setting="stt.endpoint_silence_ms">
   <Picker
     label="End of speech"
     value={String(silence)}
@@ -299,7 +297,7 @@
                 {model.credit}
                 {#if waitsOnLicence?.id !== model.id}
                   <button
-                    class="caps btn-underline"
+                    class="btn-underline"
                     aria-label={`Read the licence for ${model.label}`}
                     on:click={() => readLicence(model)}>Read the licence</button
                   >
@@ -371,51 +369,27 @@
   </div>
 </Row>
 
-<button
-  class="caps btn-underline more"
-  aria-label="More listening settings"
-  aria-expanded={more}
-  aria-controls={MORE}
-  on:click={() => (more = !more)}
->
-  More
-  <svg width="11" height="7" viewBox="0 0 11 7" aria-hidden="true" focusable="false">
-    <path
-      d="M1 1.5 L5.5 5.5 L10 1.5"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.4"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-    />
-  </svg>
-</button>
+<Row name="Microphone" note={openNote} noteId="microphone-opens-note" setting="audio.keep_open">
+  <Segmented
+    label="Microphone"
+    value={keepOpen ? 'always' : 'use'}
+    options={OPENS}
+    describedBy="microphone-opens-note"
+    change={(next) => write('audio.keep_open', next === 'always')}
+  />
+</Row>
 
-<div id={MORE}>
-  {#if more}
-    <Row name="Microphone" note={openNote} noteId="microphone-opens-note" setting="audio.keep_open">
-      <Segmented
-        label="Microphone"
-        value={keepOpen ? 'always' : 'use'}
-        options={OPENS}
-        describedBy="microphone-opens-note"
-        change={(next) => write('audio.keep_open', next === 'always')}
-      />
-    </Row>
-
-    <Row name="Free memory" block note={unloadNote} setting="models.unload_after">
-      <Picker
-        label="Free memory"
-        value={String(unloadAfter)}
-        change={(next) => write('models.unload_after', Number(next))}
-      >
-        {#each unloadOffered as minutes (minutes)}
-          <option value={String(minutes)}>{idleFor(minutes)}</option>
-        {/each}
-      </Picker>
-    </Row>
-  {/if}
-</div>
+<Row name="Free memory" note={unloadNote} setting="models.unload_after">
+  <Picker
+    label="Free memory"
+    value={String(unloadAfter)}
+    change={(next) => write('models.unload_after', Number(next))}
+  >
+    {#each unloadOffered as minutes (minutes)}
+      <option value={String(minutes)}>{idleFor(minutes)}</option>
+    {/each}
+  </Picker>
+</Row>
 
 <style>
   /* Under the sentence that explains it, aligned with the control it acts for. */
@@ -462,15 +436,15 @@
 
   .name {
     font-variation-settings:
-      'wght' 600,
-      'wdth' 100;
+      'wght' var(--cut-name-weight),
+      'wdth' var(--cut-name-width);
     font-size: 15px;
   }
 
   .on .name {
     font-variation-settings:
-      'wght' 800,
-      'wdth' 105;
+      'wght' var(--cut-head-weight),
+      'wdth' var(--cut-head-width);
   }
 
   /* The dash this world uses for a thing that is not here yet. */
@@ -493,8 +467,8 @@
   }
 
   .credit button {
-    margin-left: 4px;
     color: var(--ink);
+    border-bottom-color: currentcolor;
   }
 
   /* Centred, not stretched: a wrapped flex line sizes its items to the tallest, so the input would
@@ -510,28 +484,5 @@
   .add {
     background: transparent;
     width: 110px;
-  }
-
-  .more {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--ink);
-    margin-bottom: 22px;
-  }
-
-  .more svg {
-    transition: transform 120ms ease-out;
-  }
-
-  /* The chevron points where the rows went. */
-  .more[aria-expanded='true'] svg {
-    transform: rotate(180deg);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .more svg {
-      transition: none;
-    }
   }
 </style>

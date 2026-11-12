@@ -30,10 +30,10 @@
 <SubRow name="key">
   {#if present && !replacing}
     <span class="held">A key is set</span>
-    <button class="caps btn-underline act" aria-label="Remove the key" on:click={removeKey}>
+    <button class="btn-underline act" aria-label="Remove the key" on:click={removeKey}>
       Remove
     </button>
-    <button class="caps btn-underline act" aria-label="Replace the key" on:click={replaceKey}>
+    <button class="btn-underline act" aria-label="Replace the key" on:click={replaceKey}>
       Replace
     </button>
   {:else}
@@ -53,7 +53,7 @@
 </SubRow>
 
 <style>
-  /* A resting rule, or an 11px word beside a field reads as part of the value. */
+  /* A resting rule, or a word beside a field reads as part of the value. */
   .act {
     color: var(--ink);
     border-bottom-color: currentcolor;

@@ -420,7 +420,7 @@ it('lands on the newest unanswered question when reopened for a missed one', asy
   );
   expect(
     screen
-      .getByRole('option', { name: /^Agent asked Should I update the reports\?/ })
+      .getByRole('option', { name: /^An agent asked Should I update the reports\?/ })
       .getAttribute('aria-selected'),
   ).toBe('true');
 });
@@ -763,7 +763,7 @@ it('a question with no answer reaches the record without a transcription', async
 
   expect(
     await screen.findByRole('option', {
-      name: /^Agent asked Which branch should I use\?, .*, No answer heard$/,
+      name: /^An agent asked Which branch should I use\?, .*, No answer heard$/,
     }),
   ).toBeTruthy();
 });
@@ -2375,11 +2375,15 @@ describe('below the width the sidebar folds at', () => {
     render(App);
     await listed();
     expect(screen.queryByRole('button', { name: 'Back to History' })).toBeNull();
+    expect(
+      within(page('History')).getByRole('heading', { name: 'History' }).classList.contains('sr'),
+    ).toBe(false);
 
     await fireEvent.click(screen.getByRole('option', { name: /^the older one,/ }));
     const back = await screen.findByRole('button', { name: 'Back to History' });
     const heading = within(page('History')).getByRole('heading', { name: 'History' });
     expect(heading.parentElement!.contains(back)).toBe(true);
+    expect(heading.classList.contains('sr')).toBe(true);
     expect(screen.getByRole('region', { name: 'Selected row' }).contains(back)).toBe(false);
 
     await fireEvent.click(back);

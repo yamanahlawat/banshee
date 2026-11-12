@@ -586,16 +586,10 @@ it('lists the devices once, however often the microphone opens and closes', asyn
   await waitFor(() => expect(vi.mocked(listDevices)).toHaveBeenCalledTimes(2));
 });
 
-it('keeps the microphone and memory settings under More, closed until asked', async () => {
+it('shows the microphone and memory settings', () => {
   daemon.set(reduceStatus(empty(), localStatus));
   render(ListeningPage);
-  const more = screen.getByRole('button', { name: 'More listening settings' });
-  expect(more.textContent?.trim()).toBe('More');
-  expect(more.getAttribute('aria-expanded')).toBe('false');
-  expect(screen.queryByRole('radiogroup', { name: 'Microphone' })).toBeNull();
-
-  await fireEvent.click(more);
-  expect(more.getAttribute('aria-expanded')).toBe('true');
+  expect(screen.queryByRole('button', { name: 'More listening settings' })).toBeNull();
   expect(screen.getByRole('radiogroup', { name: 'Microphone' })).toBeTruthy();
   expect(screen.getByRole('combobox', { name: 'Free memory' })).toBeTruthy();
 });
@@ -603,7 +597,6 @@ it('keeps the microphone and memory settings under More, closed until asked', as
 it('offers the microphone held open, off by default, and says what each choice does', async () => {
   daemon.set(reduceStatus(empty(), localStatus));
   render(ListeningPage);
-  await fireEvent.click(screen.getByRole('button', { name: 'More listening settings' }));
 
   const group = screen.getByRole('radiogroup', { name: 'Microphone' });
   expect(screen.getByRole('radio', { name: 'When you speak' }).getAttribute('aria-checked')).toBe(
@@ -637,7 +630,6 @@ it('offers the microphone held open, off by default, and says what each choice d
 it('offers Never and the idle times Handy offers for freeing memory', async () => {
   daemon.set(reduceStatus(empty(), localStatus));
   render(ListeningPage);
-  await fireEvent.click(screen.getByRole('button', { name: 'More listening settings' }));
 
   const picker = screen.getByRole('combobox', { name: 'Free memory' }) as HTMLSelectElement;
   expect([...picker.options].map((one) => one.textContent)).toEqual([
@@ -667,7 +659,6 @@ it('keeps a hand-edited idle time among the choices', async () => {
     }),
   );
   render(ListeningPage);
-  await fireEvent.click(screen.getByRole('button', { name: 'More listening settings' }));
 
   const picker = screen.getByRole('combobox', { name: 'Free memory' }) as HTMLSelectElement;
   expect(picker.value).toBe('30');
@@ -680,4 +671,13 @@ it('shows the quiet length the table states when the daemon sends none', () => {
   render(ListeningPage);
   const shown = screen.getByRole('option', { name: 'After 1.5 seconds of quiet' });
   expect((shown as HTMLOptionElement).selected).toBe(true);
+});
+
+it('keeps the Input, End of speech and Free memory rows inline', () => {
+  render(ListeningPage);
+  for (const label of ['Input device', 'End of speech', 'Free memory']) {
+    expect(screen.getByRole('combobox', { name: label }).closest('.row')?.classList).not.toContain(
+      'block',
+    );
+  }
 });

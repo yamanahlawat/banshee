@@ -17,6 +17,7 @@
 
 <style>
   .absence {
+    max-width: var(--measure);
     margin: 4px var(--gutter) 18px;
     padding: 14px 16px;
     border: 1px dashed var(--accent);

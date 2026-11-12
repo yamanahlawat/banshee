@@ -254,6 +254,7 @@
   /* An absence is drawn, not omitted: the thing that is missing takes up the
      place it will fill once it arrives. */
   .blocker {
+    max-width: var(--measure);
     margin: 0 var(--gutter) 16px;
     padding: 14px 16px;
     border: 1px dashed var(--accent);

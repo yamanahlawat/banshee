@@ -94,6 +94,10 @@
     cursor: pointer;
   }
 
+  .item:hover:not([aria-current='page']) {
+    background: var(--hover);
+  }
+
   .item[aria-current='page'] {
     background: var(--hilite);
     font-weight: 700;

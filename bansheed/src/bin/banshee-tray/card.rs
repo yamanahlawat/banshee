@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::chip::{
-    Countdown, Done, Scene, Show, Trim, YOUR_TURN, YOUR_TURN_NEXT, missed_label, segments_lit,
+    Countdown, Scene, Show, Trim, WORKING, YOUR_TURN, YOUR_TURN_NEXT, missed_label, segments_lit,
     split,
 };
 use crate::figure::{BONE, CAPSULE};
@@ -18,8 +18,7 @@ pub const CARD_WIDTH: f64 = 560.0;
 pub const NARROW_WIDTH: f64 = 440.0;
 pub const CARD_RADIUS: f64 = 20.0;
 pub const SIDE: f64 = 20.0;
-/// The grip row's 22 plus the body's top 6.
-pub const TOP: f64 = 28.0;
+pub const TOP: f64 = 20.0;
 pub const BODY_BOTTOM: f64 = 14.0;
 pub const NAME_GAP: f64 = 8.0;
 pub const CONTEXT_GAP: f64 = 8.0;
@@ -28,9 +27,8 @@ pub const MORE_GAP: f64 = 4.0;
 pub const MAX_LINES: usize = 4;
 /// The clamp's mask, in em of the block's size.
 pub const FADE_EM: f64 = 2.2;
-pub const ANSWER_TOP: f64 = 12.0;
-pub const ANSWER_BOTTOM: f64 = 14.0;
-pub const ANSWER_MIN: f64 = 48.0;
+pub const ANSWER_TOP: f64 = 14.0;
+pub const ANSWER_BOTTOM: f64 = 20.0;
 pub const ANSWER_LINES: usize = 2;
 pub const ANSWER_FADE_EM: f64 = 1.1;
 pub const GLYPH_GAP: f64 = 10.0;
@@ -40,11 +38,12 @@ pub const DIVIDER: f64 = 2.0;
 /// The 2 px track with a 1 px overhang each side.
 pub const DRAIN_HEIGHT: f64 = 4.0;
 pub const DRAIN_RADIUS: f64 = 2.0;
+pub const TRACK_RADIUS: f64 = 1.0;
 pub const SEGMENTS: usize = 5;
 pub const SEGMENT_GAP: f64 = 4.0;
 pub const SEGMENT_HEIGHT: f64 = 3.0;
-pub const SEGMENT_OFF: f64 = 0.45;
-pub const PILL_PAD_X: f64 = 18.0;
+pub const SEGMENT_RADIUS: f64 = 1.5;
+pub const SEGMENT_OFF: u32 = 0xBF8E7D;
 pub const MISSED_PAD: Pad = Pad {
     top: 9.0,
     right: 12.0,
@@ -93,19 +92,18 @@ impl Cut {
 
     pub fn weight(self) -> f64 {
         match self {
-            Cut::Context | Cut::Ask => 350.0,
+            Cut::Context | Cut::Ask | Cut::Hint => 350.0,
             Cut::User => 800.0,
             Cut::Label | Cut::Name => 650.0,
-            Cut::Hint => 400.0,
             Cut::Chip => 600.0,
         }
     }
 
     pub fn width(self) -> f64 {
         match self {
-            Cut::Context | Cut::Ask => 84.0,
+            Cut::Context | Cut::Ask | Cut::Hint => 84.0,
             Cut::User => 112.0,
-            Cut::Label | Cut::Hint | Cut::Chip | Cut::Name => 100.0,
+            Cut::Label | Cut::Chip | Cut::Name => 100.0,
         }
     }
 
@@ -344,7 +342,7 @@ fn answer_of(show: &Show) -> Option<(Glyph, &str, Cut)> {
             Some((Glyph::Bars, words, Cut::User))
         }
         Show::Answering(_) | Show::Recording(_) => Some((Glyph::Bars, YOUR_TURN, Cut::Label)),
-        Show::Working => Some((Glyph::Dots, "Transcribing your answer", Cut::Label)),
+        Show::Working => Some((Glyph::Dots, WORKING, Cut::Label)),
         Show::NothingHeard(_)
         | Show::Broken(_)
         | Show::Done(_)
@@ -364,7 +362,6 @@ pub fn layout(
 ) -> Option<Layout> {
     let Some(question) = scene.question.as_deref() else {
         return match &scene.show {
-            Show::Done(Done::Sent) => Some(sent_pill(measure)),
             Show::Missed { count, ask } => Some(missed_pill(*count, ask, measure)),
             _ => None,
         };
@@ -411,7 +408,7 @@ pub fn layout(
         blocks.push(shown);
     }
 
-    y += BODY_BOTTOM;
+    y = (y + BODY_BOTTOM).round();
     let divider = match scene.countdown {
         Some(countdown) => {
             let share = share_left(countdown, now);
@@ -472,7 +469,7 @@ pub fn layout(
         shown.height += TEACH_GAP + hint.height;
         shown.lines.extend(hint.lines);
     }
-    let row = (ANSWER_TOP + GLYPH.max(shown.height) + ANSWER_BOTTOM).max(ANSWER_MIN);
+    let row = ANSWER_TOP + GLYPH.max(shown.height) + ANSWER_BOTTOM;
     blocks.push(shown);
 
     Some(Layout {
@@ -490,35 +487,6 @@ pub fn layout(
         }),
         chip: None,
     })
-}
-
-fn sent_pill(measure: &dyn Measure) -> Layout {
-    let label = Done::Sent.words();
-    let height = CAPSULE;
-    let line = Cut::Label.line_height();
-    Layout {
-        shape: Shape {
-            width: 2.0 * PILL_PAD_X + measure.width(label, Cut::Label),
-            height,
-            radius: height / 2.0,
-        },
-        blocks: vec![Block {
-            lines: vec![Text {
-                line: label.to_string(),
-                cut: Cut::Label,
-                ink: Ink::Bone,
-                x: PILL_PAD_X,
-                top: (height - line) / 2.0,
-                height: line,
-            }],
-            top: 0.0,
-            height,
-            fade: None,
-        }],
-        divider: None,
-        glyph: None,
-        chip: None,
-    }
 }
 
 fn missed_pill(count: u32, ask: &str, measure: &dyn Measure) -> Layout {
@@ -567,7 +535,11 @@ fn missed_pill(count: u32, ask: &str, measure: &dyn Measure) -> Layout {
         shape: Shape {
             width: (chip_x + chip_width + MISSED_PAD.right).min(NARROW_WIDTH),
             height,
-            radius: CARD_RADIUS,
+            radius: if height <= CAPSULE {
+                height / 2.0
+            } else {
+                CARD_RADIUS
+            },
         },
         blocks: vec![Block {
             lines: texts,
@@ -741,10 +713,8 @@ mod tests {
         )
         .unwrap();
         let bare = laid(Show::Reading, "The build is red. Retry it?");
-        assert!(close(
-            named.shape.height - bare.shape.height,
-            SIDE + Cut::Name.line_height() + NAME_GAP - TOP
-        ));
+        let grown = named.shape.height - bare.shape.height;
+        assert!((grown - (SIDE + Cut::Name.line_height() + NAME_GAP - TOP)).abs() <= 0.5);
         assert_eq!(named.shape.width, bare.shape.width);
         assert_eq!(named.blocks.len(), bare.blocks.len() + 1);
     }
@@ -874,20 +844,36 @@ mod tests {
         let ask = block_of(&card, Cut::Ask);
         assert!(close(ask.top, TOP + 21.75 + CONTEXT_GAP));
         let divider = card.divider.as_ref().unwrap();
-        assert!(close(divider.top, ask.top + 27.5 + BODY_BOTTOM));
+        assert!(close(divider.top, (ask.top + 27.5 + BODY_BOTTOM).round()));
         assert!(close(divider.height, DIVIDER_THIN));
         let PlacedGlyph { x, top, .. } = card.glyph.unwrap();
         assert!(close(x, SIDE));
         assert!(close(top, divider.top + 1.0 + ANSWER_TOP));
-        let row = ANSWER_TOP + GLYPH.max(20.25) + ANSWER_BOTTOM;
-        let height = if row > ANSWER_MIN {
-            top + 20.25 + ANSWER_BOTTOM
-        } else {
-            divider.top + 1.0 + ANSWER_MIN
-        };
-        assert!(close(card.shape.height, height));
+        assert!(close(card.shape.height, top + 20.25 + 20.0));
         assert!(close(card.shape.width, CARD_WIDTH));
         assert!(close(card.shape.radius, CARD_RADIUS));
+    }
+
+    #[test]
+    fn the_card_sits_evenly_inside_its_edges() {
+        let bare = laid(Show::Reading, "The build is red. Retry it?");
+        assert!(close(bare.blocks[0].top, 20.0));
+        let named = layout(
+            &asked_by("claude"),
+            ROOM,
+            false,
+            Instant::now(),
+            &Mono::new(),
+        )
+        .unwrap();
+        assert!(close(named.blocks[0].top, 20.0));
+        for card in [&bare, &named] {
+            let words = card.blocks.last().unwrap();
+            let bottom = words.top + words.height.max(GLYPH);
+            assert!(close(card.shape.height, bottom + 20.0));
+            let top = card.divider.as_ref().unwrap().top;
+            assert!(close(top, top.round()));
+        }
     }
 
     fn row_of(show: Show) -> (Glyph, Vec<String>, Cut) {
@@ -916,11 +902,7 @@ mod tests {
         );
         assert_eq!(
             row_of(Show::Working),
-            (
-                Glyph::Dots,
-                vec!["Transcribing your answer".into()],
-                Cut::Label
-            )
+            (Glyph::Dots, vec!["Working".into()], Cut::Label)
         );
     }
 
@@ -948,14 +930,9 @@ mod tests {
     }
 
     #[test]
-    fn the_sent_pill_says_sent_alone() {
+    fn sent_is_a_figure_pill_with_no_layout() {
         let scene = Scene::of(Show::Done(Done::Sent), 1);
-        let card = layout(&scene, ROOM, false, Instant::now(), &Mono::new()).expect("a pill");
-        let lines: Vec<&Text> = card.blocks.iter().flat_map(|b| &b.lines).collect();
-        assert_eq!(lines.len(), 1);
-        assert_eq!((lines[0].line.as_str(), lines[0].cut), ("Sent", Cut::Label));
-        let width = 2.0 * PILL_PAD_X + Mono::new().width("Sent", Cut::Label);
-        assert_eq!(card.shape, pill(width));
+        assert!(layout(&scene, ROOM, false, Instant::now(), &Mono::new()).is_none());
     }
 
     fn missed(count: u32, ask: &str) -> Layout {
@@ -1004,6 +981,7 @@ mod tests {
     fn a_missed_pill_with_no_ask_is_one_line_tall() {
         let card = missed(1, "");
         assert_eq!(card.shape.height, CAPSULE);
+        assert_eq!(card.shape.radius, card.shape.height / 2.0);
         assert_eq!(card.blocks.iter().flat_map(|b| &b.lines).count(), 1);
     }
 

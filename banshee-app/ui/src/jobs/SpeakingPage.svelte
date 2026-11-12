@@ -165,7 +165,7 @@
             />
             <label for={`voice-${voice.id}`}>
               <span class="name" class:absent={!here}>{voice.name}</span>
-              <span class="desc">{voice.description}</span>
+              <span class="desc note">{voice.description}</span>
               <!-- The dashed name is the mark for the eye, and this is the same
                    fact for a reader who hears the radio rather than sees it. -->
               {#if !here}<span class="sr">, not on this machine</span>{/if}
@@ -247,8 +247,8 @@
      starts at one edge down the list. */
   .name {
     font-variation-settings:
-      'wght' 600,
-      'wdth' 100;
+      'wght' var(--cut-name-weight),
+      'wdth' var(--cut-name-width);
     font-size: 15px;
     width: 88px;
     flex: none;
@@ -263,15 +263,11 @@
 
   .on .name {
     font-variation-settings:
-      'wght' 800,
-      'wdth' 105;
+      'wght' var(--cut-head-weight),
+      'wdth' var(--cut-head-width);
   }
 
   .desc {
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
-    font-size: 13px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

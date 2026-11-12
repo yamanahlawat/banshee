@@ -59,7 +59,7 @@ fn an_unknown_device_is_left_out_rather_than_named_empty() {
         !tooltip.contains("Microphone"),
         "no device means none is named: {tooltip}"
     );
-    assert!(tooltip.contains("idle"), "{tooltip}");
+    assert!(tooltip.contains("Banshee: Ready"), "{tooltip}");
 }
 
 // A bar reader has the tooltip only, so a substitution has to show there or
@@ -77,7 +77,7 @@ fn a_waybar_tooltip_names_what_the_config_still_waits_for() {
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
     assert_eq!(
         parsed["tooltip"],
-        "Banshee is idle. Microphone: MacBook Pro Microphone (waiting for \"Yeti Nano\"), opens when you speak"
+        "Banshee: Ready. Microphone: MacBook Pro Microphone (waiting for \"Yeti Nano\"), opens when you speak"
     );
 }
 
@@ -101,15 +101,15 @@ fn a_waybar_tooltip_says_whether_the_microphone_is_open() {
     };
     assert_eq!(
         tooltip(false, false),
-        "Banshee is idle. Microphone: MacBook Pro Microphone, opens when you speak"
+        "Banshee: Ready. Microphone: MacBook Pro Microphone, opens when you speak"
     );
     assert_eq!(
         tooltip(true, false),
-        "Banshee is idle. Microphone: MacBook Pro Microphone, open"
+        "Banshee: Ready. Microphone: MacBook Pro Microphone, open"
     );
     assert_eq!(
         tooltip(false, true),
-        "Banshee is idle. Microphone: MacBook Pro Microphone, not allowed by macOS"
+        "Banshee: Ready. Microphone: MacBook Pro Microphone, not allowed by macOS"
     );
 }
 
@@ -777,7 +777,7 @@ fn an_idle_bar_with_a_problem_picks_the_problem_icon_and_names_it_first() {
         line["tooltip"]
             .as_str()
             .unwrap()
-            .starts_with("Accessibility is not granted. Banshee is idle. Microphone: ")
+            .starts_with("Accessibility is not granted. Banshee: Not ready. Microphone: ")
     );
 }
 
@@ -797,7 +797,7 @@ fn a_problem_while_recording_leaves_the_bar_on_the_state() {
         line["tooltip"]
             .as_str()
             .unwrap()
-            .starts_with("Banshee is recording")
+            .starts_with("Banshee: Recording")
     );
 }
 
@@ -819,4 +819,19 @@ fn a_status_with_a_blocker_reaches_the_waybar_line_as_a_problem() {
     assert_eq!(line["alt"], "problem");
     assert_eq!(problem_name(&serde_json::json!({"blockers": []})), None);
     assert_eq!(problem_name(&serde_json::json!({})), None);
+}
+
+#[test]
+fn a_waybar_tooltip_names_every_state_with_its_human_word() {
+    for (wire, human) in [
+        ("idle", "Ready"),
+        ("recording", "Recording"),
+        ("speaking", "Speaking"),
+        ("listening", "Your turn"),
+        ("busy", "Working"),
+    ] {
+        let line: serde_json::Value =
+            serde_json::from_str(&waybar_line(wire, None, None, false, false, None)).unwrap();
+        assert_eq!(line["tooltip"], format!("Banshee: {human}"));
+    }
 }

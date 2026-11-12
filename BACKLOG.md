@@ -195,6 +195,10 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 - A screen reader hears a segmented control change only after the daemon answers.
 - In a wide window, the History list does not scroll to the missed question's row. The
   detail pane shows the question.
+- Five controls repeat the same border, radius and minimum height (`Field.svelte`,
+  `Picker.svelte`, `Find.svelte`, the Hotkey page's `.key`, and `.chip` in `tokens.css`), and
+  the segmented control and the Agents row derive their height from `--control-height` with
+  hand-written offsets. A new control can get one of them wrong.
 
 ## Build and tests
 
