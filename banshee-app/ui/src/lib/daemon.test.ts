@@ -69,10 +69,10 @@ describe('the state word', () => {
     expect(stateWord(state)).toBe('Recording');
     expect(lampForm('Recording')).toBe('recording');
   });
-  it('is Listening while armed, because the daemon holds the microphone open then too', () => {
+  it('is Your turn while armed, because the daemon holds the microphone open then too', () => {
     const state = reduceLive(reduceStatus(empty(), ready), armed);
     expect(state.live.recording).toBe(true);
-    expect(stateWord(state)).toBe('Listening');
+    expect(stateWord(state)).toBe('Your turn');
   });
   it('is Working while transcribing, even though the mode has not gone idle', () => {
     const state = reduceLive(reduceStatus(empty(), ready), transcribing);
@@ -81,7 +81,7 @@ describe('the state word', () => {
   });
   // Which flag outranks which is `Activity::of`, tested in banshee-common.
   it.each([
-    ['listening', 'Listening'],
+    ['listening', 'Your turn'],
     ['recording', 'Recording'],
     ['speaking', 'Speaking'],
     ['busy', 'Working'],
@@ -345,10 +345,10 @@ it('names the file once when the server sent no length', () => {
   expect(spokenProgress({ ...tick, bytes: 90 * 1_048_576 })).toBe('kokoro.onnx');
 });
 
-// Listening means an agent has stopped and is waiting for an answer. It shared
+// Your turn means an agent has stopped and is waiting for an answer. It shared
 // a silhouette with Ready, which is the state where doing nothing is correct.
-it('gives Listening a form of its own', () => {
-  expect(lampForm('Listening')).toBe('listening');
+it('gives Your turn a form of its own', () => {
+  expect(lampForm('Your turn')).toBe('listening');
   expect(lampForm('Ready')).toBe('idle');
 });
 

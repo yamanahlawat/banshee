@@ -132,16 +132,16 @@ mod tray {
             }
         }
 
-        fn label(self) -> &'static str {
-            match self {
-                Indicator::Idle => "Idle",
-                Indicator::Recording => "Recording",
-                Indicator::Speaking => "Speaking",
-                // What it means to a person, not the name on the wire.
-                Indicator::Listening => "Waiting for you",
-                Indicator::Busy => "Busy",
-                Indicator::NotRunning => "Banshee is not running",
-            }
+        fn label(self, problem: bool) -> &'static str {
+            let activity = match self {
+                Indicator::Idle => Activity::Idle,
+                Indicator::Recording => Activity::Recording,
+                Indicator::Speaking => Activity::Speaking,
+                Indicator::Listening => Activity::Listening,
+                Indicator::Busy => Activity::Busy,
+                Indicator::NotRunning => return "Not running",
+            };
+            banshee_common::state_label(activity.word(), problem)
         }
     }
 
@@ -174,9 +174,10 @@ mod tray {
 
     fn tooltip(indicator: Indicator, problem: Option<&Problem>) -> String {
         match (indicator, problem) {
-            (Indicator::NotRunning, _) => indicator.label().to_string(),
+            (Indicator::NotRunning, _) | (_, None) => {
+                format!("Banshee: {}", indicator.label(false))
+            }
             (_, Some(problem)) => format!("Banshee: {}", problem.name),
-            (_, None) => format!("Banshee: {}", indicator.label()),
         }
     }
 
@@ -689,7 +690,10 @@ mod tray {
             rows.push(row);
             rows.push(Row::Separator);
         }
-        rows.push(Row::Info(STATE_ID, indicator.label().to_string()));
+        rows.push(Row::Info(
+            STATE_ID,
+            indicator.label(problem.is_some()).to_string(),
+        ));
         if let Some(line) = device_line(indicator, device) {
             rows.push(Row::Info(DEVICE_ID, line));
         }
@@ -2043,7 +2047,7 @@ mod tray {
         }
 
         const TODAYS_ROWS: [&str; 10] = [
-            "Idle",
+            "Ready",
             "Microphone: MacBook Pro Microphone, opens when you speak",
             "Audio and text stay on this machine",
             "Listening model",
@@ -2065,7 +2069,11 @@ mod tray {
             let wrong = problem("Accessibility is off");
             assert_eq!(
                 labels(Indicator::Idle, Some(&wrong), Start::Ready),
-                [&["Accessibility is off", "---"][..], &TODAYS_ROWS[..]].concat()
+                [
+                    &["Accessibility is off", "---", "Not ready"][..],
+                    &TODAYS_ROWS[1..]
+                ]
+                .concat()
             );
             let recording = labels(Indicator::Recording, Some(&wrong), Start::Ready);
             assert_eq!(recording[..3], ["Accessibility is off", "---", "Recording"]);
@@ -2079,7 +2087,7 @@ mod tray {
                 [
                     "Start Banshee",
                     "---",
-                    "Banshee is not running",
+                    "Not running",
                     "Audio and text stay on this machine",
                     "Listening model",
                     "Voice",
@@ -2963,10 +2971,18 @@ mod tray {
                 tooltip(Indicator::Speaking, Some(&wrong)),
                 "Banshee: Accessibility is off"
             );
-            assert_eq!(tooltip(Indicator::Idle, None), "Banshee: Idle");
+            assert_eq!(tooltip(Indicator::Idle, None), "Banshee: Ready");
+            for (indicator, word) in [
+                (Indicator::Recording, "Recording"),
+                (Indicator::Speaking, "Speaking"),
+                (Indicator::Listening, "Your turn"),
+                (Indicator::Busy, "Working"),
+            ] {
+                assert_eq!(tooltip(indicator, None), format!("Banshee: {word}"));
+            }
             assert_eq!(
                 tooltip(Indicator::NotRunning, Some(&wrong)),
-                "Banshee is not running",
+                "Banshee: Not running",
                 "a daemon that is down wins over a problem"
             );
         }

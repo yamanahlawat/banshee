@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The question card, History and the log name the program that asked.** The card shows
   the name above the question on macOS and Linux. History keeps it on question rows and shows
-  it after the time and in the detail's date line. Dictation shows no name, including
+  it after the time and above the question in the detail. Dictation shows no name, including
   dictation through `banshee record`. The log names every socket use that opens the
   microphone, and who set `audio.keep_open`. When the name does not read, none shows. The
   daemon reads the name from the operating system, so a renamed program shows its new name.
@@ -19,18 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The parent is not measured for Cursor, OpenCode or the npm Claude Code.
 - **An agent's question shows on screen while you answer.** When an agent asks, the capsule
   becomes a card above the Dock: the whole question, with the ask in larger type, and a row
-  that says whether Banshee is speaking, listening or transcribing. Clicks pass through it.
+  that says whether it is your turn next, your turn or Banshee is working. Clicks pass through it.
   History keeps the whole question. When you pause and Banshee hears you as unfinished, the
   line between the question and your words closes in from both ends. Speaking fills it
   again. If you stay quiet and Banshee still hears you as unfinished, it refills and runs
   again. Until Banshee has the turn detection model, the line runs from the first pause. The
   window or `banshee setup` fetches the model. "Keep talking to add more" shows under your
   words the first time the line runs after the tray starts. On macOS with Reduce Motion, the
-  line goes out in five steps. When the answer is sent, the card shrinks to a pill that says
-  Sent. A question nobody answered becomes a small pill, "You missed a question", that stays
-  until you click it. The click opens History at that question. A second missed question
-  makes it "You missed 2 questions". VoiceOver reads the pill as a button. On Linux the card
-  shows on the same desktops as the capsule.
+  line goes out in five steps. When the answer is sent, the card shrinks to a pill with the
+  figure and the word Sent. A question nobody answered becomes a small pill, "You missed a
+  question", that stays until you click it. The click opens History at that question. A
+  second missed question makes it "You missed 2 questions". VoiceOver reads the pill as a
+  button. On Linux the card shows on the same desktops as the capsule.
 - **A pause to think rarely ends your answer to an agent now.** After the pause, Banshee
   checks whether you sound finished. If you don't, it keeps listening and checks again after
   each further pause of the same length. Speaking again starts the checks over. An existing
@@ -88,6 +88,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **History says who asked and who answered.** A question's detail shows "Claude asked"
+  above the question and "You answered" above your answer, in small capitals. With no
+  program name stored, it reads "An agent asked". In the list, a question row shows
+  "18:31 claude asked" under its words.
+- **Every surface names a state with the same word.** The menu bar, its tooltip, the
+  window, the question card and the Waybar tooltip say Ready, Recording, Speaking, Your
+  turn, Working or Not running. With a lasting problem, the menu says Not ready, as the
+  window does. Waybar's `text`, `alt` and `class` and `banshee watch` keep their words, so
+  a Waybar config needs no change.
+- **Every pill on screen has the card's bright edge.** The dictation pill, Your turn and
+  Copied now carry it, so they stand out on a dark desktop. Sent shows the figure beside the
+  word, like Copied. Pill words are a little larger. The card keeps even space on all four
+  sides, and the countdown line has round ends.
+- **The window's controls share one shape and one height.** Choice buttons are rounded and
+  use plain words in place of capitals, as buttons do. Drop-down menus and the hotkey box
+  are boxed like text fields, with darker borders that are easier to see. Sidebar items and
+  choices shade under the pointer.
 - **The window has a sidebar, and History shows a list with the selected row beside
   it.** Every page is one click away, and the window can grow or fill the screen.
   The sidebar folds into a button when the window is narrow, and it says when audio
@@ -134,7 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An idle microphone reads `<device>, opens when you speak`.** It is not a
   fault. When macOS refuses the microphone, every screen reads "not allowed by
   macOS" and names the problem "Microphone access is not allowed".
-- **The window has a More section under Listening.** It holds the two new settings.
+- **The window shows the two new settings on Listening,** Microphone and Free memory.
 - **Breaking: `preset` and `language` are gone from `[stt]`.** Delete both from
   `config.toml`, or the daemon won't start. The error names the key and its line,
   and the window shows it. The tray's first row runs `banshee start`.

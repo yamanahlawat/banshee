@@ -96,7 +96,7 @@ bind = , F9, exec, banshee record toggle
 - **It emits** one custom-module object per line:
 
 ```json
-{"text":"recording","alt":"recording","class":"recording","tooltip":"Banshee is recording. Microphone: Blue Yeti"}
+{"text":"recording","alt":"recording","class":"recording","tooltip":"Banshee: Recording. Microphone: Blue Yeti"}
 ```
 
 - **`text`** shows.

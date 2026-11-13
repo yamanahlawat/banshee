@@ -274,6 +274,20 @@ pub fn microphone_label(
     }
 }
 
+/// The human word for a wire activity word. A lasting problem changes only
+/// the idle word. An unknown word comes back as it came in.
+pub fn state_label(word: &str, problem: bool) -> &str {
+    match word {
+        "idle" if problem => "Not ready",
+        "idle" => "Ready",
+        "recording" => "Recording",
+        "speaking" => "Speaking",
+        "listening" => "Your turn",
+        "busy" => "Working",
+        other => other,
+    }
+}
+
 /// True only where `state[name]` is JSON's own `true`.
 pub fn flag(state: &Value, name: &str) -> bool {
     state.get(name).and_then(Value::as_bool) == Some(true)
@@ -742,7 +756,23 @@ mod wire_tests {
 
 #[cfg(test)]
 mod label_tests {
-    use super::{microphone_label, microphone_open, microphone_refused};
+    use super::{microphone_label, microphone_open, microphone_refused, state_label};
+
+    #[test]
+    fn each_activity_word_has_one_human_word() {
+        for (word, problem, expected) in [
+            ("idle", false, "Ready"),
+            ("idle", true, "Not ready"),
+            ("recording", false, "Recording"),
+            ("recording", true, "Recording"),
+            ("speaking", false, "Speaking"),
+            ("listening", false, "Your turn"),
+            ("busy", false, "Working"),
+            ("other", false, "other"),
+        ] {
+            assert_eq!(state_label(word, problem), expected, "{word} {problem}");
+        }
+    }
 
     // The tray, `banshee status` and `banshee watch --waybar` all show this
     // sentence, so it is spelled once and tested once

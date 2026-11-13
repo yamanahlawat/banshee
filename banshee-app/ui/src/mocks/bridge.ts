@@ -228,6 +228,7 @@ function rows(): HistoryRow[] {
   const kinds: ((i: number) => Omit<HistoryRow, 'id' | 'timestamp'>)[] = [
     (i) => ({
       ...ASKED,
+      client: 'claude',
       text: 'The release branch.',
       outcome: 'transcribed',
       reason: null,

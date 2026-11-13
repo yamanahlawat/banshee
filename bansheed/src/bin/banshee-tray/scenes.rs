@@ -63,10 +63,6 @@ pub fn moves(scene: &Scene, entrance: Entrance, calm: bool) -> Vec<Move> {
             moves.push(Move::Emerge);
         }
     }
-    if matches!(show, Show::Done(Done::Sent)) {
-        moves.push(Move::WordsFade);
-        return moves;
-    }
     if entrance == Entrance::SameWords {
         moves.extend_from_slice(opening(calm));
         return moves;
@@ -78,9 +74,9 @@ pub fn moves(scene: &Scene, entrance: Entrance, calm: bool) -> Vec<Move> {
         (Show::YourTurn | Show::Reading, false) => &[Move::Cups],
         (Show::NothingHeard(_), false) => &[Move::Shake, Move::Breaks],
         (Show::Broken(_), false) => &[Move::Strain, Move::Breaks],
-        (Show::Done(_), false) => &[Move::Float, Move::FrameSink],
-        (Show::Done(_), true) => &[Move::FadeOut],
-        (Show::Copied | Show::Missed { .. }, _) => &[],
+        (Show::Done(Done::Typed), false) => &[Move::Float, Move::FrameSink],
+        (Show::Done(Done::Typed), true) => &[Move::FadeOut],
+        (Show::Copied | Show::Done(Done::Sent) | Show::Missed { .. }, _) => &[],
         (Show::Answering(_), calm) => opening(calm),
         (
             Show::Working
@@ -240,6 +236,7 @@ mod tests {
             nothing_heard,
             broken,
             Show::Done(Done::Typed),
+            Show::Done(Done::Sent),
             Show::Copied,
             Show::Reading,
         ]
@@ -408,18 +405,22 @@ mod tests {
     }
 
     #[test]
-    fn sent_fades_its_words_in_and_sinks_out() {
+    fn sent_moves_as_copied_does_and_typed_floats_out() {
         use Move::*;
-        let sent = Show::Done(Done::Sent);
-        for calm in [false, true] {
-            assert_eq!(
-                moves(&Scene::of(sent.clone(), 1), Entrance::NewWords, calm),
-                [WordsFade]
-            );
+        let (sent, copied) = (Show::Done(Done::Sent), Show::Copied);
+        for entrance in [Entrance::Fresh, Entrance::SameWords, Entrance::NewWords] {
+            for calm in [false, true] {
+                assert_eq!(
+                    moves(&Scene::of(sent.clone(), 1), entrance, calm),
+                    moves(&Scene::of(copied.clone(), 1), entrance, calm),
+                    "{entrance:?}, calm {calm}"
+                );
+                assert_eq!(leaving(&sent, calm), leaving(&copied, calm));
+            }
         }
-        assert_eq!(leaving(&sent, false), Some(FailureExit));
-        assert_eq!(leaving(&sent, true), Some(FadeOut));
-        assert_eq!(leaving(&Show::Done(Done::Typed), false), None);
+        let typed = Scene::of(Show::Done(Done::Typed), 1);
+        assert_eq!(moves(&typed, Entrance::NewWords, false), [Float, FrameSink]);
+        assert_eq!(leaving(&typed.show, false), None);
     }
 
     #[test]

@@ -53,7 +53,6 @@
 >
   {#each options as option, i (option.value)}
     <button
-      class="caps"
       type="button"
       role="radio"
       aria-checked={option.value === value}
@@ -73,6 +72,7 @@
        shows a fourth cell that no option fills. */
     display: inline-flex;
     border: 1px solid var(--ink);
+    border-radius: var(--radius);
   }
 
   .seg button {
@@ -80,12 +80,24 @@
     background: transparent;
     border: 0;
     border-right: 1px solid var(--ink);
-    padding: 8px 12px;
+    min-height: calc(var(--control-height) - 2px);
+    padding: 7px 12px;
+    font-size: 13px;
+    font-weight: 600;
     cursor: pointer;
+  }
+
+  .seg button:first-child {
+    border-radius: calc(var(--radius) - 1px) 0 0 calc(var(--radius) - 1px);
   }
 
   .seg button:last-child {
     border-right: 0;
+    border-radius: 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0;
+  }
+
+  .seg button[aria-checked='false']:hover {
+    background: var(--hover);
   }
 
   .seg button[aria-checked='true'] {

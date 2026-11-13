@@ -712,12 +712,18 @@ mod tests {
         renderer.show(Some(&sent), t);
         assert_eq!(renderer.height_from, Some((height, t)));
         assert_eq!(renderer.width_from, Some((CARD_WIDTH, t)));
-        let shape = renderer.card.as_ref().map(|card| card.layout.shape);
-        assert!(
-            shape.is_some_and(|shape| shape.height == CAPSULE && shape.radius == CAPSULE / 2.0),
-            "{shape:?}"
+        assert!(renderer.card.is_none());
+        let line = renderer.line.as_ref().expect("the pill's word");
+        assert!(line.path.is_some());
+        let settled = renderer.picture(at(t0, 5000), 1, paint::shown_shape);
+        assert_eq!(
+            settled,
+            Some(Shape {
+                width: paint::width(Some(line)),
+                height: CAPSULE,
+                radius: CAPSULE / 2.0,
+            })
         );
-        assert!(renderer.line.is_none());
     }
 
     fn pixels(draw: &Draw) -> (u32, u32) {
@@ -747,7 +753,39 @@ mod tests {
                 .picture(at(t0, 5000), 1, paint::capsule_top)
                 .expect("a pill");
             assert_eq!(top, f64::from(card_size.1) - TRAVEL - CAPSULE);
+            assert!(renderer.line.is_some(), "a figure pill with its word");
+            assert_eq!(renderer.input_region(at(t0, 5000)), None);
+            let middle = f64::from(card_size.0) / 2.0;
+            assert!(!renderer.opens_at(middle, top + CAPSULE / 2.0, at(t0, 5000)));
         }
+    }
+
+    #[test]
+    fn a_pill_that_ends_a_card_takes_clicks_only_on_its_own_shape() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&card(Show::Working, 1)), t0);
+        let card_size = renderer.open(t0).expect("a card");
+        renderer.draw(t0, 1).expect("a card");
+        let broken = scene(Show::Broken("No microphone".into()), 2);
+        renderer.show(Some(&broken), at(t0, 1000));
+        let now = at(t0, 5000);
+        let draw = renderer.draw(now, 1).expect("a pill");
+        assert_eq!(draw.resize, None);
+        let width = paint::width(renderer.line.as_ref());
+        let top = f64::from(card_size.1) - TRAVEL - CAPSULE;
+        let left = ((f64::from(card_size.0) - width) / 2.0).floor();
+        assert_eq!(
+            renderer.input_region(now),
+            Some((left as i32, top as i32, width as i32, CAPSULE as i32))
+        );
+        let middle = f64::from(card_size.0) / 2.0;
+        assert!(renderer.opens_at(middle, top + CAPSULE / 2.0, now));
+        assert!(!renderer.opens_at(middle, top - 2.0, now), "above the pill");
+        assert!(
+            !renderer.opens_at(left - 2.0, top + CAPSULE / 2.0, now),
+            "beside"
+        );
     }
 
     #[test]

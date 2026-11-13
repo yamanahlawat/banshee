@@ -142,16 +142,16 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 - The menu bar icon answers one question: can I speak right now.
 - The menu's `Listening model` and `Voice` rows list the models and voices already on this machine. A pick takes effect with no restart. Downloads stay in the window. Under a transcription or speech server, the row names the server and is greyed out.
 - A lasting problem puts an exclamation badge on the idle figure. The first menu row says what is wrong, for example `Accessibility is not granted` or `Microphone access is not allowed`, and opens Banshee. When Banshee started without Accessibility, the daemon restarts as that grant lands, and the badge clears. On macOS 14 and later, a microphone grant or refusal reaches Banshee at its next use, with no restart.
-- When Banshee is not running, the first row reads `Start Banshee` and runs `banshee start`. It reads `Starting Banshee` while that runs, and `Start failed. Open Banshee` if it fails. The tooltip reads `Banshee is not running`.
-- The badge shows only at rest. The recording, speaking, waiting and busy marks keep their shape.
+- When Banshee is not running, the first row reads `Start Banshee` and runs `banshee start`. It reads `Starting Banshee` while that runs, and `Start failed. Open Banshee` if it fails. The tooltip reads `Banshee: Not running`.
+- The badge shows only at rest. The recording, speaking, your turn and working marks keep their shape.
 - Banshee also says a new problem aloud once after it starts, never at login. `feedback.speak_problems = false` turns that off. [Feedback](docs/configuration.md)
 
-| Idle | Recording | Busy | Speaking | Waiting for you | Not running |
+| Ready | Recording | Working | Speaking | Your turn | Not running |
 |:----:|:---------:|:----:|:--------:|:---------------:|:-----------:|
 | <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/busy.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/listening.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
 
-- Busy means Banshee transcribes what you said.
-- Waiting for you means an agent asked a question and holds for your answer.
+- Working means Banshee transcribes what you said.
+- Your turn means an agent asked a question and holds for your answer.
 - The states differ by shape, never by colour alone, and macOS tints the template image.
 
 ## History

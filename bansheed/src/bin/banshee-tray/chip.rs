@@ -17,6 +17,7 @@ pub const SENT_HOLD: Duration = Duration::from_secs(1);
 
 /// The capsule's word and the VoiceOver announcement for a copied dictation.
 pub const COPIED: &str = "Copied";
+pub const WORKING: &str = "Working";
 pub const YOUR_TURN: &str = "Your turn";
 pub const YOUR_TURN_NEXT: &str = "Your turn next";
 
@@ -95,8 +96,9 @@ pub fn words_of(show: &Show) -> Option<(&str, Trim)> {
         Show::YourTurn | Show::Answering(_) => Some((YOUR_TURN, Trim::End)),
         Show::NothingHeard(text) | Show::Broken(text) => Some((text, Trim::End)),
         Show::Copied => Some((COPIED, Trim::End)),
+        Show::Done(Done::Sent) => Some((Done::Sent.words(), Trim::End)),
         Show::Reading => Some((YOUR_TURN_NEXT, Trim::End)),
-        Show::Recording(_) | Show::Working | Show::Done(_) | Show::Missed { .. } => None,
+        Show::Recording(_) | Show::Working | Show::Done(Done::Typed) | Show::Missed { .. } => None,
     }
 }
 
@@ -665,7 +667,7 @@ pub fn announcement(before: Option<&Scene>, after: Option<&Scene>) -> Option<Str
         return None;
     }
     match &after.show {
-        Show::Working => Some("Working".to_string()),
+        Show::Working => Some(WORKING.to_string()),
         Show::Done(done) => Some(done.words().to_string()),
         Show::Copied => Some(COPIED.to_string()),
         Show::NothingHeard(text) | Show::Broken(text) => Some(text.clone()),
@@ -2118,6 +2120,12 @@ mod tests {
         assert_eq!(chip.deadline(), Some(clock.at(200) + SENT_HOLD));
         chip.tick(clock.at(200) + SENT_HOLD);
         assert_eq!(shown(&chip), None);
+    }
+
+    #[test]
+    fn sent_shows_its_word_in_the_pill_and_typed_shows_none() {
+        assert_eq!(words_of(&Show::Done(Done::Sent)), Some(("Sent", Trim::End)));
+        assert_eq!(words_of(&Show::Done(Done::Typed)), None);
     }
 
     #[test]

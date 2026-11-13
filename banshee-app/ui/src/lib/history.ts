@@ -163,6 +163,13 @@ export function newestUnanswered(rows: HistoryRow[]): HistoryRow | null {
   return rows.find((row) => row.kind === 'question' && row.outcome === 'no_answer') ?? null;
 }
 
+/// Who asked a question. The meta line reads it in lower case where no client
+/// is stored.
+export function asker(row: HistoryRow, lower = false): string {
+  if (row.client) return row.client;
+  return lower ? 'an agent' : 'An agent';
+}
+
 export function rowFlag(row: HistoryRow): string | null {
   if (row.kind === 'dictation') return row.outcome === 'failed' ? row.reason : null;
   switch (row.outcome) {

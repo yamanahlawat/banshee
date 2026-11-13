@@ -15,7 +15,7 @@
     <p class="note failed">{label}</p>
     <p class="note said">{said}</p>
   </div>
-  <button class="caps btn-underline" on:click={() => copy(failureSays(label, said), copyId)}>
+  <button class="btn-underline" on:click={() => copy(failureSays(label, said), copyId)}>
     {$copied === copyId ? 'Copied' : 'Copy'}
     <span class="sr">the failure</span>
   </button>

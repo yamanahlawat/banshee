@@ -3,7 +3,7 @@
 
   import { land } from '../lib/focus';
 
-  import { dayLabel, keptAudio, rowFlag } from '../lib/history';
+  import { asker, dayLabel, keptAudio, rowFlag } from '../lib/history';
   import type { HistoryRow } from '../lib/tauri';
   import { formatTime, sameLocalDay, toDate } from '../lib/time';
   import { plan, segments, span, type Segment } from '../lib/vlist';
@@ -266,35 +266,43 @@
         {#if !dated && firstOfDay(item.index)}
           <span class="day" aria-hidden="true">{day}</span>
         {/if}
-        <!-- Inside the last paragraph: beside it, the option's name would gain a
-             space before the comma. -->
-        {#snippet when()}<span class="sr">{`, ${day} at ${time}`}{flag ? `, ${flag}` : ''}</span
-          >{/snippet}
-        {#if row.kind === 'dictation' && row.outcome === 'failed'}
-          <p class="words failed">Transcription failed{@render when()}</p>
-        {:else if row.kind === 'dictation'}
-          <p class="words user"><Marked text={row.text ?? ''} needle={query} />{@render when()}</p>
-        {:else if row.outcome === 'transcribed'}
-          <p class="words agent one">
-            <span class="sr">{row.client ?? 'Agent'} asked</span>
-            <Marked text={row.question ?? ''} needle={query} />
-          </p>
-          <p class="words user one">
-            <span class="sr">You answered</span>
-            <Marked text={row.text ?? ''} needle={query} />{@render when()}
-          </p>
-        {:else}
-          <p class="words agent">
-            <span class="sr">{row.client ?? 'Agent'} asked</span>
-            <Marked text={row.question ?? ''} needle={query} />{@render when()}
-          </p>
-        {/if}
-        <span class="meta" aria-hidden="true">
-          {#if dated}<span>{day}</span>{/if}
-          <span class="mono time">{time}</span>
-          {#if row.client}<span class="client">{row.client}</span>{/if}
-          {#if flag}<span class="flag">{flag}</span>{/if}
-        </span>
+        <div class="cell">
+          <!-- Inside the last paragraph: beside it, the option's name would gain a
+               space before the comma. -->
+          {#snippet when()}<span class="sr">{`, ${day} at ${time}`}{flag ? `, ${flag}` : ''}</span
+            >{/snippet}
+          {#if row.kind === 'dictation' && row.outcome === 'failed'}
+            <p class="words failed">Transcription failed{@render when()}</p>
+          {:else if row.kind === 'dictation'}
+            <p class="words user">
+              <Marked text={row.text ?? ''} needle={query} />{@render when()}
+            </p>
+          {:else if row.outcome === 'transcribed'}
+            <p class="words agent one">
+              <span class="sr">{asker(row)} asked</span>
+              <Marked text={row.question ?? ''} needle={query} />
+            </p>
+            <p class="words user one">
+              <span class="sr">You answered</span>
+              <Marked text={row.text ?? ''} needle={query} />{@render when()}
+            </p>
+          {:else}
+            <p class="words agent">
+              <span class="sr">{asker(row)} asked</span>
+              <Marked text={row.question ?? ''} needle={query} />{@render when()}
+            </p>
+          {/if}
+          <span class="meta" aria-hidden="true">
+            <span class="line">
+              {#if dated}<span>{day}</span>{/if}
+              <span class="mono time">{time}</span>
+              {#if row.kind === 'question'}
+                <span class="client">{asker(row, true)} asked</span>
+              {/if}
+            </span>
+            {#if flag}<span class="flag">{flag}</span>{/if}
+          </span>
+        </div>
       </div>
     {/if}
   {/each}
@@ -304,31 +312,40 @@
   .list {
     height: 100%;
     min-height: 0;
-    overflow-y: auto;
+    overflow-y: scroll;
     overflow-anchor: none;
+    padding: 8px 0 8px 11px;
   }
 
   .row {
     position: relative;
-    padding: 10px 12px;
-    border-radius: var(--radius-row);
     cursor: default;
   }
 
-  .row[aria-selected='true'] {
+  .row:focus-visible {
+    outline: none;
+  }
+
+  .cell {
+    padding: 10px 9px;
+    border-radius: var(--radius-row);
+  }
+
+  .row[aria-selected='true'] .cell {
     background: var(--hilite);
   }
 
-  .row:focus-visible {
+  .row:focus-visible .cell {
+    outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
 
   .day {
     display: block;
-    margin-bottom: 4px;
+    padding: 10px 9px 0;
     font-size: 13px;
     line-height: 1.45;
-    font-weight: 600;
+    font-weight: var(--cut-name-weight);
     color: var(--dim);
   }
 
@@ -363,7 +380,7 @@
 
   .failed {
     color: var(--accent);
-    font-weight: 600;
+    font-weight: var(--cut-name-weight);
   }
 
   .meta {
@@ -379,6 +396,24 @@
     color: var(--dim);
   }
 
+  .line {
+    display: flex;
+    column-gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .time {
+    flex: none;
+  }
+
+  .client {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .time,
   .flag {
     color: var(--accent);
@@ -386,7 +421,7 @@
 
   .flag {
     font-variation-settings:
-      'wght' 600,
+      'wght' var(--cut-name-weight),
       'wdth' var(--cut-agent-width);
   }
 

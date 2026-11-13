@@ -20,6 +20,7 @@ import {
   marked,
   matches,
   rowFlag,
+  asker,
   selected,
   view,
   listed,
@@ -216,6 +217,20 @@ describe('marked', () => {
   ])('marks %s for %s exactly when the row matches', (text, needle) => {
     const hit = marked(text, needle).some((part) => part.hit);
     expect(matches(row({ question: null, text }), needle)).toBe(hit);
+  });
+});
+
+describe('asker', () => {
+  it('names the client, or an agent where none is stored', () => {
+    expect(asker(row({ client: 'claude' }))).toBe('claude');
+    expect(asker(row({ client: 'claude' }), true)).toBe('claude');
+    expect(asker(row({ client: null }))).toBe('An agent');
+    expect(asker(row({ client: null }), true)).toBe('an agent');
+  });
+
+  it('reads an empty client as no client', () => {
+    expect(asker(row({ client: '' }))).toBe('An agent');
+    expect(asker(row({ client: '' }), true)).toBe('an agent');
   });
 });
 

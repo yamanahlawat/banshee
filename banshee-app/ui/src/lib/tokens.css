@@ -57,12 +57,21 @@
   --cut-user-width: 112;
   --cut-agent-weight: 350;
   --cut-agent-width: 84;
+  /* A drawn heading, a page title and the model or agent in force. */
+  --cut-head-weight: 750;
+  --cut-head-width: 106;
+  /* A name in a list of choices, before it is the one in force. */
+  --cut-name-weight: 600;
+  --cut-name-width: 100;
 
   --gutter: 20px;
+  --measure: 640px;
 
   --hilite: #dcd6cd;
   --radius: 7px;
   --radius-row: 9px;
+  --control-height: 34px;
+  --hover: color-mix(in srgb, var(--hilite) 50%, transparent);
 
   color-scheme: light;
 }
@@ -168,6 +177,7 @@ body {
   color: var(--ink);
   background: transparent;
   border: 0;
+  min-height: var(--control-height);
 }
 
 /* The measured token, never the ink at the browser's own opacity. */
@@ -290,8 +300,8 @@ body {
 .box-head {
   margin: 0;
   font-variation-settings:
-    'wght' 750,
-    'wdth' 106;
+    'wght' var(--cut-head-weight),
+    'wdth' var(--cut-head-width);
   font-size: 17px;
   line-height: 1.3;
   letter-spacing: -0.015em;
@@ -310,6 +320,7 @@ body {
   background: var(--ink);
   border: 1px solid var(--ink);
   border-radius: var(--radius);
+  min-height: var(--control-height);
   padding: 7px 14px;
   font-family: var(--sans);
   font-size: 13px;
@@ -338,11 +349,13 @@ body {
   padding: 0 0 1px;
   cursor: pointer;
   flex: none;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
 }
 
-/* The rule sits on the label and the label is 11px, so padding the button to a
-   pointer's size would push the rule off the word it underlines. The box that
-   answers a click grows behind the label instead, and the rule stays put. */
+/* Padding the button to a pointer's size would push the rule off the word it
+   underlines, so the box that answers a click grows behind the label. */
 .btn-underline::after {
   content: '';
   position: absolute;
@@ -380,7 +393,7 @@ body {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--ink);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--dim);
   border-radius: var(--radius);
 }
 
@@ -395,4 +408,8 @@ body {
   border: 0;
   padding: 0;
   cursor: pointer;
+}
+
+.chip button:focus-visible {
+  outline-offset: -2px;
 }

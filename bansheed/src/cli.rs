@@ -163,11 +163,12 @@ fn waybar_line(
     problem: Option<&str>,
 ) -> String {
     let problem = problem.filter(|_| word == "idle");
+    let said = banshee_common::state_label(word, problem.is_some());
     let tooltip = match device {
         // Nothing to say about the microphone, so the word stands alone
-        None => format!("Banshee is {word}"),
+        None => format!("Banshee: {said}"),
         Some(_) => format!(
-            "Banshee is {word}. Microphone: {}",
+            "Banshee: {said}. Microphone: {}",
             banshee_common::microphone_label(device, missing, open, refused)
         ),
     };

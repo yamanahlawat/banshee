@@ -90,7 +90,7 @@
       'wdth' 100;
     font-size: 15px;
     background: transparent;
-    border: 1px solid var(--rule);
+    border: 1px solid var(--dim);
     border-radius: var(--radius);
     padding: 6px 9px;
     margin: 0;

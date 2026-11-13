@@ -502,7 +502,13 @@
 
   <main>
     <h1 class="sr">Banshee</h1>
-    <Page name={page} lead={leads[page]} regions={page === 'History'} bind:scroller={body}>
+    <Page
+      name={page}
+      lead={leads[page]}
+      regions={page === 'History'}
+      titled={!(page === 'History' && reading)}
+      bind:scroller={body}
+    >
       <svelte:fragment slot="start">
         {#if !$sidebarShown}
           <button class="btn btn-ghost unfold" bind:this={unfold} on:click={openDrawer}>

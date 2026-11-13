@@ -123,3 +123,25 @@ it('offers the press behaviours in the order the table lists them', () => {
     [...modes.querySelectorAll('[role="radio"]')].map((radio) => radio.textContent?.trim()),
   ).toEqual(['Tap', 'Hold']);
 });
+
+it('holds one button for Change and Cancel, ghost while it waits', async () => {
+  const page = render(HotkeyPage);
+  const change = page.getByRole('button', { name: 'Change' });
+  expect(change.classList.contains('btn-ghost')).toBe(false);
+  expect(change.querySelector('.held')?.textContent).toBe('Change');
+
+  await fireEvent.click(change);
+  const cancel = page.getByRole('button', { name: 'Cancel' });
+  expect(cancel).toBe(change);
+  expect(cancel.classList.contains('btn-ghost')).toBe(true);
+  expect(cancel.querySelector('.held')?.textContent).toBe('Change');
+});
+
+it('marks the capture as waiting only while it waits for a key', async () => {
+  const page = render(HotkeyPage);
+  const capture = page.getByRole('button', { name: /change the hotkey/ });
+  expect(capture.classList.contains('waiting')).toBe(false);
+
+  await fireEvent.click(capture);
+  expect(capture.classList.contains('waiting')).toBe(true);
+});

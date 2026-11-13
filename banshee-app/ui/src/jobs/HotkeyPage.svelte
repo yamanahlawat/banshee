@@ -37,6 +37,8 @@
     release = null;
   }
 
+  const toggle = () => (recording ? stop() : begin());
+
   function commit(next: string) {
     stop();
     refusal = null;
@@ -85,24 +87,25 @@
 
 {#if listens}
   <Row name="The key" setting="audio.hotkey">
-    <span class="capture">
-      <button class="key" on:click={() => (recording ? stop() : begin())}>
-        {recording ? 'Press a key' : humanize(key) || 'Not set'}<span class="sr"
-          >, change the hotkey</span
-        >
-      </button>
-    </span>
-    <button class="btn" on:click={() => (recording ? stop() : begin())}>
-      {recording ? 'Cancel' : 'Change'}
+    <button class="key" class:waiting={recording} on:click={toggle}>
+      {recording ? 'Press a key' : humanize(key) || 'Not set'}<span class="sr"
+        >, change the hotkey</span
+      >
+    </button>
+    <button class="btn holds" class:btn-ghost={recording} on:click={toggle}>
+      <span>{recording ? 'Cancel' : 'Change'}</span>
+      <!-- Holds the button at the wider of its two labels. -->
+      <span class="held" aria-hidden="true">Change</span>
     </button>
   </Row>
 
   {#if refusal}
-    <p class="refusal">{refusal}</p>
+    <p class="note refusal">{refusal}</p>
   {/if}
 
   <Row
     name="Press behaviour"
+    block
     note="Hold: speak while the key is down. Tap: press once to start, once to stop."
     setting="audio.hotkey_mode"
   >
@@ -114,16 +117,16 @@
     />
   </Row>
 {:else}
-  <p class="compositor">
+  <p class="note compositor">
     Wayland grants no global hotkey, so Banshee binds none. Bind these two commands to one key in
     your compositor. Put the first on the press and the second on the release.
   </p>
   <pre class="commands">banshee record start
 banshee record stop</pre>
-  <p class="compositor">docs/linux.md gives the Hyprland and Omarchy syntax.</p>
+  <p class="note compositor">docs/linux.md gives the Hyprland and Omarchy syntax.</p>
 {/if}
 
-<Row name="While Banshee is talking" setting="audio.barge_in">
+<Row name="While Banshee is talking" block setting="audio.barge_in">
   <Segmented
     label="While Banshee is talking"
     value={bargeIn}
@@ -136,8 +139,6 @@ banshee record stop</pre>
   .compositor {
     margin: 0 0 12px;
     color: var(--dim);
-    font-size: 13px;
-    line-height: 1.5;
   }
 
   .commands {
@@ -151,29 +152,18 @@ banshee record stop</pre>
     overflow-x: auto;
   }
 
-  /* The underline the pickers wear, on a wrapper as theirs is, so it means the
-     same thing on both: press here to change what it says. */
-  .capture {
-    display: flex;
-    flex: 1;
-    min-width: 0;
-    border-bottom: 1px solid var(--ink);
-  }
-
-  .capture:hover {
-    border-bottom-color: var(--accent);
-  }
-
   .key {
     flex: 1;
+    min-width: 0;
+    min-height: var(--control-height);
     font-family: var(--mono);
     font-size: 13px;
     text-align: left;
     color: var(--ink);
     background: transparent;
-    border: 0;
+    border: 1px solid var(--dim);
     border-radius: var(--radius);
-    padding: 6px 0;
+    padding: 6px 9px;
     cursor: pointer;
   }
 
@@ -181,12 +171,27 @@ banshee record stop</pre>
     color: var(--accent);
   }
 
+  /* A dashed accent line is what this world draws around a thing that is not
+     there yet: here, the key. */
+  .key.waiting {
+    border-style: dashed;
+    border-color: var(--accent);
+  }
+
+  .holds {
+    display: inline-grid;
+  }
+
+  .holds > * {
+    grid-area: 1 / 1;
+  }
+
+  .held {
+    visibility: hidden;
+  }
+
   .refusal {
     margin: -16px 0 26px;
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
-    font-size: 13px;
     color: var(--accent);
   }
 </style>

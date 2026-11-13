@@ -12,6 +12,9 @@
   export let scroller: HTMLElement | undefined = undefined;
   /// The page scrolls in regions of its own, so the page as a whole does not.
   export let regions = false;
+  /// False while the toolbar's own Back button already names the page. The title
+  /// stays in the DOM, since the page's heading is where focus returns.
+  export let titled = true;
 
   const TITLE = 'page-title';
 
@@ -22,9 +25,9 @@
   <div class="toolbar">
     <slot name="start" />
     {#if lead === null}
-      <h2 class="title" id={PAGE_HEADING} tabindex="-1">{name}</h2>
+      <h2 class="title" class:sr={!titled} id={PAGE_HEADING} tabindex="-1">{name}</h2>
     {:else}
-      <p class="title" id={TITLE}>{name}</p>
+      <p class="title" class:sr={!titled} id={TITLE}>{name}</p>
     {/if}
     <slot name="end" />
   </div>
@@ -54,18 +57,21 @@
     gap: 14px;
     flex: none;
     min-height: 56px;
-    padding: 0 28px;
+    padding: 0 var(--gutter);
     border-bottom: 1px solid var(--rule);
   }
 
-  .title {
+  .title:not(.sr) {
     margin: 0;
+  }
+
+  .title {
     font-size: 17px;
     line-height: 1.3;
     letter-spacing: -0.01em;
     font-variation-settings:
-      'wght' 750,
-      'wdth' 106;
+      'wght' var(--cut-head-weight),
+      'wdth' var(--cut-head-width);
   }
 
   /* The page scrolls below the toolbar, so the toolbar stays put however long
@@ -92,7 +98,7 @@
   }
 
   .column {
-    max-width: 640px;
+    max-width: var(--measure);
     box-sizing: content-box;
     padding: 0 var(--gutter) 24px;
   }
@@ -104,7 +110,8 @@
      itself, in the same voice it uses for everything it says. */
   .statement {
     margin: 0 0 26px;
-    max-width: 520px;
+    max-width: var(--measure);
+    text-wrap: balance;
     font-variation-settings:
       'wght' var(--cut-agent-weight),
       'wdth' var(--cut-agent-width);

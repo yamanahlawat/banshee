@@ -147,7 +147,13 @@
 
 <div class="history">
   {#if stacked}
-    <div class="notices" role="region" aria-label="Notices" use:tabWhenScrolls>
+    <div
+      class="notices"
+      class:capped={rows.length > 0}
+      role="region"
+      aria-label="Notices"
+      use:tabWhenScrolls
+    >
       {#if shownHost !== null}
         <HostLine host={shownHost} inset />
       {/if}
@@ -242,10 +248,13 @@
 
   .notices {
     flex: none;
-    max-height: 50vh;
     overflow-y: auto;
     padding-top: 18px;
     border-bottom: 1px solid var(--rule);
+  }
+
+  .capped {
+    max-height: 50vh;
   }
 
   .notice {

@@ -35,8 +35,10 @@
     align-items: center;
     flex: 1;
     min-width: 0;
+    min-height: var(--control-height);
     color: var(--ink);
-    border-bottom: 1px solid var(--ink);
+    border: 1px solid var(--dim);
+    border-radius: var(--radius);
   }
 
   select {
@@ -52,13 +54,13 @@
     background: transparent;
     border: 0;
     border-radius: var(--radius);
-    padding: 6px 22px 6px 0;
+    padding: 6px 28px 6px 9px;
     margin: 0;
   }
 
   svg {
     position: absolute;
-    right: 2px;
+    right: 9px;
     pointer-events: none;
   }
 </style>

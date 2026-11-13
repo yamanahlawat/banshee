@@ -148,7 +148,7 @@
 {:else}
   {#if listNote}
     <div class="caveat" class:failed={listNote.failed} role="status">
-      <p>{listNote.text}</p>
+      <p class="note">{listNote.text}</p>
       <button class="btn" on:click={look}>Look again</button>
     </div>
   {/if}
@@ -179,7 +179,7 @@
   </div>
 
   {#if alsoWorksWith}
-    <p class="elsewhere">Banshee also works with {alsoWorksWith}.</p>
+    <p class="note elsewhere">Banshee also works with {alsoWorksWith}.</p>
   {/if}
 {/if}
 
@@ -205,10 +205,7 @@
   }
 
   .caveat p {
-    max-width: 520px;
     margin: 0 0 10px;
-    font-size: 13px;
-    line-height: 1.5;
     color: var(--dim);
   }
 
@@ -226,13 +223,14 @@
     align-items: center;
     gap: 12px;
     padding: 11px 0;
+    min-height: calc(var(--control-height) + 22px);
     min-width: 0;
   }
 
   .name {
     font-variation-settings:
-      'wght' 700,
-      'wdth' 105;
+      'wght' var(--cut-head-weight),
+      'wdth' var(--cut-head-width);
     font-size: 15px;
     flex: 1;
     min-width: 0;
@@ -249,12 +247,7 @@
   }
 
   .elsewhere {
-    max-width: 520px;
     margin: 16px 0 0;
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
-    font-size: 13px;
     color: var(--dim);
   }
 

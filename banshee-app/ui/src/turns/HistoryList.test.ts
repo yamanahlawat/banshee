@@ -275,6 +275,40 @@ describe('the window', () => {
   });
 });
 
+describe('the reveal', () => {
+  beforeEach(layOut);
+
+  it.each([
+    ['the last row', 'End', 1, 1],
+    ['a row midway', 'ArrowDown', 20, 10],
+  ])(
+    'shows %s, chosen by keyboard, below the top inset when a search keeps it',
+    async (_, key, presses, id) => {
+      const INSET = 8;
+      const { box, choose, rerender } = list(said(30));
+      await tick();
+      option('Line 30').focus();
+      for (let i = 0; i < presses; i++) {
+        await fireEvent.keyDown(document.activeElement!, { key });
+        await waitFor(() => expect(choose).toHaveBeenCalledTimes(i + 1));
+        await tick();
+      }
+      expect(choose).toHaveBeenLastCalledWith(id);
+
+      await rerender({ selectedId: id, query: 'Line' });
+      await tick();
+
+      const row = option(`Line ${id}`);
+      const content = offsetOf(box.lastElementChild!) + SHORT;
+      // The browser keeps the offset between the list's ends, its insets included.
+      const end = INSET + content + INSET - VIEWPORT;
+      const top = INSET + offsetOf(row) - Math.max(0, Math.min(box.scrollTop, end));
+      expect(top).toBeGreaterThanOrEqual(0);
+      expect(top).toBeLessThanOrEqual(VIEWPORT - SHORT);
+    },
+  );
+});
+
 describe('following the newest row', () => {
   beforeEach(layOut);
 
@@ -321,15 +355,34 @@ describe('the rows', () => {
     list([asked(1, 'Shall I push?', 'transcribed', at(0, 12), { text: 'Yes.', client: 'claude' })]);
     const row = screen.getByRole('option', { name: /^claude asked Shall I push\?/ });
     const meta = row.querySelector('.meta') as HTMLElement;
-    expect(meta.textContent?.replace(/\s+/g, ' ').trim()).toBe('12:00 claude');
-    expect(row.querySelector('.client')?.textContent).toBe('claude');
+    expect(meta.getAttribute('aria-hidden')).toBe('true');
+    expect(meta.textContent?.replace(/\s+/g, ' ').trim()).toBe('12:00 claude asked');
+    expect(row.querySelector('.client')?.textContent).toBe('claude asked');
   });
 
-  it('keeps "Agent asked" and a bare time for a row with no client', () => {
+  it('says "An agent asked" for a row with no client', () => {
     list([asked(1, 'Shall I push?', 'transcribed', at(0, 12), { text: 'Yes.' })]);
-    const row = screen.getByRole('option', { name: /^Agent asked Shall I push\?/ });
+    const row = screen.getByRole('option', { name: /^An agent asked Shall I push\?/ });
+    expect(row.querySelector('.client')?.textContent).toBe('an agent asked');
+    expect(
+      (row.querySelector('.meta') as HTMLElement).textContent?.replace(/\s+/g, ' ').trim(),
+    ).toBe('12:00 an agent asked');
+  });
+
+  it('shows a bare time on a dictation', () => {
+    list([dictated(1, 'Open the pull request.', at(0, 12))]);
+    const row = option('Open the pull request');
     expect(row.querySelector('.client')).toBeNull();
     expect((row.querySelector('.meta') as HTMLElement).textContent?.trim()).toBe('12:00');
+  });
+
+  it('keeps the time beside a long client name, which takes its own element', () => {
+    const client = 'c'.repeat(80);
+    list([asked(1, 'Shall I push?', 'no_answer', at(0, 12), { client })]);
+    const meta = option(`${client} asked Shall I push`).querySelector('.meta') as HTMLElement;
+    expect(meta.querySelector('.time')?.textContent).toBe('12:00');
+    expect(meta.querySelector('.client')?.textContent).toBe(`${client} asked`);
+    expect(meta.querySelector('.client')?.contains(meta.querySelector('.time'))).toBe(false);
   });
 
   it('names each option by its text, its day and time, and its flag', () => {
@@ -342,19 +395,19 @@ describe('the rows', () => {
       name: 'Transcription failed, Today at 13:00, The server refused the key.',
     });
     screen.getByRole('option', {
-      name: 'Agent asked Which branch should I use? You answered The release one., Today at 12:00',
+      name: 'An agent asked Which branch should I use? You answered The release one., Today at 12:00',
     });
     screen.getByRole('option', {
-      name: 'Agent asked Shall I push?, Yesterday at 18:00, No answer heard',
+      name: 'An agent asked Shall I push?, Yesterday at 18:00, No answer heard',
     });
     screen.getByRole('option', {
-      name: 'Agent asked Run the suite?, Yesterday at 17:00, Closed before you answered',
+      name: 'An agent asked Run the suite?, Yesterday at 17:00, Closed before you answered',
     });
     screen.getByRole('option', {
-      name: 'Agent asked Tag it?, Yesterday at 16:00, Not transcribed',
+      name: 'An agent asked Tag it?, Yesterday at 16:00, Not transcribed',
     });
     screen.getByRole('option', {
-      name: 'Agent asked Merge it?, 3 November at 09:00, Not asked aloud',
+      name: 'An agent asked Merge it?, 3 November at 09:00, Not asked aloud',
     });
   });
 
@@ -380,17 +433,19 @@ describe('the rows', () => {
     list(kinds());
     const label = (row: string, day: string) => within(option(row)).queryByText(day);
     expect(label('Open the pull request', 'Today')?.closest('[aria-hidden="true"]')).toBeTruthy();
+    // The selection fill and the focus ring sit on the cell, so the label stays outside it.
+    expect(label('Open the pull request', 'Today')?.closest('.cell')).toBeNull();
     expect(label('Transcription failed', 'Today')).toBeNull();
-    expect(label('Agent asked Shall I push', 'Yesterday')).toBeTruthy();
-    expect(label('Agent asked Run the suite', 'Yesterday')).toBeNull();
-    expect(label('Agent asked Merge it', '3 November')).toBeTruthy();
+    expect(label('An agent asked Shall I push', 'Yesterday')).toBeTruthy();
+    expect(label('An agent asked Run the suite', 'Yesterday')).toBeNull();
+    expect(label('An agent asked Merge it', '3 November')).toBeTruthy();
   });
 
   it('puts the date in each row and drops the day labels under a search', () => {
     list(kinds(), { query: 'a' });
     expect(within(option('Transcription failed')).getByText('Today')).toBeTruthy();
-    expect(within(option('Agent asked Shall I push')).getByText('Yesterday')).toBeTruthy();
-    expect(within(option('Agent asked Run the suite')).getByText('Yesterday')).toBeTruthy();
+    expect(within(option('An agent asked Shall I push')).getByText('Yesterday')).toBeTruthy();
+    expect(within(option('An agent asked Run the suite')).getByText('Yesterday')).toBeTruthy();
   });
 
   it('marks what the search matched in each row, and keeps the names whole', () => {
@@ -399,9 +454,9 @@ describe('the rows', () => {
     expect(marks).toEqual(['the', 'The', 'the']);
     screen.getByRole('option', { name: 'Open the pull request., Today at 14:32' });
     screen.getByRole('option', {
-      name: 'Agent asked Which branch should I use? You answered The release one., Today at 12:00',
+      name: 'An agent asked Which branch should I use? You answered The release one., Today at 12:00',
     });
-    screen.getByRole('option', { name: /^Agent asked Run the suite\?/ });
+    screen.getByRole('option', { name: /^An agent asked Run the suite\?/ });
   });
 
   it('marks nothing with no search', () => {

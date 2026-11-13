@@ -722,6 +722,15 @@ describe('the notices above the list', () => {
     expect(stack.firstElementChild).toBe(line);
   });
 
+  it('caps the stack at half the window only while rows share the page', () => {
+    const { unmount } = show(ROWS, { waiting: true });
+    expect(notices()!.classList.contains('capped')).toBe(true);
+    unmount();
+
+    show([], { waiting: true });
+    expect(notices()!.classList.contains('capped')).toBe(false);
+  });
+
   it('names no host while the sidebar shows it', () => {
     show(ROWS, { host: 'api.openai.com' });
     expect(notices()).toBeNull();

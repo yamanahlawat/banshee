@@ -127,7 +127,7 @@ export type Word =
   | 'Ready'
   | 'Recording'
   | 'Speaking'
-  | 'Listening'
+  | 'Your turn'
   | 'Working'
   | 'Not ready'
   | 'Downloading'
@@ -217,7 +217,7 @@ export function isDown(state: Daemon): boolean {
 }
 // The daemon ranks them; this only reads its answer.
 const SAYS: Record<string, Word> = {
-  listening: 'Listening',
+  listening: 'Your turn',
   recording: 'Recording',
   speaking: 'Speaking',
   busy: 'Working',
@@ -240,7 +240,7 @@ export function lampForm(word: Word): LampForm {
   // The one state where doing nothing is the wrong answer, so it cannot share
   // a silhouette with Ready. Downloading and Not ready still do: each resolves
   // on its own, and the window shouts them in the body anyway.
-  if (word === 'Listening') return 'listening';
+  if (word === 'Your turn') return 'listening';
   if (word === 'Working') return 'busy';
   return 'idle';
 }

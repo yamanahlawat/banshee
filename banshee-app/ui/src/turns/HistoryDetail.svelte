@@ -1,7 +1,15 @@
 <script lang="ts">
   import { announce, asSentence, copied, copy, report, serverHost } from '../lib/copy';
   import { daemon, listeningFacts } from '../lib/daemon';
-  import { dayLabel, keptAudio, keptUntil, replaceRow, retrying, rowFlag } from '../lib/history';
+  import {
+    asker,
+    dayLabel,
+    keptAudio,
+    keptUntil,
+    replaceRow,
+    retrying,
+    rowFlag,
+  } from '../lib/history';
   import { retry, type HistoryRow } from '../lib/tauri';
   import { formatTime } from '../lib/time';
   import Marked from './Marked.svelte';
@@ -73,7 +81,7 @@
 <div class="detail" role="region" aria-label="Selected row">
   <h2 class="when" tabindex="-1" bind:this={heading}>
     {dayLabel(row.timestamp, now)} at
-    <span class="mono time">{formatTime(row.timestamp)}</span>{row.client ? `, ${row.client}` : ''}
+    <span class="mono time">{formatTime(row.timestamp)}</span>
   </h2>
 
   {#snippet labelled(shown: string, widest: string)}
@@ -97,9 +105,11 @@
   {:else if row.kind === 'dictation'}
     <p class="words user" class:pending={busy}><Marked text={row.text ?? ''} needle={query} /></p>
   {:else}
+    <p class="caps caption">{asker(row)} asked</p>
     <p class="words agent"><Marked text={row.question ?? ''} needle={query} /></p>
     <hr />
     {#if row.outcome === 'transcribed'}
+      <p class="caps caption">You answered</p>
       <p class="words user"><Marked text={row.text ?? ''} needle={query} /></p>
     {:else}
       {#if flag}<p class="flag">{flag}</p>{/if}
@@ -152,6 +162,11 @@
     overflow-y: auto;
     padding: 44px 52px;
   }
+  @media (max-width: 859.98px) {
+    .detail {
+      padding: 22px var(--gutter);
+    }
+  }
   .detail > * {
     max-width: 580px;
   }
@@ -167,6 +182,13 @@
   }
   .time {
     color: var(--accent);
+  }
+  .caption {
+    margin: 0 0 8px;
+    color: var(--dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .words {
     margin: 0;
