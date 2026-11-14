@@ -6,10 +6,12 @@ vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTaur
 import { history, setSetting, status } from '../lib/tauri';
 import type { HistoryRow } from '../lib/tauri';
 import { daemon, type Status } from '../lib/daemon';
-import { table } from '../lib/settings';
+import { forgetRefusals, table } from '../lib/settings';
 import { table as historyTable } from '../lib/history';
 import { dictated } from '../lib/history.mock';
 import { commonTable } from '../lib/tauri.mock';
+import { expectInOrder } from '../lib/order.mock';
+import { WAITING_SAYS } from '../lib/copy';
 import SavedHistoryPage from './SavedHistoryPage.svelte';
 
 const NOW = new Date('2026-11-07T12:00:00Z');
@@ -46,6 +48,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(NOW);
   table.set(commonTable);
+  forgetRefusals();
   vi.mocked(setSetting).mockReset();
   vi.mocked(setSetting).mockResolvedValue([] as never);
   vi.mocked(history).mockReset();
@@ -156,6 +159,26 @@ it('lands on the period in force when the write is refused', async () => {
   await waitFor(() => expect(document.activeElement).toBe(period('30 days')));
   expect(period('30 days').getAttribute('aria-checked')).toBe('true');
   expect(period('30 days').tabIndex).toBe(0);
+  const refusal = screen.getByText('Not changed. Refused.');
+  const group = screen.getByRole('radiogroup', { name: 'Keep audio' });
+  expect(refusal.closest('.row')?.contains(group)).toBe(true);
+  expect(group.getAttribute('aria-describedby')?.split(' ')).toContain(refusal.id);
+});
+
+it('keeps Stop saving and says the refusal on the Saving row', async () => {
+  vi.mocked(setSetting).mockRejectedValue({
+    code: -32000,
+    message: 'the daemon closed the socket',
+    transport: true,
+  });
+  renderPage('30d', [RECENT, OLDER]);
+  const button = screen.getByRole('button', { name: /^Stop saving/ });
+  await fireEvent.click(button);
+
+  const refusal = await waitFor(() => screen.getByText('Not changed. Banshee is not running.'));
+  expect(screen.getByRole('button', { name: /^Stop saving/ })).toBe(button);
+  expect(refusal.closest('.row')?.contains(button)).toBe(true);
+  expect(button.getAttribute('aria-describedby')?.split(' ')).toContain(refusal.id);
 });
 
 it('neither writes nor asks for the period already in force', async () => {
@@ -192,8 +215,8 @@ it('points both answers of each question at the question', async () => {
   await fireEvent.click(screen.getByRole('button', { name: 'Keep it' }));
 
   await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
-  const clear = screen.getByText(/^Delete all 2 rows/);
-  for (const name of ['Keep it', 'Delete everything']) {
+  const clear = screen.getByText(/^Clear everything Banshee kept\? 2 dictations/);
+  for (const name of ['Keep it', 'Clear everything']) {
     expect(screen.getByRole('button', { name }).getAttribute('aria-describedby')).toBe(clear.id);
   }
   expect(clear.id).not.toBe('');
@@ -203,7 +226,9 @@ it('names the audio in the Clear question when any row has it', async () => {
   const page = renderPage('7d', [RECENT, dictated(3, 'said', '2026-11-06T12:00:00Z')]);
   await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
   expect(
-    screen.getByText('Delete all 2 rows and their audio? This cannot be undone.'),
+    screen.getByText(
+      'Clear everything Banshee kept? 2 dictations and questions, and their audio. This cannot be undone.',
+    ),
   ).toBeTruthy();
   page.unmount();
 
@@ -212,5 +237,60 @@ it('names the audio in the Clear question when any row has it', async () => {
     dictated(4, 'said', '2026-11-05T12:00:00Z'),
   ]);
   await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
-  expect(screen.getByText('Delete all 2 rows? This cannot be undone.')).toBeTruthy();
+  expect(
+    screen.getByText(
+      'Clear everything Banshee kept? 2 dictations and questions. This cannot be undone.',
+    ),
+  ).toBeTruthy();
+});
+
+it('says one dictation or question in the singular', async () => {
+  renderPage('7d', [dictated(3, 'said', '2026-11-06T12:00:00Z')]);
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect(
+    screen.getByText(
+      'Clear everything Banshee kept? One dictation or question. This cannot be undone.',
+    ),
+  ).toBeTruthy();
+});
+
+const STORED = 'It lives in a file only you can read. Nothing is sent anywhere.';
+const STOPPED = 'Banshee is not keeping anything new. What it kept stays until you clear it.';
+
+it('puts Save and Clear in one Saving row, with its notes under them', () => {
+  ready();
+  holding([RECENT]);
+  render(SavedHistoryPage, { saving: false });
+  const label = screen.getByText('Saving');
+  expect(label.classList.contains('caps')).toBe(true);
+  expectInOrder(
+    label,
+    screen.getByRole('button', { name: 'Start saving' }),
+    screen.getByRole('button', { name: 'Clear' }),
+    screen.getByText(STORED),
+    screen.getByText(STOPPED),
+    screen.getByText('Keep audio'),
+  );
+});
+
+it('asks the Clear question in the Saving row, above its notes', async () => {
+  renderPage('7d', [RECENT]);
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expectInOrder(
+    screen.getByText('Saving'),
+    screen.getByText(/^Clear everything Banshee kept\?/),
+    screen.getByRole('button', { name: 'Keep it' }),
+    screen.getByText(STORED),
+  );
+});
+
+it('boxes Stop saving, and dashes it while Banshee has not taken it', () => {
+  ready();
+  daemon.update((state) => ({ ...state, pending: new Set(['daemon.save_history']) }));
+  holding([RECENT]);
+  render(SavedHistoryPage, { saving: true });
+  const button = screen.getByRole('button', { name: /^Stop saving/ });
+  expect(button.classList.contains('btn')).toBe(true);
+  expect(button.classList.contains('pending')).toBe(true);
+  expect(button.querySelector('.sr')?.textContent).toBe(WAITING_SAYS);
 });

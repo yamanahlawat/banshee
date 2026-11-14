@@ -69,18 +69,19 @@
     font-size: 17px;
     line-height: 1.3;
     letter-spacing: -0.01em;
-    font-variation-settings:
-      'wght' var(--cut-head-weight),
-      'wdth' var(--cut-head-width);
+    --wght: var(--cut-head-weight);
+    --wdth: var(--cut-head-width);
   }
 
   /* The page scrolls below the toolbar, so the toolbar stays put however long
-     the page runs. */
+     the page runs. A control that focus brings into view keeps its whole ring,
+     which reaches 4px past its box. */
   .scroller {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
     padding-top: 22px;
+    scroll-padding-block: 6px;
   }
 
   .scroller.regions {
@@ -112,9 +113,8 @@
     margin: 0 0 26px;
     max-width: var(--measure);
     text-wrap: balance;
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
+    --wght: var(--cut-agent-weight);
+    --wdth: var(--cut-agent-width);
     font-size: 28px;
     line-height: 1.3;
     letter-spacing: -0.03em;

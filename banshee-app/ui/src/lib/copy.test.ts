@@ -7,7 +7,7 @@ import {
   CHOICE_LABELS,
   copy,
   copied,
-  feedbackLead,
+  feedbackInForce,
   listeningLead,
   listeningNote,
   problem,
@@ -16,6 +16,8 @@ import {
   languagesHeard,
   modelCost,
   modelFacts,
+  refusalSays,
+  whyItFailed,
 } from './copy';
 import * as copyModule from './copy';
 import { empty, listeningFacts, type Listening, type Speech } from './daemon';
@@ -227,7 +229,12 @@ const SPEECH_LEADS: [string, Partial<Speech>, string][] = [
   [
     'the local voice is not on this machine',
     { remote: false, started: false, voiceName: 'Bella', voiceDownloaded: false },
-    'Bella did not load, so Banshee is silent. Get its files below, or pick another voice.',
+    'Bella did not load, so Banshee is silent. Press Get beside it, or pick another voice.',
+  ],
+  [
+    'a running speaker waits for the chosen voice',
+    { remote: false, voiceName: 'Bella', voiceDownloaded: false },
+    'Banshee switches to Bella once its file is here.',
   ],
   [
     'the local voice is on this machine and did not load',
@@ -240,7 +247,7 @@ it.each(SPEECH_LEADS)('the voice lead, when %s', (_, over, says) => {
   expect(speechLead({ ...SPOKEN, ...over })).toBe(says);
 });
 
-const FEEDBACK_LEADS: [string, boolean, string][] = [
+const FEEDBACK_IN_FORCE: [string, boolean, string][] = [
   [
     'both',
     true,
@@ -259,18 +266,18 @@ const FEEDBACK_LEADS: [string, boolean, string][] = [
   ['none', false, 'Banshee shows nothing and plays no sound.'],
 ];
 
-it.each(FEEDBACK_LEADS)('the feedback lead for %s, on macOS %s', (mode, mac, says) => {
-  expect(feedbackLead(mode, true, mac)).toBe(says);
+it.each(FEEDBACK_IN_FORCE)('the feedback in force for %s, on macOS %s', (mode, mac, says) => {
+  expect(feedbackInForce(mode, true, mac)).toBe(says);
 });
 
-it('says the feedback lead of a stopped daemon whatever the mode', () => {
-  expect(feedbackLead(null, false, true)).toBe(
+it('says the feedback in force of a stopped daemon whatever the mode', () => {
+  expect(feedbackInForce(null, false, true)).toBe(
     'Banshee is not running, so it shows and plays nothing.',
   );
 });
 
-it('says no feedback lead before the daemon names the cues in force', () => {
-  expect(feedbackLead(null, true, true)).toBeNull();
+it('says no feedback in force before the daemon names the cues', () => {
+  expect(feedbackInForce(null, true, true)).toBeNull();
 });
 
 const SPEECH_NOTES: [string, Partial<Speech>, string][] = [
@@ -393,4 +400,77 @@ it('says nothing about a restart', () => {
       }
     }
   }
+});
+
+describe('whyItFailed', () => {
+  it('says Banshee is not running when the socket failed before the request left', () => {
+    expect(
+      whyItFailed({ message: 'the daemon closed the socket', transport: true, sent: false }),
+    ).toBe('Banshee is not running.');
+  });
+
+  it('says Banshee did not answer when the socket failed after the request left', () => {
+    expect(whyItFailed({ message: 'the daemon did not answer', transport: true, sent: true })).toBe(
+      'Banshee did not answer.',
+    );
+  });
+
+  it("reads the daemon's own reason as a sentence", () => {
+    expect(whyItFailed({ code: -32000, message: 'the config is not writable' })).toBe(
+      'The config is not writable.',
+    );
+    expect(whyItFailed(new Error('config.toml changed after the plan was made.'))).toBe(
+      'Config.toml changed after the plan was made.',
+    );
+  });
+
+  it('says that failed when there are no words', () => {
+    expect(whyItFailed(undefined)).toBe('That failed.');
+    expect(whyItFailed({ message: '  ' })).toBe('That failed.');
+  });
+});
+
+describe('refusalSays', () => {
+  it('says Banshee is not running when the socket failed before the request left', () => {
+    expect(
+      refusalSays({
+        code: -32000,
+        message: 'Connection refused (os error 61)',
+        transport: true,
+        sent: false,
+      }),
+    ).toBe('Not changed. Banshee is not running.');
+  });
+
+  // The request may have run before the reply was lost, so the row cannot say
+  // nothing changed.
+  it('says Banshee did not answer when the socket failed after the request left', () => {
+    expect(
+      refusalSays({
+        code: -32000,
+        message: 'the daemon did not answer',
+        transport: true,
+        sent: true,
+      }),
+    ).toBe('Banshee did not answer, so this may not have changed.');
+  });
+
+  // The daemon writes -32000 for its own refusals too, so only the flag tells.
+  it('reads the message of a refusal the daemon wrote with the same code', () => {
+    expect(refusalSays({ code: -32000, message: 'the config file is not writable' })).toBe(
+      'Not changed. The config file is not writable.',
+    );
+  });
+
+  it('drops the key the daemon quotes ahead of its reason', () => {
+    expect(
+      refusalSays({ message: "'stt.model': unknown variant `x`, expected one of `a`, `b`" }),
+    ).toBe('Not changed. Unknown variant `x`, expected one of `a`, `b`.');
+  });
+
+  it('says Banshee refused it when there are no words', () => {
+    expect(refusalSays(undefined)).toBe('Not changed. Banshee refused it.');
+    expect(refusalSays({ message: '' })).toBe('Not changed. Banshee refused it.');
+    expect(refusalSays({ message: "'feedback.mode': " })).toBe('Not changed. Banshee refused it.');
+  });
 });

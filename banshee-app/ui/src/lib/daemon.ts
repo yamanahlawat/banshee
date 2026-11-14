@@ -295,7 +295,9 @@ function names(progress: Progress): string {
     : progress.model;
 }
 
-const megabytes = (bytes: number) => Math.round(bytes / 1_048_576);
+export const MEGABYTE = 1_048_576;
+
+const megabytes = (bytes: number) => Math.round(bytes / MEGABYTE);
 
 export function downloadLine(progress: Progress): string {
   const done = percent(progress.bytes, progress.total);
@@ -332,6 +334,16 @@ export function spokenProgress(progress: Progress): string {
 export function endsTheRun(progress: Progress): boolean {
   if (progress.state === 'downloading') return false;
   return !progress.count || progress.index === progress.count;
+}
+
+/// Whether the run is fetching a listening model. The progress label is the
+/// file in the user's words; the role the daemon gives each missing file is
+/// what tells a model from a voice.
+export function fetchingSpeech(state: Daemon): boolean {
+  const file = state.download?.model;
+  return (state.status?.missing_downloads ?? []).some(
+    (missing) => missing.name === file && missing.role === 'speech',
+  );
 }
 
 /// A key that refuses for want of a file is answered by the download that

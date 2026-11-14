@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { tick } from 'svelte';
@@ -32,8 +32,9 @@ import {
   WAITING_SAYS,
 } from '../lib/copy';
 import { forgetTheAsk } from '../lib/downloads';
-import { table } from '../lib/settings';
+import { forgetRefusals, table } from '../lib/settings';
 import { commonTable, tableWith } from '../lib/tauri.mock';
+import { expectInOrder } from '../lib/order.mock';
 import ListeningPage from './ListeningPage.svelte';
 
 // The daemon's own reply under a remote listener, so each test states only what
@@ -135,10 +136,11 @@ function keyField(): HTMLInputElement | null {
   return document.querySelector('input[type="password"]');
 }
 
-// The row that holds the listener choice. The group is the design here, so a
-// test asks whether the parts are inside it rather than only that they exist.
+// The wrapper that holds the listener choice and its parts. The group is the
+// design here, so a test asks whether the parts are inside it rather than only
+// that they exist.
 function listenerGroup(): HTMLElement {
-  return screen.getByRole('radiogroup', { name: 'Listening' }).closest('.row') as HTMLElement;
+  return screen.getByRole('radiogroup', { name: 'Listening' }).closest('.apart') as HTMLElement;
 }
 
 // The page reads the platform from the user agent, which jsdom names as neither.
@@ -151,6 +153,7 @@ beforeEach(() => {
   forgetTheAsk();
   daemon.set(empty());
   forgetCopy();
+  forgetRefusals();
   vi.clearAllMocks();
   vi.mocked(setSetting).mockResolvedValue([]);
   vi.mocked(status).mockResolvedValue(remoteStatus);
@@ -355,6 +358,32 @@ it('puts the mark back on the model in force when the daemon refuses a choice', 
     ).toBe(true),
   );
   expect(turbo.checked).toBe(false);
+  const refusal = screen.getByText('Not changed. No.');
+  expect(
+    screen
+      .getByRole('radiogroup', { name: 'Listening model' })
+      .getAttribute('aria-describedby')
+      ?.split(' '),
+  ).toContain(refusal.id);
+});
+
+it('puts the picker back on the stored choice and says the refusal on its row', async () => {
+  vi.mocked(setSetting).mockRejectedValue({
+    code: -32000,
+    message: 'the daemon closed the socket',
+    transport: true,
+  });
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(ListeningPage);
+  const picker = screen.getByRole('combobox', { name: 'End of speech' }) as HTMLSelectElement;
+  const stored = picker.value;
+  const other = [...picker.options].find((option) => option.value !== stored)!.value;
+  await fireEvent.change(picker, { target: { value: other } });
+
+  const refusal = await waitFor(() => screen.getByText('Not changed. Banshee is not running.'));
+  expect(picker.value).toBe(stored);
+  expect(picker.getAttribute('aria-describedby')).toBe(refusal.id);
+  expect(refusal.closest('.row')?.contains(picker)).toBe(true);
 });
 
 // The run's total covers the detector, the engine and a voice, so a voice the
@@ -515,7 +544,11 @@ it('names the last failure inside the group that caused it', () => {
   );
   render(ListeningPage);
   const failure = screen.getByText(/refused the key/);
-  expect(listenerGroup().contains(failure)).toBe(true);
+  // Last in the group and inside no row, so it stands at the group's own edge.
+  const last = listenerGroup().lastElementChild as HTMLElement;
+  expect(last.contains(failure)).toBe(true);
+  expect(within(last).queryByRole('radiogroup')).toBeNull();
+  expect(within(last).queryByRole('textbox')).toBeNull();
   // A live region on an element that arrives with its own content is not
   // announced, so the failure is spoken instead.
   expect(failure.getAttribute('role')).toBeNull();
@@ -541,8 +574,18 @@ it('reads the group with the failure standing under it', () => {
 it('puts the key under the server it opens', () => {
   daemon.set(reduceStatus(empty(), remoteStatus));
   render(ListeningPage);
-  const names = [...listenerGroup().querySelectorAll('.sub')].map((name) => name.textContent);
-  expect(names).toEqual(['server', 'key', 'model']);
+  const group = within(listenerGroup());
+  const labels = ['Server', 'Key', 'Model'].map((name) => group.getByText(name));
+  for (const label of labels) expect(label.classList.contains('caps')).toBe(true);
+  expectInOrder(
+    screen.getByRole('radiogroup', { name: 'Listening' }),
+    labels[0],
+    group.getByRole('textbox', { name: 'Server' }),
+    labels[1],
+    group.getByText('A key is set'),
+    labels[2],
+    group.getByRole('textbox', { name: 'Model' }),
+  );
 });
 
 // Dictation carries on with the loaded model, so a chosen model that is not
@@ -551,6 +594,94 @@ it('offers the fetch while the daemon is working and nothing is blocked', () => 
   daemon.set(reduceStatus(empty(), { ...choosing(TURBO), ready: true, blockers: [] }));
   render(ListeningPage);
   expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy();
+});
+
+const TURBO_FILE = 'whisper-large-v3-turbo-Q5_K_M.gguf';
+
+function runOn(file: string, role: 'speech' | 'voice') {
+  daemon.set(
+    reduceStatus(empty(), {
+      ...choosing(TURBO),
+      missing_downloads: [
+        { name: TURBO_FILE, role: 'speech', megabytes: 619 },
+        { name: 'bf_emma.bin', role: 'voice', megabytes: 1 },
+      ],
+    }),
+  );
+  daemon.update((d) => ({
+    ...d,
+    download: {
+      label: role === 'speech' ? 'Listening model' : 'Voice',
+      model: file,
+      index: 1,
+      count: 2,
+      bytes: 30,
+      total: 100,
+      state: 'downloading',
+    },
+  }));
+}
+
+it('shows the download line under the model row while the run fetches the model', () => {
+  runOn(TURBO_FILE, 'speech');
+  const { container } = render(ListeningPage);
+  expect(container.querySelector('.progress')?.textContent).toContain('30%');
+  expect(screen.queryByRole('button', { name: /^Download/ })).toBeNull();
+});
+
+// A run on a voice says nothing about the model, so the row keeps its button,
+// held while the run goes and still reachable from the keyboard.
+it('keeps the Download button while the run fetches a voice', async () => {
+  runOn('bf_emma.bin', 'voice');
+  const { container } = render(ListeningPage);
+  expect(container.querySelector('.progress')).toBeNull();
+  const fetch = screen.getByRole('button', { name: 'Download' }) as HTMLButtonElement;
+  expect(fetch.disabled).toBe(false);
+  expect(fetch.getAttribute('aria-disabled')).toBe('true');
+
+  daemon.update((d) => ({ ...d, download: null }));
+  await tick();
+  expect(fetch.hasAttribute('aria-disabled')).toBe(false);
+});
+
+const BUSY = 'One download at a time. This works again when the current one finishes.';
+
+it('says once, under Download, that one download runs at a time, until the run ends', async () => {
+  runOn('bf_emma.bin', 'voice');
+  render(ListeningPage);
+  const said: string[] = [];
+  const stop = announcement.subscribe((message) => said.push(message));
+
+  const fetch = screen.getByRole('button', { name: 'Download' });
+  await fireEvent.click(fetch);
+
+  stop();
+  expect(vi.mocked(downloadModels)).not.toHaveBeenCalled();
+  expect(said.filter((message) => message === BUSY)).toHaveLength(1);
+  const busy = screen.getByText(BUSY);
+  expect(fetch.parentElement?.contains(busy)).toBe(true);
+  expect(fetch.compareDocumentPosition(busy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(fetch.getAttribute('aria-describedby')?.split(' ')).toContain(busy.id);
+
+  daemon.update((d) => ({ ...d, download: null }));
+  await tick();
+  expect(screen.queryByText(BUSY)).toBeNull();
+  expect(fetch.hasAttribute('aria-describedby')).toBe(false);
+});
+
+// A refusal clears on a page change, and so does the busy note.
+it('leaves the busy note behind when the page goes', async () => {
+  runOn('bf_emma.bin', 'voice');
+  const first = render(ListeningPage);
+  await fireEvent.click(screen.getByRole('button', { name: 'Download' }));
+  expect(screen.getByText(BUSY)).toBeTruthy();
+  first.unmount();
+
+  render(ListeningPage);
+  expect(screen.queryByText(BUSY)).toBeNull();
+  expect(screen.getByRole('button', { name: 'Download' }).hasAttribute('aria-describedby')).toBe(
+    false,
+  );
 });
 
 it('sends one download however fast the button is pressed', async () => {
@@ -563,7 +694,9 @@ it('sends one download however fast the button is pressed', async () => {
   await fireEvent.click(fetch);
 
   expect(vi.mocked(downloadModels)).toHaveBeenCalledTimes(1);
-  expect((fetch as HTMLButtonElement).disabled).toBe(true);
+  expect((fetch as HTMLButtonElement).disabled).toBe(false);
+  expect(fetch.getAttribute('aria-disabled')).toBe('true');
+  expect(fetch.textContent?.trim()).toBe('Download');
 });
 
 // Capture opens and closes once per use, and the device stays named between
@@ -602,8 +735,8 @@ it('offers the microphone held open, off by default, and says what each choice d
   expect(screen.getByRole('radio', { name: 'When you speak' }).getAttribute('aria-checked')).toBe(
     'true',
   );
-  expect(group.getAttribute('aria-describedby')).toBe('microphone-opens-note');
-  expect(document.getElementById('microphone-opens-note')?.textContent).toBe(
+  const note = () => document.getElementById(group.getAttribute('aria-describedby') ?? '');
+  expect(note()?.textContent).toBe(
     'Banshee opens the microphone when you speak and closes it right after.',
   );
 
@@ -620,7 +753,7 @@ it('offers the microphone held open, off by default, and says what each choice d
     }),
   );
   await waitFor(() =>
-    expect(document.getElementById('microphone-opens-note')?.textContent).toBe(
+    expect(note()?.textContent).toBe(
       'The microphone stays open, so recording starts at once. The system shows the microphone in use, and a Bluetooth headset plays at phone-call quality.',
     ),
   );
@@ -673,11 +806,101 @@ it('shows the quiet length the table states when the daemon sends none', () => {
   expect((shown as HTMLOptionElement).selected).toBe(true);
 });
 
-it('keeps the Input, End of speech and Free memory rows inline', () => {
+function sensitivity(): HTMLElement {
+  return screen.getByRole('radiogroup', { name: 'Sensitivity' });
+}
+
+it.each([
+  [0.15, 'High'],
+  [0.5, 'Medium'],
+  [0.85, 'Low'],
+])('reads a stored threshold of %s as %s', async (stored, word) => {
+  daemon.set(reduceStatus(empty(), withStt({ vad_threshold: stored })));
   render(ListeningPage);
-  for (const label of ['Input device', 'End of speech', 'Free memory']) {
-    expect(screen.getByRole('combobox', { name: label }).closest('.row')?.classList).not.toContain(
-      'block',
-    );
-  }
+  const checked = within(sensitivity())
+    .getAllByRole('radio')
+    .find((one) => one.getAttribute('aria-checked') === 'true');
+  expect(checked?.textContent?.trim()).toBe(word);
+});
+
+it('keeps the screen order Low, Medium, High', () => {
+  daemon.set(reduceStatus(empty(), withStt({ vad_threshold: 0.5 })));
+  render(ListeningPage);
+  const names = within(sensitivity())
+    .getAllByRole('radio')
+    .map((one) => one.textContent?.trim());
+  expect(names).toEqual(['Low', 'Medium', 'High']);
+});
+
+it('describes Sensitivity by its note', () => {
+  daemon.set(reduceStatus(empty(), withStt({ vad_threshold: 0.5 })));
+  render(ListeningPage);
+  const note = screen.getByText(
+    'High hears quiet speech, and more of the room. Low needs a clear voice.',
+  );
+  expect(sensitivity().getAttribute('aria-describedby')).toBe(note.id);
+});
+
+// The microphone rows come first, then the listener and what it hears, then memory.
+it('orders the rows microphone first, then the listener, then memory', () => {
+  daemon.set(reduceStatus(empty(), { ...withStt({ provider: 'remote' }), stt_translates: true }));
+  const { container } = render(ListeningPage);
+  const names = [...container.querySelectorAll('.row > .name')].map((name) => name.textContent);
+  expect(names).toEqual([
+    'Input',
+    'Microphone',
+    'Sensitivity',
+    'End of speech',
+    'Listening',
+    'Server',
+    'Key',
+    'Model',
+    'Write it in',
+    'Words to know',
+    'Free memory',
+  ]);
+});
+
+// The keyboard reaches the controls in the order the eye does.
+it('reaches the controls in the order the rows stand', () => {
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(ListeningPage);
+  expectInOrder(
+    screen.getByRole('combobox', { name: 'Input device' }),
+    screen.getByRole('radiogroup', { name: 'Microphone' }),
+    screen.getByRole('radiogroup', { name: 'Sensitivity' }),
+    screen.getByRole('combobox', { name: 'End of speech' }),
+    screen.getByRole('radiogroup', { name: 'Listening' }),
+    screen.getByRole('radiogroup', { name: 'Listening model' }),
+    screen.getByRole('button', { name: 'Add a word' }),
+    screen.getByRole('combobox', { name: 'Free memory' }),
+  );
+});
+
+const describedText = (el: HTMLElement) =>
+  (el.getAttribute('aria-describedby') ?? '')
+    .split(' ')
+    .map((id) => document.getElementById(id)?.textContent ?? '')
+    .join(' ');
+
+it('describes the word controls by the note under Words to know', async () => {
+  daemon.set(
+    reduceStatus(empty(), {
+      ...localStatus,
+      config: { ...localStatus.config, stt: { ...localStatus.config?.stt, vocabulary: ['Tauri'] } },
+    }),
+  );
+  render(ListeningPage);
+  const says = 'Words Banshee should expect to hear.';
+  expect(describedText(screen.getByRole('button', { name: 'Remove Tauri' }))).toBe(says);
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a word' }));
+  expect(describedText(screen.getByRole('textbox', { name: 'New word' }))).toBe(says);
+});
+
+it('describes Free memory by its note', () => {
+  daemon.set(reduceStatus(empty(), localStatus));
+  render(ListeningPage);
+  expect(describedText(screen.getByRole('combobox', { name: 'Free memory' }))).toMatch(
+    /^The listening model and the voice /,
+  );
 });

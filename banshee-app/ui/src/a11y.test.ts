@@ -45,7 +45,15 @@ const ROWS = vi.hoisted(() => {
 
 vi.mock('./lib/tauri', async () => (await import('./lib/tauri.mock')).mockTauri());
 
-import { detectAgents, history, listen, listDevices, listVoices, status } from './lib/tauri';
+import {
+  detectAgents,
+  history,
+  listen,
+  listDevices,
+  listVoices,
+  planConnect,
+  status,
+} from './lib/tauri';
 import type { HistoryRow } from './lib/tauri';
 import { agents } from './lib/agents';
 import { table as historyTable, view } from './lib/history';
@@ -145,5 +153,39 @@ it('the Saved history page carries none during the confirm', async () => {
   await choose('Saved history');
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Keep it' })).toBeTruthy());
+  expect(await violations(container)).toEqual([]);
+});
+
+// The voices to get are a list beside the radio group, so the page is checked
+// with both drawn.
+it('the Speaking page carries none with voices to get', async () => {
+  vi.mocked(listVoices).mockResolvedValue({
+    voices: [
+      { id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true },
+      { id: 'bm_george', name: 'George', description: 'British, steady', downloaded: false },
+    ],
+    current: 'af_sky',
+  });
+  const { container } = render(App);
+  await screen.findByRole('option', { name: /^Yes\./ });
+  await choose('Speaking');
+  await screen.findByRole('list', { name: 'More voices' });
+  expect(await violations(container)).toEqual([]);
+});
+
+// The review opens inside the Installed group, under the agent's name, so the
+// page is checked with both groups and the review drawn.
+it('the Agents page carries none with both groups and a review open', async () => {
+  vi.mocked(detectAgents).mockResolvedValue([
+    { id: 'claude', name: 'Claude Code', presence: 'connected', note: '' },
+    { id: 'cursor', name: 'Cursor', presence: 'found', note: '' },
+  ]);
+  vi.mocked(planConnect).mockResolvedValue([{ path: '~/.cursor/mcp.json', diff: '+ banshee' }]);
+  const { container } = render(App);
+  await screen.findByRole('option', { name: /^Yes\./ });
+  await choose('Agents');
+  await fireEvent.click(await screen.findByRole('button', { name: 'Connect' }));
+  await screen.findByRole('button', { name: 'Apply' });
+  expect(screen.getByRole('list', { name: 'Connected' })).toBeTruthy();
   expect(await violations(container)).toEqual([]);
 });

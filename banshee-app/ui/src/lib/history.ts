@@ -23,6 +23,10 @@ export function formatCount(n: number): string {
   return n.toLocaleString('en-US');
 }
 
+export function kept(n: number): string {
+  return n === 1 ? 'one dictation or question' : `${formatCount(n)} dictations and questions`;
+}
+
 export type Table = {
   rows: HistoryRow[];
   saving: boolean | null;
@@ -163,11 +167,9 @@ export function newestUnanswered(rows: HistoryRow[]): HistoryRow | null {
   return rows.find((row) => row.kind === 'question' && row.outcome === 'no_answer') ?? null;
 }
 
-/// Who asked a question. The meta line reads it in lower case where no client
-/// is stored.
-export function asker(row: HistoryRow, lower = false): string {
-  if (row.client) return row.client;
-  return lower ? 'an agent' : 'An agent';
+/// Who asked a question.
+export function asker(row: HistoryRow): string {
+  return row.client || 'An agent';
 }
 
 export function rowFlag(row: HistoryRow): string | null {

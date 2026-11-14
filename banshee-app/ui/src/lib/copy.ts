@@ -37,6 +37,31 @@ export function asSentence(said: string): string {
   return /[.!?]$/.test(opened) ? opened : `${opened}.`;
 }
 
+type CallError = { message?: unknown; transport?: unknown; sent?: unknown };
+
+/// Why a call failed, as a sentence. Only `transport`, set when the socket
+/// failed, tells a stopped Banshee apart: its own refusals share the code. A
+/// request that left before the socket failed may already have run.
+export function whyItFailed(error: unknown, otherwise = 'That failed.'): string {
+  const { message, transport, sent } = (error ?? {}) as CallError;
+  if (transport === true) {
+    return sent === true ? 'Banshee did not answer.' : 'Banshee is not running.';
+  }
+  const reason = typeof message === 'string' ? message.trim() : '';
+  return reason === '' ? otherwise : asSentence(reason);
+}
+
+/// A refused write, as its row says it. The daemon quotes the key ahead of its
+/// reason, and the row already names it.
+export function refusalSays(error: unknown): string {
+  const { message, transport, sent } = (error ?? {}) as CallError;
+  if (transport === true && sent === true) {
+    return 'Banshee did not answer, so this may not have changed.';
+  }
+  const keyless = typeof message === 'string' ? message.replace(/^'[^']*':/, '') : message;
+  return `Not changed. ${whyItFailed({ message: keyless, transport, sent }, 'Banshee refused it.')}`;
+}
+
 /// The languages a listening model hears: the names up to three, and a count
 /// beyond that.
 export function languagesHeard(codes: string[]): string {
@@ -150,9 +175,12 @@ export function speechLead(facts: Speech): string {
     if (!facts.started) {
       const fix = facts.voiceDownloaded
         ? 'Pick another voice.'
-        : 'Get its files below, or pick another voice.';
+        : 'Press Get beside it, or pick another voice.';
       return `${facts.voiceName || 'The local voice'} did not load, so Banshee is silent. ${fix}`;
     }
+    // The speaker in force may be another voice, which this sentence cannot name.
+    if (!facts.voiceDownloaded)
+      return `Banshee switches to ${facts.voiceName} once its file is here.`;
     return facts.voiceName ? `Banshee speaks as ${facts.voiceName}.` : 'Banshee has no voice yet.';
   }
   if (!facts.started) {
@@ -188,7 +216,7 @@ const FEEDBACK: Record<string, (place: string) => string> = {
 };
 
 /// Null while the daemon runs and has not said which cues are in force.
-export function feedbackLead(mode: string | null, live: boolean, mac: boolean): string | null {
+export function feedbackInForce(mode: string | null, live: boolean, mac: boolean): string | null {
   if (!live) return 'Banshee is not running, so it shows and plays nothing.';
   if (mode === null) return null;
   return FEEDBACK[mode]?.(mac ? 'above the Dock' : 'at the bottom of the screen') ?? null;

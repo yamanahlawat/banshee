@@ -28,8 +28,8 @@
   export let host: string | null;
   /// The compositor binds the key, so Banshee binds none.
   export let compositor: boolean;
-  /// The bound key, empty when none is.
-  export let hotkey: string;
+  /// The bound key, empty when none is, and null while Banshee is not running.
+  export let hotkey: string | null;
   export let verb: 'Hold' | 'Tap';
   export let go: (page: Page) => void;
   /// True while an open row takes the list's place, below the width they share.
@@ -62,7 +62,7 @@
     : hotkey
       ? `${verb} ${hotkey} and talk in any app.`
       : 'No key is bound, so nothing starts dictation.';
-  $: keyless = !compositor && !hotkey;
+  $: keyless = !compositor && hotkey === '';
   // A notice above holds the one action, and may say why the key does nothing.
   $: empty = alerting
     ? { detail: keyless ? says : SHOWS }
@@ -200,7 +200,7 @@
           />
         {:else}
           <div class="none">
-            <Absence label="No match" detail={`Nothing said so far contains “${$needle}”.`} />
+            <Absence plain label="No match" detail={`Nothing said so far contains “${$needle}”.`} />
           </div>
         {/if}
       </div>
@@ -228,6 +228,7 @@
         />
       {:else if !downloading}
         <Absence
+          plain
           label="Nothing here yet"
           detail={empty.detail}
           action={empty.action}

@@ -223,14 +223,11 @@ describe('marked', () => {
 describe('asker', () => {
   it('names the client, or an agent where none is stored', () => {
     expect(asker(row({ client: 'claude' }))).toBe('claude');
-    expect(asker(row({ client: 'claude' }), true)).toBe('claude');
     expect(asker(row({ client: null }))).toBe('An agent');
-    expect(asker(row({ client: null }), true)).toBe('an agent');
   });
 
   it('reads an empty client as no client', () => {
     expect(asker(row({ client: '' }))).toBe('An agent');
-    expect(asker(row({ client: '' }), true)).toBe('an agent');
   });
 });
 

@@ -9,6 +9,7 @@ import { stubMedia } from '../lib/media.mock';
 import { dictated } from '../lib/history.mock';
 import type { HistoryRow } from '../lib/tauri';
 import HistoryDetail from './HistoryDetail.svelte';
+import source from './HistoryDetail.svelte?raw';
 import ready from '../mocks/ready.json';
 import remote from '../mocks/remote.json';
 
@@ -594,5 +595,13 @@ describe('accessibility', () => {
     const { container } = show(row);
     const result = await axe.run(container);
     expect(result.violations).toEqual([]);
+  });
+});
+
+describe('date line colour', () => {
+  it('draws the clock time in the dim date line', () => {
+    expect(source).toMatch(/<h2 class="when[^"]*"[^>]*>[\s\S]*?class="mono time"/);
+    expect(source).toMatch(/\n\s*\.when\s*\{[^}]*color:\s*var\(--dim\)/);
+    expect(source).not.toMatch(/\.time[^{]*\{[^}]*color:/);
   });
 });

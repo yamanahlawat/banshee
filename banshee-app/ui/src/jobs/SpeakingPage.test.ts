@@ -1,21 +1,36 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
+import { tick } from 'svelte';
 
 vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTauri());
+vi.mock(import('../lib/travel'), async (actual) => ({
+  ...(await actual()),
+  travel: vi.fn(),
+}));
 
 import { copyText, downloadModels, setSetting, status, type Voices } from '../lib/tauri';
-import { daemon, empty, reduceStatus, speechFacts, type Status } from '../lib/daemon';
+import {
+  daemon,
+  empty,
+  reduceStatus,
+  speechFacts,
+  type Progress,
+  type Status,
+} from '../lib/daemon';
 import {
   announcement,
   forgetCopy,
+  problem,
   speechNote,
   WAITING_SAYS,
   WAITS_FOR_ITS_FILE,
 } from '../lib/copy';
 import { forgetTheAsk } from '../lib/downloads';
-import { table } from '../lib/settings';
+import { travel } from '../lib/travel';
+import { forgetRefusals, table } from '../lib/settings';
 import { commonTable } from '../lib/tauri.mock';
+import { expectInOrder } from '../lib/order.mock';
 import SpeakingPage from './SpeakingPage.svelte';
 
 const VOICES: Voices = {
@@ -27,6 +42,8 @@ const VOICES: Voices = {
       downloaded: false,
     },
     { id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true },
+    { id: 'af_bella', name: 'Bella', description: 'American, warm', downloaded: false },
+    { id: 'af_heart', name: 'Heart', description: 'American, soft', downloaded: true },
     { id: 'am_adam', name: 'Adam', description: 'American, low', downloaded: false },
   ],
   current: 'af_sky',
@@ -68,7 +85,7 @@ const remoteStatus = speaking(
 );
 
 function speakingGroup(): HTMLElement {
-  return screen.getByRole('radiogroup', { name: 'Speaking' }).closest('.row') as HTMLElement;
+  return screen.getByRole('radiogroup', { name: 'Speaking' }).closest('.apart') as HTMLElement;
 }
 
 function keyField(): HTMLInputElement | null {
@@ -80,6 +97,7 @@ beforeEach(() => {
   daemon.set(empty());
   forgetCopy();
   forgetTheAsk();
+  forgetRefusals();
   vi.clearAllMocks();
   vi.mocked(setSetting).mockResolvedValue([]);
   vi.mocked(downloadModels).mockResolvedValue(undefined);
@@ -191,8 +209,13 @@ it('says the voice waits for its file, beside the voices', () => {
   const pending = container.querySelectorAll('.note.pending');
   expect(pending).toHaveLength(1);
   expect(pending[0].textContent).toBe(WAITS_FOR_ITS_FILE);
-  expect(screen.getByRole('radio', { name: /Sky/ }).closest('.part')?.contains(pending[0])).toBe(
-    true,
+  const group = screen.getByRole('radiogroup', { name: 'Voice' });
+  expect(pending[0].closest('.row')).toBe(group.closest('.row'));
+  expectInOrder(
+    screen.getByText(speechNote(speechFacts(get(daemon), VOICES.voices))),
+    screen.getByText('Voice'),
+    group,
+    pending[0],
   );
 });
 
@@ -258,34 +281,51 @@ it('removes a stored key and says so', async () => {
   await waitFor(() => expect(get(announcement)).toBe('The key is removed.'));
 });
 
-it('fetches nothing when the daemon refuses the voice', async () => {
+it('fetches nothing when the daemon refuses the voice, and says so under its Get', async () => {
   daemon.set(reduceStatus(empty(), LOCAL));
-  vi.mocked(setSetting).mockRejectedValue(new Error('no such voice'));
+  vi.mocked(setSetting).mockRejectedValue({ code: -32000, message: "'tts.voice': no such voice" });
   render(SpeakingPage, { voices: VOICES });
 
-  await fireEvent.change(screen.getByRole('radio', { name: /Adam/ }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Get Adam and switch to it' }));
 
-  await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalled());
+  const refusal = await waitFor(() => screen.getByText('Not changed. No such voice.'));
   expect(vi.mocked(downloadModels)).not.toHaveBeenCalled();
+  const more = screen.getByRole('list', { name: 'More voices' });
+  const adam = within(more).getByRole('button', { name: 'Get Adam and switch to it' });
+  expect(refusal.closest('li')).toBe(adam.closest('li'));
+  expect(adam.getAttribute('aria-describedby')?.split(' ')).toContain(refusal.id);
+  expect(screen.queryByRole('radio', { name: /Adam/ })).toBeNull();
+  expect(screen.getByRole('radiogroup', { name: 'Voice' }).hasAttribute('aria-describedby')).toBe(
+    false,
+  );
+});
+
+it('puts the mark back on the voice in force and says the refusal on its row', async () => {
+  daemon.set(reduceStatus(empty(), LOCAL));
+  vi.mocked(setSetting).mockRejectedValue({ code: -32000, message: "'tts.voice': no such voice" });
+  render(SpeakingPage, { voices: VOICES });
+  const other = screen.getByRole('radio', { name: /Heart/ }) as HTMLInputElement;
+  await fireEvent.click(other);
+
+  const refusal = await waitFor(() => screen.getByText('Not changed. No such voice.'));
+  expect((screen.getByRole('radio', { name: /Sky/ }) as HTMLInputElement).checked).toBe(true);
+  expect(other.checked).toBe(false);
+  const group = screen.getByRole('radiogroup', { name: 'Voice' });
+  expect(group.getAttribute('aria-describedby')).toBe(refusal.id);
+  expect(refusal.closest('.row')?.contains(group)).toBe(true);
+  expect(
+    screen.getByRole('list', { name: 'More voices' }).getAttribute('aria-describedby'),
+  ).not.toContain(refusal.id);
 });
 
 it('fetches the file when the reader asks for a voice the machine lacks', async () => {
   daemon.set(reduceStatus(empty(), LOCAL));
   render(SpeakingPage, { voices: VOICES });
 
-  await fireEvent.click(screen.getByRole('button', { name: /Get Adam/ }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Get Adam and switch to it' }));
 
   await waitFor(() => expect(vi.mocked(downloadModels)).toHaveBeenCalled());
-});
-
-it('fetches nothing for a voice already on the machine', async () => {
-  daemon.set(reduceStatus(empty(), LOCAL));
-  render(SpeakingPage, { voices: VOICES });
-
-  await fireEvent.change(screen.getByRole('radio', { name: /Sky/ }));
-
-  await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalled());
-  expect(vi.mocked(downloadModels)).not.toHaveBeenCalled();
+  expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'am_adam');
 });
 
 function remoteAsking(format?: string, rate?: number | null): Status {
@@ -359,11 +399,41 @@ it('sends nothing for a rate that is not a whole number, and says why', async ()
   expect(get(announcement)).toBe('The sample rate is a whole number of hertz, as in 24000.');
 });
 
+it('says on the Sample rate row why a typed rate was not sent', async () => {
+  daemon.set(reduceStatus(empty(), remoteAsking('pcm', 22_050)));
+  render(SpeakingPage, { voices: VOICES });
+  const field = rateField()!;
+  await fireEvent.input(field, { target: { value: 'abc' } });
+  await fireEvent.blur(field);
+
+  const refusal = await waitFor(() =>
+    screen.getByText('The sample rate is a whole number of hertz, as in 24000.'),
+  );
+  expect(refusal.closest('.row')?.contains(field)).toBe(true);
+  expect(field.getAttribute('aria-describedby')).toBe(refusal.id);
+  expect(field.value).toBe('22050');
+});
+
 it('orders the remote rows from the server down to the format', () => {
   daemon.set(reduceStatus(empty(), remoteAsking('pcm')));
   render(SpeakingPage, { voices: VOICES });
-  const names = [...speakingGroup().querySelectorAll('.sub')].map((name) => name.textContent);
-  expect(names).toEqual(['server', 'key', 'model', 'voice', 'tone', 'format', 'rate']);
+  const group = within(speakingGroup());
+  const rows = [
+    ['Server', group.getByRole('textbox', { name: 'Server' })],
+    ['Key', group.getByText('A key is set')],
+    ['Model', group.getByRole('textbox', { name: 'Model' })],
+    ['Voice', group.getByRole('textbox', { name: 'Voice' })],
+    ['Tone', group.getByRole('textbox', { name: 'Tone' })],
+    ['Format', group.getByRole('radiogroup', { name: 'Audio format' })],
+    ['Sample rate', group.getByRole('textbox', { name: 'Sample rate' })],
+  ] as const;
+  const order: HTMLElement[] = [screen.getByRole('radiogroup', { name: 'Speaking' })];
+  for (const [name, control] of rows) {
+    const label = group.getByText(name);
+    expect(label.classList.contains('caps')).toBe(true);
+    order.push(label, control);
+  }
+  expectInOrder(...order);
 });
 
 // The daemon refuses both, but its answer is a TOML parse error over four
@@ -395,49 +465,319 @@ it('puts the whole description in the row', () => {
   ]);
 });
 
-it('offers a voice that is not here the control that gets it', () => {
-  render(SpeakingPage, { voices: VOICES });
+function voiceRadios(): string[] {
+  return within(screen.getByRole('radiogroup', { name: 'Voice' }))
+    .getAllByRole('radio')
+    .map((radio) => radio.id);
+}
 
-  expect(screen.getByRole('button', { name: /Get Adam/ })).toBeTruthy();
-  expect(screen.queryByRole('button', { name: 'Play Adam' })).toBeNull();
-  expect(screen.getByRole('button', { name: 'Play Sky' })).toBeTruthy();
+function moreVoices(): HTMLElement {
+  return screen.getByRole('list', { name: 'More voices' });
+}
+
+it('offers only voices on the machine as choices', () => {
+  daemon.set(reduceStatus(empty(), LOCAL));
+  render(SpeakingPage, { voices: VOICES });
+  expect(voiceRadios()).toEqual(['voice-af_sky', 'voice-af_heart']);
+  expect(document.querySelectorAll('input[type="radio"][name="voice"]')).toHaveLength(2);
 });
 
-it('takes a voice without fetching it', async () => {
-  vi.mocked(setSetting).mockResolvedValue([]);
+// jsdom moves no radio on an arrow key. A browser moves to the next radio of the
+// same name in tree order, so that order is what decides where ArrowDown lands.
+it('moves among voices on the machine with the arrow keys', async () => {
+  daemon.set(reduceStatus(empty(), LOCAL));
   render(SpeakingPage, { voices: VOICES });
+  const named = [...document.querySelectorAll<HTMLInputElement>('input[name="voice"]')];
+  const next = named[named.findIndex((radio) => radio.id === 'voice-af_sky') + 1];
+  expect(next.id).toBe('voice-af_heart');
 
-  await fireEvent.change(screen.getByRole('radio', { name: /Adam/ }));
-
-  await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'am_adam'));
+  await fireEvent.click(next);
+  await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'af_heart'));
   expect(vi.mocked(downloadModels)).not.toHaveBeenCalled();
 });
 
-it('says a voice is absent in the name the radio carries', () => {
+it('lists the rest under More voices with Get', () => {
+  daemon.set(reduceStatus(empty(), LOCAL));
   render(SpeakingPage, { voices: VOICES });
-  expect(screen.getByRole('radio', { name: /Adam.*not on this machine/ })).toBeTruthy();
-  expect(screen.getByRole('radiogroup', { name: 'Voice' })).toBeTruthy();
+  const more = moreVoices();
+  expect(more.tagName).toBe('UL');
+  expect(
+    within(more)
+      .getAllByRole('button')
+      .map((button) => button.getAttribute('aria-label')),
+  ).toEqual([
+    'Get Companion and switch to it',
+    'Get Bella and switch to it',
+    'Get Adam and switch to it',
+  ]);
+  expect(within(more).queryByRole('radio')).toBeNull();
+  expect(more.querySelector('.absent')).toBeNull();
+  const note = screen.getByText('Get downloads a voice and switches to it.');
+  expect(note.closest('.row')?.contains(more)).toBe(true);
+  expect(more.getAttribute('aria-describedby')).toBe(note.id);
+});
+
+it('keeps a Get on the current voice while its file is absent', () => {
+  daemon.set(reduceStatus(empty(), speaking({ voice: 'af_bella' })));
+  render(SpeakingPage, { voices: VOICES });
+  expect(voiceRadios()).toEqual(['voice-af_sky', 'voice-af_bella', 'voice-af_heart']);
+  const bella = screen.getByRole('radio', { name: /Bella.*not on this machine/ });
+  expect((bella as HTMLInputElement).checked).toBe(true);
+  expect(document.querySelector('label[for="voice-af_bella"] .name')?.classList).toContain(
+    'absent',
+  );
+  const group = screen.getByRole('radiogroup', { name: 'Voice' });
+  expect(
+    within(group).getByRole('button', { name: 'Get Bella, which is not on this machine' }),
+  ).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Play Bella' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Get Bella and switch to it' })).toBeNull();
+});
+
+it('shows the download under the current voice while its file arrives', () => {
+  daemon.set({
+    ...reduceStatus(empty(), { ...speaking({ voice: 'af_bella' }), pending: ['tts.voice'] }),
+    download: {
+      model: 'af_bella.bin',
+      label: 'Voice',
+      index: 1,
+      count: 1,
+      bytes: 5_000_000,
+      total: 10_000_000,
+      state: 'downloading',
+    },
+  });
+  const { container } = render(SpeakingPage, { voices: VOICES });
+  const line = container.querySelector('.progress') as HTMLElement;
+  expect(line.textContent).toContain('50%');
+  expect(line.closest('.row')).toBe(
+    screen.getByRole('radiogroup', { name: 'Voice' }).closest('.row'),
+  );
+  expect(container.querySelector('.note.pending')).toBeNull();
+});
+
+it('lands focus on the voice when Get chooses it', async () => {
+  daemon.set(reduceStatus(empty(), LOCAL));
+  vi.mocked(status).mockResolvedValue(speaking({ voice: 'af_bella' }));
+  render(SpeakingPage, { voices: VOICES });
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Get Bella and switch to it' }));
+
+  await waitFor(() => expect(document.activeElement?.id).toBe('voice-af_bella'));
+  expect(get(announcement)).toBe('Getting Bella.');
+  expect(within(moreVoices()).queryByRole('button', { name: /Bella/ })).toBeNull();
+  await waitFor(() => expect(vi.mocked(downloadModels)).toHaveBeenCalled());
+});
+
+it('moves the voice Get chose into Voice, and nothing when its file lands', async () => {
+  daemon.set(reduceStatus(empty(), LOCAL));
+  vi.mocked(status).mockResolvedValue(speaking({ voice: 'af_bella' }));
+  const page = render(SpeakingPage, { voices: VOICES });
+  expect(travel).not.toHaveBeenCalled();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Get Bella and switch to it' }));
+  await waitFor(() => expect(document.activeElement?.id).toBe('voice-af_bella'));
+  expect(vi.mocked(travel).mock.calls).toEqual([['af_bella']]);
+
+  await page.rerender({
+    voices: {
+      ...VOICES,
+      voices: VOICES.voices.map((voice) =>
+        voice.id === 'af_bella' ? { ...voice, downloaded: true } : voice,
+      ),
+    },
+  });
+  expect(vi.mocked(travel).mock.calls).toEqual([['af_bella']]);
+});
+
+it('says when a fetched voice is ready', async () => {
+  daemon.set(reduceStatus(empty(), LOCAL));
+  vi.mocked(status).mockResolvedValue(speaking({ voice: 'af_bella' }));
+  const page = render(SpeakingPage, { voices: VOICES });
+  await fireEvent.click(screen.getByRole('button', { name: 'Get Bella and switch to it' }));
+  await waitFor(() => expect(vi.mocked(downloadModels)).toHaveBeenCalled());
+
+  const landed: Voices = {
+    ...VOICES,
+    voices: VOICES.voices.map((voice) =>
+      voice.id === 'af_bella' ? { ...voice, downloaded: true } : voice,
+    ),
+  };
+  await page.rerender({ voices: landed });
+  expect(get(announcement)).toBe('Bella is ready.');
+
+  forgetCopy();
+  await page.rerender({ voices: { ...landed, voices: [...landed.voices] } });
+  expect(get(announcement)).toBe('');
+});
+
+it('says which voice did not download, and keeps its Get to try again', async () => {
+  daemon.set(reduceStatus(empty(), LOCAL));
+  vi.mocked(status).mockResolvedValue(speaking({ voice: 'am_adam' }));
+  vi.mocked(downloadModels).mockRejectedValue(new Error('offline'));
+  render(SpeakingPage, { voices: VOICES });
+  await fireEvent.click(screen.getByRole('button', { name: 'Get Adam and switch to it' }));
+  await waitFor(() => expect(get(problem)).toBe('Adam did not download. Press Get to try again.'));
+
+  const retry = within(screen.getByRole('radiogroup', { name: 'Voice' })).getByRole('button', {
+    name: 'Get Adam, which is not on this machine',
+  });
+  vi.mocked(downloadModels).mockResolvedValue(undefined);
+  await fireEvent.click(retry);
+  await waitFor(() => expect(vi.mocked(downloadModels)).toHaveBeenCalledTimes(2));
+});
+
+it('leaves More voices out when every voice is here', () => {
+  daemon.set(reduceStatus(empty(), LOCAL));
+  render(SpeakingPage, {
+    voices: {
+      voices: VOICES.voices.map((voice) => ({ ...voice, downloaded: true })),
+      current: 'af_sky',
+    },
+  });
+  expect(screen.queryByRole('list', { name: 'More voices' })).toBeNull();
+  expect(screen.queryByText('More voices')).toBeNull();
+});
+
+it('says it cannot list voices while Banshee is not running', () => {
+  daemon.set(reduceStatus(empty(), { ...LOCAL, running: false }));
+  const down = render(SpeakingPage, { voices: { voices: [], current: null } });
+  expect(screen.getByText('Banshee is not running, so it cannot list its voices.')).toBeTruthy();
+  down.unmount();
+
+  daemon.set(reduceStatus(empty(), LOCAL));
+  render(SpeakingPage, { voices: { voices: [], current: null } });
+  expect(screen.getByText("No voices yet. They arrive with Banshee's models.")).toBeTruthy();
+});
+
+const BUSY = 'One download at a time. This works again when the current one finishes.';
+
+const RUNNING: Progress = {
+  model: 'kokoro.onnx',
+  label: 'Voice',
+  index: 1,
+  count: 2,
+  bytes: 1,
+  total: 10,
+  state: 'downloading',
+};
+
+it('keeps the Get note standing while a download runs, and leaves Get to press', () => {
+  daemon.set({ ...reduceStatus(empty(), LOCAL), download: RUNNING });
+  const { container } = render(SpeakingPage, { voices: VOICES });
+  expect(screen.queryByText(BUSY)).toBeNull();
+  expect(container.querySelector('.progress')).toBeNull();
+  const note = screen.getByText('Get downloads a voice and switches to it.');
+  expect(note.closest('.row')?.contains(moreVoices())).toBe(true);
+  const button = screen.getByRole('button', { name: 'Get Adam and switch to it' });
+  expect((button as HTMLButtonElement).disabled).toBe(false);
+});
+
+it('marks every Get busy while a download runs, and clears the mark when it ends', async () => {
+  daemon.set({ ...reduceStatus(empty(), LOCAL), download: RUNNING });
+  render(SpeakingPage, { voices: VOICES });
+  const gets = within(moreVoices()).getAllByRole('button');
+  expect(gets).toHaveLength(3);
+  for (const button of gets) {
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+  }
+
+  daemon.set(reduceStatus(empty(), LOCAL));
+  await tick();
+
+  for (const button of within(moreVoices()).getAllByRole('button')) {
+    expect(button.hasAttribute('aria-disabled')).toBe(false);
+  }
+});
+
+it('says once, under the Get pressed, that one download runs at a time', async () => {
+  daemon.set({ ...reduceStatus(empty(), LOCAL), download: RUNNING });
+  render(SpeakingPage, { voices: VOICES });
+  const said: string[] = [];
+  const stop = announcement.subscribe((message) => said.push(message));
+
+  const adam = screen.getByRole('button', { name: 'Get Adam and switch to it' });
+  await fireEvent.click(adam);
+
+  stop();
+  expect(said.filter((message) => message === BUSY)).toHaveLength(1);
+  expect(vi.mocked(setSetting)).not.toHaveBeenCalled();
+  const busy = screen.getByText(BUSY);
+  expect(busy.closest('li')).toBe(adam.closest('li'));
+  expect(adam.getAttribute('aria-describedby')?.split(' ')).toContain(busy.id);
+});
+
+it('moves the busy sentence to the next Get pressed, and clears it when the run ends', async () => {
+  daemon.set({ ...reduceStatus(empty(), LOCAL), download: RUNNING });
+  render(SpeakingPage, { voices: VOICES });
+  const adam = screen.getByRole('button', { name: 'Get Adam and switch to it' });
+  const bella = screen.getByRole('button', { name: 'Get Bella and switch to it' });
+  await fireEvent.click(adam);
+  await fireEvent.click(bella);
+
+  expect(screen.getAllByText(BUSY)).toHaveLength(1);
+  expect(screen.getByText(BUSY).closest('li')).toBe(bella.closest('li'));
+  expect(adam.getAttribute('aria-describedby')).not.toContain(screen.getByText(BUSY).id);
+
+  daemon.set(reduceStatus(empty(), LOCAL));
+  await tick();
+
+  expect(screen.queryByText(BUSY)).toBeNull();
+  expect(bella.getAttribute('aria-describedby')).toBe(
+    screen.getByText('Get downloads a voice and switches to it.').id,
+  );
+});
+
+it('keeps focus on the button beside the current voice when its file lands', async () => {
+  daemon.set(reduceStatus(empty(), speaking({ voice: 'af_bella' })));
+  const page = render(SpeakingPage, { voices: VOICES });
+  const button = within(screen.getByRole('radiogroup', { name: 'Voice' })).getByRole('button', {
+    name: 'Get Bella, which is not on this machine',
+  });
+  button.focus();
+
+  await page.rerender({
+    voices: {
+      ...VOICES,
+      voices: VOICES.voices.map((voice) =>
+        voice.id === 'af_bella' ? { ...voice, downloaded: true } : voice,
+      ),
+    },
+  });
+
+  expect(document.activeElement).toBe(button);
+  expect(button.getAttribute('aria-label')).toBe('Play Bella');
+  expect(button.textContent?.trim()).toBe('Play');
+});
+
+it('offers a voice that is not here the control that gets it', () => {
+  render(SpeakingPage, { voices: VOICES });
+
+  expect(screen.getByRole('button', { name: 'Get Adam and switch to it' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Play Adam' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Play Sky' })).toBeTruthy();
 });
 
 it('sends one fetch however fast Get is pressed', async () => {
   vi.mocked(downloadModels).mockResolvedValue(undefined);
   render(SpeakingPage, { voices: VOICES });
 
-  // Both in one tick, because `disabled` only lands on the next render and the
-  // second press of a real double-click arrives before it.
-  const get = screen.getByRole('button', { name: /Get Adam/ });
+  const get = screen.getByRole('button', { name: 'Get Adam and switch to it' });
   get.click();
   get.click();
+  screen.getByRole('button', { name: 'Get Bella and switch to it' }).click();
 
   await waitFor(() => expect(vi.mocked(downloadModels)).toHaveBeenCalledTimes(1));
-  expect((get as HTMLButtonElement).disabled).toBe(true);
+  expect(vi.mocked(setSetting)).toHaveBeenCalledTimes(1);
+  expect((get as HTMLButtonElement).disabled).toBe(false);
 });
 
 it("lists the companion first, with Kyutai's credit", () => {
   render(SpeakingPage, { voices: VOICES });
-  const first = within(screen.getByRole('radiogroup', { name: 'Voice' })).getAllByRole('radio')[0];
-  expect(first.id).toBe('voice-companion');
-  expect(screen.getByText('Pocket TTS by Kyutai, CC-BY-4.0')).toBeTruthy();
+  const first = within(moreVoices()).getAllByRole('listitem')[0];
+  expect(within(first).getByText('Companion')).toBeTruthy();
+  expect(within(first).getByText('Pocket TTS by Kyutai, CC-BY-4.0')).toBeTruthy();
 });
 
 it('has no speaking rate', () => {
@@ -448,6 +788,6 @@ it('has no speaking rate', () => {
 
 it('offers Get Companion when its files have not arrived', () => {
   render(SpeakingPage, { voices: VOICES });
-  expect(screen.getByRole('button', { name: /Get Companion/ })).toBeTruthy();
-  expect(screen.getByRole('radio', { name: /Companion.*not on this machine/ })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Get Companion and switch to it' })).toBeTruthy();
+  expect(screen.queryByRole('radio', { name: /Companion/ })).toBeNull();
 });

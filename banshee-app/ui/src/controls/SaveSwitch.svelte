@@ -2,29 +2,33 @@
   import { waiting } from '../lib/daemon';
   import { write } from '../lib/settings';
   import { WAITING_SAYS } from '../lib/copy';
+  import { rowDescription } from '../lib/ids';
 
   export let saving: boolean;
+  export let describedBy: string | undefined = undefined;
+  const fromRow = rowDescription();
+  $: described = describedBy ?? $fromRow;
 
   // The key is a constant of this control, so the one fact about it is read
   // here rather than computed by each band that places it.
   $: pending = $waiting.has('daemon.save_history');
 </script>
 
-<button class="btn-underline" class:pending on:click={() => write('daemon.save_history', !saving)}>
+<button
+  class="btn btn-ghost"
+  class:pending
+  aria-describedby={described}
+  on:click={() => write('daemon.save_history', !saving)}
+>
   {saving ? 'Stop saving' : 'Start saving'}
   {#if pending}<span class="sr">{WAITING_SAYS}</span>{/if}
 </button>
 
 <style>
-  /* A resting rule, so it reads as a control rather than the second half of
-     the count beside it. Without one, "8 saved  Stop saving" is one phrase. */
-  button {
-    color: var(--ink);
-    border-bottom-color: currentcolor;
-  }
-
-  /* The dash this world uses for a value the daemon has not taken. */
-  button.pending {
-    border-bottom: 1px dashed var(--accent);
+  /* The dashed accent line this world draws around a value the daemon has not
+     taken. */
+  .pending {
+    border-style: dashed;
+    border-color: var(--accent);
   }
 </style>

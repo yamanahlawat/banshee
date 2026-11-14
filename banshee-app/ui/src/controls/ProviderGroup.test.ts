@@ -15,6 +15,7 @@ function group(props: Record<string, unknown> = {}) {
     options: OPTIONS,
     note: 'Audio goes to api.openai.com.',
     noteId: 'listener-note',
+    setting: 'stt.provider',
     change: () => {},
     ...props,
   });

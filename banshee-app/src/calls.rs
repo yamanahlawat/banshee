@@ -20,9 +20,7 @@ const PREVIEW_SENTENCE: &str = "The quick brown fox jumps over the lazy dog, whi
 pub struct CommandError {
     pub code: i32,
     pub message: String,
-    #[serde(skip)]
     pub transport: bool,
-    #[serde(skip)]
     pub sent: bool,
 }
 
@@ -258,5 +256,28 @@ mod tests {
         assert!(
             super::waiting_of(&json!({"ok": true, "restart_required": ["stt.model"]})).is_err()
         );
+    }
+
+    fn sent_to_the_window(transport: bool, sent: bool) -> serde_json::Value {
+        let error = super::CommandError::from(crate::socket::RpcError {
+            code: -32000,
+            message: "the daemon closed the socket".to_string(),
+            transport,
+            sent,
+        });
+        serde_json::to_value(error).unwrap()
+    }
+
+    // The daemon writes -32000 for its own refusals too, so only these flags
+    // tell the window that the socket failed and whether the request had left.
+    #[test]
+    fn the_window_hears_whether_the_socket_failed_and_whether_the_request_left() {
+        let unsent = sent_to_the_window(true, false);
+        assert_eq!(unsent["transport"], json!(true));
+        assert_eq!(unsent["sent"], json!(false));
+        let unanswered = sent_to_the_window(true, true);
+        assert_eq!(unanswered["transport"], json!(true));
+        assert_eq!(unanswered["sent"], json!(true));
+        assert_eq!(sent_to_the_window(false, true)["transport"], json!(false));
     }
 }

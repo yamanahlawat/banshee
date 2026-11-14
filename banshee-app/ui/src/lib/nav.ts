@@ -1,7 +1,7 @@
 import { WAITING_SAYS, waitingSays } from './copy';
 
 export const MAIN = ['History', 'Agents'] as const;
-export const SETTINGS = ['Listening', 'Speaking', 'Hotkey', 'Feedback', 'Saved history'] as const;
+export const SETTINGS = ['Listening', 'Speaking', 'Hotkey', 'Saved history'] as const;
 export const PAGES = [...MAIN, ...SETTINGS] as const;
 export type Page = (typeof PAGES)[number];
 
@@ -15,7 +15,7 @@ const WRITTEN_ON: [string, Page][] = [
   ['audio.hotkey', 'Hotkey'],
   ['audio.hotkey_mode', 'Hotkey'],
   ['audio.barge_in', 'Hotkey'],
-  ['feedback', 'Feedback'],
+  ['feedback', 'Hotkey'],
   ['daemon.save_history', 'Saved history'],
 ];
 

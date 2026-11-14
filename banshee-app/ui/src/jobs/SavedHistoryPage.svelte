@@ -4,6 +4,7 @@
   import {
     forget,
     formatCount,
+    kept,
     keptAudio,
     readAfter,
     readAll,
@@ -34,15 +35,14 @@
 
   function clearSays(rows: HistoryRow[], count: number): string {
     const now = new Date();
-    const audio = rows.some((row) => keptAudio(row, now) !== null) ? ' and their audio' : '';
-    const noun = count === 1 ? 'row' : 'rows';
-    return `Delete all ${formatCount(count)} ${noun}${audio}? This cannot be undone.`;
+    const audio = rows.some((row) => keptAudio(row, now) !== null) ? ', and their audio' : '';
+    const counted = kept(count);
+    return `Clear everything Banshee kept? ${counted.charAt(0).toUpperCase()}${counted.slice(1)}${audio}. This cannot be undone.`;
   }
 
   $: daemonConfig = ($daemon.status?.config?.daemon ?? {}) as Record<string, unknown>;
   $: keepAudio = String(daemonConfig.keep_audio ?? defaultOf($settings, 'daemon.keep_audio'));
   $: periods = optionsOf($settings, 'daemon.keep_audio');
-  const KEEP_AUDIO_NOTE = 'keep-audio-note';
   const KEEP_AUDIO_QUESTION = 'keep-audio-question';
   const CLEAR_QUESTION = 'clear-question';
 
@@ -146,82 +146,83 @@
   }
 </script>
 
-<div class="record">
+<Row
+  name="Saving"
+  note="It lives in a file only you can read. Nothing is sent anywhere."
+  setting="daemon.save_history"
+  line={null}
+>
   {#if confirming}
-    <!-- On one line with the buttons this wraps at 480 and drops the
-         destructive control alone at the gutter, which is the strongest
-         reading position on the page. -->
-    <p class="warn" id={CLEAR_QUESTION}>{clearSays($table.rows, total)}</p>
-    <div class="actions">
-      <button
-        bind:this={keep}
-        class="btn"
-        aria-describedby={CLEAR_QUESTION}
-        on:click={() => show(false, () => clearer)}
-      >
-        Keep it
-      </button>
-      <button
-        class="btn btn-ghost"
-        aria-describedby={CLEAR_QUESTION}
-        disabled={deleting}
-        on:click={clear}>Delete everything</button
-      >
+    <!-- One block: on one line with the buttons the question wraps at 480 and
+         drops the destructive control alone at the gutter, which is the
+         strongest reading position on the page. -->
+    <div>
+      <p class="warn note-type" id={CLEAR_QUESTION}>{clearSays($table.rows, total)}</p>
+      <div class="actions">
+        <button
+          bind:this={keep}
+          class="btn"
+          aria-describedby={CLEAR_QUESTION}
+          on:click={() => show(false, () => clearer)}
+        >
+          Keep it
+        </button>
+        <button
+          class="btn btn-ghost"
+          aria-describedby={CLEAR_QUESTION}
+          disabled={deleting}
+          on:click={clear}>Clear everything</button
+        >
+      </div>
     </div>
   {:else}
-    <div class="actions">
-      <SaveSwitch {saving} />
-      {#if total > 0}
-        <button bind:this={clearer} class="btn btn-ghost" on:click={ask}> Clear </button>
-      {/if}
-    </div>
-  {/if}
-
-  <p class="note">It lives in a file only you can read. Nothing is sent anywhere.</p>
-
-  {#if !saving}
-    <p class="note">Banshee is not keeping anything new. What it kept stays until you clear it.</p>
-  {/if}
-</div>
-
-<div class="keep">
-  <Row
-    name="Keep audio"
-    block
-    note="Audio holds whatever the microphone heard, other voices too. A shorter period deletes older audio."
-    noteId={KEEP_AUDIO_NOTE}
-    setting="daemon.keep_audio"
-  >
-    {#if shortening}
-      <!-- One block, so the row's control line does not set the question beside its buttons. -->
-      <div>
-        <p class="warn" id={KEEP_AUDIO_QUESTION}>
-          {shortenSays(shortening.period, shortening.count)}
-        </p>
-        <div class="actions">
-          <button
-            bind:this={keepPeriod}
-            class="btn"
-            aria-describedby={KEEP_AUDIO_QUESTION}
-            on:click={keepTheAudio}>Keep it</button
-          >
-          <button class="btn btn-ghost" aria-describedby={KEEP_AUDIO_QUESTION} on:click={shorten}
-            >Delete</button
-          >
-        </div>
-      </div>
-    {:else}
-      <Segmented
-        bind:this={periodChoice}
-        label="Keep audio"
-        value={shown}
-        options={periods}
-        describedBy={KEEP_AUDIO_NOTE}
-        change={choosePeriod}
-      />
+    <SaveSwitch {saving} />
+    {#if total > 0}
+      <button bind:this={clearer} class="btn btn-ghost" on:click={ask}> Clear </button>
     {/if}
-  </Row>
-</div>
+  {/if}
+  <svelte:fragment slot="under">
+    {#if !saving}
+      <p class="note">
+        Banshee is not keeping anything new. What it kept stays until you clear it.
+      </p>
+    {/if}
+  </svelte:fragment>
+</Row>
+
+<Row
+  name="Keep audio"
+  note="Audio holds whatever the microphone heard, other voices too. A shorter period deletes older audio."
+  setting="daemon.keep_audio"
+>
+  {#if shortening}
+    <!-- One block, so the row's control line does not set the question beside its buttons. -->
+    <div>
+      <p class="warn note-type" id={KEEP_AUDIO_QUESTION}>
+        {shortenSays(shortening.period, shortening.count)}
+      </p>
+      <div class="actions">
+        <button
+          bind:this={keepPeriod}
+          class="btn"
+          aria-describedby={KEEP_AUDIO_QUESTION}
+          on:click={keepTheAudio}>Keep it</button
+        >
+        <button class="btn btn-ghost" aria-describedby={KEEP_AUDIO_QUESTION} on:click={shorten}
+          >Delete</button
+        >
+      </div>
+    </div>
+  {:else}
+    <Segmented
+      bind:this={periodChoice}
+      label="Keep audio"
+      value={shown}
+      options={periods}
+      change={choosePeriod}
+    />
+  {/if}
+</Row>
 
 <style>
   .actions {
@@ -233,20 +234,12 @@
   }
 
   .warn {
-    max-width: 520px;
+    max-width: 440px;
     margin: 0 0 12px;
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
-    font-size: 13px;
     color: var(--accent);
   }
 
   .note {
-    margin: 12px 0 0;
-  }
-
-  .keep {
-    margin-top: 22px;
+    margin: 8px 0 0;
   }
 </style>

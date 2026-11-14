@@ -6,3 +6,8 @@ it('leaves the focus ring to the search wrapper', () => {
   expect(style).toMatch(/\.search:focus-within\s*\{[^}]*outline:\s*2px solid/);
   expect(style).toMatch(/\.search input:focus-visible\s*\{[^}]*outline:\s*none/);
 });
+
+it('gives the placeholder the measured dim', () => {
+  const style = source.slice(source.indexOf('<style>'));
+  expect(style).toMatch(/input::placeholder\s*\{[^}]*color:\s*var\(--dim\)/);
+});

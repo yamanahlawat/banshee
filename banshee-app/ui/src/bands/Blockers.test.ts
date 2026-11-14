@@ -1,15 +1,39 @@
-import { fireEvent, render } from '@testing-library/svelte';
+import { fireEvent, render as mount } from '@testing-library/svelte';
 import { beforeEach, expect, it, vi } from 'vitest';
+import { tick, type ComponentProps } from 'svelte';
 
 vi.mock('../lib/tauri', async () => (await import('../lib/tauri.mock')).mockTauri());
 
 import Blockers from './Blockers.svelte';
-import { claimTheRun, forgetTheAsk } from '../lib/downloads';
-import { setSetting } from '../lib/tauri';
+import { claimTheRun, forgetSamples, forgetTheAsk, record } from '../lib/downloads';
+import { downloadModels, setSetting } from '../lib/tauri';
+import { announcement } from '../lib/copy';
 import permissions from '../mocks/permissions.json';
-import type { Blocker, BlockerKind, ListeningModel } from '../lib/daemon';
+import { daemon, type Blocker, type BlockerKind, type ListeningModel } from '../lib/daemon';
+import { forgetRefusals } from '../lib/settings';
 
-beforeEach(forgetTheAsk);
+type Props = ComponentProps<typeof Blockers>;
+
+// The download line reads the store, which the app fills from the same push
+// that sets this prop.
+function render(component: typeof Blockers, props: Props) {
+  const show = (p: Props) => daemon.update((d) => ({ ...d, download: p.download ?? null }));
+  show(props);
+  const drawn = mount(component, props);
+  return {
+    ...drawn,
+    rerender: async (next: Props) => {
+      show(next);
+      await drawn.rerender(next);
+    },
+  };
+}
+
+beforeEach(() => {
+  forgetTheAsk();
+  forgetSamples();
+  forgetRefusals();
+});
 
 const at = (bytes: number) => ({
   label: 'Listening model',
@@ -41,6 +65,16 @@ it('shows every percent and says only the quarters', async () => {
 
   await rerender({ blockers: [], download: at(51), restart: () => {} });
   expect(said()).not.toBe(first);
+});
+
+it('keeps the pace outside the spoken progress', () => {
+  record(at(10), 0);
+  record(at(11), 5);
+  record(at(20), 5005);
+  const { container } = render(Blockers, { blockers: [], download: at(20), restart: () => {} });
+  const shown = container.querySelector('.progress')?.textContent ?? '';
+  expect(shown).toContain('B/s');
+  expect(container.querySelector('[aria-live="polite"]')?.textContent).not.toContain('B/s');
 });
 
 it.each([
@@ -310,7 +344,7 @@ const missingModel: Blocker = {
   command: 'banshee setup',
 };
 
-it('shuts Download while a run is already asked for', () => {
+it('holds Download while a run is already asked for, and keeps it in reach', async () => {
   claimTheRun();
   const { getByRole } = render(Blockers, {
     blockers: [missingModel],
@@ -318,7 +352,43 @@ it('shuts Download while a run is already asked for', () => {
     restart: () => {},
   });
 
-  expect((getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(true);
+  const download = getByRole('button', { name: 'Download' }) as HTMLButtonElement;
+  expect(download.disabled).toBe(false);
+  expect(download.getAttribute('aria-disabled')).toBe('true');
+
+  forgetTheAsk();
+  await tick();
+  expect(download.hasAttribute('aria-disabled')).toBe(false);
+});
+
+const BUSY = 'One download at a time. This works again when the current one finishes.';
+
+it('says once, under Download, that one download runs at a time, until the run ends', async () => {
+  claimTheRun();
+  const { getByRole, getByText, queryByText } = render(Blockers, {
+    blockers: [missingModel],
+    download: null,
+    restart: () => {},
+  });
+  vi.mocked(downloadModels).mockClear();
+  const said: string[] = [];
+  const stop = announcement.subscribe((message) => said.push(message));
+
+  const download = getByRole('button', { name: 'Download' });
+  await fireEvent.click(download);
+
+  stop();
+  expect(vi.mocked(downloadModels)).not.toHaveBeenCalled();
+  expect(said.filter((message) => message === BUSY)).toHaveLength(1);
+  const busy = getByText(BUSY);
+  expect(download.closest('section')?.contains(busy)).toBe(true);
+  expect(download.compareDocumentPosition(busy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(download.getAttribute('aria-describedby')?.split(' ')).toContain(busy.id);
+
+  forgetTheAsk();
+  await tick();
+  expect(queryByText(BUSY)).toBeNull();
+  expect(download.hasAttribute('aria-describedby')).toBe(false);
 });
 
 it('offers Download while nothing is running', () => {
@@ -376,6 +446,35 @@ it('asks which listening model to fetch, from the suggestions alone', async () =
 
   await fireEvent.click(getByRole('radio', { name: 'Whisper turbo' }));
   expect(vi.mocked(setSetting)).toHaveBeenCalledWith('stt.model', 'whisper-large-v3-turbo');
+});
+
+it('says a refused model choice under the choice', async () => {
+  vi.mocked(setSetting).mockRejectedValueOnce({
+    code: -32000,
+    message: 'the daemon closed the socket',
+    transport: true,
+  });
+  const { findByText, getByRole } = render(Blockers, {
+    blockers: [missingModel],
+    download: null,
+    restart: () => {},
+    megabytes: 1440,
+    chosen: 'parakeet-unified-en-0.6b',
+    models: [
+      suggestion('parakeet-unified-en-0.6b', 'Parakeet Unified', ['en']),
+      suggestion('whisper-large-v3-turbo', 'Whisper turbo', ['af', 'am', 'ar', 'as']),
+    ],
+  });
+  await fireEvent.click(getByRole('radio', { name: 'Whisper turbo' }));
+
+  const refusal = await findByText('Not changed. Banshee is not running.');
+  const group = getByRole('radiogroup', { name: 'Listening model' });
+  expect(getByRole('radio', { name: 'Parakeet Unified' }).getAttribute('aria-checked')).toBe(
+    'true',
+  );
+  expect(group.getAttribute('aria-describedby')).toBe(refusal.id);
+  expect(refusal.closest('[aria-live]')).toBeNull();
+  expect(group.compareDocumentPosition(refusal) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
 // The window offers no acceptance, so a model set through the CLI shows its

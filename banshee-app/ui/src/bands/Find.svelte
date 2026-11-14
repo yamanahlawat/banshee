@@ -109,6 +109,10 @@
     line-height: 1.45;
   }
 
+  input::placeholder {
+    color: var(--dim);
+  }
+
   input::-webkit-search-cancel-button {
     -webkit-appearance: none;
     appearance: none;

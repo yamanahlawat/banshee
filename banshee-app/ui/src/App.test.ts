@@ -144,6 +144,15 @@ it('draws an empty history rather than leaving the body blank', async () => {
   expect(screen.queryByRole('listbox')).toBeNull();
 });
 
+it('claims no missing key on an empty History while Banshee is stopped', async () => {
+  vi.mocked(status).mockResolvedValue({ running: false });
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
+  expect(screen.getByText('Banshee is not running')).toBeTruthy();
+  expect(screen.queryByText(/No key is bound/)).toBeNull();
+});
+
 it('asks for an agent on an empty History only once the daemon says none is connected', async () => {
   vi.mocked(history).mockResolvedValue([]);
   render(App);
@@ -227,25 +236,17 @@ it('lists every page in the sidebar, with the settings in a named group', async 
   const names = within(sidebar())
     .getAllByRole('button')
     .map((button) => button.textContent?.trim());
-  expect(names).toEqual([
-    'History',
-    'Agents',
-    'Listening',
-    'Speaking',
-    'Hotkey',
-    'Feedback',
-    'Saved history',
-  ]);
+  expect(names).toEqual(['History', 'Agents', 'Listening', 'Speaking', 'Hotkey', 'Saved history']);
   const settings = within(sidebar()).getByRole('group', { name: 'Settings' });
   expect(
     within(settings)
       .getAllByRole('button')
       .map((button) => button.textContent?.trim()),
-  ).toEqual(['Listening', 'Speaking', 'Hotkey', 'Feedback', 'Saved history']);
+  ).toEqual(['Listening', 'Speaking', 'Hotkey', 'Saved history']);
 
   expect(item('History').getAttribute('aria-current')).toBe('page');
-  await choose('Feedback');
-  await waitFor(() => expect(item('Feedback').getAttribute('aria-current')).toBe('page'));
+  await choose('Hotkey');
+  await waitFor(() => expect(item('Hotkey').getAttribute('aria-current')).toBe('page'));
   expect(item('History').hasAttribute('aria-current')).toBe(false);
 });
 
@@ -276,26 +277,48 @@ it('says the state in the sidebar foot on every page', async () => {
   expect(within(sidebar()).queryByText(/Audio goes to/)).toBeNull();
 });
 
-it('moves Feedback off the Hotkey page onto its own', async () => {
+it('holds Feedback on the Hotkey page, with no page of its own', async () => {
   render(App);
   await listed();
+  expect(within(sidebar()).queryByRole('button', { name: /^Feedback/ })).toBeNull();
 
   await choose('Hotkey');
   await waitFor(() => expect(page('Hotkey')).toBeTruthy());
-  expect(screen.queryByRole('radiogroup', { name: 'Feedback' })).toBeNull();
-
-  await choose('Feedback');
-  await waitFor(() => expect(page('Feedback')).toBeTruthy());
-  expect(within(page('Feedback')).getByRole('radiogroup', { name: 'Feedback' })).toBeTruthy();
+  expect(within(page('Hotkey')).getByRole('radiogroup', { name: 'Feedback' })).toBeTruthy();
 });
 
-it('leads Feedback with the mode the daemon reports', async () => {
-  // The config still asks for both: the lead reads the cues in force.
+it('forgets a refused setting once another page is chosen', async () => {
+  vi.mocked(setSetting).mockRejectedValueOnce({
+    code: -32000,
+    message: 'the daemon closed the socket',
+    transport: true,
+  });
+  render(App);
+  await listed();
+  await choose('Hotkey');
+  await waitFor(() => expect(page('Hotkey')).toBeTruthy());
+  await fireEvent.click(within(page('Hotkey')).getByRole('radio', { name: 'Off' }));
+  await screen.findByText('Not changed. Banshee is not running.');
+
+  await choose('Speaking');
+  await waitFor(() => expect(page('Speaking')).toBeTruthy());
+  await choose('Hotkey');
+  await waitFor(() => expect(page('Hotkey')).toBeTruthy());
+  expect(screen.queryByText('Not changed. Banshee is not running.')).toBeNull();
+});
+
+it('opens the Feedback note with the mode the daemon reports, under a lead about the key', async () => {
+  // The config still asks for both: the note reads the cues in force.
   vi.mocked(status).mockResolvedValue({ ...ready, feedback: 'none' });
   render(App);
   await listed();
-  await choose('Feedback');
-  await waitFor(() => expect(pageHeading('Feedback').textContent).toMatch(/plays no sound\.$/));
+  await choose('Hotkey');
+  const group = await waitFor(() =>
+    within(page('Hotkey')).getByRole('radiogroup', { name: 'Feedback' }),
+  );
+  const note = document.getElementById(group.getAttribute('aria-describedby') ?? '');
+  expect(note?.textContent).toMatch(/^Banshee shows nothing and plays no sound\. /);
+  expect(pageHeading('Hotkey').textContent).not.toMatch(/sound/);
 });
 
 it('asks before it deletes the record', async () => {
@@ -735,7 +758,59 @@ it('counts the rows Saved history keeps', async () => {
   await choose('Saved history');
   await waitFor(() =>
     expect(pageHeading('Saved history').textContent).toBe(
-      'Banshee is keeping 2 rows, on this machine.',
+      'Banshee is keeping 2 dictations and questions, on this machine.',
+    ),
+  );
+});
+
+// A stopped Banshee keeps nothing, so the count is what it kept.
+it('counts the rows Banshee kept while it is stopped', async () => {
+  render(App);
+  await listed();
+  daemon.update((s) => ({ ...s, down: 'not running' }));
+  await choose('Saved history');
+  await waitFor(() =>
+    expect(pageHeading('Saved history').textContent).toBe(
+      'Banshee kept 2 dictations and questions on this machine.',
+    ),
+  );
+});
+
+it('says Banshee is keeping what you say before anything is said', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
+  await choose('Saved history');
+  await waitFor(() =>
+    expect(pageHeading('Saved history').textContent).toBe(
+      'Banshee is keeping what you say, and you have not said anything yet.',
+    ),
+  );
+});
+
+// Stopped from the start, nothing says whether saving is on, so the lead says
+// only what is on the machine.
+it('says Banshee has kept nothing while it is stopped and holds nothing', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  vi.mocked(status).mockResolvedValue({ running: false });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
+  await choose('Saved history');
+  await waitFor(() =>
+    expect(pageHeading('Saved history').textContent).toBe('Banshee has kept nothing yet.'),
+  );
+});
+
+// The last answer Banshee gave stands while it is stopped.
+it('says saving is off while Banshee is stopped with saving off', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, history_enabled: false });
+  render(App);
+  await listed();
+  daemon.update((s) => ({ ...s, down: 'not running' }));
+  await choose('Saved history');
+  await waitFor(() =>
+    expect(pageHeading('Saved history').textContent).toBe(
+      'Saving is off, and Banshee is not running.',
     ),
   );
 });
@@ -1081,7 +1156,7 @@ it('reads the voices again once their files have landed', async () => {
 });
 
 // A window that can only offer what is on disk cannot offer a choice at all.
-it('offers every voice, and fetches the one that is chosen', async () => {
+it('offers every voice, and fetches the one Get chooses', async () => {
   vi.mocked(listVoices).mockResolvedValue({
     current: 'af_sky',
     voices: [
@@ -1094,15 +1169,16 @@ it('offers every voice, and fetches the one that is chosen', async () => {
   await choose('Speaking');
 
   await waitFor(() => expect(pageHeading('Speaking')).toBeTruthy());
-  expect(screen.getByText('George')).toBeTruthy();
+  const more = screen.getByRole('list', { name: 'More voices' });
+  expect(within(more).getByText('George')).toBeTruthy();
+  expect(screen.queryByRole('radio', { name: /George/ })).toBeNull();
 
   expect(screen.queryByRole('button', { name: 'Play George' })).toBeNull();
-  expect(screen.getByRole('button', { name: /Get George/ })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Play Sky' }).hasAttribute('disabled')).toBe(false);
 
-  await fireEvent.click(screen.getByRole('button', { name: /Get George/ }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Get George and switch to it' }));
   await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'bm_george'));
-  expect(vi.mocked(downloadModels)).toHaveBeenCalled();
+  await waitFor(() => expect(vi.mocked(downloadModels)).toHaveBeenCalled());
 });
 
 it('does not fetch a voice that is already here', async () => {
@@ -1406,6 +1482,8 @@ it('sets sensitivity by band, and writes a float for it', async () => {
   expect(screen.getByRole('radio', { name: 'Medium' }).getAttribute('aria-checked')).toBe('true');
 
   await fireEvent.click(screen.getByRole('radio', { name: 'High' }));
+  await waitFor(() => expect(setSetting).toHaveBeenCalledWith('stt.vad_threshold', 0.15));
+  await fireEvent.click(screen.getByRole('radio', { name: 'Low' }));
   await waitFor(() => expect(setSetting).toHaveBeenCalledWith('stt.vad_threshold', 0.85));
 });
 
@@ -1444,9 +1522,11 @@ it('makes keeping the record the primary, and names what would be lost', async (
   await choose('Saved history');
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
 
-  expect(screen.getByText(/Delete all 2 rows\?/)).toBeTruthy();
+  expect(
+    screen.getByText(/Clear everything Banshee kept\? 2 dictations and questions/),
+  ).toBeTruthy();
   const buttons = screen.getAllByRole('button').map((b) => b.textContent?.trim());
-  expect(buttons.indexOf('Keep it')).toBeLessThan(buttons.indexOf('Delete everything'));
+  expect(buttons.indexOf('Keep it')).toBeLessThan(buttons.indexOf('Clear everything'));
 });
 
 // Abandoning a half-typed word must not also throw the reader off the page.
@@ -1501,7 +1581,7 @@ it('lets a failure be dismissed', async () => {
   await listed();
   await choose('Saved history');
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Delete everything' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear everything' }));
 
   await waitFor(() => expect(screen.getByText(/could not be cleared/)).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
@@ -1562,7 +1642,7 @@ it('keeps focus somewhere real after the record is deleted', async () => {
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
   // The daemon keeps nothing once it has cleared, so a re-read finds nothing.
   vi.mocked(history).mockResolvedValue([]);
-  await fireEvent.click(await screen.findByRole('button', { name: 'Delete everything' }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'Clear everything' }));
 
   await waitFor(() => expect(screen.queryByRole('button', { name: 'Clear' })).toBeNull());
   expect(document.activeElement).not.toBe(document.body);
@@ -1578,7 +1658,7 @@ it('takes one delete however many times the button is pressed', async () => {
   await choose('Saved history');
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
 
-  const destroy = await screen.findByRole('button', { name: 'Delete everything' });
+  const destroy = await screen.findByRole('button', { name: 'Clear everything' });
   await fireEvent.click(destroy);
   await fireEvent.click(destroy);
   release();
@@ -1814,6 +1894,15 @@ it('blames the stopped daemon rather than the voice', async () => {
   );
 });
 
+// A stopped Banshee binds no key, and has not said which one it would bind.
+it('says on the Hotkey page that no key works while Banshee is stopped', async () => {
+  vi.mocked(status).mockResolvedValue({ running: false });
+  render(App);
+  await fireEvent.click(await waitFor(() => item('Hotkey')));
+  const heading = await waitFor(() => pageHeading('Hotkey'));
+  expect(heading.textContent).toBe('Banshee is not running, so no key starts dictation.');
+});
+
 // The cell reads every key under the speaker's table, so a key added later
 // cannot be left off a hand-written list and lose its mark. A key of another
 // job's is the discriminating half: it marks that job's cell instead.
@@ -2023,7 +2112,7 @@ it('lands on the failure itself, not the top of the page it opens', async () => 
   );
 });
 
-// Seven sidebar stops come first in the tab order, so the keyboard needs a way
+// Six sidebar stops come first in the tab order, so the keyboard needs a way
 // past them to the page itself.
 it('the skip link enters the page that is showing', async () => {
   vi.mocked(status).mockResolvedValue(ready);
@@ -2207,21 +2296,15 @@ it('releases the download controls once the run reports', async () => {
   const start = await screen.findByRole('button', { name: /Download/ });
   await fireEvent.click(start);
 
-  await waitFor(() =>
-    expect((screen.getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(
-      true,
-    ),
-  );
+  const held = () => screen.getByRole('button', { name: /Download/ });
+  await waitFor(() => expect(held().getAttribute('aria-disabled')).toBe('true'));
+  expect((held() as HTMLButtonElement).disabled).toBe(false);
 
   pushes.get('daemon:downloads')?.({
     payload: { model: 'ggml-x.bin', bytes: 10, total: 100, state: 'done' },
   });
 
-  await waitFor(() =>
-    expect((screen.getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(
-      false,
-    ),
-  );
+  await waitFor(() => expect(held().hasAttribute('aria-disabled')).toBe(false));
 });
 
 describe('below the width the sidebar folds at', () => {
@@ -2413,14 +2496,14 @@ describe('below the width the sidebar folds at', () => {
     render(App);
     await listed();
     await fireEvent.click(unfold());
-    await choose('Feedback');
-    await waitFor(() => expect(page('Feedback')).toBeTruthy());
+    await choose('Hotkey');
+    await waitFor(() => expect(page('Hotkey')).toBeTruthy());
     await fireEvent.click(unfold());
 
     widen(WIDE, true);
     await waitFor(() => expect(drawer()).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(item('Feedback')));
-    expect(item('Feedback').getAttribute('aria-current')).toBe('page');
+    await waitFor(() => expect(document.activeElement).toBe(item('Hotkey')));
+    expect(item('Hotkey').getAttribute('aria-current')).toBe('page');
     expect(screen.queryByRole('button', { name: 'Show sidebar' })).toBeNull();
 
     widen(WIDE, false);

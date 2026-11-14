@@ -565,6 +565,12 @@ describe('below the width the list and detail share', () => {
 });
 
 describe('an empty History', () => {
+  it('has no dashed edge', () => {
+    show([]);
+    const plain = screen.getByRole('heading', { name: 'Nothing here yet' }).parentElement;
+    expect(plain?.classList.contains('plain')).toBe(true);
+  });
+
   it('says how to start, with a key', () => {
     show([]);
     expect(screen.getByRole('heading', { name: 'Nothing here yet' })).toBeTruthy();
@@ -652,6 +658,16 @@ describe('an empty History', () => {
     show([], { alerting: true, hotkey: '' });
     expect(screen.getByText('No key is bound, so nothing starts dictation.')).toBeTruthy();
     expect(screen.queryByRole('button')).toBeNull();
+  });
+
+  // The key is unknown while Banshee is stopped, and its own notice says the
+  // hotkey does nothing until it starts.
+  it('claims no missing key under a notice when the key is unknown', () => {
+    show([], { alerting: true, hotkey: null });
+    expect(screen.queryByText(/No key is bound/)).toBeNull();
+    expect(
+      screen.getByText('Your dictations show here, and so do the questions agents ask you.'),
+    ).toBeTruthy();
   });
 
   it('asks a compositor user for an agent when none is connected', async () => {

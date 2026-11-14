@@ -9,10 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A download shows its speed and the time left,** on History and under the voice or model that started it.
 - **The question card, History and the log name the program that asked.** The card shows
-  the name above the question on macOS and Linux. History keeps it on question rows and shows
-  it after the time and above the question in the detail. Dictation shows no name, including
-  dictation through `banshee record`. The log names every socket use that opens the
+  the name above the question on macOS and Linux. History keeps it on question rows, shows it
+  under the time in the list, and above the question in the detail. Dictation shows no name,
+  including dictation through `banshee record`. The log names every socket use that opens the
   microphone, and who set `audio.keep_open`. When the name does not read, none shows. The
   daemon reads the name from the operating system, so a renamed program shows its new name.
   The shim reports its parent, which reads as `claude` for Claude Code in the desktop app.
@@ -88,10 +89,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **History rows show the time and the agent's name down the right edge,** and a missed question's flag where the answer would be.
+- **The window's small notes are easier to read,** in a slightly heavier, wider cut with more space between lines.
+- **Speaking lists your voices apart from voices to get,** so the arrow keys move only among voices that can speak.
+- **Every settings page puts its labels in one column,** so each control starts on the same edge.
+- **Agents lists connected agents apart from installed ones,** and an agent's review opens under its name.
+- **Feedback is a row on Hotkey,** and the sidebar has no Feedback page.
+- **Listening puts the microphone settings first,** then the listener and its words, then memory.
+- **Saved history says how many dictations and questions it keeps,** and Clear asks before it clears everything.
 - **History says who asked and who answered.** A question's detail shows "Claude asked"
   above the question and "You answered" above your answer, in small capitals. With no
-  program name stored, it reads "An agent asked". In the list, a question row shows
-  "18:31 claude asked" under its words.
+  program name stored, it reads "An agent asked".
 - **Every surface names a state with the same word.** The menu bar, its tooltip, the
   window, the question card and the Waybar tooltip say Ready, Recording, Speaking, Your
   turn, Working or Not running. With a lasting problem, the menu says Not ready, as the
@@ -265,6 +273,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A setting Banshee refuses says so on its row,** in words, instead of only to a screen reader.
+- **Sensitivity reads the right way round.** High now hears quiet speech. If you chose High or Low
+  before, check it once.
 - **On macOS, a running Banshee follows the Accessibility switch.** Switched off,
   Banshee shows the problem within about 2 s, says it once, and copies each
   dictation instead of losing it. Switched on, the problem clears. If Banshee

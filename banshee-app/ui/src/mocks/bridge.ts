@@ -21,6 +21,8 @@ const remoteSpeech = asStatus(remoteSpeechJson);
 
 // A write changes what `status` answers next, as the daemon's would.
 const written: Record<string, unknown> = {};
+// A connect changes what detection answers next.
+const connected = new Set<string>();
 
 const HOST = 'api.openai.com';
 const OPENAI = `https://${HOST}/v1`;
@@ -89,6 +91,27 @@ const STATES: Record<string, Status> = {
     download_megabytes: 619,
     missing_downloads: [
       { name: 'whisper-large-v3-turbo-Q5_K_M.gguf', role: 'speech', megabytes: 619 },
+    ],
+  },
+  // The listening model is missing, so the blocker asks which one to fetch.
+  // No other state draws that choice.
+  'needs-download': {
+    ...ready,
+    download_megabytes: 619,
+    missing_downloads: [
+      { name: 'parakeet-unified-en-0.6b-Q8_0.gguf', role: 'speech', megabytes: 619 },
+    ],
+    blockers: [
+      {
+        kind: 'model',
+        id: 'parakeet-unified-en-0.6b-Q8_0.gguf',
+        name: 'parakeet-unified-en-0.6b-Q8_0.gguf',
+        role: 'speech',
+        remedy: 'download',
+        consequence: 'recording does not work',
+        fix: 'run: banshee setup',
+        command: 'banshee setup',
+      },
     ],
   },
   // A model set through the CLI whose licence waits to be accepted, which the
@@ -357,7 +380,17 @@ const ANSWERS: Record<string, (args?: Record<string, unknown>) => unknown> = {
     return { ...row, text: SAID[0], outcome: 'transcribed', reason: null };
   },
   settings_table: () => settingsJson,
-  set_setting: () => [],
+  set_setting: (args) => {
+    // Feedback carries the daemon's own words; every other key reads as a
+    // stopped Banshee.
+    if (chosen() === 'refuses') {
+      throw args?.key === 'feedback.mode'
+        ? { code: -32000, message: "'feedback.mode': the config file is not writable" }
+        : { code: -32000, message: 'the daemon closed the socket', transport: true };
+    }
+    if (typeof args?.key === 'string') written[args.key] = args.value;
+    return [];
+  },
   // A failure has no other way to be looked at: every other state is a status
   // reply, and this one only happens when a call rejects.
   open_licence: () => undefined,
@@ -398,7 +431,7 @@ const ANSWERS: Record<string, (args?: Record<string, unknown>) => unknown> = {
   // The home screen's agent absence needs a state with none connected, or it
   // cannot be looked at.
   detect_agents: (): AgentRow[] =>
-    chosen() === 'no-agents'
+    (chosen() === 'no-agents'
       ? [
           { id: 'claude', name: 'Claude Code', presence: 'found', note: '' },
           { id: 'cursor', name: 'Cursor', presence: 'found', note: '' },
@@ -410,7 +443,12 @@ const ANSWERS: Record<string, (args?: Record<string, unknown>) => unknown> = {
           { id: 'opencode', name: 'OpenCode', presence: 'connected', note: '' },
           { id: 'antigravity', name: 'Antigravity', presence: 'absent', note: '' },
           { id: 'pi', name: 'Pi', presence: 'absent', note: '' },
-        ],
+        ]
+    ).map((agent) => (connected.has(agent.id) ? { ...agent, presence: 'connected' } : agent)),
+  apply_connect: (args) => {
+    connected.add(String(args?.id));
+    return null;
+  },
   plan_connect: (): PlannedChange[] => [
     {
       path: '~/.cursor/mcp.json',
@@ -450,15 +488,12 @@ export function push(event: string, deliver: (payload: unknown) => void): () => 
       if (at >= files.length) return clearInterval(tick);
     }
     deliver(at_(files[at], done));
-  }, 400);
+  }, 700);
   deliver(at_(files[0], 41));
   return () => clearInterval(tick);
 }
 
 export function answer<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (command === 'set_setting' && typeof args?.key === 'string') {
-    written[args.key] = args.value;
-  }
   const reply = ANSWERS[command];
   try {
     return Promise.resolve((reply ? reply(args) : undefined) as T);
