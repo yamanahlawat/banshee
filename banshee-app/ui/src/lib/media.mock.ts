@@ -6,9 +6,13 @@ type Listener = () => void;
 /// for any other. Returns the way to move one query and tell its listeners.
 export function stubMatchMedia(matching: Record<string, boolean>) {
   const lists = new Map<string, { matches: boolean; listeners: Set<Listener> }>();
-  vi.stubGlobal('matchMedia', (q: string) => {
+  const listFor = (q: string) => {
     const list = lists.get(q) ?? { matches: matching[q] ?? false, listeners: new Set<Listener>() };
     lists.set(q, list);
+    return list;
+  };
+  vi.stubGlobal('matchMedia', (q: string) => {
+    const list = listFor(q);
     return {
       get matches() {
         return list.matches;
@@ -18,7 +22,7 @@ export function stubMatchMedia(matching: Record<string, boolean>) {
     };
   });
   return (q: string, matches: boolean) => {
-    const list = lists.get(q)!;
+    const list = listFor(q);
     list.matches = matches;
     list.listeners.forEach((l) => l());
   };

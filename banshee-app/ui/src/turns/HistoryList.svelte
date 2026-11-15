@@ -30,9 +30,9 @@
 
   const OVERSCAN = 3;
   // Not measured in a window: worked from this file's CSS for a two-line row.
-  // 20px of padding, two 15px lines at 1.35, the 2px gap and a 13px meta line at
-  // 1.45. Measured heights replace it as rows mount.
-  const ESTIMATE = 81;
+  // 20px of padding and two 15px lines at 1.35; the rail's two 13px lines at 1.5
+  // stand shorter. Measured heights replace it as rows mount.
+  const ESTIMATE = 61;
 
   let scroller: HTMLElement;
   let scrollTop = 0;
@@ -267,41 +267,41 @@
           <span class="day" aria-hidden="true">{day}</span>
         {/if}
         <div class="cell">
-          <!-- Inside the last paragraph: beside it, the option's name would gain a
-               space before the comma. -->
-          {#snippet when()}<span class="sr">{`, ${day} at ${time}`}{flag ? `, ${flag}` : ''}</span
-            >{/snippet}
-          {#if row.kind === 'dictation' && row.outcome === 'failed'}
-            <p class="words failed">Transcription failed{@render when()}</p>
-          {:else if row.kind === 'dictation'}
-            <p class="words user">
-              <Marked text={row.text ?? ''} needle={query} />{@render when()}
-            </p>
-          {:else if row.outcome === 'transcribed'}
-            <p class="words agent one">
-              <span class="sr">{asker(row)} asked</span>
-              <Marked text={row.question ?? ''} needle={query} />
-            </p>
-            <p class="words user one">
-              <span class="sr">You answered</span>
-              <Marked text={row.text ?? ''} needle={query} />{@render when()}
-            </p>
-          {:else}
-            <p class="words agent">
-              <span class="sr">{asker(row)} asked</span>
-              <Marked text={row.question ?? ''} needle={query} />{@render when()}
-            </p>
-          {/if}
-          <span class="meta" aria-hidden="true">
-            <span class="line">
-              {#if dated}<span>{day}</span>{/if}
-              <span class="mono time">{time}</span>
-              {#if row.kind === 'question'}
-                <span class="client">{asker(row, true)} asked</span>
-              {/if}
-            </span>
-            {#if flag}<span class="flag">{flag}</span>{/if}
-          </span>
+          <div class="text">
+            <!-- Inside the paragraph the name ends on: beside it, the option's name
+                 would gain a space before the comma. -->
+            {#snippet when()}<span class="sr">{`, ${day} at ${time}`}{flag ? `, ${flag}` : ''}</span
+              >{/snippet}
+            {#if row.kind === 'dictation' && row.outcome === 'failed'}
+              <p class="words failed">Transcription failed{@render when()}</p>
+            {:else if row.kind === 'dictation'}
+              <p class="words user">
+                <Marked text={row.text ?? ''} needle={query} />{@render when()}
+              </p>
+            {:else if row.outcome === 'transcribed'}
+              <p class="words agent one">
+                <span class="sr">{asker(row)} asked</span>
+                <Marked text={row.question ?? ''} needle={query} />
+              </p>
+              <p class="words user one">
+                <span class="sr">You answered</span>
+                <Marked text={row.text ?? ''} needle={query} />{@render when()}
+              </p>
+            {:else}
+              <p class="words agent">
+                <span class="sr">{asker(row)} asked</span>
+                <Marked text={row.question ?? ''} needle={query} />{@render when()}
+              </p>
+            {/if}
+            {#if flag}<p class="flag note-type" aria-hidden="true">{flag}</p>{/if}
+          </div>
+          <div class="rail note-type" aria-hidden="true">
+            {#if dated}<span class="date">{day}</span>{/if}
+            <span class="mono time">{time}</span>
+            {#if row.kind === 'question' && row.client}
+              <span class="client">{row.client}</span>
+            {/if}
+          </div>
         </div>
       </div>
     {/if}
@@ -327,8 +327,16 @@
   }
 
   .cell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 12px;
+    align-items: baseline;
     padding: 10px 9px;
     border-radius: var(--radius-row);
+  }
+
+  .text {
+    min-width: 0;
   }
 
   .row[aria-selected='true'] .cell {
@@ -367,15 +375,13 @@
   }
 
   .user {
-    font-variation-settings:
-      'wght' var(--cut-user-weight),
-      'wdth' var(--cut-user-width);
+    --wght: var(--cut-user-weight);
+    --wdth: var(--cut-user-width);
   }
 
   .agent {
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
+    --wght: var(--cut-agent-weight);
+    --wdth: var(--cut-agent-width);
   }
 
   .failed {
@@ -383,50 +389,38 @@
     font-weight: var(--cut-name-weight);
   }
 
-  .meta {
+  .flag {
+    margin: 2px 0 0;
+    overflow-wrap: anywhere;
+    color: var(--accent);
+    --wght: var(--cut-name-weight);
+    --wdth: var(--cut-agent-width);
+  }
+
+  /* The clock time and Yesterday fit with room to spare. Under a search a
+     date such as 30 September widens its own row's rail rather than wrap. */
+  .rail {
+    min-width: 64px;
     display: flex;
-    flex-wrap: wrap;
-    column-gap: 8px;
-    margin-top: 2px;
-    font-size: 13px;
-    line-height: 1.45;
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
+    flex-direction: column;
+    align-items: flex-end;
+    text-align: right;
     color: var(--dim);
   }
 
-  .line {
-    display: flex;
-    column-gap: 8px;
-    min-width: 0;
-    max-width: 100%;
-  }
-
-  .time {
-    flex: none;
+  .date {
+    white-space: nowrap;
   }
 
   .client {
-    min-width: 0;
+    max-width: 64px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .time,
-  .flag {
-    color: var(--accent);
-  }
-
-  .flag {
-    font-variation-settings:
-      'wght' var(--cut-name-weight),
-      'wdth' var(--cut-agent-width);
-  }
-
-  .row[aria-selected='true'] .meta,
-  .row[aria-selected='true'] .time,
+  .row[aria-selected='true'] .rail,
+  .row[aria-selected='true'] .failed,
   .row[aria-selected='true'] .flag {
     color: var(--ink);
   }

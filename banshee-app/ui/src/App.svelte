@@ -34,11 +34,10 @@
     SPEECH_FAILURE,
     failureReads,
     spell,
-    feedbackLead,
   } from './lib/copy';
   import {
     followSaveHistory,
-    formatCount,
+    kept,
     newestUnanswered,
     readAll,
     readLatest,
@@ -47,8 +46,8 @@
     view,
   } from './lib/history';
   import { agents, refresh as readAgents } from './lib/agents';
-  import { loadTable } from './lib/settings';
-  import { forgetTheAsk } from './lib/downloads';
+  import { forgetRefusals, loadTable } from './lib/settings';
+  import { forgetSamples, forgetTheAsk, record } from './lib/downloads';
   import {
     launchMissed,
     listen,
@@ -62,11 +61,12 @@
     type Voices,
   } from './lib/tauri';
   import { humanize } from './lib/hotkey';
-  import { claimKeys, keysClaimed, onMac } from './lib/keys';
+  import { claimKeys, keysClaimed } from './lib/keys';
   import Sidebar from './bands/Sidebar.svelte';
   import Page from './bands/Page.svelte';
   import { PAGE_HEADING, SIDEBAR } from './bands/page';
   import { listAndDetail, sidebarShown } from './lib/layout';
+  import { reduced } from './lib/travel';
   import { waitingOn, type Page as PageName } from './lib/nav';
   import Blockers from './bands/Blockers.svelte';
   import Find from './bands/Find.svelte';
@@ -77,7 +77,6 @@
   import HotkeyPage from './jobs/HotkeyPage.svelte';
   import SpeakingPage from './jobs/SpeakingPage.svelte';
   import AgentsPage from './jobs/AgentsPage.svelte';
-  import FeedbackPage from './jobs/FeedbackPage.svelte';
   import SavedHistoryPage from './jobs/SavedHistoryPage.svelte';
 
   let seenChanges: number | null = null;
@@ -88,8 +87,6 @@
   let agentsRead = false;
   // Nothing remembers the page, so every launch opens on History.
   let page: PageName = 'History';
-  // The platform does not change under this window.
-  const mac = onMac();
 
   // `updateCallbackDone` settles before the crossfade finishes.
   type ViewTransition = { updateCallbackDone: Promise<void> };
@@ -97,11 +94,10 @@
   // the old snapshot. Returning before then leaves the focus move below looking
   // for a page that has not rendered.
   async function swap(run: () => void): Promise<void> {
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const start = (
       document as Document & { startViewTransition?: (run: () => void) => ViewTransition }
     ).startViewTransition;
-    if (reduce || !start) {
+    if (reduced() || !start) {
       run();
       return;
     }
@@ -113,6 +109,7 @@
   async function show(next: PageName) {
     if (next === page) return;
     await swap(() => {
+      forgetRefusals();
       page = next;
       if (body) body.scrollTop = 0;
     });
@@ -255,19 +252,26 @@
         : `${spell(connected, true)} agent${connected === 1 ? '' : 's'} can speak to you and ask you questions out loud.`,
     Listening: listeningLead(listening),
     Speaking: speechLead(speech),
-    Hotkey: !hotkeyListens
-      ? 'Your compositor holds this binding. Banshee binds no key here.'
-      : !boundKey
-        ? 'No key is bound, so nothing starts dictation.'
-        : holdToTalk
-          ? `Hold ${boundKey} to talk.`
-          : `Tap ${boundKey} to start, and again to stop.`,
-    Feedback: feedbackLead($daemon.live.feedback, live, mac),
-    'Saved history': !savingHistory
-      ? 'Banshee is keeping nothing new you say.'
-      : $table.total === 0
-        ? 'Banshee is keeping what you say, and you have not said anything yet.'
-        : `Banshee is keeping ${formatCount($table.total)} row${$table.total === 1 ? '' : 's'}, on this machine.`,
+    Hotkey: !live
+      ? 'Banshee is not running, so no key starts dictation.'
+      : !hotkeyListens
+        ? 'Your compositor holds this binding. Banshee binds no key here.'
+        : !boundKey
+          ? 'No key is bound, so nothing starts dictation.'
+          : holdToTalk
+            ? `Hold ${boundKey} to talk.`
+            : `Tap ${boundKey} to start, and again to stop.`,
+    'Saved history': live
+      ? !savingHistory
+        ? 'Banshee is keeping nothing new you say.'
+        : $table.total === 0
+          ? 'Banshee is keeping what you say, and you have not said anything yet.'
+          : `Banshee is keeping ${kept($table.total)}, on this machine.`
+      : !savingHistory
+        ? 'Saving is off, and Banshee is not running.'
+        : $table.total === 0
+          ? 'Banshee has kept nothing yet.'
+          : `Banshee kept ${kept($table.total)} on this machine.`,
   } satisfies Record<PageName, string | null>;
 
   // The daemon sets `armed` from `ask_user` alone, and sends no question with
@@ -446,6 +450,8 @@
         const progress = e.payload;
         const last = endsTheRun(progress);
         forgetTheAsk();
+        if (last) forgetSamples();
+        else record(progress, performance.now());
         daemon.update((s) => ({ ...s, download: last ? null : progress }));
 
         // `downloadModels` answers as soon as the daemon takes the task, so a
@@ -486,7 +492,7 @@
 <svelte:window on:keydown={onKeydown} on:focus={onReturn} />
 
 <div class="window" class:folded={!$sidebarShown}>
-  <!-- Invisible until it takes focus. Seven sidebar stops come first, so the
+  <!-- Invisible until it takes focus. Six sidebar stops come first, so the
        keyboard needs a way past them to the page. -->
   <button class="btn skip" on:click={() => document.getElementById(PAGE_HEADING)?.focus()}>
     Skip to the page
@@ -559,8 +565,6 @@
         <SpeakingPage {voices} />
       {:else if page === 'Hotkey'}
         <HotkeyPage />
-      {:else if page === 'Feedback'}
-        <FeedbackPage />
       {:else if page === 'Saved history'}
         <SavedHistoryPage saving={savingHistory} />
       {:else}
@@ -575,7 +579,7 @@
             {waiting}
             {host}
             compositor={!hotkeyListens}
-            hotkey={boundKey}
+            hotkey={live ? boundKey : null}
             verb={holdToTalk ? 'Hold' : 'Tap'}
             {go}
           >

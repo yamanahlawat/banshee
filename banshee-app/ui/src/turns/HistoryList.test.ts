@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dictated } from '../lib/history.mock';
 import type { HistoryRow } from '../lib/tauri';
 import HistoryList from './HistoryList.svelte';
+import source from './HistoryList.svelte?raw';
 
 const NOW = new Date(2026, 10, 6, 15, 0);
 const at = (daysAgo: number, hour: number, minute = 0) =>
@@ -351,38 +352,83 @@ describe('the rows', () => {
     asked(2, 'Merge it?', 'unasked', at(3, 9), { reason: 'Banshee is muted.' }),
   ];
 
-  it('shows the asker after the time and reads it aloud', () => {
+  // What a sighted reader sees: the row without its screen-reader text.
+  const shown = (el: Element) => {
+    const copy = el.cloneNode(true) as Element;
+    copy.querySelectorAll('.sr').forEach((one) => one.remove());
+    return copy.textContent?.replace(/\s+/g, ' ').trim();
+  };
+  const textOf = (row: Element) => row.querySelector('.cell > .text') as HTMLElement;
+  const railOf = (row: Element) => row.querySelector('.cell > .rail') as HTMLElement;
+
+  it('sets each row as a text column, then a rail hidden from the name', () => {
+    list(kinds());
+    for (const one of screen.getAllByRole('option')) {
+      const cell = one.querySelector('.cell')!;
+      expect([...cell.children]).toEqual([textOf(one), railOf(one)]);
+      expect(railOf(one).getAttribute('aria-hidden')).toBe('true');
+    }
+  });
+
+  it("puts the time on the rail and the asking agent's name under it, and reads who asked", () => {
     list([asked(1, 'Shall I push?', 'transcribed', at(0, 12), { text: 'Yes.', client: 'claude' })]);
     const row = screen.getByRole('option', { name: /^claude asked Shall I push\?/ });
-    const meta = row.querySelector('.meta') as HTMLElement;
-    expect(meta.getAttribute('aria-hidden')).toBe('true');
-    expect(meta.textContent?.replace(/\s+/g, ' ').trim()).toBe('12:00 claude asked');
-    expect(row.querySelector('.client')?.textContent).toBe('claude asked');
+    const rail = railOf(row);
+    expect([...rail.children].map((one) => [one.className.split(' ')[0], one.textContent])).toEqual(
+      [
+        ['mono', '12:00'],
+        ['client', 'claude'],
+      ],
+    );
+    expect(rail.querySelector('.time')).toBe(rail.firstElementChild);
+    expect(shown(row)).not.toMatch(/asked/);
   });
 
-  it('says "An agent asked" for a row with no client', () => {
+  it('shows only the time on the rail for a row with no client, and reads "An agent asked"', () => {
     list([asked(1, 'Shall I push?', 'transcribed', at(0, 12), { text: 'Yes.' })]);
     const row = screen.getByRole('option', { name: /^An agent asked Shall I push\?/ });
-    expect(row.querySelector('.client')?.textContent).toBe('an agent asked');
-    expect(
-      (row.querySelector('.meta') as HTMLElement).textContent?.replace(/\s+/g, ' ').trim(),
-    ).toBe('12:00 an agent asked');
+    expect(shown(railOf(row))).toBe('12:00');
+    expect(row.querySelector('.client')).toBeNull();
+    expect(shown(row)).not.toMatch(/asked|an agent/i);
   });
 
-  it('shows a bare time on a dictation', () => {
+  it('shows only the time on the rail of a dictation', () => {
     list([dictated(1, 'Open the pull request.', at(0, 12))]);
     const row = option('Open the pull request');
+    expect(shown(railOf(row))).toBe('12:00');
     expect(row.querySelector('.client')).toBeNull();
-    expect((row.querySelector('.meta') as HTMLElement).textContent?.trim()).toBe('12:00');
   });
 
-  it('keeps the time beside a long client name, which takes its own element', () => {
+  it('keeps the time whole above a long client name, which takes its own element', () => {
     const client = 'c'.repeat(80);
     list([asked(1, 'Shall I push?', 'no_answer', at(0, 12), { client })]);
-    const meta = option(`${client} asked Shall I push`).querySelector('.meta') as HTMLElement;
-    expect(meta.querySelector('.time')?.textContent).toBe('12:00');
-    expect(meta.querySelector('.client')?.textContent).toBe(`${client} asked`);
-    expect(meta.querySelector('.client')?.contains(meta.querySelector('.time'))).toBe(false);
+    const rail = railOf(option(`${client} asked Shall I push`));
+    expect(rail.querySelector('.time')?.textContent).toBe('12:00');
+    expect(rail.querySelector('.client')?.textContent).toBe(client);
+    expect(rail.querySelector('.client')?.contains(rail.querySelector('.time'))).toBe(false);
+  });
+
+  it("puts a flag in the answer's place, under the question and hidden from the name", () => {
+    list(kinds());
+    const flags: [string, string][] = [
+      ['An agent asked Shall I push', 'No answer heard'],
+      ['An agent asked Run the suite', 'Closed before you answered'],
+      ['An agent asked Tag it', 'Not transcribed'],
+      ['An agent asked Merge it', 'Not asked aloud'],
+      ['Transcription failed', 'The server refused the key.'],
+    ];
+    for (const [row, flag] of flags) {
+      const text = textOf(option(row));
+      expect([...text.children].map(shown)).toEqual([
+        row.replace('An agent asked ', '') + (row.startsWith('An agent') ? '?' : ''),
+        flag,
+      ]);
+      expect(text.lastElementChild!.classList.contains('flag')).toBe(true);
+      expect(text.lastElementChild!.getAttribute('aria-hidden')).toBe('true');
+      expect(railOf(option(row)).querySelector('.flag')).toBeNull();
+    }
+    expect(textOf(option('An agent asked Which branch')).querySelector('.flag')).toBeNull();
+    expect(textOf(option('Open the pull request')).querySelector('.flag')).toBeNull();
   });
 
   it('names each option by its text, its day and time, and its flag', () => {
@@ -473,5 +519,43 @@ describe('the rows', () => {
       rules: { 'color-contrast': { enabled: false } },
     });
     expect(results.violations.map((v) => `${v.id}: ${v.nodes.length} node(s)`)).toEqual([]);
+  });
+});
+
+describe('contrast', () => {
+  it('draws a selected failed row in ink', () => {
+    expect(source).toMatch(
+      /\.row\[aria-selected='true'\] \.failed[^{]*\{[^}]*color:\s*var\(--ink\)/,
+    );
+  });
+
+  it("draws a selected row's rail, which carries its time, and its flag in ink", () => {
+    for (const part of ['rail', 'flag']) {
+      expect(source).toMatch(
+        new RegExp(
+          `\\.row\\[aria-selected='true'\\] \\.${part}[^{]*\\{[^}]*color:\\s*var\\(--ink\\)`,
+        ),
+      );
+    }
+  });
+
+  it("cuts a long name on the rail with an ellipsis, at the rail's fixed width", () => {
+    expect(source).toMatch(/\n\s*\.client\s*\{[^}]*text-overflow:\s*ellipsis/);
+    expect(source).toMatch(/\n\s*\.client\s*\{[^}]*white-space:\s*nowrap/);
+    const cut = source.match(/\n\s*\.client\s*\{[^}]*max-width:\s*(\d+px)/)?.[1];
+    expect(cut).toBeDefined();
+    expect(source).toMatch(new RegExp(`\\n\\s*\\.rail\\s*\\{[^}]*min-width:\\s*${cut};`));
+  });
+
+  it('keeps a date whole on the rail under a search', () => {
+    expect(source).toMatch(/\n\s*\.date\s*\{[^}]*white-space:\s*nowrap/);
+  });
+
+  // The time takes the rail's dim, and turns with the rail on a selected row.
+  it('draws the clock time in the dim rail and leaves the flag in the accent', () => {
+    expect(source).toMatch(/<div class="rail[^"]*"[^>]*>[\s\S]*?class="mono time"/);
+    expect(source).toMatch(/\n\s*\.rail\s*\{[^}]*color:\s*var\(--dim\)/);
+    expect(source).not.toMatch(/\.time[^{]*\{[^}]*color:/);
+    expect(source).toMatch(/\n\s*\.flag\s*\{[^}]*color:\s*var\(--accent\)/);
   });
 });

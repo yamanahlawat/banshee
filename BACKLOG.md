@@ -183,15 +183,10 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
 
 ## The window
 
-- Sensitivity runs backwards. "High" writes `stt.vad_threshold` 0.85, and the daemon counts
-  audio as speech only above the threshold (`bansheed/src/hotkey.rs:390`), so High hears the
-  least. `docs/configuration.md` says higher is stricter, which matches the daemon. The window's
-  labels are the wrong side (`banshee-app/ui/src/jobs/MicrophonePanel.svelte:40-44`).
-- The download shows no rate or time left, so a stalled download looks like a slow one.
 - A vocabulary word removed by mistake has to be typed again.
-- The same model is called `Speech model` in one place and `Model` in another.
+- The same model is called `Model` on the Listening page and `Listening model` in the Blockers
+  box.
 - Buttons show they can be pressed only on hover.
-- Speech settings have no panel of their own.
 - A screen reader hears a segmented control change only after the daemon answers.
 - In a wide window, the History list does not scroll to the missed question's row. The
   detail pane shows the question.
@@ -199,6 +194,18 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   `Picker.svelte`, `Find.svelte`, the Hotkey page's `.key`, and `.chip` in `tokens.css`), and
   the segmented control and the Agents row derive their height from `--control-height` with
   hand-written offsets. A new control can get one of them wrong.
+- `banshee-app/tauri.conf.json` sets no `app.security.csp`, and the window now draws more
+  daemon and server text.
+- A voice download that fails during a run shows the general `<file> · failed. Try again when
+  you are back online.` message on History, not the voice's own words.
+- A stalled download is not shown, because Banshee reports only at each whole percent and
+  fails a file after 30 s without data.
+- The same act is called Get on Speaking, Download on Listening, and fetch in the line above
+  Download.
+- Row ties a note to its control only when the page passes `noteId`, so on Hotkey, Listening
+  and Saved history some notes are read with their control and some are not.
+- While Banshee is stopped, Saved history still offers Stop saving, and the press can only be
+  refused.
 
 ## Build and tests
 

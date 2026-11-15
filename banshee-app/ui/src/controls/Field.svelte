@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { claimKeys } from '../lib/keys';
+  import { rowDescription } from '../lib/ids';
 
   export let label: string;
   export let value = '';
@@ -15,6 +16,9 @@
   export let cancel: (() => void) | undefined = undefined;
   // Bound by a caller that has to focus a field it just swapped in.
   export let input: HTMLInputElement | undefined = undefined;
+  export let describedBy: string | undefined = undefined;
+  const fromRow = rowDescription();
+  $: described = describedBy ?? $fromRow;
 
   let draft = value;
   $: draft = value;
@@ -74,6 +78,7 @@
   class:dashed
   type={masked ? 'password' : 'text'}
   aria-label={label}
+  aria-describedby={described}
   autocomplete={masked ? 'off' : undefined}
   {placeholder}
   value={draft}
@@ -85,9 +90,8 @@
 
 <style>
   .field {
-    font-variation-settings:
-      'wght' 500,
-      'wdth' 100;
+    --wght: 500;
+    --wdth: 100;
     font-size: 15px;
     background: transparent;
     border: 1px solid var(--dim);

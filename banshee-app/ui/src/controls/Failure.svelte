@@ -23,6 +23,7 @@
 
 <style>
   .failure {
+    margin-left: calc(var(--label-column) + var(--label-gap));
     display: flex;
     flex-direction: column;
     align-items: start;

@@ -1,7 +1,7 @@
 <script lang="ts">
+  import DownloadLine from '../controls/DownloadLine.svelte';
   import {
     chosenWaitsOnLicence,
-    downloadLine,
     percent,
     spokenProgress,
     fixGroups,
@@ -11,12 +11,14 @@
     type Progress,
     type Remedy,
   } from '../lib/daemon';
-  import { write } from '../lib/settings';
+  import { refusalId, refused, write } from '../lib/settings';
   import { openPermissionPane } from '../lib/tauri';
-  import { askForModels, fetching } from '../lib/downloads';
+  import { askForModels, blocked, BUSY_NOTE, fetching } from '../lib/downloads';
   import { downloadSize, languagesHeard, report, spell } from '../lib/copy';
   import Segmented from '../controls/Segmented.svelte';
   import LicenceWait from '../controls/LicenceWait.svelte';
+  import Refusal from '../controls/Refusal.svelte';
+  import BusyNote from '../controls/BusyNote.svelte';
 
   export let blockers: Blocker[] = [];
   export let download: Progress | null = null;
@@ -54,6 +56,7 @@
   $: suggestions = models.filter((one) => one.suggested);
   $: waits = chosenWaitsOnLicence(models, chosen);
   $: options = suggestions.map((one) => ({ value: one.id, label: one.label }));
+  $: modelRefused = $refused.has('stt.model');
   $: hears = suggestions
     .map((one) => `${one.label} hears ${languagesHeard(one.languages)}.`)
     .join(' ');
@@ -80,6 +83,8 @@
     return null;
   }
 
+  const MODELS = 'blocker-download';
+
   const PANES: Record<string, string> = {
     accessibility: 'Accessibility',
     microphone: 'Microphone',
@@ -98,6 +103,7 @@
           run: () => openPermissionPane(first.id),
           // The download brings no grant, so this keeps its place beside one.
           settledByADownload: false,
+          downloads: false,
           chooses: false,
         };
       case 'download':
@@ -106,8 +112,9 @@
           label: 'Download',
           pane: '',
           confirmsWithRestart: false,
-          run: askForModels,
+          run: () => askForModels(MODELS),
           settledByADownload: true,
+          downloads: true,
           // The model decides which file is fetched, so it is worth asking
           // before a download that runs to gigabytes. A missing voice or
           // detector is the same whichever model is set.
@@ -124,6 +131,7 @@
           // A model arriving repairs a model, so a model restart stands down
           // for the run. It brings neither a microphone nor a key.
           settledByADownload: first.kind === 'model',
+          downloads: false,
           chooses: false,
         };
       default:
@@ -134,6 +142,7 @@
           confirmsWithRestart: false,
           run: null,
           settledByADownload: false,
+          downloads: false,
           chooses: false,
         };
     }
@@ -171,7 +180,7 @@
     {#if done !== null}
       <div class="track"><div class="bar" style="transform: scaleX({done / 100})"></div></div>
     {/if}
-    <p class="progress mono">{downloadLine(download)}</p>
+    <DownloadLine />
     <p class="note reassure">
       This resumes if the connection drops, and it keeps going if you close this window.
     </p>
@@ -203,15 +212,17 @@
           label="Listening model"
           value={chosen}
           {options}
+          describedBy={modelRefused ? refusalId('stt.model') : undefined}
           change={(next) => write('stt.model', next)}
         />
         {#if waits}
           <div class="waits"><LicenceWait model={waits} /></div>
         {:else}
-          <p class="size">
+          <p class="size note-type">
             About {downloadSize(megabytes)} to fetch. {hears} You can change this later.
           </p>
         {/if}
+        <Refusal setting="stt.model" />
       </div>
     {/if}
 
@@ -228,7 +239,9 @@
         {:else}
           <button
             class="btn"
-            disabled={busy || (fix.settledByADownload && $fetching)}
+            disabled={busy || (fix.settledByADownload && !fix.downloads && $fetching)}
+            aria-disabled={fix.downloads && $fetching ? 'true' : undefined}
+            aria-describedby={fix.downloads && $blocked === MODELS ? BUSY_NOTE : undefined}
             on:click={() => {
               if (fix.confirmsWithRestart) asked = { ...asked, [group[0].id]: true };
               run(fix)();
@@ -239,6 +252,7 @@
           </button>
         {/if}
       </div>
+      {#if fix.downloads}<BusyNote button={MODELS} />{/if}
     {/if}
     {#if fix.confirmsWithRestart && asked[group[0].id]}
       <p class="fix">A grant only reaches Banshee if it starts afterwards.</p>
@@ -261,13 +275,11 @@
   }
 
   .consequence,
-  .fix,
-  .size {
+  .fix {
     max-width: 520px;
     margin: 8px 0 0;
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
+    --wght: var(--cut-agent-weight);
+    --wdth: var(--cut-agent-width);
     font-size: 15px;
     line-height: 1.45;
   }
@@ -286,8 +298,8 @@
   }
 
   .size {
-    margin-top: 10px;
-    font-size: 13px;
+    max-width: 440px;
+    margin: 10px 0 0;
   }
 
   .waits {
@@ -301,18 +313,11 @@
     margin-top: 14px;
   }
 
-  .btn {
-    /* Fits the longer label, so 'Downloading' cannot shove the command beside
-       it sideways mid-download. */
-    min-width: 132px;
-  }
-
   .opening {
     max-width: 520px;
     margin: 0 var(--gutter) 22px;
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
+    --wght: var(--cut-agent-weight);
+    --wdth: var(--cut-agent-width);
     font-size: 15px;
     line-height: 1.45;
   }
@@ -334,12 +339,6 @@
     .bar {
       transition: transform 250ms linear;
     }
-  }
-
-  .progress {
-    margin: 10px 0 0;
-    font-size: 11px;
-    color: var(--accent);
   }
 
   /* Quieter than a blocker's consequence: this steadies the wait. */

@@ -79,7 +79,7 @@
 </script>
 
 <div class="detail" role="region" aria-label="Selected row">
-  <h2 class="when" tabindex="-1" bind:this={heading}>
+  <h2 class="when note-type" tabindex="-1" bind:this={heading}>
     {dayLabel(row.timestamp, now)} at
     <span class="mono time">{formatTime(row.timestamp)}</span>
   </h2>
@@ -120,10 +120,10 @@
     {#key row.id}
       <Player bind:this={player} id={row.id} seconds={audio.seconds} />
     {/key}
-    <p class="kept">{keptUntil(audio.until)}</p>
+    <p class="kept note-type">{keptUntil(audio.until)}</p>
   {/if}
   {#if failedDictation && !audio}
-    <p class="kept">No audio was kept, so there is nothing to retry.</p>
+    <p class="kept note-type">No audio was kept, so there is nothing to retry.</p>
   {/if}
   <!-- One row for every kind, so Retry stays the same element when a failed
        dictation turns into a transcribed one, and focus stays on it. -->
@@ -151,7 +151,7 @@
     {/if}
   </div>
   {#if retryable && sendsTo}
-    <p class="kept" id="retry-sends">Sends this recording to {sendsTo}.</p>
+    <p class="kept note-type" id="retry-sends">Sends this recording to {sendsTo}.</p>
   {/if}
 </div>
 
@@ -172,16 +172,13 @@
   }
   .when {
     margin: 0 0 20px;
-    font-size: 13px;
-    line-height: 1.45;
+    /* The cut draws this line, so this weight shows only in a fallback face, which
+       would otherwise set the heading bold. */
     font-weight: 400;
     color: var(--dim);
   }
   .when:focus-visible {
     outline-offset: 4px;
-  }
-  .time {
-    color: var(--accent);
   }
   .caption {
     margin: 0 0 8px;
@@ -202,19 +199,16 @@
     color: var(--dim);
   }
   .user {
-    font-variation-settings:
-      'wght' var(--cut-user-weight),
-      'wdth' var(--cut-user-width);
+    --wght: var(--cut-user-weight);
+    --wdth: var(--cut-user-width);
   }
   .agent {
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
+    --wght: var(--cut-agent-weight);
+    --wdth: var(--cut-agent-width);
   }
   .failed {
-    font-variation-settings:
-      'wght' 700,
-      'wdth' 100;
+    --wght: 700;
+    --wdth: 100;
   }
   hr {
     margin: 22px 0;
@@ -225,20 +219,17 @@
     margin: 0;
     font-size: 17px;
     line-height: 1.3;
-    font-variation-settings:
-      'wght' 650,
-      'wdth' var(--cut-agent-width);
+    --wght: 650;
+    --wdth: var(--cut-agent-width);
     color: var(--accent);
   }
   .note {
     margin: 8px 0 0;
-    max-width: 460px;
     color: var(--dim);
   }
   .kept {
+    max-width: 440px;
     margin: 8px 0 0;
-    font-size: 13px;
-    line-height: 1.45;
     color: var(--dim);
   }
   .actions {

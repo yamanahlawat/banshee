@@ -1,21 +1,21 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { daemon, hotkeyListens } from '../lib/daemon';
-  import { defaultOf, optionsOf, table, write } from '../lib/settings';
+  import { daemon, hotkeyListens, isDown } from '../lib/daemon';
+  import { defaultOf, forgetRefusal, optionsOf, refuse, table, write } from '../lib/settings';
+  import { feedbackInForce } from '../lib/copy';
   import { hotkeyFrom, humanize, isModifier } from '../lib/hotkey';
-  import { claimKeys } from '../lib/keys';
+  import { claimKeys, onMac } from '../lib/keys';
   import Row from '../controls/Row.svelte';
   import Segmented from '../controls/Segmented.svelte';
 
   let recording = false;
-  let refusal: string | null = null;
   let heldModifier: string | null = null;
   // Held for as long as the capture runs, so Escape cancels the capture and a
   // chord containing Cmd or Ctrl binds rather than triggering the window.
   let release: (() => void) | null = null;
 
   function begin() {
-    refusal = null;
+    forgetRefusal('audio.hotkey');
     recording = true;
     release ??= claimKeys();
   }
@@ -28,8 +28,36 @@
   $: bindable = $daemon.status?.bindable_modifiers ?? [];
   $: audio = ($daemon.status?.config?.audio ?? {}) as Record<string, unknown>;
   $: key = String(audio.hotkey ?? '');
+  $: shownKey = recording
+    ? 'Press a key'
+    : isDown($daemon)
+      ? 'Unknown while Banshee is stopped'
+      : humanize(key) || 'Not set';
   $: mode = String(audio.hotkey_mode ?? defaultOf($table, 'audio.hotkey_mode'));
+  $: bargeInNote = `Stop: Banshee goes quiet when you ${listens ? 'press the key' : 'start dictating'}. Carry on: it finishes what it is saying.`;
   $: bargeIn = String(audio.barge_in ?? defaultOf($table, 'audio.barge_in'));
+
+  $: feedbackConfig = ($daemon.status?.config?.feedback ?? {}) as Record<string, unknown>;
+  $: feedback = String(feedbackConfig.mode ?? defaultOf($table, 'feedback.mode'));
+  // The first sentence says what shows and what plays, so these say only the rest.
+  const SPOKEN = "An agent's questions are still spoken aloud.";
+  const FAILURE = 'A failure plays a sound too.';
+  const mac = onMac();
+  const FEEDBACK_NOTES: Record<string, string> = {
+    visual: mac
+      ? `${SPOKEN} Using VoiceOver? Choose Both, so you hear when recording starts.`
+      : `${SPOKEN} The figure needs a desktop with layer shell, such as Hyprland, Sway or KDE. Without one, Banshee plays every sound.`,
+    sound: FAILURE,
+    both: FAILURE,
+    none: SPOKEN,
+  };
+  // The daemon says which cues are in force; `feedback` above is only what was asked for.
+  // A stopped Banshee shows and plays nothing, so the mode note would contradict it.
+  $: feedbackNote = isDown($daemon)
+    ? (feedbackInForce(null, false, mac) ?? '')
+    : [feedbackInForce($daemon.live.feedback, true, mac), FEEDBACK_NOTES[feedback]]
+        .filter(Boolean)
+        .join(' ');
   function stop() {
     recording = false;
     heldModifier = null;
@@ -41,7 +69,6 @@
 
   function commit(next: string) {
     stop();
-    refusal = null;
     write('audio.hotkey', next);
   }
 
@@ -59,10 +86,11 @@
       // Which modifiers bind is the daemon's answer, and a daemon that has not
       // answered refuses all of them. Saying Banshee cannot bind a key it binds
       // every day sends the reader after the wrong thing.
-      refusal =
+      const message =
         bindable.length === 0
           ? 'Banshee has to be running before a key can be bound.'
           : 'Banshee cannot bind that key.';
+      refuse('audio.hotkey', message);
       return;
     }
     // A chord begins with its modifiers, so committing on the first press
@@ -86,11 +114,9 @@
 <svelte:window on:keydown={onKeyDown} on:keyup={onKeyUp} />
 
 {#if listens}
-  <Row name="The key" setting="audio.hotkey">
-    <button class="key" class:waiting={recording} on:click={toggle}>
-      {recording ? 'Press a key' : humanize(key) || 'Not set'}<span class="sr"
-        >, change the hotkey</span
-      >
+  <Row name="The key" setting="audio.hotkey" let:describedBy>
+    <button class="key" class:waiting={recording} aria-describedby={describedBy} on:click={toggle}>
+      {shownKey}<span class="sr">, change the hotkey</span>
     </button>
     <button class="btn holds" class:btn-ghost={recording} on:click={toggle}>
       <span>{recording ? 'Cancel' : 'Change'}</span>
@@ -99,13 +125,8 @@
     </button>
   </Row>
 
-  {#if refusal}
-    <p class="note refusal">{refusal}</p>
-  {/if}
-
   <Row
     name="Press behaviour"
-    block
     note="Hold: speak while the key is down. Tap: press once to start, once to stop."
     setting="audio.hotkey_mode"
   >
@@ -126,12 +147,21 @@ banshee record stop</pre>
   <p class="note compositor">docs/linux.md gives the Hyprland and Omarchy syntax.</p>
 {/if}
 
-<Row name="While Banshee is talking" block setting="audio.barge_in">
+<Row name="While Banshee is talking" note={bargeInNote} setting="audio.barge_in">
   <Segmented
     label="While Banshee is talking"
     value={bargeIn}
     options={optionsOf($table, 'audio.barge_in')}
     change={(next) => write('audio.barge_in', next)}
+  />
+</Row>
+
+<Row name="Feedback" note={feedbackNote} setting="feedback.mode">
+  <Segmented
+    label="Feedback"
+    value={feedback}
+    options={optionsOf($table, 'feedback.mode')}
+    change={(next) => write('feedback.mode', next)}
   />
 </Row>
 
@@ -188,10 +218,5 @@ banshee record stop</pre>
 
   .held {
     visibility: hidden;
-  }
-
-  .refusal {
-    margin: -16px 0 26px;
-    color: var(--accent);
   }
 </style>

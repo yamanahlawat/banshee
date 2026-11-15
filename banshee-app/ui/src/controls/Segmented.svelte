@@ -2,6 +2,7 @@
   // A component and not a CSS class: without the group role and label a screen
   // reader hears N separate toggles with no idea they are one choice.
   import { arrowStep } from '../lib/keys';
+  import { rowDescription } from '../lib/ids';
 
   export let label: string;
   export let value: string;
@@ -10,6 +11,8 @@
   /// The id of the sentence that says what the choice does, so the group is
   /// read with its consequence rather than as three bare words.
   export let describedBy: string | undefined = undefined;
+  const fromRow = rowDescription();
+  $: described = describedBy ?? $fromRow;
 
   let group: HTMLDivElement;
 
@@ -48,7 +51,7 @@
   class="seg"
   role="radiogroup"
   aria-label={label}
-  aria-describedby={describedBy}
+  aria-describedby={described}
   bind:this={group}
 >
   {#each options as option, i (option.value)}

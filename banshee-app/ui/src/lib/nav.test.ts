@@ -3,15 +3,7 @@ import { WAITING_SAYS, WAITS_FOR_ITS_FILE } from './copy';
 import { PAGES, SETTINGS, waitingOn } from './nav';
 
 it('lists the pages in sidebar order, with the settings last', () => {
-  expect(PAGES).toEqual([
-    'History',
-    'Agents',
-    'Listening',
-    'Speaking',
-    'Hotkey',
-    'Feedback',
-    'Saved history',
-  ]);
+  expect(PAGES).toEqual(['History', 'Agents', 'Listening', 'Speaking', 'Hotkey', 'Saved history']);
   expect(PAGES.slice(-SETTINGS.length)).toEqual(SETTINGS);
 });
 
@@ -41,8 +33,8 @@ it('splits the audio table between the pages that write it', () => {
   expect(waitingOn(['audio.barge_in'])).toEqual({ Hotkey: WAITING_SAYS });
 });
 
-it('reaches Feedback, Saved history and the memory row', () => {
-  expect(waitingOn(['feedback.mode'])).toEqual({ Feedback: WAITING_SAYS });
+it('reaches the feedback row on Hotkey, Saved history and the memory row', () => {
+  expect(waitingOn(['feedback.mode'])).toEqual({ Hotkey: WAITING_SAYS });
   expect(waitingOn(['daemon.save_history'])).toEqual({ 'Saved history': WAITING_SAYS });
   expect(waitingOn(['models.unload_after'])).toEqual({ Listening: WAITING_SAYS });
 });

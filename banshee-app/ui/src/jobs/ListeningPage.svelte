@@ -4,12 +4,13 @@
     chosenWaitsOnLicence,
     daemon,
     deviceLabel,
+    fetchingSpeech,
     listeningFacts,
     shownFloat,
     SYSTEM_DEVICE,
   } from '../lib/daemon';
   import { defaultOf, optionsOf, table, write } from '../lib/settings';
-  import { askForModels, fetching } from '../lib/downloads';
+  import { askForModels, blocked, BUSY_NOTE, fetching } from '../lib/downloads';
   import { listDevices, type Devices } from '../lib/tauri';
   import Row from '../controls/Row.svelte';
   import Field from '../controls/Field.svelte';
@@ -17,7 +18,8 @@
   import Picker from '../controls/Picker.svelte';
   import Segmented from '../controls/Segmented.svelte';
   import ProviderGroup from '../controls/ProviderGroup.svelte';
-  import SubRow from '../controls/SubRow.svelte';
+  import DownloadLine from '../controls/DownloadLine.svelte';
+  import BusyNote from '../controls/BusyNote.svelte';
   import Failure from '../controls/Failure.svelte';
   import LicenceWait from '../controls/LicenceWait.svelte';
   import { claimKeys, onMac } from '../lib/keys';
@@ -38,13 +40,15 @@
   const LISTENER_NOTE = 'listener-note';
 
   // Three words are all the window reads back. The midpoints are derived from the band edges, not
-  // measured against a room.
+  // measured against a room. A lower threshold hears more, so the bands run High first.
   const BANDS = [
-    { upTo: 1 / 3, word: 'Low', writes: 0.15 },
+    { upTo: 1 / 3, word: 'High', writes: 0.15 },
     { upTo: 2 / 3, word: 'Medium', writes: 0.5 },
-    { upTo: Infinity, word: 'High', writes: 0.85 },
+    { upTo: Infinity, word: 'Low', writes: 0.85 },
   ];
-  const HEARD = BANDS.map((b) => ({ value: b.word, label: b.word }));
+  const HEARD = [...BANDS].reverse().map(({ word }) => ({ value: word, label: word }));
+  const SENSITIVITY_NOTE =
+    'High hears quiet speech, and more of the room. Low needs a clear voice.';
   const QUIET = [1000, 1500, 2500, 4000];
   // A model translates in one direction only: any language in, English out.
   const WRITE_IN = [
@@ -105,7 +109,7 @@
 
   $: stt = ($daemon.status?.config?.stt ?? {}) as Record<string, unknown>;
   $: threshold = shownFloat(Number(stt.vad_threshold ?? defaultOf($table, 'stt.vad_threshold')));
-  $: band = BANDS.find((b) => threshold < b.upTo)?.word ?? 'High';
+  $: band = (BANDS.find((b) => threshold < b.upTo) ?? BANDS[BANDS.length - 1]).word;
   $: silence = Number(stt.endpoint_silence_ms ?? defaultOf($table, 'stt.endpoint_silence_ms'));
   // Keyed by word below, and a duplicate in a hand-edited config raises
   // Svelte's `each_key_duplicate` and renders no page.
@@ -132,9 +136,10 @@
   // either, which drops the model while its download runs.
   $: needsFetching =
     provider === 'local' && chosen !== null && !chosen.downloaded && waitsOnLicence === null;
+  const FETCH = 'listening-model';
   // No guard here: `askForModels` claims the run before it awaits anything.
   async function fetchModel() {
-    await askForModels().catch(() => report('The download did not start.'));
+    await askForModels(FETCH).catch(() => report('The download did not start.'));
   }
   $: modelSays =
     needsFetching && chosen
@@ -219,7 +224,16 @@
   </Picker>
 </Row>
 
-<Row name="Sensitivity" setting="stt.vad_threshold">
+<Row name="Microphone" note={openNote} setting="audio.keep_open">
+  <Segmented
+    label="Microphone"
+    value={keepOpen ? 'always' : 'use'}
+    options={OPENS}
+    change={(next) => write('audio.keep_open', next === 'always')}
+  />
+</Row>
+
+<Row name="Sensitivity" note={SENSITIVITY_NOTE} setting="stt.vad_threshold">
   <Segmented
     label="Sensitivity"
     value={band}
@@ -252,31 +266,37 @@
   note={listenerNote}
   noteId={LISTENER_NOTE}
   alsoId={lastError ? DICTATION_FAILURE : undefined}
+  setting="stt.provider"
   change={(next) => write('stt.provider', next)}
 >
   {#if provider === 'remote'}
-    <SubRow name="server" setting="stt.remote.base_url">
+    <Row name="Server" setting="stt.remote.base_url">
       <Field
         label="Server"
         value={String(remoteTable.base_url ?? '')}
         placeholder="https://api.openai.com/v1"
         commit={(next) => write('stt.remote.base_url', next)}
       />
-    </SubRow>
+    </Row>
     <KeyRow setting="stt.remote.api_key" present={listening.keyPresent} />
-    <SubRow name="model" setting="stt.remote.model">
+    <Row name="Model" setting="stt.remote.model">
       <Field
         label="Model"
         value={String(remoteTable.model ?? '')}
         placeholder="whisper-1"
         commit={(next) => write('stt.remote.model', next)}
       />
-    </SubRow>
+    </Row>
   {:else if models.length > 0}
-    <SubRow name="model" says={modelSays}>
-      <div class="models" role="radiogroup" aria-label="Listening model">
+    <Row name="Model" line={modelSays} setting="stt.model" let:describedBy>
+      <div
+        class="models"
+        role="radiogroup"
+        aria-label="Listening model"
+        aria-describedby={describedBy}
+      >
         {#each models as model (model.id)}
-          <div class="model" class:on={model.id === chosenId}>
+          <div class="model choice-row" class:on={model.id === chosenId}>
             <input
               type="radio"
               name="listening-model"
@@ -291,9 +311,9 @@
               ><span class="name" class:absent={!model.downloaded}>{model.label}</span
               >{#if !model.downloaded}<span class="sr">, not on this machine</span>{/if}</label
             >
-            <p class="facts" id={`model-${model.id}-facts`}>{modelFacts(model, mac)}</p>
+            <p class="facts note-type" id={`model-${model.id}-facts`}>{modelFacts(model, mac)}</p>
             {#if model.credit}
-              <p class="credit">
+              <p class="credit note-type">
                 {model.credit}
                 {#if waitsOnLicence?.id !== model.id}
                   <button
@@ -312,13 +332,21 @@
           <div class="licence">
             <LicenceWait model={waitsOnLicence} />
           </div>
+        {:else if needsFetching && fetchingSpeech($daemon)}
+          <div class="fetch"><DownloadLine /></div>
         {:else if needsFetching}
-          <button class="btn fetch" disabled={$fetching} on:click={fetchModel}>
-            {$fetching ? 'Downloading' : 'Download'}
+          <button
+            class="btn fetch"
+            aria-disabled={$fetching ? 'true' : undefined}
+            aria-describedby={$blocked === FETCH ? BUSY_NOTE : undefined}
+            on:click={fetchModel}
+          >
+            Download
           </button>
+          <BusyNote button={FETCH} />
         {/if}
       </svelte:fragment>
-    </SubRow>
+    </Row>
   {/if}
 
   {#if lastError}
@@ -337,13 +365,14 @@
   </Row>
 {/if}
 
-<Row name="Words to know" block note={vocabularyNote} setting="stt.vocabulary">
+<Row name="Words to know" note={vocabularyNote} setting="stt.vocabulary" let:describedBy>
   <div class="chips">
     {#each vocabulary as word (word)}
       <span class="chip">
         {word}
         <button
           aria-label={`Remove ${word}`}
+          aria-describedby={describedBy}
           on:click={() =>
             write(
               'stt.vocabulary',
@@ -357,6 +386,7 @@
         bind:this={field}
         class="chip add"
         aria-label="New word"
+        aria-describedby={describedBy}
         on:blur={(e) => addWord(e.currentTarget.value)}
         on:keydown={(e) => {
           if (e.key === 'Enter') addWord(e.currentTarget.value);
@@ -364,19 +394,11 @@
         }}
       />
     {:else}
-      <button class="btn btn-ghost" on:click={beginAdding}>Add a word</button>
+      <button class="btn btn-ghost" aria-describedby={describedBy} on:click={beginAdding}
+        >Add a word</button
+      >
     {/if}
   </div>
-</Row>
-
-<Row name="Microphone" note={openNote} noteId="microphone-opens-note" setting="audio.keep_open">
-  <Segmented
-    label="Microphone"
-    value={keepOpen ? 'always' : 'use'}
-    options={OPENS}
-    describedBy="microphone-opens-note"
-    change={(next) => write('audio.keep_open', next === 'always')}
-  />
 </Row>
 
 <Row name="Free memory" note={unloadNote} setting="models.unload_after">
@@ -392,11 +414,8 @@
 </Row>
 
 <style>
-  /* Under the sentence that explains it, aligned with the control it acts for. */
   .fetch,
   .licence {
-    grid-column: 2;
-    justify-self: start;
     margin-top: 12px;
   }
 
@@ -407,25 +426,14 @@
     width: 100%;
   }
 
-  /* The radio holds the first line, and the facts and credit hang under the
-     name rather than under the radio. */
   .model {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    column-gap: 10px;
     padding: 6px 0;
     min-width: 0;
-  }
-
-  .model input {
-    margin: 0;
-    align-self: center;
   }
 
   .model label,
   .facts,
   .credit {
-    grid-column: 2;
     min-width: 0;
   }
 
@@ -435,16 +443,14 @@
   }
 
   .name {
-    font-variation-settings:
-      'wght' var(--cut-name-weight),
-      'wdth' var(--cut-name-width);
+    --wght: var(--cut-name-weight);
+    --wdth: var(--cut-name-width);
     font-size: 15px;
   }
 
   .on .name {
-    font-variation-settings:
-      'wght' var(--cut-head-weight),
-      'wdth' var(--cut-head-width);
+    --wght: var(--cut-head-weight);
+    --wdth: var(--cut-head-width);
   }
 
   /* The dash this world uses for a thing that is not here yet. */
@@ -454,12 +460,8 @@
 
   .facts,
   .credit {
+    max-width: 440px;
     margin: 2px 0 0;
-    font-variation-settings:
-      'wght' var(--cut-agent-weight),
-      'wdth' var(--cut-agent-width);
-    font-size: 13px;
-    line-height: 1.45;
   }
 
   .credit {
