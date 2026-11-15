@@ -630,11 +630,13 @@ pub const WAYLAND_HOTKEY_HINT: &str = "the global hotkey needs X11. Bind \
 /// Wayland: no protocol grants a global grab there, so the compositor holds the
 /// binding. A client reads this before it names a key, because naming one the
 /// daemon never listens for is a promise it cannot keep.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn listens() -> bool {
-    #[cfg(all(unix, not(target_os = "macos")))]
-    if crate::dictation::is_wayland() {
-        return false;
-    }
+    !crate::dictation::is_wayland()
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+pub fn listens() -> bool {
     true
 }
 
