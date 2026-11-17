@@ -273,6 +273,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **History shows as soon as the window opens.** It used to wait for the window to finish
+  looking for agents. A control pressed while Agents reads its list answers at once too.
+- **Apply says it is working.** On Agents, the button reads Applying until the agent is
+  connected. Cancel and Connect wait until then.
 - **A setting Banshee refuses says so on its row,** in words, instead of only to a screen reader.
 - **Sensitivity reads the right way round.** High now hears quiet speech. If you chose High or Low
   before, check it once.

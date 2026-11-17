@@ -112,3 +112,9 @@ it('keeps the choice row to its own name', () => {
     .map(([path, selector]) => `${path} ${selector}`);
   expect(claims).toEqual([]);
 });
+
+// KeyRow names its own visible line `.held`, and a global rule reaches inside every component.
+it('hides the spare label only inside the button that holds it', () => {
+  expect(ruleFor('.holds > .held')).toMatch(/visibility: hidden;/);
+  expect(ruleFor('.held')).toBe('');
+});

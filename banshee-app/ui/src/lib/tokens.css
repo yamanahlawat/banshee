@@ -389,6 +389,19 @@ body {
   border-color: var(--accent);
 }
 
+/* A button with two labels stands at the wider one: `.held` is that label, unseen. */
+.holds {
+  display: inline-grid;
+}
+
+.holds > * {
+  grid-area: 1 / 1;
+}
+
+.holds > .held {
+  visibility: hidden;
+}
+
 /* A busy button takes `aria-disabled` rather than `disabled`, so it keeps focus. */
 .btn:disabled,
 .btn[aria-disabled='true'] {

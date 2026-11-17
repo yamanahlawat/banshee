@@ -207,16 +207,4 @@ banshee record stop</pre>
     border-style: dashed;
     border-color: var(--accent);
   }
-
-  .holds {
-    display: inline-grid;
-  }
-
-  .holds > * {
-    grid-area: 1 / 1;
-  }
-
-  .held {
-    visibility: hidden;
-  }
 </style>

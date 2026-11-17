@@ -238,13 +238,4 @@
     gap: 8px;
     margin-top: 24px;
   }
-  .holds {
-    display: inline-grid;
-  }
-  .holds > * {
-    grid-area: 1 / 1;
-  }
-  .held {
-    visibility: hidden;
-  }
 </style>

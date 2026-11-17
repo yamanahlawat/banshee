@@ -20,6 +20,7 @@
   let looked = false;
 
   let applyButton: HTMLButtonElement | undefined;
+  let applying = false;
   const nameOf = (id: string) => document.getElementById(`agent-${id}`);
   const connectOf = (id: string) => document.getElementById(`connect-${id}`);
 
@@ -68,6 +69,7 @@
   // The daemon can only add banshee to an agent's config today, never remove
   // it, so a review always plans a connect.
   async function review(agent: AgentRow) {
+    if (applying) return;
     rowErrors = { ...rowErrors, [agent.id]: '' };
     rowNotes = { ...rowNotes, [agent.id]: '' };
     try {
@@ -85,9 +87,10 @@
   // The rows say what is connected, so the review closes on the fresh list
   // rather than on the one the apply has already made wrong.
   async function apply() {
-    if (reviewing === null) return;
+    if (reviewing === null || applying) return;
     const id = reviewing.agent.id;
     const reviewing_name = reviewing.agent.name;
+    applying = true;
     try {
       const note = await applyConnect(id, false);
       if (note) rowNotes = { ...rowNotes, [id]: note };
@@ -108,10 +111,13 @@
       rowErrors = { ...rowErrors, [id]: whyItFailed(error) };
       reviewing = null;
       land(() => connectOf(id) ?? nameOf(id));
+    } finally {
+      applying = false;
     }
   }
 
   function cancel() {
+    if (applying) return;
     const id = reviewing?.agent.id;
     reviewing = null;
     if (id !== undefined) land(() => connectOf(id));
@@ -136,7 +142,12 @@
         <li class="agent" data-travel={agent.id} out:leave={true}>
           <span class="name" id={`agent-${agent.id}`} tabindex="-1">{agent.name}</span>
           {#if agent.presence === 'found' && !open}
-            <button class="btn" id={`connect-${agent.id}`} on:click={() => review(agent)}>
+            <button
+              class="btn"
+              id={`connect-${agent.id}`}
+              aria-disabled={applying ? 'true' : undefined}
+              on:click={() => review(agent)}
+            >
               Connect
             </button>
           {/if}
@@ -145,7 +156,7 @@
               {#if rowErrors[agent.id]}<p class="error">{rowErrors[agent.id]}</p>{/if}
               {#if rowNotes[agent.id]}<p class="note pending">{rowNotes[agent.id]}</p>{/if}
               {#if open}
-                <DiffReview plan={open.plan} {apply} {cancel} bind:applyButton />
+                <DiffReview plan={open.plan} {apply} {cancel} busy={applying} bind:applyButton />
               {/if}
             </div>
           {/if}
