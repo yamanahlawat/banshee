@@ -563,6 +563,64 @@ mod sibling_tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    fn canon(path: PathBuf) -> PathBuf {
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn helper_layout(dir: &std::path::Path) -> PathBuf {
+        let helper_macos =
+            dir.join("Banshee.app/Contents/Helpers/BansheeMenuBar.app/Contents/MacOS");
+        std::fs::create_dir_all(&helper_macos).unwrap();
+        let tray = helper_macos.join("banshee-tray");
+        std::fs::write(&tray, "").unwrap();
+        tray
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_helper_finds_programs_in_the_enclosing_app() {
+        let dir = scratch("helper");
+        let tray = helper_layout(&dir);
+        let cli = dir.join("Banshee.app/Contents/MacOS/banshee");
+        let window = dir.join("Banshee.app/Contents/MacOS/banshee-app");
+        for file in [&cli, &window] {
+            std::fs::write(file, "").unwrap();
+        }
+
+        assert_eq!(canon(sibling(&tray, "banshee").unwrap()), canon(cli));
+        assert_eq!(canon(sibling(&tray, "banshee-app").unwrap()), canon(window));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_program_beside_this_one_wins() {
+        let dir = scratch("flat");
+        let tray = dir.join("bin/banshee-tray");
+        let cli = dir.join("bin/banshee");
+        for file in [&tray, &cli] {
+            std::fs::write(file, "").unwrap();
+        }
+
+        assert_eq!(canon(sibling(&tray, "banshee").unwrap()), canon(cli));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_helper_missing_a_program_names_it() {
+        let dir = scratch("helper-missing");
+        let tray = helper_layout(&dir);
+
+        let error = sibling(&tray, "banshee-app").expect_err("no window anywhere");
+
+        assert!(
+            error.to_string().contains("banshee-app"),
+            "unhelpful error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
