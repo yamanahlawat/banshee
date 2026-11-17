@@ -25,9 +25,14 @@ xattr -dr com.apple.quarantine /Applications/Banshee.app
 ## macOS, without Homebrew
 
 ```bash
+rm -rf /Applications/Banshee.app
 curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Banshee.app.tar.gz \
   | tar -xzf - -C /Applications
 ```
+
+- **The first line removes the old app.** Unpacking over it leaves files the new app no longer
+  has, and they break its signature. A first install has nothing to remove, and `rm -rf` says
+  nothing.
 
 - **The unpacked app** sets no quarantine flag, so it needs no `xattr` line.
 - **Opening the app** puts the `banshee` command on your `PATH`, at
@@ -48,9 +53,9 @@ sudo mkdir -p /usr/local/bin && sudo ln -s \
 - **The command inside the app** stays at
   `/Applications/Banshee.app/Contents/MacOS/banshee`, whether it is linked or
   not.
-- **No admin account?** Unpack into `~/Applications`, and read that path
+- **No admin account?** Use `~/Applications` in both lines, and read that path
   instead.
-- **Update it** by running the same command again: it replaces the app in place.
+- **Update it** by running the same two lines again.
 - **Remove it** with `banshee uninstall`, which stops the daemon and takes the
   login entries and the link with it.
 

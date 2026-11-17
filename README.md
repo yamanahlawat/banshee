@@ -47,12 +47,13 @@ banshee connect claude
 Apple Silicon, with the window.
 
 ```bash
+rm -rf /Applications/Banshee.app
 curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Banshee.app.tar.gz | tar -xzf - -C /Applications
 open /Applications/Banshee.app
 ```
 
-- The downloaded app needs no `xattr` line. Run the same `curl` again to update it.
-- No admin account? Unpack into `~/Applications`, open it from there, and read that path in the line below.
+- The downloaded app needs no `xattr` line. Run the same lines again to update it. The first line removes the old app, because files left from it break the new signature.
+- No admin account? Use `~/Applications` in all three lines, open it from there, and read that path in the line below.
 - Opening the app puts the `banshee` command on your PATH, where `/usr/local/bin` takes it. A clean macOS has no such directory, and [one line makes it](docs/install.md#macos-without-homebrew).
 - The window asks before it downloads the models (~860 MB), and lets you pick the speech model first.
 - Approve the **Microphone** and **Accessibility** grants. Without them Banshee cannot record or type.
