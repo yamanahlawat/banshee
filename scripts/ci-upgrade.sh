@@ -15,6 +15,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 app="${1:-/Applications/Banshee.app}"
 macos="$app/Contents/MacOS"
 banshee="$macos/banshee"
+tray_path=Contents/Helpers/BansheeMenuBar.app/Contents/MacOS/banshee-tray
 identity=banshee-ci
 
 # launchd.plist(5), ThrottleInterval: a job is spawned at most once every 10
@@ -42,7 +43,7 @@ status_version() {
 }
 
 cdhash() {
-    codesign -dv --verbose=3 "$macos/$1" 2>&1 | sed -n 's/^CDHash=//p'
+    codesign -dv --verbose=3 "$app/$1" 2>&1 | sed -n 's/^CDHash=//p'
 }
 
 wait_for_tray_since() {
@@ -80,8 +81,8 @@ wait_for_version "$version_a" "$start_wait" ||
 wait_for_tray_since 0 "$start_wait" ||
     fail "no banshee-tray process within ${start_wait}s of banshee tray"
 pass "build A runs (version $version_a)"
-hash_a_daemon="$(cdhash banshee)"
-hash_a_tray="$(cdhash banshee-tray)"
+hash_a_daemon="$(cdhash Contents/MacOS/banshee)"
+hash_a_tray="$(cdhash "$tray_path")"
 [ -n "$hash_a_daemon" ] && [ -n "$hash_a_tray" ] || fail "build A has no CDHash"
 
 echo "=== build B over the running install"
@@ -93,8 +94,8 @@ cargo build --release --workspace --exclude banshee-app
 # Last, and never followed by a plain `cargo build`: see the Makefile.
 (cd "$root/banshee-app" && cargo tauri build --no-bundle)
 "$root/scripts/bundle.sh" "$root/target/release" "$app" "$identity" "$version_b"
-[ "$(cdhash banshee)" != "$hash_a_daemon" ] &&
-    [ "$(cdhash banshee-tray)" != "$hash_a_tray" ] ||
+[ "$(cdhash Contents/MacOS/banshee)" != "$hash_a_daemon" ] &&
+    [ "$(cdhash "$tray_path")" != "$hash_a_tray" ] ||
     fail "build B differs from build A"
 pass "build B differs from build A"
 

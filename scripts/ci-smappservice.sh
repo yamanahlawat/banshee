@@ -176,7 +176,7 @@ for label in "${legacy_labels[@]}"; do
             log="$HOME/.banshee/daemon.log"
             ;;
         com.banshee.tray)
-            arguments="<string>$macos/banshee-tray</string>"
+            arguments="<string>$app/Contents/Helpers/BansheeMenuBar.app/Contents/MacOS/banshee-tray</string>"
             log="$HOME/.banshee/tray.log"
             ;;
     esac
@@ -217,6 +217,18 @@ done
 pgrep -x banshee-tray > /dev/null ||
     fail "no banshee-tray process within ${throttle}s of banshee tray"
 pass "the tray runs (pid $(pgrep -x banshee-tray | tr '\n' ' '))"
+tray_pid="$(pgrep -x banshee-tray | head -n 1)"
+tray_exe="$(ps -o comm= -p "$tray_pid")"
+case "$tray_exe" in
+    "$app"/Contents/Helpers/BansheeMenuBar.app/*) pass "the tray runs from BansheeMenuBar.app" ;;
+    *) fail "the tray runs from $tray_exe, not from BansheeMenuBar.app" ;;
+esac
+tray_bundle="$(lsappinfo info -only bundleid -app "$tray_pid" 2> /dev/null || true)"
+case "$tray_bundle" in
+    *com.banshee.app.tray*) pass "the tray registers as com.banshee.app.tray" ;;
+    *'"com.banshee.app"'*) fail "the tray registered with LaunchServices as com.banshee.app" ;;
+    *) echo "skip: lsappinfo gave no bundle id for the tray" ;;
+esac
 expect_states "both agents are enabled" "$(login_items status all)" \
     "$daemon_label enabled" "$tray_label enabled"
 for label in "${legacy_labels[@]}"; do
