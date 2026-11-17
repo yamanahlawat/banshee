@@ -595,7 +595,7 @@ mod sibling_tests {
     }
 
     #[test]
-    fn a_program_beside_this_one_wins() {
+    fn a_flat_layout_finds_a_program_beside_the_executable() {
         let dir = scratch("flat");
         let tray = dir.join("bin/banshee-tray");
         let cli = dir.join("bin/banshee");

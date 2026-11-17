@@ -22,13 +22,9 @@ helper="$staging/Contents/Helpers/BansheeMenuBar.app"
 # new one is complete and verified.
 trap 'rm -rf "$staging"' EXIT
 
-# banshee-app is the bundle's executable. The daemon and the shim run from
-# inside it, and ~/.cargo/bin links the CLI. The menu bar runs from its own
-# nested app so macOS does not show it as Banshee in the Dock. Each executable
-# signs with its own identifier, the name of its launchd job. Columns are the
-# executable, its directory in the bundle and its signing identifier, in
-# signing order. The bundle signature covers banshee-app as its executable, so
-# it signs last.
+# Columns: executable, its directory in the bundle, its signing identifier.
+# The order is signing order. banshee-app is the bundle's executable, so the
+# bundle signature covers it and it signs last.
 executables="banshee Contents/MacOS com.banshee.app.daemon
 banshee-mcp-shim Contents/MacOS com.banshee.app.mcp-shim
 banshee-tray Contents/Helpers/BansheeMenuBar.app/Contents/MacOS com.banshee.app.tray
@@ -86,9 +82,12 @@ for agent in daemon tray; do
     }
 done
 for plist in "$agents"/*.plist; do
-    program="$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$plist")"
-    test -x "$staging/$program" || {
-        echo "$(basename "$plist") names BundleProgram '$program', which is missing or not executable" >&2
+    program="$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$plist" 2> /dev/null)" || {
+        echo "$(basename "$plist") has no BundleProgram" >&2
+        exit 1
+    }
+    test -f "$staging/$program" && test -x "$staging/$program" || {
+        echo "$(basename "$plist") names BundleProgram '$program', which is missing or not an executable file" >&2
         exit 1
     }
 done

@@ -276,7 +276,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Dock, Spotlight and Finder open the window again.** The menu bar runs as its own app,
   Banshee Menu Bar, so Banshee shows one Dock icon while the window is open and none once it
   closes. If you update with the curl command, use the new one in the README once: it removes the
-  old app first.
+  old app first. Then run `banshee start` and `banshee tray` once, or the old menu bar keeps
+  running until you log in again.
 - **History shows as soon as the window opens.** It used to wait for the window to finish
   looking for agents. A control pressed while Agents reads its list answers at once too.
 - **Apply says it is working.** On Agents, the button reads Applying until the agent is

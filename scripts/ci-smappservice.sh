@@ -218,7 +218,7 @@ pgrep -x banshee-tray > /dev/null ||
     fail "no banshee-tray process within ${throttle}s of banshee tray"
 pass "the tray runs (pid $(pgrep -x banshee-tray | tr '\n' ' '))"
 tray_pid="$(pgrep -x banshee-tray | sed -n 1p)"
-tray_txt="$(lsof -a -p "$tray_pid" -d txt -Fn 2> /dev/null | sed -n 's/^n//p' | sed -n 1p)"
+tray_txt="$({ lsof -a -p "$tray_pid" -d txt -Fn 2> /dev/null || true; } | sed -n 's/^n//p' | sed -n 1p)"
 [ -n "$tray_txt" ] || fail "lsof found no text segment for the tray (pid $tray_pid)"
 case "$tray_txt" in
     "$app"/Contents/Helpers/BansheeMenuBar.app/*) pass "the tray runs from BansheeMenuBar.app" ;;
