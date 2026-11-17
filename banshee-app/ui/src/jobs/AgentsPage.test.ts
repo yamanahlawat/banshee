@@ -476,3 +476,87 @@ it("puts what is left to do under the connected agent's name", async () => {
   expect(getByRole('list', { name: 'Connected' }).contains(step)).toBe(true);
   expect(step.closest('li')?.querySelector('.name')?.textContent).toBe('Codex');
 });
+
+/// Opens the review of the first agent listed.
+async function openTheReview(listed: AgentRow[] = [CLAUDE]) {
+  vi.mocked(detectAgents).mockResolvedValueOnce(listed);
+  vi.mocked(planConnect).mockResolvedValue([{ path: '~/.claude.json', diff: '+ banshee' }]);
+  const page = render(AgentsPage);
+  await waitFor(() => expect(page.getByText(listed[0].name)).toBeTruthy());
+  await fireEvent.click(page.getAllByRole('button', { name: 'Connect' })[0]);
+  await waitFor(() => expect(page.getByRole('button', { name: 'Apply' })).toBeTruthy());
+  return page;
+}
+
+/// Answers the call that lets the apply land, with the list read again after it.
+function anApplyTheDaemonHolds(): () => void {
+  let answer: (note: null) => void = () => {};
+  vi.mocked(applyConnect).mockReturnValue(new Promise((done) => (answer = done)));
+  return () => {
+    vi.mocked(detectAgents).mockResolvedValueOnce([CONNECTED]);
+    answer(null);
+  };
+}
+
+it('says an apply is running until it lands, and keeps focus on the button', async () => {
+  const land = anApplyTheDaemonHolds();
+  const { getByRole, queryByRole } = await openTheReview();
+  const apply = getByRole('button', { name: 'Apply' });
+  apply.focus();
+
+  await fireEvent.click(apply);
+
+  const applying = getByRole('button', { name: 'Applying' });
+  expect(applying.getAttribute('aria-disabled')).toBe('true');
+  expect(document.activeElement).toBe(applying);
+  land();
+  await waitFor(() => expect(queryByRole('button', { name: 'Applying' })).toBeNull());
+});
+
+it('connects once when Apply is pressed again while the apply runs', async () => {
+  const land = anApplyTheDaemonHolds();
+  const { getByRole } = await openTheReview();
+
+  await fireEvent.click(getByRole('button', { name: 'Apply' }));
+  await fireEvent.click(getByRole('button', { name: 'Applying' }));
+
+  expect(applyConnect).toHaveBeenCalledTimes(1);
+  land();
+  await waitFor(() => expect(getByRole('list', { name: 'Connected' })).toBeTruthy());
+});
+
+it('keeps the review open when Cancel is pressed while the apply runs', async () => {
+  const land = anApplyTheDaemonHolds();
+  const { getByRole } = await openTheReview();
+
+  await fireEvent.click(getByRole('button', { name: 'Apply' }));
+  const cancel = getByRole('button', { name: 'Cancel' });
+  await fireEvent.click(cancel);
+
+  expect(cancel.getAttribute('aria-disabled')).toBe('true');
+  expect(getByRole('button', { name: 'Applying' })).toBeTruthy();
+  land();
+  await waitFor(() => expect(getByRole('list', { name: 'Connected' })).toBeTruthy());
+});
+
+it('opens no second review while an apply runs', async () => {
+  const land = anApplyTheDaemonHolds();
+  const { getByRole } = await openTheReview([CLAUDE, CURSOR]);
+
+  await fireEvent.click(getByRole('button', { name: 'Apply' }));
+  const other = getByRole('button', { name: 'Connect' });
+  await fireEvent.click(other);
+
+  expect(other.getAttribute('aria-disabled')).toBe('true');
+  expect(planConnect).toHaveBeenCalledTimes(1);
+  land();
+  await waitFor(() => expect(getByRole('list', { name: 'Connected' })).toBeTruthy());
+});
+
+it('holds Apply at the wider of its two labels', async () => {
+  const { getByRole } = await openTheReview();
+
+  const held = getByRole('button', { name: 'Apply' }).querySelector('[aria-hidden="true"]');
+
+  expect(held?.textContent).toBe('Applying');
+});

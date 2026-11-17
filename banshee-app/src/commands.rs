@@ -66,11 +66,25 @@ impl Daemon {
         retrying(path, &mut client, body).await
     }
 
-    /// Over a connection of its own: a retry has no deadline, and on the shared
-    /// connection it would hold every other call until the daemon answered.
+    /// One call over a connection of its own, for a call the daemon may answer slowly: on the
+    /// shared connection it would hold every other call until the daemon answered.
+    async fn call_apart<T>(
+        &self,
+        body: impl for<'client> FnMut(&'client mut Client) -> Attempt<'client, T>,
+    ) -> Result<T, CommandError> {
+        retrying(self.path_or_error()?, &mut None, body).await
+    }
+
+    /// Apart, because the daemon starts a login shell to read `PATH` before it answers.
+    async fn agents(&self) -> Result<Vec<AgentRow>, CommandError> {
+        self.call_apart(|client| Box::pin(calls::detect_agents(client)))
+            .await
+    }
+
+    /// Apart, because a retry has no deadline.
     async fn retry(&self, id: i64) -> Result<serde_json::Value, CommandError> {
-        let path = self.path_or_error()?;
-        retrying(path, &mut None, |client| Box::pin(calls::retry(client, id))).await
+        self.call_apart(|client| Box::pin(calls::retry(client, id)))
+            .await
     }
 
     /// Asks the daemon to restart, then drops the connection. The daemon keeps
@@ -212,34 +226,41 @@ mod tests {
         drop(leaving.join().unwrap());
     }
 
-    #[tokio::test]
-    async fn a_retry_waiting_on_the_daemon_leaves_the_shared_connection_free() {
-        use banshee_common::{BANSHEE_RETRY, JsonRpcRequest, JsonRpcResponse};
+    struct Holding {
+        _dir: tempfile::TempDir,
+        daemon: Daemon,
+        reached: tokio::sync::mpsc::UnboundedReceiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    /// A daemon that holds `slow` until released, then answers it with `answer`, and answers
+    /// anything else at once.
+    fn a_daemon_holding(slow: &'static str, answer: serde_json::Value) -> Holding {
+        use banshee_common::{JsonRpcRequest, JsonRpcResponse};
         use std::io::{BufRead, BufReader, Write};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("banshee.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let (held_tx, mut held) = tokio::sync::mpsc::unbounded_channel();
+        let (reached_tx, reached) = tokio::sync::mpsc::unbounded_channel();
         let (release, released) = std::sync::mpsc::channel::<()>();
         let released = std::sync::Arc::new(std::sync::Mutex::new(released));
-        // Holds a retry until released, as a daemon busy with a dictation does, and answers
-        // anything else at once.
         std::thread::spawn(move || {
             for stream in listener.incoming().take(2) {
                 let mut stream = stream.unwrap();
-                let held_tx = held_tx.clone();
+                let reached_tx = reached_tx.clone();
                 let released = released.clone();
+                let answer = answer.clone();
                 std::thread::spawn(move || {
                     let mut line = String::new();
                     BufReader::new(stream.try_clone().unwrap())
                         .read_line(&mut line)
                         .unwrap();
                     let request: JsonRpcRequest = serde_json::from_str(&line).unwrap();
-                    let result = if request.method == BANSHEE_RETRY {
-                        held_tx.send(()).unwrap();
+                    let result = if request.method == slow {
+                        reached_tx.send(()).unwrap();
                         released.lock().unwrap().recv().unwrap();
-                        serde_json::json!({"row": {"id": 7}})
+                        answer
                     } else {
                         serde_json::json!({"running": true})
                     };
@@ -248,26 +269,69 @@ mod tests {
                 });
             }
         });
-        let daemon = daemon(Some(path.to_str().unwrap()));
-
-        let retry = daemon.retry(7);
-        tokio::pin!(retry);
-        tokio::select! {
-            _ = &mut retry => panic!("the retry answered before the daemon let it go"),
-            _ = held.recv() => {}
+        Holding {
+            daemon: daemon(Some(path.to_str().unwrap())),
+            _dir: dir,
+            reached,
+            release,
         }
-        assert!(
-            daemon.client.try_lock().is_ok(),
-            "a retry the daemon holds must not hold every other call with it"
-        );
+    }
+
+    async fn status_answers(daemon: &Daemon) -> bool {
         let status = daemon
             .call(|client| Box::pin(crate::calls::status(client)))
             .await
             .unwrap();
-        release.send(()).unwrap();
+        status["running"] == true
+    }
 
-        assert_eq!(status["running"], true);
+    #[tokio::test]
+    async fn a_retry_waiting_on_the_daemon_leaves_the_shared_connection_free() {
+        let mut held = a_daemon_holding(
+            banshee_common::BANSHEE_RETRY,
+            serde_json::json!({"row": {"id": 7}}),
+        );
+
+        let retry = held.daemon.retry(7);
+        tokio::pin!(retry);
+        tokio::select! {
+            _ = &mut retry => panic!("the retry answered before the daemon let it go"),
+            _ = held.reached.recv() => {}
+        }
+        assert!(
+            held.daemon.client.try_lock().is_ok(),
+            "a retry the daemon holds must not hold every other call with it"
+        );
+        assert!(status_answers(&held.daemon).await);
+        held.release.send(()).unwrap();
+
         assert_eq!(retry.await.unwrap(), serde_json::json!({"id": 7}));
+    }
+
+    #[tokio::test]
+    async fn an_agents_read_waiting_on_the_daemon_leaves_the_shared_connection_free() {
+        let row = serde_json::json!({
+            "id": "claude", "name": "Claude Code", "presence": "connected", "note": "Connected"
+        });
+        let mut held = a_daemon_holding(
+            banshee_common::BANSHEE_AGENTS,
+            serde_json::json!({"agents": [row]}),
+        );
+
+        let agents = held.daemon.agents();
+        tokio::pin!(agents);
+        tokio::select! {
+            _ = &mut agents => panic!("the agents read answered before the daemon let it go"),
+            _ = held.reached.recv() => {}
+        }
+        assert!(
+            held.daemon.client.try_lock().is_ok(),
+            "an agents read the daemon holds must not hold every other call with it"
+        );
+        assert!(status_answers(&held.daemon).await);
+        held.release.send(()).unwrap();
+
+        assert_eq!(agents.await.unwrap()[0].id, "claude");
     }
 
     #[test]
@@ -475,9 +539,7 @@ pub async fn download_models(daemon: State<'_, Daemon>) -> Result<(), CommandErr
 
 #[tauri::command]
 pub async fn detect_agents(daemon: State<'_, Daemon>) -> Result<Vec<AgentRow>, CommandError> {
-    daemon
-        .call(|client| Box::pin(calls::detect_agents(client)))
-        .await
+    daemon.agents().await
 }
 
 #[tauri::command]

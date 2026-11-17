@@ -4,6 +4,8 @@
   export let plan: PlannedChange[];
   export let apply: () => void;
   export let cancel: () => void;
+  /// The apply is with the daemon, which cannot take it back.
+  export let busy = false;
   /// Bound by the page, which lands focus on Apply when the review opens.
   export let applyButton: HTMLButtonElement | undefined = undefined;
 
@@ -41,8 +43,18 @@
         >{/each}</pre>
   {/each}
   <div class="actions">
-    <button class="btn" bind:this={applyButton} on:click={apply}>Apply</button>
-    <button class="btn btn-ghost" on:click={cancel}>Cancel</button>
+    <button
+      class="btn holds"
+      bind:this={applyButton}
+      aria-disabled={busy ? 'true' : undefined}
+      on:click={apply}
+    >
+      <span>{busy ? 'Applying' : 'Apply'}</span>
+      <span class="held" aria-hidden="true">Applying</span>
+    </button>
+    <button class="btn btn-ghost" aria-disabled={busy ? 'true' : undefined} on:click={cancel}>
+      Cancel
+    </button>
   </div>
 </div>
 
