@@ -224,6 +224,11 @@ tray_txt="$({ lsof -a -p "$tray_pid" -d txt -Fn 2> /dev/null || true; } | sed -n
 [ "$tray_txt" = "$app/$tray_path" ] ||
     fail "the tray runs from $tray_txt, not from $app/$tray_path"
 pass "the tray runs from $tray_path"
+helper_info="$app/${tray_path%/MacOS/*}/Info.plist"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$helper_info")" = "$tray_label" ] &&
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$helper_info")" = true ] ||
+    fail "$helper_info does not name $tray_label with LSUIElement set"
+pass "the tray's app is $tray_label with LSUIElement set"
 tray_bundle="$(lsappinfo info -only bundleid -app "$tray_pid" 2> /dev/null || true)"
 case "$tray_bundle" in
     *com.banshee.app.tray*) pass "the tray registers as com.banshee.app.tray" ;;

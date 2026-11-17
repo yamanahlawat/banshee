@@ -52,7 +52,7 @@ tmp="$(mktemp)" && curl -fsSL https://github.com/yamanahlawat/banshee/releases/l
 open /Applications/Banshee.app
 ```
 
-- The downloaded app needs no `xattr` line. Run the same lines again to update it. The command removes the old app after the download, because files left from it break the new signature. After a curl update, run `banshee start`, then `banshee tray`, once.
+- The downloaded app needs no `xattr` line. Run the same lines again to update it. The command removes the old app after the download, because files left from it break the new signature. After each curl update, run `banshee start`, then `banshee tray`.
 - No admin account? Use `~/Applications` in every line that names `/Applications`, open it from there, and read that path in the line below.
 - Opening the app puts the `banshee` command on your PATH, where `/usr/local/bin` takes it. A clean macOS has no such directory, and [one line makes it](docs/install.md#macos-without-homebrew).
 - The window asks before it downloads the models (~860 MB), and lets you pick the speech model first.

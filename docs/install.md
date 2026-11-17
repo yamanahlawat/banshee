@@ -54,7 +54,7 @@ sudo mkdir -p /usr/local/bin && sudo ln -s \
 - **No admin account?** Use `~/Applications` in every line that names `/Applications`, and read that path
   instead.
 - **Update it** by running the same command again. Then run `banshee start`, then `banshee tray`,
-  once, so the old menu bar process gives way to the new one.
+  so the daemon and the menu bar restart on the new app.
 - **Remove it** with `banshee uninstall`, which stops the daemon and takes the
   login entries and the link with it.
 
