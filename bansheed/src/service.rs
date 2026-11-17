@@ -542,8 +542,8 @@ mod sibling_tests {
         let found = sibling(&link, "banshee-tray").unwrap();
 
         assert_eq!(
-            std::fs::canonicalize(&found).unwrap(),
-            std::fs::canonicalize(&tray).unwrap(),
+            canon(found),
+            canon(tray),
             "the lookup must land inside the bundle, not beside the symlink"
         );
         let _ = std::fs::remove_dir_all(&dir);

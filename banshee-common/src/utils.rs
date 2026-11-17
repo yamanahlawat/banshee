@@ -21,9 +21,9 @@ pub fn sibling(exe: &Path, name: &str) -> Result<PathBuf, BansheeError> {
     }
     #[cfg(target_os = "macos")]
     if let Some(outer) = enclosing_app_macos(dir) {
-        let found = outer.join(name);
-        if found.exists() {
-            return Ok(found);
+        let nested = outer.join(name);
+        if nested.exists() {
+            return Ok(nested);
         }
     }
     Err(BansheeError::Other(format!(

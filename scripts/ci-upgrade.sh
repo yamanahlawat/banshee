@@ -15,7 +15,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 app="${1:-/Applications/Banshee.app}"
 macos="$app/Contents/MacOS"
 banshee="$macos/banshee"
-tray_path=Contents/Helpers/BansheeMenuBar.app/Contents/MacOS/banshee-tray
+tray_path="$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$app/Contents/Library/LaunchAgents/com.banshee.app.tray.plist")"
 identity=banshee-ci
 
 # launchd.plist(5), ThrottleInterval: a job is spawned at most once every 10
