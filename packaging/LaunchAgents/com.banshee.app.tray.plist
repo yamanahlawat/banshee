@@ -5,7 +5,7 @@
     <key>Label</key>
     <string>com.banshee.app.tray</string>
     <key>BundleProgram</key>
-    <string>Contents/MacOS/banshee-tray</string>
+    <string>Contents/Helpers/BansheeMenuBar.app/Contents/MacOS/banshee-tray</string>
     <key>ProgramArguments</key>
     <array>
         <string>banshee-tray</string>

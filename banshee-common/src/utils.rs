@@ -8,19 +8,44 @@ use crate::{BANSHEE_SUBSCRIBE, JsonRpcNotification, JsonRpcRequest, JsonRpcRespo
 
 /// A binary that ships beside this one, inside the same `Banshee.app`. A
 /// symlink reaches the CLI, so canonicalize finds the directory it lives in.
+/// On macOS the menu bar helper app nests under `Contents/Helpers`, so a miss
+/// there falls back to the enclosing app's `Contents/MacOS`.
 pub fn sibling(exe: &Path, name: &str) -> Result<PathBuf, BansheeError> {
     let real = std::fs::canonicalize(exe)?;
-    let found = real
+    let dir = real
         .parent()
-        .ok_or_else(|| BansheeError::Other("banshee is not inside a directory".into()))?
-        .join(name);
-    if !found.exists() {
-        return Err(BansheeError::Other(format!(
-            "{} not found; reinstall so {name} ships beside the CLI",
-            found.display()
-        )));
+        .ok_or_else(|| BansheeError::Other("banshee is not inside a directory".into()))?;
+    let found = dir.join(name);
+    if found.exists() {
+        return Ok(found);
     }
-    Ok(found)
+    #[cfg(target_os = "macos")]
+    if let Some(outer) = enclosing_app_macos(dir) {
+        let nested = outer.join(name);
+        if nested.exists() {
+            return Ok(nested);
+        }
+    }
+    Err(BansheeError::Other(format!(
+        "{} not found; reinstall so {name} ships beside the CLI",
+        found.display()
+    )))
+}
+
+/// `X.app/Contents/Helpers/<Name>.app/Contents/MacOS` to `X.app/Contents/MacOS`.
+#[cfg(target_os = "macos")]
+fn enclosing_app_macos(dir: &Path) -> Option<PathBuf> {
+    let is = |path: &Path, name: &str| path.file_name().is_some_and(|n| n == name);
+    let contents = dir.parent()?;
+    let helper = contents.parent()?;
+    let helpers = helper.parent()?;
+    let outer_contents = helpers.parent()?;
+    let matches = is(dir, "MacOS")
+        && is(contents, "Contents")
+        && helper.extension().is_some_and(|e| e == "app")
+        && is(helpers, "Helpers")
+        && is(outer_contents, "Contents");
+    matches.then(|| outer_contents.join("MacOS"))
 }
 
 /// The sibling above, ready to run. Both binaries in the bundle reach the
