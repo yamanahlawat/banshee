@@ -54,7 +54,7 @@ impl Rotating {
         })
     }
 
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         if !self.path.exists() {
             (self.file, self.written) = open(&self.path)?;
         }
@@ -126,7 +126,7 @@ impl Log for Sink {
             }
             Sink::File(file) => {
                 if let Ok(mut file) = file.lock() {
-                    let _ = file.write(line.as_bytes());
+                    let _ = file.append(line.as_bytes());
                 }
             }
         }
@@ -239,8 +239,8 @@ mod tests {
     fn a_file_past_the_limit_moves_aside_and_the_next_line_starts_a_new_one() {
         let (dir, path) = scratch_log("rotate");
         let mut file = Rotating::new(&path, 10, 5).unwrap();
-        file.write(b"0123456789A\n").unwrap();
-        file.write(b"next\n").unwrap();
+        file.append(b"0123456789A\n").unwrap();
+        file.append(b"next\n").unwrap();
 
         let (current, old) = (read(&path, ""), read(&path, ".1"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -253,7 +253,7 @@ mod tests {
         let (dir, path) = scratch_log("rotate-kept");
         let mut file = Rotating::new(&path, 1, 2).unwrap();
         for line in ["a\n", "b\n", "c\n", "d\n"] {
-            file.write(line.as_bytes()).unwrap();
+            file.append(line.as_bytes()).unwrap();
         }
 
         let found = [read(&path, ""), read(&path, ".1"), read(&path, ".2")];
@@ -267,9 +267,9 @@ mod tests {
     fn a_log_deleted_while_running_comes_back_on_the_next_line() {
         let (dir, path) = scratch_log("rotate-deleted");
         let mut file = Rotating::new(&path, 1024, 5).unwrap();
-        file.write(b"before\n").unwrap();
+        file.append(b"before\n").unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
-        file.write(b"after\n").unwrap();
+        file.append(b"after\n").unwrap();
 
         let current = read(&path, "");
         let _ = std::fs::remove_dir_all(&dir);

@@ -231,6 +231,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not know is spelled letter by letter. With `espeak-ng` installed, such a
   word used to be pronounced, so `tokenizers` was said as a word and is now
   spelled. See Removed.
+- **Banshee uses jiff for time instead of chrono, which is unmaintained, and
+  rotates its own log.** The log still moves aside at 1000 KB and keeps five
+  old files. Timestamps in History read the same.
 - **Both local voices read versions, paths, file names, PR numbers, units and
   rates aloud.** `0.12.1` is "zero point twelve point one", `src/main.rs` is
   "src slash main dot rs" with or without backticks, `PR #218` is "PR number
