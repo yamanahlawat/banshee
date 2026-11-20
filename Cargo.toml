@@ -16,8 +16,8 @@ categories = ["command-line-utilities", "multimedia::audio"]
 # One version per shared dependency; a crate adds only its own features.
 [workspace.dependencies]
 arboard = "3.6.1"
-chrono = "0.4"
 dirs = "7.0.0"
+jiff = "0.2.39"
 log = "0.4.34"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

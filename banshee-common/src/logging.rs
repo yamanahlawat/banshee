@@ -5,39 +5,98 @@
 //! `BANSHEE_LOG_TO=file` and writes to its own file under `~/Library/Logs`,
 //! since launchd discards stderr. Every other run writes to stderr.
 
+use std::fs::File;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use file_rotate::compression::Compression;
-use file_rotate::suffix::AppendCount;
-use file_rotate::{ContentLimit, FileRotate};
 use log::{LevelFilter, Log, Metadata, Record};
 
 enum Sink {
     Stderr,
-    File(Mutex<FileRotate<AppendCount>>),
+    File(Mutex<Rotating>),
 }
 
 // macOS rotates its own logs in /etc/newsyslog.conf at 1000 KB, keeping five
-// old files; file-rotate has no default of its own.
-const ROTATE_AT_BYTES: usize = 1000 * 1024;
+// old files.
+const ROTATE_AT_BYTES: u64 = 1000 * 1024;
 const OLD_FILES_KEPT: usize = 5;
 
 impl Sink {
     fn file(path: &Path) -> std::io::Result<Self> {
-        // FileRotate panics when it cannot make the folder, so the folder is made here first.
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder)?;
-        }
-        Ok(Sink::File(Mutex::new(FileRotate::new(
+        Ok(Sink::File(Mutex::new(Rotating::new(
             path,
-            AppendCount::new(OLD_FILES_KEPT),
-            ContentLimit::BytesSurpassed(ROTATE_AT_BYTES),
-            Compression::None,
-            None,
-        ))))
+            ROTATE_AT_BYTES,
+            OLD_FILES_KEPT,
+        )?)))
     }
+}
+
+/// An append-only log that moves itself to `<path>.1` once it has grown past
+/// `limit` bytes, shifting older files up to `<path>.<kept>`.
+struct Rotating {
+    path: PathBuf,
+    limit: u64,
+    kept: usize,
+    file: File,
+    written: u64,
+}
+
+impl Rotating {
+    fn new(path: &Path, limit: u64, kept: usize) -> std::io::Result<Self> {
+        let (file, written) = open(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            limit,
+            kept,
+            file,
+            written,
+        })
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.written > self.limit {
+            self.rotate()?;
+        }
+        self.file.write_all(bytes)?;
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn rotate(&mut self) -> std::io::Result<()> {
+        for n in (1..self.kept).rev() {
+            moved(&self.old(n), &self.old(n + 1))?;
+        }
+        moved(&self.path, &self.old(1))?;
+        (self.file, self.written) = open(&self.path)?;
+        Ok(())
+    }
+
+    fn old(&self, n: usize) -> PathBuf {
+        let mut name = self.path.clone().into_os_string();
+        name.push(format!(".{n}"));
+        name.into()
+    }
+}
+
+fn open(path: &Path) -> std::io::Result<(File, u64)> {
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    let file = File::options().create(true).append(true).open(path)?;
+    let written = file.metadata()?.len();
+    Ok((file, written))
+}
+
+fn moved(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+fn clock(at: &jiff::Zoned) -> impl std::fmt::Display {
+    at.strftime("%H:%M:%S%.3f")
 }
 
 /// transcribe.cpp writes many Info lines on every model load, and
@@ -57,15 +116,14 @@ impl Log for Sink {
         if !wanted(record.metadata()) {
             return;
         }
-        let clock = chrono::Local::now().format("%H:%M:%S%.3f");
-        let line = format!("{}\n", line(clock, record));
+        let line = format!("{}\n", line(clock(&jiff::Zoned::now()), record));
         match self {
             Sink::Stderr => {
                 let _ = std::io::stderr().lock().write_all(line.as_bytes());
             }
             Sink::File(file) => {
                 if let Ok(mut file) = file.lock() {
-                    let _ = file.write_all(line.as_bytes());
+                    let _ = file.append(line.as_bytes());
                 }
             }
         }
@@ -129,13 +187,12 @@ fn line(clock: impl std::fmt::Display, record: &Record) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDir;
 
     #[test]
     fn a_logged_line_lands_in_the_file() {
-        let dir = std::env::temp_dir().join(format!("banshee-log-file-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("Logs/daemon.log");
-        std::fs::create_dir_all(dir.join("Logs")).unwrap();
+        let dir = TempDir::new("log-file");
+        let path = dir.0.join("daemon.log");
         std::fs::write(&path, "a line from an earlier run\n").unwrap();
         let sink = Sink::file(&path).expect("a sink on a temp folder");
         let unique = format!("a line only this test writes {}", std::process::id());
@@ -150,7 +207,6 @@ mod tests {
         }
 
         let written = std::fs::read_to_string(&path).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(
             written.starts_with("a line from an earlier run\n"),
             "{written:?}"
@@ -160,6 +216,51 @@ mod tests {
             written.ends_with(&format!("INFO  daemon: {unique}\n")),
             "{written:?}"
         );
+    }
+
+    fn read(path: &std::path::Path, suffix: &str) -> String {
+        std::fs::read_to_string(format!("{}{suffix}", path.display())).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_missing_log_folder_is_made() {
+        let dir = TempDir::new("log-folder");
+        let path = dir.0.join("Logs/com.banshee.app/daemon.log");
+        let mut file = Rotating::new(&path, 1024, 5).unwrap();
+        file.append(b"first\n").unwrap();
+
+        assert_eq!(read(&path, ""), "first\n");
+    }
+
+    #[test]
+    fn a_file_past_the_limit_moves_aside_and_the_next_line_starts_a_new_one() {
+        let dir = TempDir::new("rotate");
+        let path = dir.0.join("daemon.log");
+        let mut file = Rotating::new(&path, 10, 5).unwrap();
+        file.append(b"0123456789A\n").unwrap();
+        file.append(b"next\n").unwrap();
+
+        assert_eq!(read(&path, ".1"), "0123456789A\n");
+        assert_eq!(read(&path, ""), "next\n");
+    }
+
+    #[test]
+    fn only_the_newest_old_files_are_kept() {
+        let dir = TempDir::new("rotate-kept");
+        let path = dir.0.join("daemon.log");
+        let mut file = Rotating::new(&path, 1, 2).unwrap();
+        for line in ["a\n", "b\n", "c\n", "d\n"] {
+            file.append(line.as_bytes()).unwrap();
+        }
+
+        let found = ["", ".1", ".2", ".3"].map(|suffix| read(&path, suffix));
+        assert_eq!(found, ["d\n", "c\n", "b\n", ""]);
+    }
+
+    #[test]
+    fn the_clock_reads_hours_to_milliseconds() {
+        let at: jiff::Zoned = "2026-11-17T21:33:17.25+05:30[+05:30]".parse().unwrap();
+        assert_eq!(clock(&at).to_string(), "21:33:17.250");
     }
 
     #[test]

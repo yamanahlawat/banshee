@@ -82,8 +82,10 @@ fn described(path: PathBuf, period: Option<Duration>) -> Option<Kept> {
     let meta = std::fs::metadata(path).ok()?;
     let seconds =
         meta.len().saturating_sub(WAV_HEADER_BYTES as u64) as f64 / BYTES_PER_SECOND as f64;
-    let until =
-        period.and_then(|period| Some(super::stamp((meta.modified().ok()? + period).into())));
+    let until = period.and_then(|period| {
+        let at = jiff::Zoned::try_from(meta.modified().ok()? + period).ok()?;
+        Some(super::stamp(&at))
+    });
     Some(Kept { seconds, until })
 }
 
@@ -201,7 +203,7 @@ mod tests {
         let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         set_modified(&path(&dir, 1), modified);
         let until = kept(&dir, 1, Some(DAY)).unwrap().until.unwrap();
-        let named = chrono::DateTime::parse_from_rfc3339(&until).unwrap();
+        let named: jiff::Timestamp = until.parse().unwrap();
         assert_eq!(SystemTime::from(named), modified + DAY);
     }
 

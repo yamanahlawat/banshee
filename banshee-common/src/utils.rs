@@ -483,12 +483,7 @@ mod tests {
         assert_eq!(systemd_unit(TRAY_AGENT), Some("banshee-tray.service"));
     }
 
-    struct TempDir(PathBuf);
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TempDir;
 
     #[test]
     fn a_failed_write_leaves_no_staging_file_so_the_next_write_succeeds() {
