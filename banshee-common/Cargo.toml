@@ -14,9 +14,8 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-chrono.workspace = true
+jiff.workspace = true
 dirs.workspace = true
-file-rotate = "0.8.0"
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -468,7 +468,6 @@ dependencies = [
  "banshee-common",
  "block2 0.6.2",
  "bytes",
- "chrono",
  "clap",
  "core-foundation 0.10.1",
  "core-graphics 0.25.0",
@@ -478,6 +477,7 @@ dependencies = [
  "enigo",
  "harfrust",
  "hound",
+ "jiff",
  "json5",
  "libc",
  "log",
@@ -543,9 +543,8 @@ dependencies = [
 name = "banshee-common"
 version = "0.17.0"
 dependencies = [
- "chrono",
  "dirs",
- "file-rotate",
+ "jiff",
  "log",
  "serde",
  "serde_json",
@@ -953,10 +952,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -1990,16 +1987,6 @@ checksum = "38e2275cc4e4fc009b0669731a1e5ab7ebf11f469eaede2bab9309a5b4d6057f"
 dependencies = [
  "memoffset",
  "rustc_version",
-]
-
-[[package]]
-name = "file-rotate"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e8e2fa049328a1f3295991407a88585805d126dfaadf74b9fe8c194c730aafc"
-dependencies = [
- "chrono",
- "flate2",
 ]
 
 [[package]]
