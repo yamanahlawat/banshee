@@ -83,8 +83,8 @@ fn described(path: PathBuf, period: Option<Duration>) -> Option<Kept> {
     let seconds =
         meta.len().saturating_sub(WAV_HEADER_BYTES as u64) as f64 / BYTES_PER_SECOND as f64;
     let until = period.and_then(|period| {
-        let at = jiff::Timestamp::try_from(meta.modified().ok()? + period).ok()?;
-        Some(super::stamp(&at.to_zoned(jiff::tz::TimeZone::system())))
+        let at = jiff::Zoned::try_from(meta.modified().ok()? + period).ok()?;
+        Some(super::stamp(&at))
     });
     Some(Kept { seconds, until })
 }

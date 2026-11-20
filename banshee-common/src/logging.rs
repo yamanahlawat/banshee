@@ -55,9 +55,6 @@ impl Rotating {
     }
 
     fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        if !self.path.exists() {
-            (self.file, self.written) = open(&self.path)?;
-        }
         if self.written > self.limit {
             self.rotate()?;
         }
@@ -193,10 +190,7 @@ mod tests {
 
     #[test]
     fn a_logged_line_lands_in_the_file() {
-        let dir = std::env::temp_dir().join(format!("banshee-log-file-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("Logs/daemon.log");
-        std::fs::create_dir_all(dir.join("Logs")).unwrap();
+        let (dir, path) = scratch_log("log-file");
         std::fs::write(&path, "a line from an earlier run\n").unwrap();
         let sink = Sink::file(&path).expect("a sink on a temp folder");
         let unique = format!("a line only this test writes {}", std::process::id());
@@ -256,24 +250,9 @@ mod tests {
             file.append(line.as_bytes()).unwrap();
         }
 
-        let found = [read(&path, ""), read(&path, ".1"), read(&path, ".2")];
-        let third_kept = std::fs::exists(format!("{}.3", path.display())).unwrap();
+        let found = ["", ".1", ".2", ".3"].map(|suffix| read(&path, suffix));
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(found, ["d\n", "c\n", "b\n"]);
-        assert!(!third_kept, "a third old file outlived the limit of two");
-    }
-
-    #[test]
-    fn a_log_deleted_while_running_comes_back_on_the_next_line() {
-        let (dir, path) = scratch_log("rotate-deleted");
-        let mut file = Rotating::new(&path, 1024, 5).unwrap();
-        file.append(b"before\n").unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
-        file.append(b"after\n").unwrap();
-
-        let current = read(&path, "");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(current, "after\n");
+        assert_eq!(found, ["d\n", "c\n", "b\n", ""]);
     }
 
     #[test]
