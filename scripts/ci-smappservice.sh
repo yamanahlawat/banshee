@@ -18,6 +18,7 @@ banshee="$macos/banshee"
 domain="gui/$(id -u)"
 daemon_label=com.banshee.app.daemon
 tray_label=com.banshee.app.tray
+tray_path="$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$app/Contents/Library/LaunchAgents/$tray_label.plist")"
 legacy_labels=(com.banshee.daemon com.banshee.tray)
 launch_agents="$HOME/Library/LaunchAgents"
 socket="$HOME/.banshee/banshee.sock"
@@ -176,7 +177,7 @@ for label in "${legacy_labels[@]}"; do
             log="$HOME/.banshee/daemon.log"
             ;;
         com.banshee.tray)
-            arguments="<string>$macos/banshee-tray</string>"
+            arguments="<string>$app/$tray_path</string>"
             log="$HOME/.banshee/tray.log"
             ;;
     esac
@@ -216,7 +217,24 @@ until pgrep -x banshee-tray > /dev/null || [ "$SECONDS" -gt "$deadline" ]; do
 done
 pgrep -x banshee-tray > /dev/null ||
     fail "no banshee-tray process within ${throttle}s of banshee tray"
-pass "the tray runs (pid $(pgrep -x banshee-tray | tr '\n' ' '))"
+tray_pid="$(pgrep -x banshee-tray | sed -n 1p)"
+pass "the tray runs (pid $tray_pid)"
+tray_txt="$({ lsof -a -p "$tray_pid" -d txt -Fn 2> /dev/null || true; } | sed -n 's/^n//p' | sed -n 1p)"
+[ -n "$tray_txt" ] || fail "lsof found no text segment for the tray (pid $tray_pid)"
+[ "$tray_txt" = "$app/$tray_path" ] ||
+    fail "the tray runs from $tray_txt, not from $app/$tray_path"
+pass "the tray runs from $tray_path"
+helper_info="$app/${tray_path%/MacOS/*}/Info.plist"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$helper_info")" = "$tray_label" ] &&
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$helper_info")" = true ] ||
+    fail "$helper_info does not name $tray_label with LSUIElement set"
+pass "the tray's app is $tray_label with LSUIElement set"
+tray_bundle="$(lsappinfo info -only bundleid -app "$tray_pid" 2> /dev/null || true)"
+case "$tray_bundle" in
+    *com.banshee.app.tray*) pass "the tray registers as com.banshee.app.tray" ;;
+    *'"com.banshee.app"'*) fail "the tray registered with LaunchServices as com.banshee.app" ;;
+    *) echo "skip: lsappinfo gave no bundle id for the tray (output: '$tray_bundle')" ;;
+esac
 expect_states "both agents are enabled" "$(login_items status all)" \
     "$daemon_label enabled" "$tray_label enabled"
 for label in "${legacy_labels[@]}"; do
