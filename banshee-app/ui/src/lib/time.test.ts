@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatTime, formatWhen, sinceDay, sameLocalDay, toDate } from './time';
+import { formatTime, sameLocalDay, toDate } from './time';
 
 describe('formatTime', () => {
   // Two spellings of one instant must read alike. This holds under any host
@@ -28,49 +28,5 @@ describe('sameLocalDay', () => {
     expect(sameLocalDay(toDate('2026-08-26T09:00:00Z'), toDate('2026-08-27T09:00:00Z'))).toBe(
       false,
     );
-  });
-});
-
-describe('formatWhen', () => {
-  const now = new Date(2026, 7, 29, 0, 3, 0);
-  const at = (y: number, m: number, d: number, h: number, min: number) =>
-    new Date(y, m, d, h, min).toISOString();
-
-  it("gives the clock alone for a row from the reader's own day", () => {
-    expect(formatWhen(at(2026, 7, 29, 0, 1), now)).toBe('00:01');
-  });
-  it('names yesterday, so 23:58 is not read as a minute ago', () => {
-    expect(formatWhen(at(2026, 7, 28, 23, 58), now)).toBe('Yesterday 23:58');
-  });
-  it('dates anything older', () => {
-    expect(formatWhen(at(2026, 7, 20, 9, 14), now)).toBe('20 Aug 09:14');
-  });
-  it('carries the year for a row from an earlier one', () => {
-    expect(formatWhen(at(2025, 7, 20, 9, 14), now)).toBe('20 Aug 2025');
-  });
-  // The column is 52px, so the year must not make a third line.
-  it('keeps a dated row to the width of one from this year', () => {
-    const thisYear = formatWhen(at(2026, 7, 20, 9, 14), now);
-    expect(formatWhen(at(2025, 7, 20, 9, 14), now).length).toBeLessThanOrEqual(thisYear.length);
-  });
-  it('counts back by the calendar, so a clock change cannot skip a day', () => {
-    const firstOfMarch = new Date(2026, 2, 1, 0, 30, 0);
-    expect(formatWhen(at(2026, 1, 28, 22, 0), firstOfMarch)).toBe('Yesterday 22:00');
-  });
-});
-
-describe('sinceDay', () => {
-  const now = new Date(2026, 8, 22, 21, 58, 0);
-  const at = (y: number, m: number, d: number) => new Date(y, m, d, 9, 0).toISOString();
-
-  it('names the reader’s own day in words, so the sentence still reads', () => {
-    expect(sinceDay(at(2026, 8, 22), now)).toBe('today');
-    expect(sinceDay(at(2026, 8, 21), now)).toBe('yesterday');
-  });
-  it('spells the month, because this sits in prose and not in the gutter', () => {
-    expect(sinceDay(at(2026, 7, 3), now)).toBe('3 August');
-  });
-  it('carries the year once the record reaches back past this one', () => {
-    expect(sinceDay(at(2025, 11, 30), now)).toBe('30 December 2025');
   });
 });

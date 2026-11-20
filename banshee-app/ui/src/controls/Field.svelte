@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { claimKeys } from '../lib/keys';
+  import { rowDescription } from '../lib/ids';
 
   export let label: string;
   export let value = '';
@@ -15,6 +16,9 @@
   export let cancel: (() => void) | undefined = undefined;
   // Bound by a caller that has to focus a field it just swapped in.
   export let input: HTMLInputElement | undefined = undefined;
+  export let describedBy: string | undefined = undefined;
+  const fromRow = rowDescription();
+  $: described = describedBy ?? $fromRow;
 
   let draft = value;
   $: draft = value;
@@ -22,8 +26,7 @@
   // A write refused after a newer one landed skips its rollback.
   let generation = 0;
 
-  // Typing owns the keyboard: otherwise Escape closes the panel and Cmd+F opens
-  // Find mid-word.
+  // Typing owns the keyboard: otherwise Cmd+F opens Find mid-word.
   function take() {
     release ??= claimKeys();
   }
@@ -75,6 +78,7 @@
   class:dashed
   type={masked ? 'password' : 'text'}
   aria-label={label}
+  aria-describedby={described}
   autocomplete={masked ? 'off' : undefined}
   {placeholder}
   value={draft}
@@ -86,20 +90,20 @@
 
 <style>
   .field {
-    font-variation-settings:
-      'wght' 500,
-      'wdth' 100;
+    --wght: 500;
+    --wdth: 100;
     font-size: 15px;
-    border-bottom: 1px solid var(--ink);
-    border-radius: 0;
-    padding: 6px 0;
+    background: transparent;
+    border: 1px solid var(--dim);
+    border-radius: var(--radius);
+    padding: 6px 9px;
     margin: 0;
   }
 
   /* A dashed accent line is what this world draws around a thing that is not
-     there, and an underline is the form of it a control can carry. */
+     there. */
   .dashed {
-    border-bottom-style: dashed;
-    border-bottom-color: var(--accent);
+    border-style: dashed;
+    border-color: var(--accent);
   }
 </style>

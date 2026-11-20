@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64},
@@ -8,13 +7,13 @@ use std::{
 };
 
 use banshee_common::DownloadProgress;
+use banshee_common::listening::ListeningModel;
 use tokio::sync::{broadcast, watch};
 
 use crate::audio::cues::{Cues, Reason, ReasonCode, Signal, Target, broken};
 use crate::config::{BargeInMode, Config, FeedbackMode};
 use crate::text_to_speech::{SpeechPlayer, lock};
-
-const TRANSCRIPTION_RING_CAPACITY: usize = 16;
+use change_count::ChangeCount;
 
 // One file emits at most 101 notifications, so a subscriber has to fall a whole
 // file behind before the channel starts dropping any of them
@@ -28,25 +27,40 @@ pub const MAX_PUSH_TO_TALK: Duration = Duration::from_secs(crate::audio::RING_SE
 // healthy gaps are 11 ms to 18 ms, so this keeps 55 to 90 times headroom.
 pub const CAPTURE_SILENCE_LIMIT: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TranscribeTarget {
-    Mailbox,
-    Dictate,
-    /// Hand the words to a coding agent, which changes the desktop.
-    Tell,
-}
+// The cue a use owes until capture's first sound, as an `AtomicU8`: the
+// capture callback moves it from waiting to heard, and that callback must not
+// lock. A press owes its start cue, and an answer its arm cue.
+const NO_START_CUE: u8 = 0;
+const DICTATE_WAITS: u8 = 1;
+const ANSWER_WAITS: u8 = 2;
+const DICTATE_HEARD: u8 = 3;
+const ANSWER_HEARD: u8 = 4;
+const ARM_WAITS: u8 = 5;
+const ARM_HEARD: u8 = 6;
+const ARM_PLAYED: u8 = 7;
 
-/// What the daemon reads from the machine it runs on: its files, and whether
-/// VoiceOver is on. Handed in, so a test decides.
+// EX_TEMPFAIL in sysexits.h. Any nonzero status restarts the daemon under
+// launchd's `SuccessfulExit=false` and systemd's `Restart=on-failure`.
+const RESTART_EXIT: u8 = 75;
+
+/// What the daemon reads from the machine it runs on: its files, its grants,
+/// whether VoiceOver is on and which app is in front. Handed in, so a test
+/// decides.
 pub struct Machine {
     pub models: std::path::PathBuf,
     pub config: std::path::PathBuf,
+    pub credentials: std::path::PathBuf,
+    pub licences: std::path::PathBuf,
     pub voiceover: fn() -> bool,
-}
-
-struct PushToTalk {
-    deadline: Instant,
-    target: TranscribeTarget,
+    pub frontmost: fn() -> Option<crate::frontmost::App>,
+    #[cfg(target_os = "macos")]
+    pub accessibility: fn() -> bool,
+    #[cfg(target_os = "macos")]
+    pub microphone: fn() -> Option<Refusal>,
+    #[cfg(target_os = "macos")]
+    pub key_presses: fn() -> crate::permissions::Access,
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub typer_blockers: fn() -> Vec<banshee_common::Blocker>,
 }
 
 /// A stopped dictation's place in the ring. Dropped, it gives the place back,
@@ -54,24 +68,47 @@ struct PushToTalk {
 pub type RingClaim = Counted;
 
 pub struct AskCommand {
+    pub question: String,
+    pub client: Option<String>,
     pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     pub timeout: Duration,
     pub session: u64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct Question {
+    pub text: String,
+    pub client: Option<String>,
+}
+
+pub struct RetryCommand {
+    pub id: i64,
+    pub samples: Vec<f32>,
+    pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+}
+
 pub enum ConsumerCommand {
-    Transcribe(TranscribeTarget, RingClaim),
+    // A push-to-talk began, numbered so a refusal ends this press and no
+    // later one. The consumer reads the ring while the key is held and ends
+    // on the `Transcribe` or `Discard` that follows.
+    Stream(u64),
+    // With the app in front at the stop, or `None` when that is unknown.
+    Transcribe(RingClaim, Option<crate::frontmost::App>),
     // The consumer empties the ring, so a cancelled session does not feed
     // the next transcription
     Discard,
     Ask(AskCommand),
-    // The listener owns the engine, so both of these reach it the way a rebind
-    // does. A push-to-talk leaves that thread idle until the key is released,
-    // so either can land while the microphone is open. The ring holds the audio,
-    // so the dictation that follows is whole.
+    Retry(RetryCommand),
+    // The listener owns the engine, so these reach it the way a rebind does.
+    // One that lands while a dictation streams waits until the dictation ends,
+    // so a model never changes under the stream that uses it.
     Retune(Vec<String>),
     Speak(crate::speech_to_text::Speech),
-    Reload(crate::config::STTPreset),
+    Reload(&'static banshee_common::listening::ListeningModel),
+    /// The listener the config names takes over.
+    Replace(Box<crate::config::STTConfig>),
+    /// `models.unload_after` moved, so the idle wait is measured again.
+    UnloadAfter,
     Shutdown,
 }
 
@@ -98,26 +135,48 @@ impl RecordingMode {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TranscriptionEntry {
-    pub id: u64,
-    pub text: String,
-}
-
-struct TranscriptionRing {
-    next_id: u64,
-    entries: VecDeque<TranscriptionEntry>,
-}
-
 /// Why the recording pipeline did not start. A missing mic, a missing model, an
 /// unreadable key file and a remote listener that will not answer need different
 /// fixes, so they stay distinct out to the RPC error code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecordingError {
     Microphone(String),
+    /// macOS refused the grant, read before any open was tried.
+    MicrophoneRefused(Refusal),
     Model(String),
+    /// The id of a listening model whose file is not downloaded.
+    NoListeningModel(&'static str),
     Provider(String),
+    /// A remote listener that would not build at start. Its server is the one
+    /// config.toml names, and a write cannot reach a pipeline that never stood.
+    UnbuiltListener(String),
     KeyFile(String),
+}
+
+/// Why macOS will not let capture open, read from the grant without opening.
+/// No other platform has a grant to read, so nothing builds one there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", test)), expect(dead_code))]
+pub enum Refusal {
+    Denied,
+    /// An administrator or a profile decides, so nobody on this Mac can allow it.
+    Restricted,
+}
+
+impl Refusal {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Refusal::Denied => "macOS does not allow Banshee to use it",
+            Refusal::Restricted => "this Mac restricts it",
+        }
+    }
+
+    pub const fn fix(self) -> &'static str {
+        match self {
+            Refusal::Denied => "allow Banshee in System Settings > Privacy & Security > Microphone",
+            Refusal::Restricted => "ask the administrator of this Mac for microphone access",
+        }
+    }
 }
 
 /// What the recording pipeline is. The daemon builds it on its own thread and
@@ -155,8 +214,19 @@ impl std::fmt::Display for RecordingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RecordingError::Microphone(e) => write!(f, "the microphone would not open: {e}"),
+            RecordingError::MicrophoneRefused(refusal) => {
+                write!(f, "the microphone would not open: {}", refusal.reason())
+            }
             RecordingError::Model(e) => write!(f, "a model would not load: {e}"),
-            RecordingError::Provider(e) => write!(f, "the remote listener is not reachable: {e}"),
+            RecordingError::NoListeningModel(id) => {
+                write!(
+                    f,
+                    "the listening model {id} is not downloaded: run banshee setup"
+                )
+            }
+            RecordingError::Provider(e) | RecordingError::UnbuiltListener(e) => {
+                write!(f, "the remote listener is not reachable: {e}")
+            }
             RecordingError::KeyFile(e) => {
                 write!(f, "the remote listener's key file is unreadable: {e}")
             }
@@ -171,13 +241,27 @@ impl RecordingError {
     pub fn consequence(&self) -> String {
         match self {
             RecordingError::Model(_) => "a model would not load".to_string(),
-            RecordingError::Provider(_) => {
+            RecordingError::NoListeningModel(_) => {
+                "no listening model yet: run banshee setup".to_string()
+            }
+            RecordingError::Provider(_) | RecordingError::UnbuiltListener(_) => {
                 "dictation and ask_user do not work until the key or server is fixed".to_string()
             }
             RecordingError::KeyFile(_) => {
                 "dictation and ask_user do not work until the key file is fixed".to_string()
             }
-            RecordingError::Microphone(_) => self.to_string().trim_end_matches('.').to_string(),
+            RecordingError::Microphone(_) | RecordingError::MicrophoneRefused(_) => {
+                self.to_string().trim_end_matches('.').to_string()
+            }
+        }
+    }
+
+    /// The fault a failed start leaves. A listener refused at start never
+    /// built, and only a start builds one.
+    pub fn at_start(self) -> Self {
+        match self {
+            RecordingError::Provider(reason) => RecordingError::UnbuiltListener(reason),
+            other => other,
         }
     }
 
@@ -186,30 +270,142 @@ impl RecordingError {
         match self {
             RecordingError::Microphone(_)
             | RecordingError::Model(_)
-            | RecordingError::Provider(_) => Some("banshee start"),
-            RecordingError::KeyFile(_) => None,
+            | RecordingError::UnbuiltListener(_) => Some("banshee start"),
+            RecordingError::Provider(_) => Some("banshee config set stt.remote.api_key"),
+            RecordingError::NoListeningModel(_) => Some("banshee setup"),
+            // A grant is a switch in System Settings, not a command.
+            RecordingError::KeyFile(_) | RecordingError::MicrophoneRefused(_) => None,
         }
+    }
+
+    /// What went wrong, then what to do, for a use whose microphone would not
+    /// open: `last_error` and an agent's reply carry both, since nothing else
+    /// names the fix. The next use opens again, so a device needs no restart.
+    pub fn failed_use(&self) -> String {
+        let fix = match self {
+            RecordingError::Microphone(_) => {
+                "Connect the microphone, or choose another in Listening. The next use tries again."
+                    .to_string()
+            }
+            other => format!("{}.", crate::audio::cues::capitalised(&other.fix())),
+        };
+        format!("{}. {fix}", self.to_string().trim_end_matches('.'))
     }
 
     pub fn fix(&self) -> String {
         match self {
-            // The watchdog rescans after a fault, so most microphones recover
-            // on their own. A capture that failed at startup has no watchdog.
+            // Capture held open rescans after a fault, and capture opened for a
+            // use tries the device again at the next use.
             RecordingError::Microphone(_) => {
                 "connect the microphone, grant it in Privacy & Security, or fix \
                  [audio] input_device. If recording does not recover on its own, \
                  restart: banshee start"
                     .to_string()
             }
+            RecordingError::MicrophoneRefused(refusal) => refusal.fix().to_string(),
             RecordingError::Model(_) => "restart it: banshee start".to_string(),
-            RecordingError::Provider(_) => "set the key: banshee config set stt.remote.api_key, \
-                 or fix [stt.remote] base_url, then restart: banshee start"
-                .to_string(),
+            RecordingError::NoListeningModel(_) => "download it: banshee setup".to_string(),
+            RecordingError::Provider(_) => {
+                "fix [stt.remote] base_url, or set the key: banshee config set stt.remote.api_key"
+                    .to_string()
+            }
+            RecordingError::UnbuiltListener(_) => {
+                "fix [stt.remote] base_url in config.toml, then restart: banshee start".to_string()
+            }
             // A key written again reads the same file first, so the fix starts
             // by removing it.
             RecordingError::KeyFile(_) => crate::credentials::Credentials::remove_command(),
         }
     }
+}
+
+/// The microphone, as recording sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mic {
+    /// The pipeline around capture is still being built.
+    Starting,
+    /// Shut between uses. The next use opens it, so it is ready.
+    Closed,
+    Open,
+    /// Capture failed, or the pipeline around it did not build.
+    Faulted(RecordingError),
+}
+
+/// What the listener has of its model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Listening {
+    /// A listener that loads no file.
+    Remote,
+    /// A remote listener that cannot send, and why. The next key write ends it.
+    Refused(RecordingError),
+    /// On disk and not in memory. It loads when used, so it is no fault.
+    Available(&'static ListeningModel),
+    /// Being read into memory. A use waits for it, so it is no fault either.
+    Loading(&'static ListeningModel),
+    Loaded(&'static ListeningModel),
+    /// The model whose file arrived and did not load, and why.
+    Failed(&'static ListeningModel, String),
+    /// The model whose file is still to download.
+    Missing(&'static ListeningModel),
+}
+
+impl Listening {
+    /// `None` for a listener that loads no file.
+    pub fn model(&self) -> Option<&'static ListeningModel> {
+        match self {
+            Listening::Remote | Listening::Refused(_) => None,
+            Listening::Available(model)
+            | Listening::Loading(model)
+            | Listening::Loaded(model)
+            | Listening::Failed(model, _)
+            | Listening::Missing(model) => Some(model),
+        }
+    }
+
+    pub fn serves(&self) -> bool {
+        matches!(
+            self,
+            Listening::Remote
+                | Listening::Available(_)
+                | Listening::Loading(_)
+                | Listening::Loaded(_)
+        )
+    }
+
+    /// A listener that sends audio to a server, whether or not it can send.
+    /// It holds no engine a model loads into.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Listening::Remote | Listening::Refused(_))
+    }
+}
+
+/// A microphone fault wins: it is the first thing to fix, since no model
+/// records without capture.
+pub fn pipeline(mic: &Mic, listening: &Listening) -> Pipeline {
+    match (mic, listening) {
+        (Mic::Faulted(error), _) => Pipeline::Broken(error.clone()),
+        (Mic::Starting, _) => Pipeline::Opening,
+        (Mic::Closed | Mic::Open, Listening::Failed(_, error)) => {
+            Pipeline::Broken(RecordingError::Model(error.clone()))
+        }
+        (Mic::Closed | Mic::Open, Listening::Missing(model)) => {
+            Pipeline::Broken(RecordingError::NoListeningModel(model.id))
+        }
+        (Mic::Closed | Mic::Open, Listening::Refused(error)) => Pipeline::Broken(error.clone()),
+        (
+            Mic::Closed | Mic::Open,
+            Listening::Remote
+            | Listening::Available(_)
+            | Listening::Loading(_)
+            | Listening::Loaded(_),
+        ) => Pipeline::Open,
+    }
+}
+
+struct Facts {
+    mic: Mic,
+    listening: Listening,
+    route: crate::speech_to_text::Route,
 }
 
 /// The right to download, held for as long as one runs.
@@ -256,21 +452,6 @@ fn replace_if_new(field: &RwLock<Option<String>>, name: Option<String>) -> bool 
     true
 }
 
-/// A failure `banshee status` names, and the path that wrote it. A dictation
-/// that works says nothing about an agent run that failed, so a success must
-/// not clear the other side's reason.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Failed {
-    from: Source,
-    reason: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Source {
-    Dictation,
-    Tell,
-}
-
 /// Each move wakes the push task of every subscriber, so a value that has not
 /// changed sends nothing.
 fn send_if_new<T: PartialEq>(channel: &watch::Sender<Option<T>>, value: Option<T>) {
@@ -285,12 +466,13 @@ fn send_if_new<T: PartialEq>(channel: &watch::Sender<Option<T>>, value: Option<T
 
 pub struct DaemonState {
     version: &'static str,
-    // The model the listener has loaded, not the one the file names. The
-    // window reads the blockers built from this, so a preset that was asked
-    // for and never loaded must not clear them.
-    stt_model: RwLock<Option<&'static str>>,
     vad_model: &'static str,
     vad_threshold: AtomicU32,
+    endpoint_silence_ms: AtomicU64,
+    // The hotkey listener loads the generation on every key event and locks
+    // the pair only when it moved
+    binding: Mutex<(crate::binding::Hotkey, crate::config::HotkeyMode)>,
+    binding_generation: AtomicU64,
     audio_device: RwLock<Option<String>>,
     // The named device the config asks for while something else records. Never
     // a blocker: a daemon on a substitute records correctly.
@@ -300,50 +482,47 @@ pub struct DaemonState {
     wanted_device: Mutex<String>,
     // Follows a live `tts.voice`, so the voice reported is the one now loaded
     tts_voice: RwLock<Option<String>>,
-    // Said once by the branch that built the speaker. A live `[tts]` write moves
-    // the voice above and not this: a backend that takes a voice name is still
-    // the fallback.
-    speaker_started: bool,
+    // Said by the branch that built the speaker, and again by a local voice that
+    // loads later. A live `tts.voice` write moves the voice above and not this: a
+    // backend that takes a voice name is still the fallback.
+    speaker_started: AtomicBool,
+    speaker_spec: Mutex<crate::text_to_speech::SpeakerSpec>,
     wanted_downloads: RwLock<Vec<crate::models::download::Download>>,
     // The file as last parsed. `vad_threshold`, `wanted_device` and `barge_in`
     // beside it are live values the file may no longer agree with.
     config: RwLock<Arc<Config>>,
-    // A key with no live apply is read once, when the daemon starts, so this is
-    // what those keys run for the daemon's whole life. Without it a write cannot
-    // tell a change from a change back.
-    running_config: Arc<Config>,
-    // Keys the daemon accepted and wrote but has not applied. A restart empties
-    // it by nature; a live path clears its own key.
+    // Keys the daemon accepted and wrote but has not applied. A live path
+    // clears its own key.
     pending: Mutex<std::collections::BTreeSet<String>>,
-    // Why recording is off, when it is. The microphone half clears when the
-    // watchdog rebinds; the model half still needs a restart.
+    // Always `pipeline(mic, listening)` of `facts`, sent under its lock, so
+    // two writers cannot publish their changes out of order. The watchdog
+    // reopens capture on every rebind, and a value that has not moved wakes
+    // no subscriber.
     pipeline: watch::Sender<Pipeline>,
+    // `listening` names the model the listener serves, or the one it waits for
+    // while it serves none. A model the file names while another serves is not
+    // in it until that model loads.
+    facts: Mutex<Facts>,
     recording: AtomicU8,
     started_at: Instant,
-    db_connection: Mutex<Option<rusqlite::Connection>>,
-    transcriptions: Mutex<TranscriptionRing>,
-    latest_transcription_id: watch::Sender<u64>,
+    history: Mutex<crate::history::Store>,
+    history_changes: ChangeCount,
     recording_active: watch::Sender<bool>,
     transcribing: watch::Sender<bool>,
-    // Reading a Whisper file off disk takes seconds, and the listener answers
+    // Reading a model off disk can take seconds, and the listener answers
     // with the old model until it lands. Watched, so the window is told when it
     // does: `stt_model` is not a live field and nothing else reports the end.
     loading_model: watch::Sender<bool>,
-    // True for the life of one agent run the tell key started.
-    telling: watch::Sender<bool>,
-    // A second press that the run lock rejects ends first, and a flag alone
-    // would lower the icon under the run still going.
-    deliveries: Mutex<usize>,
     // Why the last hotkey-path attempt failed. Dictation writes it from
-    // resampling, transcribing, and listening for an answer. A tell run writes
-    // it too. Each side clears only what it wrote.
-    last_error: watch::Sender<Option<Failed>>,
+    // resampling, transcribing, and listening for an answer.
+    last_error: watch::Sender<Option<String>>,
     // Why the last spoken reply failed, cleared by the next one that plays.
     last_speech_error: watch::Sender<Option<String>>,
     // One counter for the whole device picture. It moves only when a setter
     // writes a value that differs, because the watchdog rewrites the same one
     // every rescan and each move wakes the push task of every subscriber.
-    device_changes: watch::Sender<u64>,
+    device_changes: ChangeCount,
+    settings_changes: ChangeCount,
     downloads: broadcast::Sender<DownloadProgress>,
     downloading: AtomicBool,
     /// Set when the daemon leaves to be started again, so the supervisor reads
@@ -353,8 +532,11 @@ pub struct DaemonState {
     commands: std::sync::mpsc::Sender<ConsumerCommand>,
     cues: Cues,
     barge_in: Mutex<BargeInMode>,
-    // Start and stop can be separate RPC calls, so this cannot live on a stack
-    push_to_talk: Mutex<PushToTalk>,
+    // The press's deadline. Start and stop can be separate RPC calls, so this
+    // cannot live on a stack
+    push_to_talk: Mutex<Instant>,
+    // The number of the latest press, moved under the push-to-talk lock.
+    presses: AtomicU64,
     armed_session: Mutex<u64>,
     ask_turn: tokio::sync::Mutex<()>,
     dictations_in_ring: Arc<watch::Sender<usize>>,
@@ -365,6 +547,23 @@ pub struct DaemonState {
     // Milliseconds since `started_at` at which the capture callback last ran.
     // Zero means it has never run, which reads as stalled.
     capture_tick: AtomicU64,
+    start_cue: AtomicU8,
+    keep_open: AtomicBool,
+    speak_problems: AtomicBool,
+    save_history: AtomicBool,
+    // The last read of the microphone grant. Every read goes through its
+    // setter, so a move reaches every client.
+    microphone_refusal: Mutex<Option<Refusal>>,
+    #[cfg(target_os = "macos")]
+    accessibility: AtomicBool,
+    // A question has played and its answer is being listened for.
+    answering: AtomicBool,
+    // Woken whenever `wants_mic` may have changed, and when a press's first
+    // sound arrives.
+    mic_owner: std::sync::OnceLock<std::thread::Thread>,
+    unload_after: Mutex<Option<Duration>>,
+    // Woken when `unload_after` moves.
+    voice_keeper: std::sync::OnceLock<std::thread::Thread>,
     shutdown: tokio::sync::Notify,
     spoken: crate::turns::SpokenTurns,
     machine: Machine,
@@ -372,12 +571,33 @@ pub struct DaemonState {
     answer_open: AtomicBool,
     level: watch::Sender<f32>,
     level_watchers: Arc<watch::Sender<usize>>,
+    // The committed words of the recording in progress, empty between recordings.
+    words: watch::Sender<String>,
+    // The question an agent is asking, empty once it ends.
+    question: watch::Sender<Question>,
+    withdrawals: Mutex<Withdrawals>,
+    // The route of the last switch handed to the listener, which may still
+    // wait in its queue.
+    asked_listener: Mutex<crate::speech_to_text::Route>,
+}
+
+/// The requests on their way to a server that have to stop. The listener
+/// compares `count` with the count it last acted on.
+#[derive(Default)]
+struct Withdrawals {
+    count: u64,
+    /// Every withdrawal up to this count was undone by a later switch to a
+    /// server.
+    settled: u64,
+    /// The listener a turn-off hands over to, until the listener takes it or
+    /// a switch to a server undoes it.
+    next: Option<crate::config::STTConfig>,
 }
 
 impl DaemonState {
     pub fn new(
         config: Arc<Config>,
-        db_connection: Option<rusqlite::Connection>,
+        history: crate::history::Store,
         speech: SpeechPlayer,
         speaker: crate::text_to_speech::Speaker,
         commands: std::sync::mpsc::Sender<ConsumerCommand>,
@@ -385,65 +605,96 @@ impl DaemonState {
         machine: Machine,
     ) -> Self {
         let wanted_downloads = crate::models::download::wanted(&config);
+        let keep_open = config.audio.keep_open;
+        let speak_problems = config.speak_problems();
+        let save_history = config.daemon.save_history;
+        let unload_after = config.models.unload_limit();
+        let asked_listener = crate::speech_to_text::Route::of(&config.stt);
+        #[cfg(target_os = "macos")]
+        let accessibility = (machine.accessibility)();
+        let facts = Facts {
+            mic: Mic::Starting,
+            listening: match crate::models::stt_model(&config) {
+                None => Listening::Remote,
+                Some(model)
+                    if crate::models::missing_in(&machine.models, &[model.file]).is_empty() =>
+                {
+                    Listening::Available(model)
+                }
+                Some(model) => Listening::Missing(model),
+            },
+            route: asked_listener.clone(),
+        };
         Self {
             machine,
             version: env!("CARGO_PKG_VERSION"),
-            stt_model: RwLock::new(crate::models::stt_file(&config)),
             vad_model: crate::models::VAD_MODEL,
             vad_threshold: AtomicU32::new(config.stt.vad_threshold.to_bits()),
+            endpoint_silence_ms: AtomicU64::new(config.stt.endpoint_silence_ms),
+            binding: Mutex::new((config.audio.hotkey, config.audio.hotkey_mode)),
+            binding_generation: AtomicU64::new(0),
             audio_device: RwLock::new(None),
             missing_device: RwLock::new(None),
             wanted_device: Mutex::new(config.audio.input_device.clone()),
-            speaker_started: speaker.started(),
+            speaker_started: AtomicBool::new(speaker.started()),
             tts_voice: RwLock::new(speaker.voice()),
+            speaker_spec: Mutex::new(crate::text_to_speech::SpeakerSpec::of(&config.tts)),
             wanted_downloads: RwLock::new(wanted_downloads),
             barge_in: Mutex::new(config.audio.barge_in),
-            running_config: Arc::clone(&config),
             config: RwLock::new(config),
             pending: Mutex::new(std::collections::BTreeSet::new()),
-            pipeline: watch::channel(Pipeline::Opening).0,
+            pipeline: watch::channel(pipeline(&facts.mic, &facts.listening)).0,
+            facts: Mutex::new(facts),
             recording: AtomicU8::new(RecordingMode::Idle as u8),
             started_at: Instant::now(),
-            db_connection: Mutex::new(db_connection),
-            transcriptions: Mutex::new(TranscriptionRing {
-                next_id: 0,
-                entries: VecDeque::with_capacity(TRANSCRIPTION_RING_CAPACITY),
-            }),
-            latest_transcription_id: watch::channel(0).0,
+            history: Mutex::new(history),
             recording_active: watch::channel(false).0,
             transcribing: watch::channel(false).0,
             loading_model: watch::channel(false).0,
-            telling: watch::channel(false).0,
-            deliveries: Mutex::new(0),
             last_error: watch::channel(None).0,
             last_speech_error: watch::channel(None).0,
-            device_changes: watch::channel(0).0,
+            device_changes: ChangeCount::new(),
+            history_changes: ChangeCount::new(),
+            settings_changes: ChangeCount::new(),
             downloads: broadcast::channel(DOWNLOAD_BACKLOG).0,
             downloading: AtomicBool::new(false),
             restart_wanted: AtomicBool::new(false),
             speech: Arc::new(speech),
             commands,
             cues,
-            push_to_talk: Mutex::new(PushToTalk {
-                deadline: Instant::now(),
-                target: TranscribeTarget::Mailbox,
-            }),
+            push_to_talk: Mutex::new(Instant::now()),
+            presses: AtomicU64::new(0),
             armed_session: Mutex::new(0),
             ask_turn: tokio::sync::Mutex::new(()),
             dictations_in_ring: Arc::new(watch::channel(0).0),
             typing: AtomicBool::new(false),
             capture_tick: AtomicU64::new(0),
+            start_cue: AtomicU8::new(NO_START_CUE),
+            keep_open: AtomicBool::new(keep_open),
+            speak_problems: AtomicBool::new(speak_problems),
+            save_history: AtomicBool::new(save_history),
+            microphone_refusal: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            accessibility: AtomicBool::new(accessibility),
+            answering: AtomicBool::new(false),
+            mic_owner: std::sync::OnceLock::new(),
+            unload_after: Mutex::new(unload_after),
+            voice_keeper: std::sync::OnceLock::new(),
             shutdown: tokio::sync::Notify::new(),
             spoken: crate::turns::SpokenTurns::default(),
             peak: AtomicU32::new(0),
             answer_open: AtomicBool::new(false),
             level: watch::channel(0.0).0,
             level_watchers: Arc::new(watch::channel(0).0),
+            words: watch::channel(String::new()).0,
+            question: watch::channel(Question::default()).0,
+            withdrawals: Mutex::new(Withdrawals::default()),
+            asked_listener: Mutex::new(asked_listener),
         }
     }
 
     // False when another session already owns the microphone.
-    pub fn record_start(&self, action: TranscribeTarget) -> bool {
+    pub fn record_start(&self) -> bool {
         // The hotkey arrives here too, so a deaf daemon answers a press with the
         // error cue. Arming a session nothing can transcribe would be silent.
         let reason = match self.pipeline() {
@@ -455,7 +706,7 @@ impl DaemonState {
             let target = if self.is_armed() {
                 Target::Answer
             } else {
-                action.into()
+                Target::Dictate
             };
             self.cues.emit(Signal::Error {
                 reason,
@@ -468,18 +719,14 @@ impl DaemonState {
             if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
-            self.cues.emit(Signal::RecordStart {
-                target: Target::Answer,
-            });
+            self.start_cue
+                .store(ANSWER_WAITS, std::sync::atomic::Ordering::Relaxed);
             true
-        } else if self.start_push_to_talk(action) {
+        } else if self.start_push_to_talk() {
             // Silence the daemon's own voice before the mic opens
             if matches!(self.barge_in(), BargeInMode::Stop) {
                 self.speech.stop();
             }
-            self.cues.emit(Signal::RecordStart {
-                target: action.into(),
-            });
             log::info!("Recording started...");
             true
         } else {
@@ -490,45 +737,59 @@ impl DaemonState {
     // A stop with nothing in flight is a no-op, so release keybinds can fire
     // unconditionally.
     pub fn record_stop(&self) {
-        if !self.stop_push_to_talk(lock(&self.push_to_talk))
-            && self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed)
-        {
+        if self.stop_push_to_talk(lock(&self.push_to_talk), self.machine.frontmost) {
+            return;
+        }
+        let session = lock(&self.push_to_talk);
+        let held = self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed);
+        drop(session);
+        if held {
             self.cues.emit(Signal::RecordStop {
                 target: Target::Answer,
             });
         }
     }
 
-    fn start_push_to_talk(&self, target: TranscribeTarget) -> bool {
-        let mut session = lock(&self.push_to_talk);
+    fn start_push_to_talk(&self) -> bool {
+        let mut deadline = lock(&self.push_to_talk);
         if !self.try_transition(RecordingMode::Idle, RecordingMode::PushToTalk) {
             return false;
         }
         // Discarded: a press starts from silence, not the last session's peak.
         self.take_peak();
-        *session = PushToTalk {
-            deadline: Instant::now() + MAX_PUSH_TO_TALK,
-            target,
-        };
+        self.start_cue
+            .store(DICTATE_WAITS, std::sync::atomic::Ordering::Relaxed);
+        *deadline = Instant::now() + MAX_PUSH_TO_TALK;
+        let press = self
+            .presses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        // Under the push-to-talk lock, so it reaches the consumer before this
+        // press's stop or cancel.
+        let _ = self.commands.send(ConsumerCommand::Stream(press));
         true
     }
 
-    fn stop_push_to_talk(&self, session: std::sync::MutexGuard<'_, PushToTalk>) -> bool {
+    fn stop_push_to_talk(
+        &self,
+        deadline: std::sync::MutexGuard<'_, Instant>,
+        at_stop: impl FnOnce() -> Option<crate::frontmost::App>,
+    ) -> bool {
         // Claimed under the push-to-talk lock and before the mode changes, so
         // `arm_after_dictations` never sees the microphone free and the ring unclaimed.
         let ring = self.claim_ring();
         if !self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             return false;
         }
-        let target = session.target;
-        drop(session);
         log::info!("Recording stopped");
         self.cues.emit(Signal::RecordStop {
-            target: target.into(),
+            target: Target::Dictate,
         });
+        // Held through the send, so a press during the read queues behind this stop.
         let _ = self
             .commands
-            .send(ConsumerCommand::Transcribe(target, ring));
+            .send(ConsumerCommand::Transcribe(ring, at_stop()));
+        drop(deadline);
         true
     }
 
@@ -542,7 +803,7 @@ impl DaemonState {
 
     // Resolved here, not in the tracker: a tracker-side read races a mode change. True when it
     // starts a session.
-    pub fn record_toggle(&self, action: TranscribeTarget) -> bool {
+    pub fn record_toggle(&self) -> bool {
         if matches!(
             self.recording_mode(),
             RecordingMode::PushToTalk | RecordingMode::ArmedHold
@@ -550,7 +811,7 @@ impl DaemonState {
             self.record_stop();
             false
         } else {
-            self.record_start(action)
+            self.record_start()
         }
     }
 
@@ -563,13 +824,15 @@ impl DaemonState {
         let session = lock(&self.push_to_talk);
         if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
             log::info!("Recording cancelled");
-            let target: Target = session.target.into();
             drop(session);
-            self.cues.emit(Signal::Cancelled { target });
+            self.cues.emit(Signal::Cancelled {
+                target: Target::Dictate,
+            });
             let _ = self.commands.send(ConsumerCommand::Discard);
         } else {
+            let held = self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed);
             drop(session);
-            if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) {
+            if held {
                 // The armed session keeps its audio; only the manual hold ends.
                 // This cue answers the start cue the hold played.
                 self.cues.emit(Signal::RecordStop {
@@ -591,15 +854,16 @@ impl DaemonState {
     // Releases a session that never got its stop. Stops rather than discards:
     // the ring holds real audio and record_stop is what routes it.
     pub fn expire_stuck_recording(&self) -> bool {
-        let session = lock(&self.push_to_talk);
-        if self.recording_mode() != RecordingMode::PushToTalk || Instant::now() < session.deadline {
+        let deadline = lock(&self.push_to_talk);
+        if self.recording_mode() != RecordingMode::PushToTalk || Instant::now() < *deadline {
             return false;
         }
         log::warn!(
             "Push-to-talk ran past {}s with no stop; releasing the microphone.",
             MAX_PUSH_TO_TALK.as_secs()
         );
-        self.stop_push_to_talk(session)
+        // Nobody pressed stop, so no app marks where the words belong.
+        self.stop_push_to_talk(deadline, || None)
     }
 
     pub fn speech(&self) -> &Arc<SpeechPlayer> {
@@ -616,38 +880,6 @@ impl DaemonState {
 
     pub fn shutdown(&self) -> &tokio::sync::Notify {
         &self.shutdown
-    }
-
-    fn ring(&self) -> std::sync::MutexGuard<'_, TranscriptionRing> {
-        self.transcriptions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    pub fn push_transcription(&self, text: String) -> u64 {
-        let mut ring = self.ring();
-        ring.next_id += 1;
-        let id = ring.next_id;
-        ring.entries.push_back(TranscriptionEntry { id, text });
-        if ring.entries.len() > TRANSCRIPTION_RING_CAPACITY {
-            ring.entries.pop_front();
-        }
-        drop(ring);
-        self.latest_transcription_id.send_replace(id);
-        id
-    }
-
-    pub fn transcriptions_since(&self, since_id: u64) -> Vec<TranscriptionEntry> {
-        let ring = self.ring();
-        ring.entries
-            .iter()
-            .filter(|entry| entry.id > since_id)
-            .cloned()
-            .collect()
-    }
-
-    pub fn subscribe_transcriptions(&self) -> watch::Receiver<u64> {
-        self.latest_transcription_id.subscribe()
     }
 
     pub fn recording_mode(&self) -> RecordingMode {
@@ -683,6 +915,183 @@ impl DaemonState {
     // written: another thread may have moved on, and subscribers want now.
     fn publish_recording(&self) {
         self.recording_active.send_replace(self.is_recording());
+        self.wake_mic();
+    }
+
+    /// Whether capture should be open now: for a press, for an answer being
+    /// listened for, or for good under `audio.keep_open`. A question that is
+    /// still playing does not need it.
+    pub fn wants_mic(&self) -> bool {
+        self.keep_open()
+            || self.answering.load(std::sync::atomic::Ordering::Relaxed)
+            || matches!(
+                self.recording_mode(),
+                RecordingMode::PushToTalk | RecordingMode::ArmedHold
+            )
+    }
+
+    pub fn keep_open(&self) -> bool {
+        self.keep_open.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_keep_open(&self, keep: bool) {
+        self.keep_open
+            .store(keep, std::sync::atomic::Ordering::Relaxed);
+        self.wake_mic();
+    }
+
+    pub fn set_mic_owner(&self, owner: std::thread::Thread) {
+        let _ = self.mic_owner.set(owner);
+    }
+
+    /// Called from the real time audio thread too: an unpark neither locks
+    /// nor allocates.
+    fn wake_mic(&self) {
+        if let Some(owner) = self.mic_owner.get() {
+            owner.unpark();
+        }
+    }
+
+    /// The question has played, so capture opens for its answer, and the arm
+    /// cue waits for capture's first sound. A hold already answering owes its
+    /// own start cue instead. False when `session` is no longer the one armed.
+    pub fn hear_answer(&self, session: u64) -> bool {
+        let current = lock(&self.armed_session);
+        let armed = *current == session && self.is_armed();
+        if armed {
+            if self.recording_mode() == RecordingMode::Armed {
+                self.start_cue
+                    .store(ARM_WAITS, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.answering
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.wake_mic();
+        }
+        armed
+    }
+
+    /// Whether the arm cue of the answer being listened for has played.
+    pub fn arm_cue_played(&self) -> bool {
+        self.start_cue.load(std::sync::atomic::Ordering::Relaxed) == ARM_PLAYED
+    }
+
+    /// The capture callback heard a sample that is not silence. Called from
+    /// the real time audio thread, so it must not lock or allocate.
+    pub fn heard_sound(&self) {
+        let (waits, heard) = match self.start_cue.load(std::sync::atomic::Ordering::Relaxed) {
+            DICTATE_WAITS => (DICTATE_WAITS, DICTATE_HEARD),
+            ANSWER_WAITS => (ANSWER_WAITS, ANSWER_HEARD),
+            ARM_WAITS => (ARM_WAITS, ARM_HEARD),
+            _ => return,
+        };
+        if self
+            .start_cue
+            .compare_exchange(
+                waits,
+                heard,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            self.wake_mic();
+        }
+    }
+
+    /// Plays the cue a use owes once its first sound has arrived, and only
+    /// while that use still holds capture: a press its start cue, an answer
+    /// its arm cue. Under the push-to-talk lock, as every stop and cancel of a
+    /// press or a hold is, so none can land between the check and the cue.
+    pub fn announce_sound(&self) {
+        let _session = lock(&self.push_to_talk);
+        let mode = self.recording_mode();
+        let heard = self.start_cue.load(std::sync::atomic::Ordering::Relaxed);
+        let (signal, holds, after) = match heard {
+            DICTATE_HEARD => (
+                Signal::RecordStart {
+                    target: Target::Dictate,
+                },
+                mode == RecordingMode::PushToTalk,
+                NO_START_CUE,
+            ),
+            ANSWER_HEARD => (
+                Signal::RecordStart {
+                    target: Target::Answer,
+                },
+                mode == RecordingMode::ArmedHold,
+                NO_START_CUE,
+            ),
+            ARM_HEARD => (
+                Signal::Arm,
+                mode == RecordingMode::Armed
+                    && self.answering.load(std::sync::atomic::Ordering::Relaxed),
+                ARM_PLAYED,
+            ),
+            _ => return,
+        };
+        let after = if holds { after } else { NO_START_CUE };
+        let taken = self
+            .start_cue
+            .compare_exchange(
+                heard,
+                after,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok();
+        if taken && holds {
+            self.cues.emit(signal);
+        }
+    }
+
+    /// The dictation `press` began, whose model would not load, is refused.
+    /// While that press is still held it ends, and its release finds nothing
+    /// to stop. Answers false when it is no longer held: every way a press
+    /// ends sends its `Transcribe` or `Discard`, which is on its way behind
+    /// its `Stream`, and a later press is left alone.
+    pub fn refuse_dictation(&self, press: u64, why: String) -> bool {
+        self.set_last_error(Some(why));
+        let session = lock(&self.push_to_talk);
+        let ended = self.presses.load(std::sync::atomic::Ordering::Relaxed) == press
+            && self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle);
+        drop(session);
+        self.cues.emit(Signal::Error {
+            reason: Reason::new(ReasonCode::TranscriptionFailed, None),
+            target: Some(Target::Dictate),
+        });
+        ended
+    }
+
+    /// The microphone would not open for the use in progress, so that use
+    /// fails with the reason. An answer learns it from the capture it reads.
+    pub fn capture_failed(&self, fault: RecordingError) {
+        self.set_last_error(Some(fault.failed_use()));
+        let answering = self
+            .answering
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        let session = lock(&self.push_to_talk);
+        let target = if self.try_transition(RecordingMode::PushToTalk, RecordingMode::Idle) {
+            let _ = self.commands.send(ConsumerCommand::Discard);
+            Some(Target::Dictate)
+        } else if self.try_transition(RecordingMode::ArmedHold, RecordingMode::Armed) && !answering
+        {
+            Some(Target::Answer)
+        } else {
+            None
+        };
+        drop(session);
+        if let Some(target) = target {
+            self.cues.emit(Signal::Error {
+                reason: broken(&fault),
+                target: Some(target),
+            });
+        }
+    }
+
+    /// The number of the latest press.
+    #[cfg(test)]
+    pub fn press(&self) -> u64 {
+        self.presses.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn subscribe_recording(&self) -> watch::Receiver<bool> {
@@ -717,64 +1126,16 @@ impl DaemonState {
         self.transcribing.subscribe()
     }
 
-    /// The count and the flag move together under the lock, or two presses at
-    /// once leave the flag on the wrong one.
-    pub fn telling_started(&self) {
-        let mut live = self.deliveries.lock().unwrap();
-        *live += 1;
-        self.telling.send_replace(true);
-    }
-
-    pub fn telling_ended(&self) {
-        let mut live = self.deliveries.lock().unwrap();
-        *live = live.saturating_sub(1);
-        self.telling.send_replace(*live > 0);
-    }
-
-    pub fn is_telling(&self) -> bool {
-        *self.telling.borrow()
-    }
-
-    pub fn subscribe_telling(&self) -> watch::Receiver<bool> {
-        self.telling.subscribe()
-    }
-
-    /// Why the last dictation failed. `None` clears a dictation failure and
-    /// leaves a tell failure standing.
+    /// Why the last recording failed. `None` clears it.
     pub fn set_last_error(&self, error: Option<String>) {
-        self.write_failure(Source::Dictation, error);
-    }
-
-    /// Why the last agent run failed. Only the next agent run clears it.
-    pub fn set_tell_error(&self, error: Option<String>) {
-        self.write_failure(Source::Tell, error);
-    }
-
-    fn write_failure(&self, from: Source, reason: Option<String>) {
-        self.last_error.send_if_modified(|current| {
-            let next = match reason {
-                Some(reason) => Some(Failed { from, reason }),
-                None if current.as_ref().is_some_and(|failed| failed.from != from) => {
-                    return false;
-                }
-                None => None,
-            };
-            if *current == next {
-                return false;
-            }
-            *current = next;
-            true
-        });
+        send_if_new(&self.last_error, error);
     }
 
     pub fn last_error(&self) -> Option<String> {
-        self.last_error
-            .borrow()
-            .as_ref()
-            .map(|failed| failed.reason.clone())
+        self.last_error.borrow().clone()
     }
 
-    pub fn subscribe_last_error(&self) -> watch::Receiver<Option<Failed>> {
+    pub fn subscribe_last_error(&self) -> watch::Receiver<Option<String>> {
         self.last_error.subscribe()
     }
 
@@ -800,18 +1161,29 @@ impl DaemonState {
         let _ = self.downloads.send(progress);
     }
 
+    #[cfg(target_os = "macos")]
     pub fn is_downloading(&self) -> bool {
         self.downloading.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub fn request_restart(&self) {
+    /// Shuts the daemon down to exit with the status that has its supervisor
+    /// start it again.
+    pub fn leave_to_restart(&self) {
         self.restart_wanted
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.shutdown.notify_one();
     }
 
-    pub fn restart_wanted(&self) -> bool {
-        self.restart_wanted
+    /// The status the daemon exits with once it shuts down.
+    pub fn exit_code(&self) -> u8 {
+        if self
+            .restart_wanted
             .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            RESTART_EXIT
+        } else {
+            0
+        }
     }
 
     /// Takes the download slot, or `None` when one is already running. The
@@ -834,7 +1206,8 @@ impl DaemonState {
         self.recording_mode() != RecordingMode::Idle
     }
 
-    /// True while the daemon holds the microphone open for a spoken answer.
+    /// True while a question waits for its spoken answer, from before it plays
+    /// until the answer ends.
     pub fn is_armed(&self) -> bool {
         matches!(
             self.recording_mode(),
@@ -854,27 +1227,44 @@ impl DaemonState {
         &self.machine.config
     }
 
+    pub fn credentials_path(&self) -> &std::path::Path {
+        &self.machine.credentials
+    }
+
     pub fn voiceover_on(&self) -> bool {
         (self.machine.voiceover)()
+    }
+
+    pub fn licences(&self) -> &std::path::Path {
+        &self.machine.licences
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn read_accessibility(&self) -> bool {
+        (self.machine.accessibility)()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn microphone_access(&self) -> Option<Refusal> {
+        (self.machine.microphone)()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn key_presses(&self) -> crate::permissions::Access {
+        (self.machine.key_presses)()
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn typer_blockers(&self) -> Vec<banshee_common::Blocker> {
+        (self.machine.typer_blockers)()
     }
 
     pub fn version(&self) -> &'static str {
         self.version
     }
 
-    pub fn stt_model(&self) -> Option<&'static str> {
-        *self
-            .stt_model
-            .read()
-            .unwrap_or_else(|poison| poison.into_inner())
-    }
-
-    /// `None` for a listener that loads no file.
-    pub fn set_stt_model(&self, model: Option<&'static str>) {
-        *self
-            .stt_model
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = model;
+    pub fn stt_model(&self) -> Option<&'static ListeningModel> {
+        self.listening().model()
     }
 
     pub fn vad_model(&self) -> &str {
@@ -924,8 +1314,7 @@ impl DaemonState {
     }
 
     fn publish_device_change(&self) {
-        self.device_changes
-            .send_modify(|generation| *generation += 1);
+        self.device_changes.bump();
     }
 
     /// Moves when the device a client can see changes. The value is a
@@ -938,8 +1327,244 @@ impl DaemonState {
         self.pipeline.borrow().clone()
     }
 
-    pub fn set_pipeline(&self, state: Pipeline) {
-        self.pipeline.send_replace(state);
+    /// A client reports whether capture is open, and nothing else wakes its
+    /// push when only that moves, so a move counts as a device change.
+    pub fn set_mic(&self, mic: Mic) {
+        let mut moved = false;
+        self.update(|facts| {
+            moved = (facts.mic == Mic::Open) != (mic == Mic::Open);
+            facts.mic = mic;
+        });
+        if moved {
+            self.publish_device_change();
+        }
+    }
+
+    /// Pushed, so a tray tells a refused microphone from an idle one.
+    pub fn set_microphone_refusal(&self, refusal: Option<Refusal>) {
+        let moved = std::mem::replace(&mut *lock(&self.microphone_refusal), refusal) != refusal;
+        if moved {
+            self.publish_device_change();
+        }
+    }
+
+    pub fn microphone_refusal(&self) -> Option<Refusal> {
+        *lock(&self.microphone_refusal)
+    }
+
+    /// Pushed, so the tray and the spoken problem line follow the switch.
+    /// Answers whether the stored grant moved.
+    #[cfg(target_os = "macos")]
+    pub fn note_accessibility(&self, granted: bool) -> bool {
+        let moved = self
+            .accessibility
+            .swap(granted, std::sync::atomic::Ordering::Relaxed)
+            != granted;
+        if moved {
+            self.publish_device_change();
+        }
+        moved
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn noted_accessibility(&self) -> bool {
+        self.accessibility
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn microphone_open(&self) -> bool {
+        lock(&self.facts).mic == Mic::Open
+    }
+
+    #[cfg(test)]
+    pub fn mic(&self) -> Mic {
+        lock(&self.facts).mic.clone()
+    }
+
+    pub fn listening(&self) -> Listening {
+        lock(&self.facts).listening.clone()
+    }
+
+    #[cfg(test)]
+    pub fn set_listening(&self, listening: Listening) {
+        self.update(|facts| facts.listening = listening);
+    }
+
+    /// The listener key on file moved. A remote listener sends with it from
+    /// the next use, and one with no key says why it cannot.
+    pub fn listener_key_changed(&self) {
+        let now = match crate::speech_to_text::key_refusal(self.credentials_path()) {
+            Some(error) => Listening::Refused(error),
+            None => Listening::Remote,
+        };
+        self.update(|facts| {
+            if facts.listening.is_remote() {
+                facts.listening = now;
+            }
+        });
+    }
+
+    /// Where the listener in force sends what it hears.
+    pub fn listener_route(&self) -> crate::speech_to_text::Route {
+        lock(&self.facts).route.clone()
+    }
+
+    /// The listener just installed, and what it has of its model.
+    pub fn install_listener(&self, route: crate::speech_to_text::Route, listening: Listening) {
+        self.update(|facts| {
+            facts.route = route;
+            facts.listening = listening;
+        });
+    }
+
+    /// Stops any request on its way to the server in force. `next` is the
+    /// listener to take over, or `None` for a removed key. A removed key
+    /// leaves a pending turn-off in place, since the turn-off already goes local.
+    pub fn withdraw_listener(&self, next: Option<crate::config::STTConfig>) {
+        let mut withdrawals = lock(&self.withdrawals);
+        withdrawals.count += 1;
+        if next.is_some() {
+            withdrawals.next = next;
+        }
+    }
+
+    pub fn listener_withdrawals(&self) -> u64 {
+        lock(&self.withdrawals).count
+    }
+
+    /// A withdrawal landed after the one `seen` and no switch undid it.
+    pub fn listener_withdrawn_since(&self, seen: u64) -> bool {
+        let withdrawals = lock(&self.withdrawals);
+        withdrawals.count > seen.max(withdrawals.settled)
+    }
+
+    pub fn asked_listener_route(&self) -> crate::speech_to_text::Route {
+        lock(&self.asked_listener).clone()
+    }
+
+    pub fn take_withdrawn_listener(&self) -> Option<crate::config::STTConfig> {
+        lock(&self.withdrawals).next.take()
+    }
+
+    /// Hands the listener the config it switches to. A switch to a server
+    /// undoes a turn-off still pending, so the commands queued after it
+    /// follow the latest choice.
+    pub fn replace_listener(&self, stt: crate::config::STTConfig) -> bool {
+        *lock(&self.asked_listener) = crate::speech_to_text::Route::of(&stt);
+        if stt.provider.is_remote() {
+            let mut withdrawals = lock(&self.withdrawals);
+            if withdrawals.next.take().is_some() {
+                withdrawals.settled = withdrawals.count;
+            }
+        }
+        self.commands
+            .send(ConsumerCommand::Replace(Box::new(stt)))
+            .is_ok()
+    }
+
+    /// A listener that serves no model takes `model`: loading when `here`
+    /// says its file is, and waiting for it otherwise. One that serves keeps
+    /// its model, and a load in flight serves, so a second caller finds it and
+    /// sends no second load. A remote listener holds no engine to load into,
+    /// so it keeps its place. Answers what the listener had, read under the
+    /// same lock as the write.
+    pub fn claim_listening_model(&self, model: &'static ListeningModel, here: bool) -> Listening {
+        let mut had = Listening::Remote;
+        self.update(|facts| {
+            had = facts.listening.clone();
+            if !had.serves() && !had.is_remote() {
+                facts.listening = if here {
+                    Listening::Loading(model)
+                } else {
+                    Listening::Missing(model)
+                };
+            }
+        });
+        had
+    }
+
+    /// `None` for a listener that loads no file.
+    pub fn listening_model_loaded(&self, model: Option<&'static ListeningModel>) {
+        self.update(|facts| {
+            facts.listening = model.map_or(Listening::Remote, Listening::Loaded);
+        });
+    }
+
+    /// A model that already serves listens on, so only a listener with none,
+    /// or one that is loading, takes the failure as its fault.
+    pub fn listening_model_failed(&self, model: &'static ListeningModel, error: String) {
+        self.update(|facts| {
+            if matches!(facts.listening, Listening::Loading(_)) || !facts.listening.serves() {
+                facts.listening = Listening::Failed(model, error);
+            }
+        });
+    }
+
+    /// The listener reads the model it idled out of back into memory.
+    /// Answers whether this caller owns the load; a load claimed for a file
+    /// that arrived ends with its own `Reload`.
+    pub fn listening_model_loading(&self) -> bool {
+        let mut ours = false;
+        self.update(|facts| {
+            if let Listening::Available(model) = facts.listening {
+                facts.listening = Listening::Loading(model);
+                ours = true;
+            }
+        });
+        ours
+    }
+
+    /// The load `listening_model_loading` gave this caller ended: the model is
+    /// in memory, or it stays on disk for the next use to try again.
+    pub fn listening_model_read(&self, loaded: bool) {
+        self.update(|facts| {
+            if let Listening::Loading(model) = facts.listening {
+                facts.listening = if loaded {
+                    Listening::Loaded(model)
+                } else {
+                    Listening::Available(model)
+                };
+            }
+        });
+    }
+
+    /// The model idled out of memory. The next use reads it again.
+    pub fn listening_model_unloaded(&self) {
+        self.update(|facts| {
+            if let Listening::Loaded(model) = facts.listening {
+                facts.listening = Listening::Available(model);
+            }
+        });
+    }
+
+    /// How long a local model stays loaded after its last use, or `None`
+    /// when it stays for good.
+    pub fn unload_after(&self) -> Option<Duration> {
+        *lock(&self.unload_after)
+    }
+
+    /// The listener and the voice each measure their idle wait again.
+    pub fn set_unload_after(&self, limit: Option<Duration>) {
+        *lock(&self.unload_after) = limit;
+        if let Some(keeper) = self.voice_keeper.get() {
+            keeper.unpark();
+        }
+        let _ = self.commands.send(ConsumerCommand::UnloadAfter);
+    }
+
+    pub fn set_voice_keeper(&self, keeper: std::thread::Thread) {
+        let _ = self.voice_keeper.set(keeper);
+    }
+
+    fn update(&self, change: impl FnOnce(&mut Facts)) {
+        let mut facts = lock(&self.facts);
+        change(&mut facts);
+        let now = pipeline(&facts.mic, &facts.listening);
+        self.pipeline.send_if_modified(|held| {
+            let moved = *held != now;
+            *held = now;
+            moved
+        });
     }
 
     pub fn subscribe_pipeline(&self) -> watch::Receiver<Pipeline> {
@@ -1021,6 +1646,17 @@ impl DaemonState {
     pub fn disarm(&self, session: u64) {
         let current = lock(&self.armed_session);
         if *current == session {
+            self.answering
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            for owed in [ARM_WAITS, ARM_HEARD, ARM_PLAYED] {
+                let _ = self.start_cue.compare_exchange(
+                    owed,
+                    NO_START_CUE,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            self.wake_mic();
             let _ = self.try_transition(RecordingMode::Armed, RecordingMode::Idle)
                 || self.try_transition(RecordingMode::ArmedHold, RecordingMode::Idle);
             self.set_answer_open(false);
@@ -1038,10 +1674,16 @@ impl DaemonState {
             .clone()
     }
 
-    /// Whether the speaker `[tts]` names is the one running. False under the OS
-    /// voice, which sends no text out whatever the config asks for.
+    /// Whether the speaker `[tts]` names is the one running. False under the
+    /// fallback or silence, which send no text out whatever the config asks for.
     pub fn speaker_started(&self) -> bool {
         self.speaker_started
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_speaker_started(&self, started: bool) {
+        self.speaker_started
+            .store(started, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// True when the backend took the change. The voice the window marks as
@@ -1051,15 +1693,38 @@ impl DaemonState {
         let Some(voice) = self.speech.reconfigure(tts) else {
             return false;
         };
-        self.set_tts_voice(voice);
+        self.set_tts_voice(Some(voice));
         true
     }
 
-    pub fn set_tts_voice(&self, voice: String) {
+    pub fn set_tts_voice(&self, voice: Option<String>) {
         *self
             .tts_voice
             .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(voice);
+            .unwrap_or_else(|poison| poison.into_inner()) = voice;
+    }
+
+    /// What the speaker in force was built from.
+    pub fn speaker_spec(&self) -> crate::text_to_speech::SpeakerSpec {
+        lock(&self.speaker_spec).clone()
+    }
+
+    pub fn speaker_provider(&self) -> crate::config::Provider {
+        lock(&self.speaker_spec).provider
+    }
+
+    /// Puts the speaker `tts` names in place and reports it as a start does.
+    /// With `cut_off`, the line playing starts again on it. False when nothing
+    /// can build a speaker.
+    pub fn switch_speaker(&self, tts: &crate::config::TTSConfig, cut_off: bool) -> bool {
+        let Some(switched) = self.speech.switch(tts, cut_off) else {
+            return false;
+        };
+        self.set_speaker_started(switched.speaker.started());
+        self.set_tts_voice(switched.speaker.voice());
+        self.set_last_speech_error(switched.fault);
+        *lock(&self.speaker_spec) = crate::text_to_speech::SpeakerSpec::of(tts);
+        true
     }
 
     /// Every file this daemon's own config needs. Set before the socket
@@ -1095,22 +1760,17 @@ impl DaemonState {
         *self.config.write().unwrap() = config;
     }
 
-    /// The config the restart-only keys are running.
-    pub fn running_config(&self) -> Arc<Config> {
-        Arc::clone(&self.running_config)
-    }
-
     pub fn pending(&self) -> Vec<String> {
         self.pending.lock().unwrap().iter().cloned().collect()
     }
 
     /// One key is either applied or waiting, never both.
-    pub fn record_outcome(&self, applied: &[String], restart_required: &[String]) {
+    pub fn record_outcome(&self, applied: &[String], waiting: &[String]) {
         let mut pending = self.pending.lock().unwrap();
         for key in applied {
             pending.remove(key);
         }
-        for key in restart_required {
+        for key in waiting {
             pending.insert(key.clone());
         }
     }
@@ -1126,6 +1786,16 @@ impl DaemonState {
 
     pub fn subscribe_feedback(&self) -> watch::Receiver<FeedbackMode> {
         self.cues.subscribe_mode()
+    }
+
+    pub fn speaks_problems(&self) -> bool {
+        self.speak_problems
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_speak_problems(&self, speak: bool) {
+        self.speak_problems
+            .store(speak, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn barge_in(&self) -> BargeInMode {
@@ -1148,14 +1818,17 @@ impl DaemonState {
         self.commands.send(ConsumerCommand::Retune(words)).is_ok()
     }
 
-    /// What language the next utterance is read as, and whether it answers in
-    /// English. The engine reads both per utterance, so no model moves.
+    /// Whether the next utterance answers in English. The engine reads it per
+    /// utterance, so no model moves.
     pub fn set_speech(&self, speech: crate::speech_to_text::Speech) -> bool {
         self.commands.send(ConsumerCommand::Speak(speech)).is_ok()
     }
 
-    pub fn load_stt_model(&self, preset: crate::config::STTPreset) -> bool {
-        self.commands.send(ConsumerCommand::Reload(preset)).is_ok()
+    pub fn load_stt_model(
+        &self,
+        model: &'static banshee_common::listening::ListeningModel,
+    ) -> bool {
+        self.commands.send(ConsumerCommand::Reload(model)).is_ok()
     }
 
     pub fn set_vad_threshold(&self, threshold: f32) {
@@ -1170,28 +1843,144 @@ impl DaemonState {
         f32::from_bits(bits)
     }
 
-    /// Runs `job` against the history file, or answers `None` when history is
-    /// off. The one place that holds the lock, so no caller repeats the two
-    /// steps that stand between it and the table.
-    pub fn with_history<T>(&self, job: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
-        let held = self
-            .db_connection
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        held.as_ref().map(job)
+    pub fn set_endpoint_silence_ms(&self, ms: u64) {
+        self.endpoint_silence_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
+    pub fn endpoint_silence_ms(&self) -> u64 {
+        self.endpoint_silence_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The hotkey and its mode, with the generation that moves on each change.
+    pub fn binding(&self) -> (crate::binding::Hotkey, crate::config::HotkeyMode, u64) {
+        let pair = lock(&self.binding);
+        (pair.0, pair.1, self.binding_generation())
+    }
+
+    pub fn set_binding(&self, hotkey: crate::binding::Hotkey, mode: crate::config::HotkeyMode) {
+        let mut pair = lock(&self.binding);
+        *pair = (hotkey, mode);
+        self.binding_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn binding_generation(&self) -> u64 {
+        self.binding_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn history_store(&self) -> std::sync::MutexGuard<'_, crate::history::Store> {
+        self.history
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Whether `daemon.save_history` is on. Only new rows depend on it: listing
+    /// and clearing work either way.
     pub fn history_enabled(&self) -> bool {
-        self.with_history(|_| ()).is_some()
+        self.save_history.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Opening and closing the file is the whole of `daemon.save_history`, so a
-    /// write between two dictations decides whether the next one is kept.
-    pub fn set_history(&self, connection: Option<rusqlite::Connection>) {
-        *self
-            .db_connection
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = connection;
+    pub fn set_save_history(&self, save: bool) {
+        self.save_history
+            .store(save, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn history_changes(&self) -> u64 {
+        self.history_changes.now()
+    }
+
+    pub fn keep(&self, entry: &crate::history::NewEntry) {
+        if !self.history_enabled() {
+            return;
+        }
+        let kept = self.history_store().keep(entry);
+        match kept {
+            Ok(_) => self.history_changes.bump(),
+            Err(error) => log::error!("Failed to keep a history row: {error}"),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn keep_audio(&self) -> crate::config::KeepAudio {
+        self.history_store().keep_audio()
+    }
+
+    /// Purges at once, so a shorter period deletes what it no longer covers.
+    pub fn set_keep_audio(&self, keep: crate::config::KeepAudio) {
+        let folder = {
+            let mut store = self.history_store();
+            store.set_keep_audio(keep);
+            store.audio_folder()
+        };
+        folder.purge(std::time::SystemTime::now());
+    }
+
+    /// Runs whether or not Save history is on.
+    pub fn purge_audio(&self) {
+        let folder = self.history_store().audio_folder();
+        folder.purge(std::time::SystemTime::now());
+    }
+
+    pub fn history(
+        &self,
+        limit: Option<u32>,
+        kind: Option<crate::history::Kind>,
+    ) -> rusqlite::Result<Vec<crate::history::Entry>> {
+        let (rows, folder) = {
+            let store = self.history_store();
+            (store.list(limit, kind)?, store.audio_folder())
+        };
+        Ok(folder.described(rows))
+    }
+
+    #[cfg(test)]
+    pub fn history_entry(&self, id: i64) -> rusqlite::Result<Option<crate::history::Entry>> {
+        self.history_store().get(id)
+    }
+
+    #[cfg(test)]
+    pub fn audio_path(&self, id: i64) -> Option<std::path::PathBuf> {
+        self.history_store().audio_path(id)
+    }
+
+    pub fn kind_and_audio_file(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<(crate::history::Kind, std::path::PathBuf)>> {
+        self.history_store().kind_and_audio_file(id)
+    }
+
+    pub fn retried(&self, id: i64, text: &str) -> rusqlite::Result<crate::history::Entry> {
+        self.history_store().retried(id, text)
+    }
+
+    pub fn clear_history(&self) -> Result<(), banshee_common::error::BansheeError> {
+        self.history_store().clear()?;
+        self.history_changes.bump();
+        Ok(())
+    }
+
+    /// Moves when a row is kept or the history is cleared. The value is a
+    /// count, not a row: the reader lists the history itself.
+    pub fn subscribe_history_changes(&self) -> watch::Receiver<u64> {
+        self.history_changes.subscribe()
+    }
+
+    pub fn settings_changes(&self) -> u64 {
+        self.settings_changes.now()
+    }
+
+    /// Moves once per persisted settings write, after its applies, so a reader
+    /// woken by it sees the speaker and listener the write built.
+    pub fn bump_settings_changes(&self) {
+        self.settings_changes.bump();
+    }
+
+    pub fn subscribe_settings_changes(&self) -> watch::Receiver<u64> {
+        self.settings_changes.subscribe()
     }
 
     /// Called from the real time audio thread, so it must not lock or allocate.
@@ -1257,10 +2046,38 @@ impl DaemonState {
         *self.level_watchers.borrow()
     }
 
+    /// Every call wakes each receiver, so a recording that ends with no words
+    /// still sends its empty text.
+    pub fn publish_words(&self, text: &str) {
+        self.words.send_replace(text.to_string());
+    }
+
+    pub fn subscribe_words(&self) -> watch::Receiver<String> {
+        self.words.subscribe()
+    }
+
+    pub fn publish_question(&self, text: &str, client: Option<&str>) {
+        self.question.send_replace(Question {
+            text: text.to_string(),
+            client: client.map(str::to_string),
+        });
+    }
+
+    pub fn subscribe_question(&self) -> watch::Receiver<Question> {
+        self.question.subscribe()
+    }
+
+    /// Whether a client shows the words. Each subscriber's push task holds a
+    /// receiver until its connection ends.
+    pub fn is_words_watched(&self) -> bool {
+        self.words.receiver_count() > 0
+    }
+
     pub fn cues(&self) -> &Cues {
         &self.cues
     }
 }
 
+mod change_count;
 #[cfg(test)]
 mod tests;

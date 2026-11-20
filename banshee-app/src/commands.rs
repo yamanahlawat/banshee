@@ -1,13 +1,32 @@
 use crate::calls::{self, CommandError, Devices, Voices};
 use crate::socket::Client;
-use banshee_common::{AgentRow, PlannedChange, rpc_code, utils};
+use banshee_common::{AgentRow, NO_AUDIO, PlannedChange, rpc_code, utils};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
 use tokio::sync::Mutex;
 
 pub const NO_HOME_DIR: &str = "Banshee cannot find your home directory.";
+
+/// What the process was started to show: `--missed` from a click on the
+/// tray's missed pill.
+pub struct Launch {
+    missed: AtomicBool,
+}
+
+impl Launch {
+    pub fn new(missed: bool) -> Self {
+        Launch {
+            missed: AtomicBool::new(missed),
+        }
+    }
+
+    fn take(&self) -> bool {
+        self.missed.swap(false, Ordering::Relaxed)
+    }
+}
 
 /// The path resolves once, so a missing home directory cannot stop the window opening.
 pub struct Daemon {
@@ -46,6 +65,38 @@ impl Daemon {
         let mut client = self.client.lock().await;
         retrying(path, &mut client, body).await
     }
+
+    /// One call over a connection of its own, for a call the daemon may answer slowly: on the
+    /// shared connection it would hold every other call until the daemon answered.
+    async fn call_apart<T>(
+        &self,
+        body: impl for<'client> FnMut(&'client mut Client) -> Attempt<'client, T>,
+    ) -> Result<T, CommandError> {
+        retrying(self.path_or_error()?, &mut None, body).await
+    }
+
+    /// Apart, because the daemon starts a login shell to read `PATH` before it answers.
+    async fn agents(&self) -> Result<Vec<AgentRow>, CommandError> {
+        self.call_apart(|client| Box::pin(calls::detect_agents(client)))
+            .await
+    }
+
+    /// Apart, because a retry has no deadline.
+    async fn retry(&self, id: i64) -> Result<serde_json::Value, CommandError> {
+        self.call_apart(|client| Box::pin(calls::retry(client, id)))
+            .await
+    }
+
+    /// Asks the daemon to restart, then drops the connection. The daemon keeps
+    /// answering on it until it exits, so the next call has to reach the new one.
+    #[cfg(target_os = "macos")]
+    async fn restart(&self) -> Result<(), CommandError> {
+        let path = self.path_or_error()?;
+        let mut client = self.client.lock().await;
+        retrying(path, &mut client, |client| Box::pin(calls::restart(client))).await?;
+        *client = None;
+        Ok(())
+    }
 }
 
 impl Default for Daemon {
@@ -54,10 +105,11 @@ impl Default for Daemon {
     }
 }
 
-/// True only for a connection that died before the request left the client.
-/// A request the daemon received may already have run, so a replay could
-/// speak a preview twice or rewrite an agent's config twice.
-fn is_safe_to_retry(error: &CommandError) -> bool {
+/// True only for a connection that died before the request left the client,
+/// which is the only failure safe to retry. A request the daemon received may
+/// already have run, so a replay could speak a preview twice or rewrite an
+/// agent's config twice.
+fn never_reached_the_daemon(error: &CommandError) -> bool {
     error.transport && !error.sent
 }
 
@@ -105,7 +157,7 @@ pub async fn retrying<T>(
     match body(client).await {
         Err(error) if error.transport => {
             *slot = None;
-            if !is_safe_to_retry(&error) {
+            if !never_reached_the_daemon(&error) {
                 return Err(error);
             }
             body(force_reconnect(slot, path).await?).await
@@ -116,18 +168,170 @@ pub async fn retrying<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Daemon, is_safe_to_retry};
+    use super::{Daemon, Launch, never_reached_the_daemon};
     use crate::calls::CommandError;
     use crate::socket::{RpcError, SOCKET_CLOSED};
     use banshee_common::rpc_code;
     use std::path::PathBuf;
     use tokio::sync::Mutex;
 
+    #[test]
+    fn a_missed_launch_is_read_once() {
+        let launch = Launch::new(true);
+        assert!(launch.take());
+        assert!(!launch.take());
+        assert!(!Launch::new(false).take());
+    }
+
     fn daemon(path: Option<&str>) -> Daemon {
         Daemon {
             path: path.map(PathBuf::from),
             client: Mutex::new(None),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_restart_lets_go_of_the_daemon_that_is_leaving() {
+        use banshee_common::{BANSHEE_RESTART, JsonRpcRequest, JsonRpcResponse};
+        use std::io::{BufRead, BufReader, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("banshee.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // Returns the stream unclosed: a daemon on its way out still answers on it.
+        let leaving = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: JsonRpcRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(request.method, BANSHEE_RESTART);
+            let reply = JsonRpcResponse::success(request.id, serde_json::json!({"ok": true}));
+            writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+            stream
+        });
+        let daemon = Daemon {
+            path: Some(path),
+            client: Mutex::new(None),
+        };
+
+        daemon.restart().await.unwrap();
+
+        assert!(
+            daemon.client.lock().await.is_none(),
+            "the next call must reach the daemon launchd starts, not this one"
+        );
+        drop(leaving.join().unwrap());
+    }
+
+    struct Holding {
+        _dir: tempfile::TempDir,
+        daemon: Daemon,
+        reached: tokio::sync::mpsc::UnboundedReceiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    /// A daemon that holds `slow` until released, then answers it with `answer`, and answers
+    /// anything else at once.
+    fn a_daemon_holding(slow: &'static str, answer: serde_json::Value) -> Holding {
+        use banshee_common::{JsonRpcRequest, JsonRpcResponse};
+        use std::io::{BufRead, BufReader, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("banshee.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let (reached_tx, reached) = tokio::sync::mpsc::unbounded_channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Arc::new(std::sync::Mutex::new(released));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let reached_tx = reached_tx.clone();
+                let released = released.clone();
+                let answer = answer.clone();
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let request: JsonRpcRequest = serde_json::from_str(&line).unwrap();
+                    let result = if request.method == slow {
+                        reached_tx.send(()).unwrap();
+                        released.lock().unwrap().recv().unwrap();
+                        answer
+                    } else {
+                        serde_json::json!({"running": true})
+                    };
+                    let reply = JsonRpcResponse::success(request.id, result);
+                    writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+                });
+            }
+        });
+        Holding {
+            daemon: daemon(Some(path.to_str().unwrap())),
+            _dir: dir,
+            reached,
+            release,
+        }
+    }
+
+    async fn status_answers(daemon: &Daemon) -> bool {
+        let status = daemon
+            .call(|client| Box::pin(crate::calls::status(client)))
+            .await
+            .unwrap();
+        status["running"] == true
+    }
+
+    #[tokio::test]
+    async fn a_retry_waiting_on_the_daemon_leaves_the_shared_connection_free() {
+        let mut held = a_daemon_holding(
+            banshee_common::BANSHEE_RETRY,
+            serde_json::json!({"row": {"id": 7}}),
+        );
+
+        let retry = held.daemon.retry(7);
+        tokio::pin!(retry);
+        tokio::select! {
+            _ = &mut retry => panic!("the retry answered before the daemon let it go"),
+            _ = held.reached.recv() => {}
+        }
+        assert!(
+            held.daemon.client.try_lock().is_ok(),
+            "a retry the daemon holds must not hold every other call with it"
+        );
+        assert!(status_answers(&held.daemon).await);
+        held.release.send(()).unwrap();
+
+        assert_eq!(retry.await.unwrap(), serde_json::json!({"id": 7}));
+    }
+
+    #[tokio::test]
+    async fn an_agents_read_waiting_on_the_daemon_leaves_the_shared_connection_free() {
+        let row = serde_json::json!({
+            "id": "claude", "name": "Claude Code", "presence": "connected", "note": "Connected"
+        });
+        let mut held = a_daemon_holding(
+            banshee_common::BANSHEE_AGENTS,
+            serde_json::json!({"agents": [row]}),
+        );
+
+        let agents = held.daemon.agents();
+        tokio::pin!(agents);
+        tokio::select! {
+            _ = &mut agents => panic!("the agents read answered before the daemon let it go"),
+            _ = held.reached.recv() => {}
+        }
+        assert!(
+            held.daemon.client.try_lock().is_ok(),
+            "an agents read the daemon holds must not hold every other call with it"
+        );
+        assert!(status_answers(&held.daemon).await);
+        held.release.send(()).unwrap();
+
+        assert_eq!(agents.await.unwrap()[0].id, "claude");
     }
 
     #[test]
@@ -164,7 +368,7 @@ mod tests {
     fn a_request_that_never_left_the_client_is_safe_to_send_again() {
         // The write side fails first on a restart, and the operating system
         // names that one itself.
-        assert!(is_safe_to_retry(&from_socket(
+        assert!(never_reached_the_daemon(&from_socket(
             -32000,
             "Broken pipe (os error 32)",
             true,
@@ -176,7 +380,7 @@ mod tests {
     fn a_request_the_daemon_may_have_run_is_never_replayed() {
         // An EOF while waiting for the reply: the daemon held the request and
         // may have acted on it before it died.
-        assert!(!is_safe_to_retry(&from_socket(
+        assert!(!never_reached_the_daemon(&from_socket(
             -32000,
             SOCKET_CLOSED,
             true,
@@ -186,7 +390,7 @@ mod tests {
 
     #[test]
     fn a_refusal_the_daemon_wrote_is_never_a_dead_connection() {
-        assert!(!is_safe_to_retry(&from_socket(
+        assert!(!never_reached_the_daemon(&from_socket(
             rpc_code::INVALID_PARAMS,
             "Disconnect is not available yet.",
             false,
@@ -194,25 +398,12 @@ mod tests {
         )));
         // The daemon writes `-32000` for its own refusals too, so the code
         // alone must not decide this.
-        assert!(!is_safe_to_retry(&from_socket(
+        assert!(!never_reached_the_daemon(&from_socket(
             -32000,
             "Microphone unavailable.",
             false,
             true
         )));
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn starting_the_daemon_leaves_a_running_unit_alone() {
-        assert_eq!(
-            super::systemctl_args(banshee_common::utils::DAEMON_AGENT, false),
-            Some(vec![
-                "--user".to_string(),
-                "start".to_string(),
-                "banshee.service".to_string(),
-            ])
-        );
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -228,6 +419,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_licence_opens_only_from_the_catalogue() {
+        assert_eq!(
+            super::licence_url("whisper-large-v3-turbo"),
+            Some("https://spdx.org/licenses/MIT.html")
+        );
+        assert_eq!(super::licence_url("https://example.com"), None);
+    }
+
+    #[test]
+    fn a_licence_that_did_not_open_names_its_url() {
+        assert_eq!(
+            super::not_opened("https://spdx.org/licenses/MIT.html"),
+            "The licence did not open. Read it at https://spdx.org/licenses/MIT.html."
+        );
+    }
+
+    #[test]
+    fn a_failed_command_answers_with_the_line_it_said_last() {
+        let said = b"Failed to choose a first feedback mode\nBanshee did not start: Delete `preset` under [stt].\n\n";
+        assert_eq!(
+            super::refusal_of("start", said),
+            "Banshee did not start: Delete `preset` under [stt]."
+        );
+        assert_eq!(
+            super::refusal_of("start", b""),
+            "banshee start did not finish"
+        );
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn starting_the_tray_names_its_unit() {
@@ -240,6 +461,29 @@ mod tests {
             ])
         );
     }
+
+    #[test]
+    fn the_window_mock_is_the_table_the_common_crate_holds() {
+        let mock: serde_json::Value =
+            serde_json::from_str(include_str!("../ui/src/mocks/settings.json")).unwrap();
+        assert_eq!(
+            mock,
+            serde_json::to_value(banshee_common::settings::SETTINGS).unwrap()
+        );
+    }
+}
+
+/// True for the first call only.
+#[tauri::command]
+pub fn launch_missed(launch: State<'_, Launch>) -> bool {
+    launch.take()
+}
+
+/// The table of settings the daemon takes, as the window reads it. No socket
+/// call: the table is data compiled into both binaries.
+#[tauri::command]
+pub fn settings_table() -> serde_json::Value {
+    serde_json::to_value(banshee_common::settings::SETTINGS).expect("the table is plain data")
 }
 
 #[tauri::command]
@@ -277,13 +521,6 @@ pub async fn list_voices(daemon: State<'_, Daemon>) -> Result<Voices, CommandErr
 }
 
 #[tauri::command]
-pub async fn list_languages(daemon: State<'_, Daemon>) -> Result<calls::Languages, CommandError> {
-    daemon
-        .call(|client| Box::pin(calls::list_languages(client)))
-        .await
-}
-
-#[tauri::command]
 pub async fn preview_voice(daemon: State<'_, Daemon>, id: String) -> Result<(), CommandError> {
     daemon
         .call(|client| {
@@ -302,9 +539,7 @@ pub async fn download_models(daemon: State<'_, Daemon>) -> Result<(), CommandErr
 
 #[tauri::command]
 pub async fn detect_agents(daemon: State<'_, Daemon>) -> Result<Vec<AgentRow>, CommandError> {
-    daemon
-        .call(|client| Box::pin(calls::detect_agents(client)))
-        .await
+    daemon.agents().await
 }
 
 #[tauri::command]
@@ -353,6 +588,28 @@ pub async fn clear_history(daemon: State<'_, Daemon>) -> Result<(), CommandError
 }
 
 #[tauri::command]
+pub async fn history_audio(
+    daemon: State<'_, Daemon>,
+    id: i64,
+) -> Result<tauri::ipc::Response, CommandError> {
+    let path = daemon
+        .call(|client| Box::pin(calls::history_audio(client, id)))
+        .await?;
+    let bytes = tokio::fs::read(path).await.map_err(|_| CommandError {
+        code: rpc_code::INVALID_PARAMS,
+        message: NO_AUDIO.to_string(),
+        transport: false,
+        sent: true,
+    })?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+pub async fn retry(daemon: State<'_, Daemon>, id: i64) -> Result<serde_json::Value, CommandError> {
+    daemon.retry(id).await
+}
+
+#[tauri::command]
 pub async fn open_permission_pane(
     daemon: State<'_, Daemon>,
     id: String,
@@ -378,6 +635,36 @@ pub async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), Comman
         })
 }
 
+/// The window names a model, never a URL, so it can open only what the
+/// catalogue links to.
+fn licence_url(model: &str) -> Option<&'static str> {
+    banshee_common::listening::find(model).map(|model| model.licence.url)
+}
+
+#[tauri::command]
+pub async fn open_licence(model: String) -> Result<(), CommandError> {
+    let url =
+        licence_url(&model).ok_or_else(|| failed(format!("'{model}' is not a listening model")))?;
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let opened = tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new(opener).arg(url).status()
+    })
+    .await;
+    match opened {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        _ => Err(failed(not_opened(url))),
+    }
+}
+
+/// The reader can still go to the licence by hand.
+fn not_opened(url: &str) -> String {
+    format!("The licence did not open. Read it at {url}.")
+}
+
 fn failed(message: String) -> CommandError {
     CommandError {
         code: rpc_code::INTERNAL,
@@ -388,47 +675,34 @@ fn failed(message: String) -> CommandError {
 }
 
 /// The socket exists only while the daemon runs, so starting one cannot go over it.
+/// A failure answers with the command's own last line, which says why.
 pub fn run_cli(subcommand: &str) -> Result<(), CommandError> {
-    let status = utils::sibling_command("banshee")
+    let output = utils::sibling_command("banshee")
         .map_err(|error| failed(error.to_string()))?
         .arg(subcommand)
-        .status()
+        .output()
         .map_err(|error| failed(error.to_string()))?;
-    if status.success() {
+    if output.status.success() {
         return Ok(());
     }
-    Err(failed(format!("banshee {subcommand} did not finish")))
+    Err(failed(refusal_of(subcommand, &output.stderr)))
 }
 
-/// Starts one login job. Without `replace`, kickstart leaves a job that already
-/// runs alone, so a daemon part-way through loading its models survives it;
-/// with it, the running job is torn down and started again, which is the only
-/// thing that clears a pipeline that died at startup.
-///
-/// It fails when the job was never bootstrapped, and the subcommand that
-/// installs it runs only then, because installing tears a running job down.
-#[cfg(target_os = "macos")]
-fn kickstart(label: &str, install: &str, replace: bool) -> Result<(), CommandError> {
-    let target = utils::launchd_target(label);
-    let mut args = vec!["kickstart"];
-    if replace {
-        args.push("-k");
-    }
-    args.push(&target);
-    let started = std::process::Command::new("launchctl")
-        .args(&args)
-        .status()
-        .map_err(|error| failed(error.to_string()))?;
-    if started.success() {
-        return Ok(());
-    }
-    run_cli(install)
+fn refusal_of(subcommand: &str, stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .map_or_else(
+            || format!("banshee {subcommand} did not finish"),
+            str::to_string,
+        )
 }
 
-/// The systemd arm. `start` leaves a running unit alone and `restart` tears it
-/// down, which is what `replace` means on launchd. Any failure falls through to
-/// the CLI: the label may name a unit nobody wrote yet, such as a fresh
-/// install where `banshee start` has not run.
+/// Starts one systemd unit. Without `replace`, `start` leaves a running unit
+/// alone; with it, `restart` tears the unit down first. Any failure falls
+/// through to the CLI: the label may name a unit nobody wrote yet, such as a
+/// fresh install where `banshee start` has not run.
 #[cfg(not(target_os = "macos"))]
 fn kickstart(label: &str, install: &str, replace: bool) -> Result<(), CommandError> {
     if let Some(args) = systemctl_args(label, replace) {
@@ -453,21 +727,49 @@ fn systemctl_args(label: &str, replace: bool) -> Option<Vec<String>> {
 }
 
 /// Puts the menu bar icon up. Not a second copy of the binary, which the
-/// icon's own lock refuses while launchd keeps retrying it.
+/// icon's own lock refuses while its supervisor keeps retrying it.
+#[cfg(target_os = "macos")]
+pub fn open_the_tray() -> Result<(), CommandError> {
+    crate::login_items::keep_the_tray_running().map_err(failed)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn open_the_tray() -> Result<(), CommandError> {
     kickstart(utils::TRAY_AGENT, "tray", false)
 }
 
-// `banshee start` waits on launchd, so running it on a worker thread would
-// hold that thread and stall every other command the window sends.
+/// `banshee start` on every platform, so a refusal comes back on its stderr.
+fn start_the_daemon() -> Result<(), CommandError> {
+    run_cli("start")
+}
+
+// `banshee start` waits on the service manager, so running it on a worker
+// thread would hold that thread and stall every other command the window sends.
 #[tauri::command]
 pub async fn start_daemon() -> Result<(), CommandError> {
-    tauri::async_runtime::spawn_blocking(|| kickstart(utils::DAEMON_AGENT, "start", false))
+    tauri::async_runtime::spawn_blocking(start_the_daemon)
         .await
         .map_err(|error| failed(error.to_string()))?
 }
 
-/// A setting the daemon reads once, and a pipeline dead at startup, both need the process renewed.
+/// A pipeline dead at start, and a permission grant, both need the process
+/// renewed. The daemon answers, then exits for launchd to start it
+/// again; with no daemon to answer, `banshee start` brings one up.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn restart_daemon(daemon: State<'_, Daemon>) -> Result<(), CommandError> {
+    match daemon.restart().await {
+        Err(error) if never_reached_the_daemon(&error) => {
+            tauri::async_runtime::spawn_blocking(start_the_daemon)
+                .await
+                .map_err(|error| failed(error.to_string()))?
+        }
+        other => other,
+    }
+}
+
+/// A pipeline dead at start, and a permission grant, both need the process renewed.
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 pub async fn restart_daemon() -> Result<(), CommandError> {
     tauri::async_runtime::spawn_blocking(|| kickstart(utils::DAEMON_AGENT, "start", true))

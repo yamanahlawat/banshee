@@ -16,7 +16,7 @@ fn the_peak_keeps_the_loudest_sample_until_it_is_read() {
 fn a_new_press_starts_from_silence() {
     let state = test_state();
     state.note_peak(0.9);
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert!(state.record_start());
     assert_eq!(
         state.take_peak(),
         0.0,
@@ -31,12 +31,17 @@ fn a_published_level_is_clamped_to_one() {
     assert_eq!(*state.subscribe_level().borrow(), 1.0);
 }
 
+const PARAKEET: &str = "parakeet-unified-en-0.6b-Q8_0.gguf";
+const TURBO: &str = "whisper-large-v3-turbo-Q5_K_M.gguf";
+
+fn turbo() -> &'static banshee_common::listening::ListeningModel {
+    banshee_common::listening::find("whisper-large-v3-turbo").unwrap()
+}
+
 #[test]
-fn the_models_wanted_follow_the_preset_the_config_names() {
+fn the_models_wanted_follow_the_model_the_config_names() {
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    let mut config = Config::default();
-    config.stt.preset = crate::config::STTPreset::Fast;
-    state.set_config(std::sync::Arc::new(config));
+    state.set_config(std::sync::Arc::new(Config::default()));
     let named = |state: &DaemonState| {
         state
             .wanted_downloads()
@@ -44,85 +49,129 @@ fn the_models_wanted_follow_the_preset_the_config_names() {
             .map(|d| d.name.clone())
             .collect::<Vec<_>>()
     };
-    assert!(named(&state).contains(&"ggml-base.en.bin".to_string()));
+    assert!(named(&state).contains(&PARAKEET.to_string()));
 
     let mut config = Config::default();
-    config.stt.preset = crate::config::STTPreset::Quality;
+    config.stt.model = "whisper-large-v3-turbo".to_string();
     state.set_config(std::sync::Arc::new(config));
 
     let after = named(&state);
-    assert!(after.contains(&"ggml-large-v3-q5_0.bin".to_string()));
+    assert!(after.contains(&TURBO.to_string()));
     assert!(
-        !after.contains(&"ggml-base.en.bin".to_string()),
+        !after.contains(&PARAKEET.to_string()),
         "the window must stop asking for the model the daemon left behind"
     );
 }
 
 #[test]
-fn a_preset_change_hands_the_listener_the_model_to_load() {
+fn a_model_change_hands_the_listener_the_model_to_load() {
     let (commands, taken) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
 
-    assert!(state.load_stt_model(crate::config::STTPreset::Quality));
+    assert!(state.load_stt_model(turbo()));
 
     match taken.try_recv() {
-        Ok(ConsumerCommand::Reload(preset)) => {
-            assert_eq!(preset.model_name(), "ggml-large-v3-q5_0.bin")
-        }
+        Ok(ConsumerCommand::Reload(model)) => assert_eq!(model.file, TURBO),
         _ => panic!("the listener was handed no model"),
     }
 }
 
 // A listener that has gone cannot load anything, and saying otherwise would
-// report a preset in effect that nothing runs.
+// report a model in effect that nothing runs.
 #[test]
-fn a_preset_change_with_no_listener_is_not_reported_as_taken() {
+fn a_model_change_with_no_listener_is_not_reported_as_taken() {
     let (commands, gone) = std::sync::mpsc::channel();
     let state = crate::test_support::daemon_state(commands);
     drop(gone);
 
-    assert!(!state.load_stt_model(Config::default().stt.preset));
+    assert!(!state.load_stt_model(turbo()));
 }
 
 #[test]
-fn the_model_reported_is_the_one_the_listener_loaded() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    assert_eq!(
-        state.stt_model(),
-        Some(Config::default().stt.preset.model_name())
+fn keeping_a_row_moves_the_counter_and_off_keeps_nothing() {
+    let on = crate::test_support::daemon_state_with_history(&[]);
+    let changes = on.subscribe_history_changes();
+    let before = *changes.borrow();
+    on.keep(&crate::history::NewEntry::dictation("kept"));
+    assert_eq!(*changes.borrow(), before + 1);
+    assert_eq!(on.history(None, None).unwrap().len(), 1);
+
+    on.clear_history().unwrap();
+    assert_eq!(*changes.borrow(), before + 2);
+
+    let off = crate::test_support::daemon_state_with_history_off(&[]);
+    let changes = off.subscribe_history_changes();
+    let before = *changes.borrow();
+    off.keep(&crate::history::NewEntry::dictation("dropped"));
+    assert_eq!(*changes.borrow(), before);
+    assert!(off.history(None, None).unwrap().is_empty());
+}
+
+const ONE_SECOND: &[f32] = &[0.0; 16_000];
+
+/// Keeps one dictation with a second of audio, and answers its file aged by `by`.
+fn kept_and_aged(state: &DaemonState, by: std::time::Duration) -> std::path::PathBuf {
+    state.keep(&crate::history::NewEntry::dictation("kept").with_audio(ONE_SECOND));
+    let id = state.history(None, None).unwrap().last().unwrap().id;
+    let path = state.audio_path(id).expect("the keep wrote a file");
+    crate::test_support::set_modified(&path, std::time::SystemTime::now() - by);
+    path
+}
+
+#[test]
+fn save_history_off_keeps_no_row_and_no_file() {
+    let state = crate::test_support::daemon_state_with_history_off(&[]);
+    state.keep(&crate::history::NewEntry::dictation("dropped").with_audio(ONE_SECOND));
+    assert!(state.history(None, None).unwrap().is_empty());
+    assert!(
+        state.audio_path(1).is_none(),
+        "the first row's id holds no file"
+    );
+}
+
+#[test]
+fn the_purge_runs_with_save_history_off() {
+    let state = crate::test_support::daemon_state_with_history(&[]);
+    let path = kept_and_aged(&state, 8 * crate::test_support::DAY);
+    state.set_save_history(false);
+
+    state.purge_audio();
+
+    assert!(!path.exists());
+    assert_eq!(state.history(None, None).unwrap().len(), 1, "the row stays");
+}
+
+#[test]
+fn a_shorter_keep_audio_purges_at_once() {
+    let state = crate::test_support::daemon_state_with_history(&[]);
+    let path = kept_and_aged(&state, 2 * crate::test_support::DAY);
+
+    state.set_keep_audio(crate::config::KeepAudio::OneDay);
+
+    assert_eq!(state.keep_audio(), crate::config::KeepAudio::OneDay);
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_retried_row_reads_back() {
+    let state = crate::test_support::daemon_state_with_history(&[]);
+    state.keep(
+        &crate::history::NewEntry::failed_dictation("The server did not answer.")
+            .with_audio(ONE_SECOND),
     );
 
-    state.set_stt_model(Some("ggml-large-v3-q5_0.bin"));
+    let row = state.retried(1, "Ship it.").unwrap();
 
-    assert_eq!(state.stt_model(), Some("ggml-large-v3-q5_0.bin"));
-}
-
-#[test]
-fn a_remote_listener_reports_no_loaded_model() {
-    let mut config = Config::default();
-    config.stt.provider = crate::config::Provider::Remote;
-    let state = crate::test_support::daemon_state_running(config, std::sync::mpsc::channel().0);
-    assert_eq!(state.stt_model(), None);
-}
-
-// The off direction alone would pass a `set_history` that always stores
-// nothing, so this asks whether a reopened file is reached.
-#[test]
-fn history_turned_back_on_is_written_to_again() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-    assert!(!state.history_enabled(), "this state starts with none");
-
-    state.set_history(Some(crate::test_support::seeded_history(&["kept"])));
-
-    assert!(state.history_enabled());
-    let rows = state
-        .with_history(|c| crate::history::TranscriptionHistory::list(c, None))
-        .expect("history is on, so the job must run")
-        .expect("the table must be readable");
-    assert_eq!(rows.len(), 1, "the reopened file must be the one read");
+    assert_eq!(row.text.as_deref(), Some("Ship it."));
+    let read = state.history_entry(1).unwrap().expect("row 1");
+    assert_eq!(read.text.as_deref(), Some("Ship it."));
+    assert_eq!(read.outcome, crate::history::Outcome::Transcribed);
+    assert!(read.audio.is_some());
+    assert!(state.history_entry(2).unwrap().is_none());
 }
 
 use super::*;
+use crate::frontmost::App;
 use crate::text_to_speech::lock;
 
 /// A client offers the command behind a Copy button, so `command` has to
@@ -132,7 +181,9 @@ fn a_recording_error_names_the_same_command_its_sentence_does() {
     for error in [
         RecordingError::Microphone(String::new()),
         RecordingError::Model(String::new()),
+        RecordingError::NoListeningModel("parakeet-unified-en-0.6b"),
         RecordingError::Provider(String::new()),
+        RecordingError::UnbuiltListener(String::new()),
     ] {
         let command = error.command().expect("every fault names a command");
         assert!(
@@ -141,6 +192,327 @@ fn a_recording_error_names_the_same_command_its_sentence_does() {
             error.fix()
         );
     }
+}
+
+#[test]
+fn a_missing_listening_model_is_named_as_missing_and_fixed_by_setup() {
+    let error = RecordingError::NoListeningModel("parakeet-unified-en-0.6b");
+    assert_eq!(error.command(), Some("banshee setup"));
+    let chip = crate::audio::cues::broken(&error).text;
+    assert!(chip.contains("No listening model"), "{chip}");
+    assert!(!chip.contains("would not load"), "{chip}");
+    assert!(
+        error.to_string().contains("parakeet-unified-en-0.6b"),
+        "{error}"
+    );
+}
+
+fn parakeet() -> &'static banshee_common::listening::ListeningModel {
+    banshee_common::listening::find(banshee_common::listening::DEFAULT_MODEL).unwrap()
+}
+
+fn dead() -> RecordingError {
+    RecordingError::Microphone("no device".to_string())
+}
+
+fn damaged() -> Listening {
+    Listening::Failed(parakeet(), "the file is damaged".to_string())
+}
+
+#[test]
+fn a_refused_remote_listener_breaks_the_pipeline_with_its_reason() {
+    let error = RecordingError::Provider("no key".into());
+    assert_eq!(
+        pipeline(&Mic::Closed, &Listening::Refused(error.clone())),
+        Pipeline::Broken(error)
+    );
+}
+
+#[test]
+fn the_pipeline_is_read_from_the_microphone_first_and_the_listening_model_second() {
+    let damaged_load = RecordingError::Model("the file is damaged".to_string());
+    let not_downloaded = RecordingError::NoListeningModel(parakeet().id);
+    let refused = RecordingError::Provider("the server refused the key".to_string());
+    let table = [
+        (Mic::Starting, Listening::Remote, Pipeline::Opening),
+        (
+            Mic::Starting,
+            Listening::Available(parakeet()),
+            Pipeline::Opening,
+        ),
+        (
+            Mic::Starting,
+            Listening::Loaded(parakeet()),
+            Pipeline::Opening,
+        ),
+        (Mic::Starting, damaged(), Pipeline::Opening),
+        (
+            Mic::Starting,
+            Listening::Missing(parakeet()),
+            Pipeline::Opening,
+        ),
+        // Shut between uses is ready: the next use opens it
+        (Mic::Closed, Listening::Remote, Pipeline::Open),
+        (
+            Mic::Closed,
+            Listening::Available(parakeet()),
+            Pipeline::Open,
+        ),
+        (Mic::Closed, Listening::Loaded(parakeet()), Pipeline::Open),
+        // A use waits for the load, so a load is no fault
+        (Mic::Closed, Listening::Loading(parakeet()), Pipeline::Open),
+        (
+            Mic::Closed,
+            damaged(),
+            Pipeline::Broken(RecordingError::Model("the file is damaged".to_string())),
+        ),
+        (
+            Mic::Closed,
+            Listening::Missing(parakeet()),
+            Pipeline::Broken(RecordingError::NoListeningModel(parakeet().id)),
+        ),
+        (Mic::Open, Listening::Remote, Pipeline::Open),
+        (Mic::Open, Listening::Available(parakeet()), Pipeline::Open),
+        (Mic::Open, Listening::Loaded(parakeet()), Pipeline::Open),
+        (Mic::Open, Listening::Loading(parakeet()), Pipeline::Open),
+        (
+            Mic::Starting,
+            Listening::Loading(parakeet()),
+            Pipeline::Opening,
+        ),
+        (
+            Mic::Faulted(dead()),
+            Listening::Loading(parakeet()),
+            Pipeline::Broken(dead()),
+        ),
+        (Mic::Open, damaged(), Pipeline::Broken(damaged_load)),
+        (
+            Mic::Open,
+            Listening::Missing(parakeet()),
+            Pipeline::Broken(not_downloaded),
+        ),
+        (
+            Mic::Faulted(dead()),
+            Listening::Remote,
+            Pipeline::Broken(dead()),
+        ),
+        (
+            Mic::Faulted(dead()),
+            Listening::Available(parakeet()),
+            Pipeline::Broken(dead()),
+        ),
+        (
+            Mic::Faulted(dead()),
+            Listening::Loaded(parakeet()),
+            Pipeline::Broken(dead()),
+        ),
+        (Mic::Faulted(dead()), damaged(), Pipeline::Broken(dead())),
+        (
+            Mic::Faulted(dead()),
+            Listening::Missing(parakeet()),
+            Pipeline::Broken(dead()),
+        ),
+        (
+            Mic::Faulted(refused.clone()),
+            damaged(),
+            Pipeline::Broken(refused),
+        ),
+    ];
+    for (mic, listening, expected) in table {
+        assert_eq!(
+            pipeline(&mic, &listening),
+            expected,
+            "{mic:?} {listening:?}"
+        );
+    }
+}
+
+#[test]
+fn the_model_reported_is_the_one_the_listener_serves_or_waits_for() {
+    let state = test_state();
+    assert_eq!(state.stt_model(), Some(parakeet()));
+
+    state.listening_model_loaded(Some(turbo()));
+    assert_eq!(state.stt_model(), Some(turbo()));
+
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
+    assert_eq!(state.stt_model(), Some(parakeet()));
+
+    state.listening_model_loaded(None);
+    assert_eq!(state.stt_model(), None, "a remote listener loads no file");
+}
+
+#[test]
+fn a_pipeline_waiting_for_its_listening_model_opens_once_the_model_loads() {
+    let state = test_state();
+    let waiting = Pipeline::Broken(RecordingError::NoListeningModel(parakeet().id));
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
+    assert_eq!(state.pipeline(), waiting);
+    state.set_mic(Mic::Open);
+    assert_eq!(
+        state.pipeline(),
+        waiting,
+        "a microphone that opens does not stand in for the model"
+    );
+    state.listening_model_loaded(Some(parakeet()));
+    assert_eq!(state.pipeline(), Pipeline::Open);
+}
+
+#[test]
+fn a_model_that_loads_under_a_dead_microphone_leaves_the_microphone_fault() {
+    let state = test_state();
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
+    state.set_mic(Mic::Faulted(dead()));
+    state.listening_model_loaded(Some(parakeet()));
+    assert_eq!(state.pipeline(), Pipeline::Broken(dead()));
+    state.set_mic(Mic::Open);
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Open,
+        "nothing is waited for now"
+    );
+}
+
+#[test]
+fn a_failed_load_outlasts_a_microphone_fault() {
+    let state = test_state();
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
+    state.set_mic(Mic::Faulted(dead()));
+    state.listening_model_failed(parakeet(), "the file is damaged".to_string());
+    assert_eq!(state.pipeline(), Pipeline::Broken(dead()));
+    state.set_mic(Mic::Open);
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Broken(RecordingError::Model("the file is damaged".to_string()))
+    );
+}
+
+#[test]
+fn a_failed_load_outlasts_the_microphone_opening_again() {
+    let state = test_state();
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
+    state.listening_model_failed(parakeet(), "the file is damaged".to_string());
+    let failed = Pipeline::Broken(RecordingError::Model("the file is damaged".to_string()));
+    assert_eq!(state.pipeline(), failed);
+    state.set_mic(Mic::Open);
+    assert_eq!(
+        state.pipeline(),
+        failed,
+        "no model listens, so nothing is ready"
+    );
+    state.listening_model_loaded(Some(parakeet()));
+    assert_eq!(state.pipeline(), Pipeline::Open);
+    state.set_mic(Mic::Open);
+    assert_eq!(state.pipeline(), Pipeline::Open);
+}
+
+#[test]
+fn a_model_that_loads_before_the_pipeline_stands_leaves_it_opening() {
+    let state = crate::test_support::daemon_state_before_the_pipeline();
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
+    state.listening_model_loaded(Some(parakeet()));
+    assert_eq!(
+        state.pipeline(),
+        Pipeline::Opening,
+        "no consumer thread exists yet"
+    );
+    state.set_mic(Mic::Closed);
+    assert_eq!(state.pipeline(), Pipeline::Open);
+}
+
+#[test]
+fn a_model_is_seeded_as_on_disk_only_when_its_file_is_there() {
+    assert_eq!(
+        state_with_parakeet_on_disk().listening(),
+        Listening::Available(parakeet())
+    );
+    let (absent, _requests) = state_on(crate::test_support::scratch_machine("state-absent"));
+    assert_eq!(absent.listening(), Listening::Missing(parakeet()));
+}
+
+#[test]
+fn a_reload_that_fails_while_a_model_serves_leaves_the_pipeline() {
+    for (state, served) in [
+        (
+            state_with_parakeet_on_disk(),
+            Listening::Available(parakeet()),
+        ),
+        (test_state(), Listening::Loaded(parakeet())),
+    ] {
+        assert_eq!(state.listening(), served);
+        state.listening_model_failed(turbo(), "the file is damaged".to_string());
+        assert_eq!(state.listening(), served, "the old model still listens");
+        assert_eq!(state.pipeline(), Pipeline::Open);
+    }
+}
+
+#[test]
+fn a_model_that_idles_out_reads_as_on_disk_and_its_reload_as_loading() {
+    let state = test_state();
+    state.listening_model_unloaded();
+    assert_eq!(state.listening(), Listening::Available(parakeet()));
+    assert!(state.listening_model_loading(), "the load is this caller's");
+    assert_eq!(state.listening(), Listening::Loading(parakeet()));
+    assert_eq!(state.stt_model(), Some(parakeet()), "status names it");
+    state.listening_model_read(true);
+    assert_eq!(state.listening(), Listening::Loaded(parakeet()));
+    assert_eq!(state.pipeline(), Pipeline::Open);
+}
+
+#[test]
+fn a_reload_on_demand_that_fails_leaves_the_model_to_the_next_use() {
+    let state = test_state();
+    state.listening_model_unloaded();
+    state.listening_model_loading();
+    state.listening_model_read(false);
+    assert_eq!(state.listening(), Listening::Available(parakeet()));
+    assert_eq!(state.pipeline(), Pipeline::Open);
+}
+
+#[test]
+fn a_claimed_load_is_left_to_its_own_reload() {
+    let state = test_state();
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
+    state.claim_listening_model(parakeet(), true);
+
+    assert!(
+        !state.listening_model_loading(),
+        "a use finds the load already claimed"
+    );
+    state.listening_model_unloaded();
+    assert_eq!(state.listening(), Listening::Loading(parakeet()));
+}
+
+#[test]
+fn a_claimed_load_answers_a_second_claim_as_serving_and_its_failure_is_a_fault() {
+    let state = test_state();
+    state.set_listening(crate::state::Listening::Missing(parakeet()));
+
+    let first = state.claim_listening_model(parakeet(), true);
+    assert!(!first.serves(), "the first claim found nothing loading");
+    assert_eq!(state.listening(), Listening::Loading(parakeet()));
+    assert!(
+        state.claim_listening_model(parakeet(), true).serves(),
+        "the second claim finds the load in flight"
+    );
+
+    state.listening_model_failed(parakeet(), "the file is damaged".to_string());
+    assert_eq!(state.listening(), damaged());
+}
+
+#[test]
+fn the_idle_limit_starts_at_the_config_and_moves_live() {
+    let (state, requests) = state_on(crate::test_support::scratch_machine("state-idle"));
+    assert_eq!(state.unload_after(), Some(Duration::from_secs(300)));
+
+    state.set_unload_after(None);
+    assert_eq!(state.unload_after(), None);
+    assert!(
+        requests
+            .try_iter()
+            .any(|command| matches!(command, ConsumerCommand::UnloadAfter)),
+        "the consumer measures its wait again"
+    );
 }
 
 #[test]
@@ -174,20 +546,33 @@ fn a_microphone_fix_names_the_restart_that_some_faults_need() {
 
 // Hands back the receiver: dropping it discards whatever record_stop queues
 fn test_state_with_commands() -> (DaemonState, std::sync::mpsc::Receiver<ConsumerCommand>) {
+    let (state, requests) = state_on(crate::test_support::scratch_machine("state-models"));
+    state.listening_model_loaded(Some(parakeet()));
+    (state, requests)
+}
+
+/// These stand for a daemon whose pipeline is up: the tests below record, arm
+/// and fault, none of which a daemon still opening its microphone does.
+fn state_on(machine: Machine) -> (DaemonState, std::sync::mpsc::Receiver<ConsumerCommand>) {
     let (commands, requests) = std::sync::mpsc::channel();
     let state = DaemonState::new(
         std::sync::Arc::new(Config::default()),
-        None,
-        crate::text_to_speech::SpeechPlayer::default(),
+        crate::test_support::seeded_history(&[]),
+        crate::test_support::quiet_speech(),
         crate::text_to_speech::Speaker::Fallback,
         commands,
         crate::audio::cues::Cues::silent(),
-        crate::test_support::scratch_machine("state-models"),
+        machine,
     );
-    // These stand for a daemon whose pipeline is up: the tests below record,
-    // arm and fault, none of which a daemon still opening its microphone does.
-    state.set_pipeline(Pipeline::Open);
+    state.set_mic(Mic::Open);
     (state, requests)
+}
+
+/// A daemon whose listening model is on disk and has not loaded.
+fn state_with_parakeet_on_disk() -> DaemonState {
+    let machine = crate::test_support::scratch_machine("state-on-disk");
+    std::fs::write(machine.models.join(parakeet().file), b"").unwrap();
+    state_on(machine).0
 }
 
 fn test_state() -> DaemonState {
@@ -195,42 +580,58 @@ fn test_state() -> DaemonState {
 }
 
 // A deaf daemon must refuse the press rather than open a session that no
-// consumer thread exists to drain.
+// consumer thread exists to drain. A pipeline still being built has no
+// consumer thread either, so a press must answer with the cue, not an open
+// session. ask_user shares the gate, so it cannot arm a deaf mic.
 #[test]
-fn record_start_is_refused_without_a_pipeline() {
-    let (state, transcribe_requests) = test_state_with_commands();
-    state.set_pipeline(Pipeline::Broken(RecordingError::Microphone(
-        "no device".to_string(),
-    )));
+fn record_start_and_arming_are_refused_until_the_pipeline_is_open() {
+    let cases = [
+        (
+            "the microphone is gone",
+            Mic::Faulted(dead()),
+            None,
+            Some(RecordingError::Microphone(String::new())),
+        ),
+        (
+            "the model did not load",
+            Mic::Open,
+            Some("the file is damaged"),
+            Some(RecordingError::Model(String::new())),
+        ),
+        ("the pipeline is still opening", Mic::Starting, None, None),
+    ];
 
-    assert!(!state.record_start(TranscribeTarget::Mailbox));
-    assert_eq!(state.recording_mode(), RecordingMode::Idle);
-    // Nothing may reach the consumer: there is nothing on the other end
-    assert!(transcribe_requests.try_recv().is_err());
+    for (name, mic, load_failure, fault) in cases {
+        let (state, transcribe_requests) = test_state_with_commands();
+        assert!(state.pipeline().fault().is_none(), "{name}");
+        assert!(state.arm_for_ask().is_some(), "{name}");
+        state.set_recording_mode(RecordingMode::Idle);
 
-    // record_stop stays a no-op, so a release keybind cannot wedge the mode
-    state.record_stop();
-    assert_eq!(state.recording_mode(), RecordingMode::Idle);
-}
+        state.set_mic(mic);
+        if let Some(error) = load_failure {
+            state.set_listening(crate::state::Listening::Missing(parakeet()));
+            state.listening_model_failed(parakeet(), error.to_string());
+        }
+        assert_eq!(
+            state.pipeline().fault().map(std::mem::discriminant),
+            fault.as_ref().map(std::mem::discriminant),
+            "{name}"
+        );
 
-#[test]
-fn recording_error_keeps_the_cause_it_was_given() {
-    let state = test_state();
-    assert!(state.pipeline().fault().is_none());
-    // An armed session is available while nothing is wrong
-    assert!(state.arm_for_ask().is_some());
-    state.set_recording_mode(RecordingMode::Idle);
+        assert!(!state.record_start(), "{name}");
+        assert!(state.arm_for_ask().is_none(), "{name}");
+        assert_eq!(state.recording_mode(), RecordingMode::Idle, "{name}");
+        // Nothing may reach the consumer: there is nothing on the other end
+        assert!(transcribe_requests.try_recv().is_err(), "{name}");
 
-    state.set_pipeline(Pipeline::Broken(RecordingError::Model(
-        "missing file".to_string(),
-    )));
-    assert!(matches!(
-        state.pipeline().fault(),
-        Some(RecordingError::Model(_))
-    ));
-    // The same gate record_start uses, so ask_user cannot arm a deaf mic
-    assert!(state.arm_for_ask().is_none());
-    assert_eq!(state.recording_mode(), RecordingMode::Idle);
+        // record_stop stays a no-op, so a release keybind cannot wedge the mode
+        state.record_stop();
+        assert_eq!(state.recording_mode(), RecordingMode::Idle, "{name}");
+
+        state.set_mic(Mic::Open);
+        state.listening_model_loaded(Some(parakeet()));
+        assert!(state.record_start(), "{name}");
+    }
 }
 
 #[test]
@@ -262,7 +663,7 @@ fn missing_device_names_what_the_config_waits_for() {
 
     // A substitute does not block recording, so no blocker appears with it
     assert!(state.pipeline().fault().is_none());
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert!(state.record_start());
     state.record_stop();
 
     // The named device returns, so nothing is missing any more
@@ -294,7 +695,7 @@ fn the_wanted_device_survives_a_poisoned_lock() {
 fn a_rewritten_device_name_is_not_a_change() {
     let (state, _requests) = test_state_with_commands();
     let mut changes = state.device_changes();
-    assert_eq!(*changes.borrow_and_update(), 0);
+    let start = *changes.borrow_and_update();
 
     state.set_missing_device(Some("yeti".to_string()));
     state.set_missing_device(Some("yeti".to_string()));
@@ -303,7 +704,7 @@ fn a_rewritten_device_name_is_not_a_change() {
         changes.has_changed().unwrap(),
         "the first write went unheard"
     );
-    assert_eq!(*changes.borrow_and_update(), 1, "a rewrite counted");
+    assert_eq!(*changes.borrow_and_update(), start + 1, "a rewrite counted");
     assert!(!changes.has_changed().unwrap());
 
     state.set_audio_device(Some("MacBook Pro Microphone".to_string()));
@@ -312,7 +713,7 @@ fn a_rewritten_device_name_is_not_a_change() {
         changes.has_changed().unwrap(),
         "the open device went unheard"
     );
-    assert_eq!(*changes.borrow_and_update(), 2, "a rewrite counted");
+    assert_eq!(*changes.borrow_and_update(), start + 2, "a rewrite counted");
 
     // One counter for the whole picture, so either field moving wakes the push
     state.set_missing_device(None);
@@ -320,22 +721,20 @@ fn a_rewritten_device_name_is_not_a_change() {
         changes.has_changed().unwrap(),
         "the device returning went unheard"
     );
-    assert_eq!(*changes.borrow_and_update(), 3);
+    assert_eq!(*changes.borrow_and_update(), start + 3);
 }
 
 #[test]
 fn recording_error_clears_when_capture_recovers() {
     let (state, _requests) = test_state_with_commands();
-    state.set_pipeline(Pipeline::Broken(RecordingError::Microphone(
-        "gone".to_string(),
-    )));
+    state.set_mic(Mic::Faulted(RecordingError::Microphone("gone".to_string())));
     assert!(state.pipeline().fault().is_some());
 
-    state.set_pipeline(Pipeline::Open);
+    state.set_mic(Mic::Open);
     assert!(state.pipeline().fault().is_none());
 
     // A second fault after a recovery must still report
-    state.set_pipeline(Pipeline::Broken(RecordingError::Microphone(
+    state.set_mic(Mic::Faulted(RecordingError::Microphone(
         "gone again".to_string(),
     )));
     assert!(matches!(
@@ -349,40 +748,24 @@ fn recording_error_clears_when_capture_recovers() {
 fn a_toggle_stops_the_session_a_toggle_started() {
     let (state, requests) = test_state_with_commands();
 
-    assert!(
-        state.record_toggle(TranscribeTarget::Dictate),
-        "idle: starts"
-    );
+    assert!(state.record_toggle(), "idle: starts");
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
 
-    assert!(
-        !state.record_toggle(TranscribeTarget::Dictate),
-        "in flight: stops"
-    );
+    assert!(!state.record_toggle(), "in flight: stops");
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     assert!(matches!(
         requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Dictate, _))
+        Ok(ConsumerCommand::Transcribe(_, _))
     ));
 
     // A manual override counts as in flight and ends as a stop
     state.set_recording_mode(RecordingMode::ArmedHold);
-    assert!(!state.record_toggle(TranscribeTarget::Dictate));
+    assert!(!state.record_toggle());
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
-}
-
-// A wrong byte here hands an utterance to the agent silently, or drops it
-// into the mailbox instead of running one
-#[test]
-fn a_tell_session_stops_into_the_agent() {
-    let (state, requests) = test_state_with_commands();
-
-    assert!(state.record_start(TranscribeTarget::Tell));
-    state.record_stop();
-    assert!(matches!(
-        requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Tell, _))
-    ));
 }
 
 // A wrong routing here turns typed-with-the-modifier noise into dictation
@@ -390,9 +773,13 @@ fn a_tell_session_stops_into_the_agent() {
 fn cancel_discards_the_session_instead_of_routing_it() {
     let (state, requests) = test_state_with_commands();
 
-    assert!(state.record_start(TranscribeTarget::Dictate));
+    assert!(state.record_start());
     state.record_cancel();
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
     assert!(matches!(requests.try_recv(), Ok(ConsumerCommand::Discard)));
     assert!(requests.try_recv().is_err(), "nothing may be transcribed");
 
@@ -417,7 +804,9 @@ fn a_cancelled_push_to_talk_emits_a_silent_signal() {
     let mut signals = cues.subscribe_signals();
     let state = crate::test_support::daemon_state_with_cues(cues);
 
-    assert!(state.record_start(TranscribeTarget::Dictate));
+    assert!(state.record_start());
+    state.heard_sound();
+    state.announce_sound();
     heard.try_recv().expect("the start cue plays");
     signals.try_recv().expect("the start signal broadcasts");
 
@@ -433,29 +822,108 @@ fn a_cancelled_push_to_talk_emits_a_silent_signal() {
 }
 
 #[test]
-fn watchdog_releases_a_push_to_talk_that_never_stopped() {
-    let (state, transcribe_requests) = test_state_with_commands();
+fn a_stop_sends_the_app_it_read_with_the_recording() {
+    let (state, requests) = test_state_with_commands();
+    assert!(state.record_start());
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
+    assert!(state.stop_push_to_talk(lock(&state.push_to_talk), || Some(App(7))));
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Transcribe(_, Some(App(7))))
+    ));
+}
 
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+#[test]
+fn a_press_during_the_stop_read_queues_behind_the_stop() {
+    let (state, requests) = test_state_with_commands();
+    assert!(state.record_start());
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
+    std::thread::scope(|scope| {
+        assert!(state.stop_push_to_talk(lock(&state.push_to_talk), || {
+            scope.spawn(|| assert!(state.record_start()));
+            std::thread::sleep(Duration::from_millis(50));
+            Some(App(7))
+        }));
+    });
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Transcribe(_, Some(App(7))))
+    ));
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
+}
+
+#[test]
+fn a_stop_with_nothing_in_flight_reads_no_app() {
+    let (state, _requests) = test_state_with_commands();
+    let read = std::cell::Cell::new(false);
+    assert!(!state.stop_push_to_talk(lock(&state.push_to_talk), || {
+        read.set(true);
+        None
+    }));
+    assert!(!read.get());
+}
+
+#[test]
+fn a_stop_reads_the_app_through_the_machine() {
+    let (state, requests) = state_on(Machine {
+        frontmost: || Some(App(9)),
+        ..crate::test_support::scratch_machine("state-reader")
+    });
+    state.listening_model_loaded(Some(parakeet()));
+    assert!(state.record_start());
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
+    state.record_stop();
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(ConsumerCommand::Transcribe(_, Some(App(9))))
+    ));
+}
+
+#[test]
+fn watchdog_releases_a_push_to_talk_that_never_stopped() {
+    let (state, transcribe_requests) = state_on(Machine {
+        frontmost: || Some(App(9)),
+        ..crate::test_support::scratch_machine("state-watchdog")
+    });
+    state.listening_model_loaded(Some(parakeet()));
+
+    assert!(state.record_start());
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
+    assert!(matches!(
+        transcribe_requests.try_recv(),
+        Ok(ConsumerCommand::Stream(_))
+    ));
 
     // Nowhere near the ceiling yet: the mic stays open
     assert!(!state.expire_stuck_recording());
     assert_eq!(state.recording_mode(), RecordingMode::PushToTalk);
 
     // Bring the deadline forward instead of waiting out MAX_PUSH_TO_TALK
-    lock(&state.push_to_talk).deadline = Instant::now();
+    *lock(&state.push_to_talk) = Instant::now();
 
-    // Past it, the mic comes back and the utterance is still transcribed
+    // Past it, the mic comes back and the utterance is still transcribed,
+    // with no app read for a stop nobody pressed
     assert!(state.expire_stuck_recording());
     assert_eq!(state.recording_mode(), RecordingMode::Idle);
     assert!(matches!(
         transcribe_requests.try_recv(),
-        Ok(ConsumerCommand::Transcribe(TranscribeTarget::Mailbox, _))
+        Ok(ConsumerCommand::Transcribe(_, None))
     ));
 
     // And a fresh start is accepted rather than refused as busy
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert!(state.record_start());
 }
 
 #[test]
@@ -464,7 +932,7 @@ fn watchdog_leaves_armed_listening_alone() {
     // ask_user sessions run their own timeouts; the watchdog must not
     // yank the microphone out from under one
     state.set_recording_mode(RecordingMode::Armed);
-    lock(&state.push_to_talk).deadline = Instant::now();
+    *lock(&state.push_to_talk) = Instant::now();
     assert!(!state.expire_stuck_recording());
     assert_eq!(state.recording_mode(), RecordingMode::Armed);
 }
@@ -477,7 +945,7 @@ fn every_path_that_moves_the_mic_publishes_it() {
     let mut recording = state.subscribe_recording();
     assert!(!*recording.borrow_and_update());
 
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert!(state.record_start());
     assert!(
         recording.has_changed().unwrap(),
         "record_start went unheard"
@@ -500,10 +968,10 @@ fn every_path_that_moves_the_mic_publishes_it() {
 fn the_voice_reported_is_the_one_the_daemon_loaded() {
     let state = test_state();
     assert_eq!(state.tts_voice(), None);
-    state.set_tts_voice("af_sky".to_string());
+    state.set_tts_voice(Some("af_sky".to_string()));
     assert_eq!(state.tts_voice().as_deref(), Some("af_sky"));
 
-    state.set_tts_voice("am_adam".to_string());
+    state.set_tts_voice(Some("am_adam".to_string()));
 
     assert_eq!(
         state.tts_voice().as_deref(),
@@ -522,26 +990,6 @@ fn recording_mode_roundtrips_and_derives_is_recording() {
         assert_eq!(state.recording_mode(), mode);
         assert!(state.is_recording());
     }
-}
-
-#[test]
-fn ring_evicts_oldest_and_filters_by_cursor() {
-    let state = test_state();
-    for i in 1..=20 {
-        state.push_transcription(format!("utterance {i}"));
-    }
-
-    let all = state.transcriptions_since(0);
-    assert_eq!(all.len(), TRANSCRIPTION_RING_CAPACITY);
-    assert_eq!(all.first().unwrap().id, 5);
-    assert_eq!(all.last().unwrap().id, 20);
-
-    let newer = state.transcriptions_since(18);
-    assert_eq!(newer.len(), 2);
-    assert_eq!(newer[0].text, "utterance 19");
-
-    assert!(state.transcriptions_since(20).is_empty());
-    assert_eq!(*state.subscribe_transcriptions().borrow(), 20);
 }
 
 #[test]
@@ -584,31 +1032,6 @@ fn clearing_an_error_that_is_already_clear_wakes_nobody() {
     );
 }
 
-// The two paths share one field, so each clears only what it wrote.
-#[test]
-fn a_success_on_one_path_leaves_the_other_path_s_failure_standing() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-
-    state.set_tell_error(Some("opencode exited exit status: 1".to_string()));
-    state.set_last_error(None);
-    assert_eq!(
-        state.last_error().as_deref(),
-        Some("opencode exited exit status: 1"),
-        "a dictation that works says nothing about an agent run that failed"
-    );
-
-    state.set_last_error(Some("the microphone would not open".to_string()));
-    state.set_tell_error(None);
-    assert_eq!(
-        state.last_error().as_deref(),
-        Some("the microphone would not open"),
-        "an agent run that works says nothing about a microphone that would not open"
-    );
-
-    state.set_last_error(None);
-    assert_eq!(state.last_error(), None, "each path still clears its own");
-}
-
 // One field per side, so a failed listen and a failed reply never overwrite
 // each other.
 #[test]
@@ -647,91 +1070,155 @@ async fn an_unchanged_speech_error_wakes_nobody() {
 }
 
 // The backend cannot reach the cue player or the state, so a channel carries
-// both what failed and the first chunk that played.
+// both what failed and the first chunk that played. A reply the fallback spoke
+// still records why the speaker the config names failed, and only that
+// speaker playing clears it.
 #[test]
 fn the_drain_sounds_the_cue_for_a_failure_and_clears_the_reason_when_one_plays() {
     use crate::text_to_speech::{Fault, drain_faults};
 
-    let (cues, heard) = crate::audio::cues::Cues::recording();
+    let cases = [
+        (
+            "a failed utterance",
+            Fault::Failed("the remote speaker refused the key".to_string()),
+            "the remote speaker refused the key",
+        ),
+        (
+            "a reply the fallback spoke",
+            Fault::SpokenByFallback("the remote speaker did not answer in time".to_string()),
+            "the remote speaker did not answer in time",
+        ),
+    ];
+
+    for (name, fault, reason) in cases {
+        let (cues, heard) = crate::audio::cues::Cues::recording();
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+
+        let (faults, receiver) = std::sync::mpsc::channel();
+        faults.send(fault).unwrap();
+        drop(faults);
+        drain_faults(std::sync::Arc::clone(&state), cues.clone(), receiver);
+
+        assert!(
+            matches!(heard.try_recv(), Ok(crate::audio::cues::Cue::Error)),
+            "{name} sounds its cue"
+        );
+        assert_eq!(
+            state.last_speech_error().as_deref(),
+            Some(reason),
+            "{name}: the reason the backend gave is the record"
+        );
+
+        let (faults, receiver) = std::sync::mpsc::channel();
+        faults.send(Fault::Played).unwrap();
+        drop(faults);
+        drain_faults(std::sync::Arc::clone(&state), cues, receiver);
+
+        assert_eq!(
+            state.last_speech_error(),
+            None,
+            "{name}: the utterance that played cleared the reason before it"
+        );
+        let sounded = heard.try_recv();
+        assert!(
+            sounded.is_err(),
+            "{name}: an utterance that played sounds no cue: {sounded:?}"
+        );
+    }
+}
+
+#[test]
+fn the_fallback_playing_keeps_the_reason_it_spoke_for() {
+    use crate::text_to_speech::{Fault, Faults, drain_faults};
+
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-
     let (faults, receiver) = std::sync::mpsc::channel();
-    faults
-        .send(Fault::Failed(
-            "the remote speaker refused the key".to_string(),
-        ))
-        .unwrap();
+    let faults = Faults::new(faults);
+    faults.send(Fault::SpokenByFallback(
+        "the remote speaker refused the key".to_string(),
+    ));
+    faults.standing_in().send(Fault::Played);
     drop(faults);
-    drain_faults(std::sync::Arc::clone(&state), cues.clone(), receiver);
-
-    assert!(
-        matches!(heard.try_recv(), Ok(crate::audio::cues::Cue::Error)),
-        "a failed utterance sounds its cue"
+    drain_faults(
+        std::sync::Arc::clone(&state),
+        crate::audio::cues::Cues::recording().0,
+        receiver,
     );
+
     assert_eq!(
         state.last_speech_error().as_deref(),
-        Some("the remote speaker refused the key"),
-        "the reason the backend gave is the record"
-    );
-
-    let (faults, receiver) = std::sync::mpsc::channel();
-    faults.send(Fault::Played).unwrap();
-    drop(faults);
-    drain_faults(std::sync::Arc::clone(&state), cues, receiver);
-
-    assert_eq!(
-        state.last_speech_error(),
-        None,
-        "the utterance that played cleared the reason before it"
-    );
-    let sounded = heard.try_recv();
-    assert!(
-        sounded.is_err(),
-        "an utterance that played sounds no cue: {sounded:?}"
+        Some("the remote speaker refused the key")
     );
 }
 
-// The fallback voice spoke, but the speaker the config names still failed.
 #[test]
-fn a_reply_the_fallback_spoke_still_records_why_the_speaker_failed() {
+fn a_local_voice_standing_in_for_a_remote_speaker_keeps_its_reason() {
+    use crate::text_to_speech::{Fault, Faults, drain_faults};
+
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    state.set_last_speech_error(Some("no key for the remote speaker".to_string()));
+    let (faults, receiver) = std::sync::mpsc::channel();
+    Faults::new(faults).standing_in().send(Fault::Played);
+    drain_faults(
+        std::sync::Arc::clone(&state),
+        crate::audio::cues::Cues::recording().0,
+        receiver,
+    );
+
+    assert_eq!(
+        state.last_speech_error().as_deref(),
+        Some("no key for the remote speaker")
+    );
+}
+
+#[test]
+fn a_voice_loaded_after_the_start_is_the_speaker_started() {
     use crate::text_to_speech::{Fault, drain_faults};
 
-    let (cues, heard) = crate::audio::cues::Cues::recording();
     let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
-
+    assert!(!state.speaker_started(), "the voice did not load at start");
     let (faults, receiver) = std::sync::mpsc::channel();
-    faults
-        .send(Fault::SpokenByFallback(
-            "the remote speaker did not answer in time".to_string(),
-        ))
-        .unwrap();
+    faults.send(Fault::Loaded).unwrap();
     drop(faults);
-    drain_faults(std::sync::Arc::clone(&state), cues, receiver);
-
-    assert!(matches!(
-        heard.try_recv(),
-        Ok(crate::audio::cues::Cue::Error)
-    ));
-    assert_eq!(
-        state.last_speech_error().as_deref(),
-        Some("the remote speaker did not answer in time")
+    drain_faults(
+        std::sync::Arc::clone(&state),
+        crate::audio::cues::Cues::recording().0,
+        receiver,
     );
+
+    assert!(state.speaker_started());
 }
 
-// The gate record_start shares with ask_user. A pipeline still being built has
-// no consumer thread, so a press must answer with the cue, not an open session.
 #[test]
-fn record_start_is_refused_while_the_pipeline_is_still_opening() {
-    let (state, transcribe_requests) = test_state_with_commands();
-    state.set_pipeline(Pipeline::Opening);
+fn a_voice_loaded_after_a_switch_to_a_server_names_no_server() {
+    use crate::text_to_speech::{Fault, drain_faults};
 
-    assert!(!state.record_start(TranscribeTarget::Mailbox));
-    assert!(state.arm_for_ask().is_none());
-    assert_eq!(state.recording_mode(), RecordingMode::Idle);
-    assert!(transcribe_requests.try_recv().is_err());
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    state
+        .speech()
+        .set_builder(Box::new(|_| crate::text_to_speech::Selection {
+            backend: crate::test_support::speaking_backend(Default::default()),
+            speaker: crate::text_to_speech::Speaker::Fallback,
+            fault: Some("no key for the remote speaker".to_string()),
+        }));
+    let tts = crate::config::TTSConfig {
+        provider: crate::config::Provider::Remote,
+        ..Default::default()
+    };
+    assert!(state.switch_speaker(&tts, false));
+    let (faults, receiver) = std::sync::mpsc::channel();
+    faults.send(Fault::Loaded).unwrap();
+    drop(faults);
+    drain_faults(
+        std::sync::Arc::clone(&state),
+        crate::audio::cues::Cues::recording().0,
+        receiver,
+    );
 
-    state.set_pipeline(Pipeline::Open);
-    assert!(state.record_start(TranscribeTarget::Mailbox));
+    assert!(
+        !state.speaker_started(),
+        "the local voice that loaded is not the server's"
+    );
 }
 
 struct StopWaits {
@@ -778,20 +1265,21 @@ fn the_watchdog_does_not_expire_a_press_whose_start_is_still_running() {
     }));
     let state = std::sync::Arc::new(DaemonState::new(
         std::sync::Arc::new(Config::default()),
-        None,
+        crate::test_support::seeded_history(&[]),
         speech,
         crate::text_to_speech::Speaker::Fallback,
         std::sync::mpsc::channel().0,
         crate::audio::cues::Cues::silent(),
         crate::test_support::scratch_machine("state-press"),
     ));
-    state.set_pipeline(Pipeline::Open);
+    state.set_mic(Mic::Open);
+    state.listening_model_loaded(Some(parakeet()));
     std::sync::Arc::clone(state.speech())
         .speak("A reply.", false, None)
         .unwrap();
 
     let starting = std::sync::Arc::clone(&state);
-    let pressed = std::thread::spawn(move || starting.record_start(TranscribeTarget::Mailbox));
+    let pressed = std::thread::spawn(move || starting.record_start());
     stop_started
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("record_start reaches speech.stop");
@@ -838,73 +1326,65 @@ fn the_answer_flag_opens_only_for_the_session_still_armed() {
     assert!(!state.is_answer_open());
 }
 
+// A refused press answers at once. An accepted one waits for its first sound,
+// which comes once capture has opened.
 #[test]
-fn the_target_and_the_arming_decide_the_press_cue() {
+fn the_arming_and_the_pipeline_decide_the_press_cue() {
     use crate::audio::cues::Cue;
 
     let cases = [
-        (TranscribeTarget::Dictate, true, true, Cue::RecordStart),
-        (TranscribeTarget::Tell, false, true, Cue::RecordStart),
-        (TranscribeTarget::Dictate, false, true, Cue::RecordStart),
-        (TranscribeTarget::Dictate, true, false, Cue::Error),
+        (true, true, None),
+        (false, true, None),
+        (true, false, Some(Cue::Error)),
     ];
-    for (target, armed, pipeline_open, expected) in cases {
+    for (armed, pipeline_open, expected) in cases {
         let (cues, heard) = crate::audio::cues::Cues::recording();
         let state = crate::test_support::daemon_state_with_cues(cues);
         if armed {
             state.arm_for_ask().expect("an idle daemon arms");
         }
         if !pipeline_open {
-            state.set_pipeline(Pipeline::Opening);
+            state.set_mic(Mic::Starting);
         }
 
         assert_eq!(
-            state.record_start(target),
+            state.record_start(),
             pipeline_open,
-            "{target:?} armed {armed} open {pipeline_open}"
+            "armed {armed} open {pipeline_open}"
         );
         assert_eq!(
             heard.try_recv().ok(),
-            Some(expected),
-            "{target:?} armed {armed} open {pipeline_open}"
+            expected,
+            "armed {armed} open {pipeline_open}"
         );
-    }
-}
-
-#[test]
-fn a_press_while_the_pipeline_opens_says_banshee_is_starting() {
-    let (cues, _heard) = crate::audio::cues::Cues::recording();
-    let mut signals = cues.subscribe_signals();
-    let state = crate::test_support::daemon_state_before_the_pipeline_with_cues(cues);
-    assert!(!state.record_start(TranscribeTarget::Dictate));
-    match signals.try_recv() {
-        Ok(crate::audio::cues::Signal::Error { reason, .. }) => {
-            assert_eq!(reason.code, crate::audio::cues::ReasonCode::Starting);
+        if pipeline_open {
+            state.heard_sound();
+            state.announce_sound();
+            assert_eq!(heard.try_recv().ok(), Some(Cue::RecordStart));
         }
-        other => panic!("expected a starting error, got {other:?}"),
     }
 }
 
 #[test]
 fn a_refused_press_names_the_press_or_the_answer_when_armed() {
     use crate::audio::cues::{Signal, Target};
-    for (press, armed, named) in [
-        (TranscribeTarget::Dictate, false, Target::Dictate),
-        (TranscribeTarget::Mailbox, false, Target::Mailbox),
-        (TranscribeTarget::Tell, false, Target::Tell),
-        (TranscribeTarget::Mailbox, true, Target::Answer),
-    ] {
+    for (armed, named) in [(false, Target::Dictate), (true, Target::Answer)] {
         let (cues, _heard) = crate::audio::cues::Cues::recording();
         let mut signals = cues.subscribe_signals();
         let state = crate::test_support::daemon_state_with_cues(cues);
         if armed {
             state.arm_for_ask().expect("an idle daemon arms");
         }
-        state.set_pipeline(Pipeline::Opening);
-        assert!(!state.record_start(press));
+        state.set_mic(Mic::Starting);
+        assert!(!state.record_start());
         match signals.try_recv() {
-            Ok(Signal::Error { target, .. }) => {
-                assert_eq!(target, Some(named), "{press:?} armed {armed}")
+            Ok(Signal::Error { target, reason }) => {
+                assert_eq!(target, Some(named), "armed {armed}");
+                assert_eq!(
+                    reason.code,
+                    crate::audio::cues::ReasonCode::Starting,
+                    "armed {armed}"
+                );
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -917,7 +1397,9 @@ fn an_answer_press_carries_the_answer_target() {
     let mut signals = cues.subscribe_signals();
     let state = crate::test_support::daemon_state_with_cues(cues);
     state.arm_for_ask().expect("an idle daemon arms");
-    assert!(state.record_start(TranscribeTarget::Dictate));
+    assert!(state.record_start());
+    state.heard_sound();
+    state.announce_sound();
     assert_eq!(
         signals.try_recv().unwrap(),
         crate::audio::cues::Signal::RecordStart {
@@ -927,9 +1409,101 @@ fn an_answer_press_carries_the_answer_target() {
 }
 
 #[test]
+fn capture_is_wanted_for_a_press_a_played_question_or_keep_open() {
+    let state = test_state();
+    assert!(!state.wants_mic(), "an idle daemon");
+
+    assert!(state.record_start());
+    assert!(state.wants_mic(), "a press");
+    state.record_cancel();
+    assert!(!state.wants_mic(), "a cancelled press");
+
+    let session = state.arm_for_ask().expect("an idle daemon arms");
+    assert!(!state.wants_mic(), "a question still playing");
+    assert!(state.record_start());
+    assert!(state.wants_mic(), "a hold to answer while it plays");
+    state.record_stop();
+    assert!(!state.wants_mic());
+    assert!(!state.hear_answer(session + 1), "another session");
+    assert!(!state.wants_mic());
+    assert!(state.hear_answer(session));
+    assert!(state.wants_mic(), "a question that has played");
+    state.disarm(session);
+    assert!(!state.wants_mic(), "the answer's end");
+    assert!(!state.hear_answer(session), "a session already over");
+
+    state.set_keep_open(true);
+    assert!(state.wants_mic(), "keep_open");
+}
+
+#[test]
+fn a_failed_open_ends_the_press_it_was_for() {
+    use crate::audio::cues::{Cues, Signal, Target};
+    let cases = [
+        ("a dictation", false, false, Some(Target::Dictate)),
+        ("a hold to answer", true, false, Some(Target::Answer)),
+        // The answer says why itself, so the hold adds no second error
+        ("a hold while the answer is heard", true, true, None),
+    ];
+    for (name, armed, answering, cue) in cases {
+        let (commands, requests) = std::sync::mpsc::channel();
+        let (cues, _sounds) = Cues::recording();
+        let mut signals = cues.subscribe_signals();
+        let state = crate::test_support::daemon_state_hearing(cues, commands);
+        if armed {
+            let session = state.arm_for_ask().expect("an idle daemon arms");
+            if answering {
+                assert!(state.hear_answer(session));
+            }
+        }
+        assert!(state.record_start(), "{name}");
+
+        state.capture_failed(RecordingError::Microphone(
+            "MacBook Pro Microphone: Host is down".to_string(),
+        ));
+
+        assert!(!state.wants_mic(), "{name}: nothing waits for capture now");
+        let expected_mode = if armed {
+            RecordingMode::Armed
+        } else {
+            RecordingMode::Idle
+        };
+        assert_eq!(state.recording_mode(), expected_mode, "{name}");
+        let error =
+            std::iter::from_fn(|| signals.try_recv().ok()).find_map(|signal| match signal {
+                Signal::Error { reason, target } => Some((reason, target)),
+                _ => None,
+            });
+        assert_eq!(
+            error.as_ref().and_then(|(_, target)| *target),
+            cue,
+            "{name}"
+        );
+        if let Some((reason, _)) = error {
+            assert!(
+                reason.text.contains("MacBook Pro Microphone"),
+                "{name}: {reason:?}"
+            );
+        }
+        let discarded = std::iter::from_fn(|| requests.try_recv().ok())
+            .any(|command| matches!(command, ConsumerCommand::Discard));
+        assert_eq!(
+            discarded, !armed,
+            "{name}: the dictation's consumer lets go"
+        );
+        assert!(
+            state
+                .last_error()
+                .is_some_and(|why| why.contains("MacBook Pro Microphone")),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn a_dictation_the_consumer_never_reads_gives_the_ring_back() {
     let (state, requests) = test_state_with_commands();
-    assert!(state.record_start(TranscribeTarget::Dictate));
+    assert!(state.record_start());
     state.record_stop();
     assert!(state.dictation_in_ring());
 
@@ -939,4 +1513,56 @@ fn a_dictation_the_consumer_never_reads_gives_the_ring_back() {
         !state.dictation_in_ring(),
         "a consumer that is gone must not leave every later question waiting"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_accessibility_move_is_published_once_and_a_repeat_never() {
+    let state = test_state();
+    let mut changes = state.device_changes();
+    let start = *changes.borrow_and_update();
+    assert!(state.noted_accessibility(), "seeded from the machine read");
+
+    assert!(!state.note_accessibility(true));
+    assert!(!changes.has_changed().unwrap(), "a repeat counted");
+
+    assert!(state.note_accessibility(false));
+    assert!(!state.noted_accessibility());
+    assert_eq!(*changes.borrow_and_update(), start + 1);
+
+    assert!(!state.note_accessibility(false));
+    assert!(!changes.has_changed().unwrap(), "a repeat counted");
+
+    assert!(state.note_accessibility(true));
+    assert!(state.noted_accessibility());
+    assert_eq!(*changes.borrow_and_update(), start + 2);
+}
+
+#[test]
+fn a_change_count_moves_by_one_per_bump_and_wakes_a_subscriber() {
+    let count = super::change_count::ChangeCount::new();
+    let receiver = count.subscribe();
+    assert_eq!(count.now(), 0);
+    assert!(!receiver.has_changed().unwrap());
+
+    count.bump();
+
+    assert_eq!(count.now(), 1);
+    assert!(receiver.has_changed().unwrap());
+}
+
+#[test]
+fn a_question_is_published_and_cleared() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let question = state.subscribe_question();
+    state.publish_question("Ship it?", Some("claude"));
+    assert_eq!(
+        *question.borrow(),
+        crate::state::Question {
+            text: "Ship it?".to_string(),
+            client: Some("claude".to_string()),
+        }
+    );
+    state.publish_question("", None);
+    assert_eq!(*question.borrow(), crate::state::Question::default());
 }

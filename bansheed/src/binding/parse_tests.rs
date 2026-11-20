@@ -64,20 +64,7 @@ fn spelling_is_forgiving_and_display_is_canonical() {
 // One table drives the parser and Display, so every bindable name must
 // round-trip; a name that prints "?" or re-parses differently is drift
 #[test]
-fn every_bindable_modifier_round_trips() {
-    for modifier in MODIFIERS.iter().filter(|m| m.refused.is_none()) {
-        let parsed = hotkey(modifier.name).unwrap();
-        assert_eq!(
-            parsed.to_string(),
-            modifier.name,
-            "display must give the name back"
-        );
-        assert_eq!(hotkey(&parsed.to_string()).unwrap(), parsed);
-    }
-}
-
-#[test]
-fn every_legal_form_survives_serialize_and_deserialize() {
+fn every_legal_form_round_trips_through_display_and_serde() {
     let forms: Vec<&str> = MODIFIERS
         .iter()
         .filter(|modifier| modifier.refused.is_none())
@@ -87,6 +74,9 @@ fn every_legal_form_survives_serialize_and_deserialize() {
 
     for text in forms {
         let parsed = hotkey(text).unwrap();
+        assert_eq!(parsed.to_string(), text, "display must give the name back");
+        assert_eq!(hotkey(&parsed.to_string()).unwrap(), parsed, "{text}");
+
         let json = serde_json::to_string(&parsed).unwrap();
         let deserialized: Hotkey = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, parsed, "{text} did not round trip");
@@ -101,10 +91,10 @@ fn a_bare_typing_key_is_refused_with_the_reason() {
 }
 
 #[test]
-fn shift_is_reserved_for_the_mailbox() {
+fn shift_is_refused_alone_and_in_a_chord() {
     for text in ["Shift", "Shift+F5", "RightShift"] {
         let error = hotkey(text).unwrap_err();
-        assert!(error.contains("mailbox"), "{text}: {error}");
+        assert!(error.contains(SHIFT_IGNORED), "{text}: {error}");
     }
 }
 

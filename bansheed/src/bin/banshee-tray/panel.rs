@@ -13,10 +13,11 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityAnnouncementKey,
-    NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityPostNotificationWithUserInfo,
-    NSAccessibilityPriorityKey, NSAccessibilityPriorityLevel, NSApplication, NSBackingStoreType,
-    NSColor, NSEvent, NSPanel, NSResponder, NSScreen, NSStatusWindowLevel, NSView,
-    NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
+    NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityButtonRole,
+    NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
+    NSAccessibilityPriorityLevel, NSApplication, NSBackingStoreType, NSColor, NSEvent, NSPanel,
+    NSResponder, NSScreen, NSStatusWindowLevel, NSView, NSWindowCollectionBehavior,
+    NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{
     CFAttributedString, CFData, CFDictionary, CFNumber, CFPreferencesAppSynchronize,
@@ -30,60 +31,29 @@ use objc2_core_text::{
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, ns_string};
 use objc2_quartz_core::{
-    CAAnimation, CALayer, CAShapeLayer, CATransaction, CATransform3D, kCALineCapRound,
-    kCALineJoinRound,
+    CAAnimation, CAGradientLayer, CALayer, CAShapeLayer, CATransaction, CATransform3D,
+    kCALineCapRound, kCALineJoinRound,
 };
 
-use super::chip::{Scene, Show};
-use super::figure::{self, Pose, Segment, Voice};
+use super::card::{
+    self, Block, CHIP_BORDER, ChipBox, Cut, DRAIN_HEIGHT, DRAIN_RADIUS, DividerKind, Layout, MUTED,
+    Measure, PlacedGlyph, RIM, RIM_WIDTH, SEGMENT_GAP, SEGMENT_HEIGHT, SEGMENT_OFF, SEGMENT_RADIUS,
+    SEGMENTS, SIDE, Shape, TRACK_RADIUS, Text, lit_segments, segment_width, share_left,
+};
+use super::chip::{Scene, Show, Trim, missed_name, segments_lit, words_of};
+use super::figure::{
+    self, ABOVE_DOCK, AROUND_WORDS, BAND, BAND_GAP, BEHIND, BONE, CAPSULE, CUP_GAP, CUP_RADII,
+    CUPS, DOCK_TILE_DEFAULT, FIGURE, HALO, HEADBAND, INSET, KINDLE_AFTER, LEVEL_STEP, LIGHT,
+    OUTLINE, OUTLINE_CONTRAST, PIVOT, Pose, RING, RING_STRENGTH, RUST, SCREEN_MARGIN, Segment,
+    TRAVEL, Voice, WORDS_BLEED, WORDS_LEFT, WORDS_SIZE, WORDS_TRACKING, WORDS_WEIGHT, WORDS_WIDTH,
+};
+use super::glyphs::{GLYPH, Glyph, Mark, SLOT, marks};
+use super::scenes::{
+    Entrance, Move, answer_opens, centred, failed, holds_the_voice, leaving, moves, rest_pose,
+    takes_clicks, wears_headphones,
+};
 
 mod motion;
-
-const FIGURE: CGFloat = 32.0;
-const CAPSULE: CGFloat = 44.0;
-const INSET: CGFloat = (CAPSULE - FIGURE) / 2.0;
-/// Clear space below the capsule, so the rise and the sinks travel without a cut.
-const TRAVEL: CGFloat = 12.0;
-const WORDS_GAP: CGFloat = 4.0;
-const WORDS_TAIL: CGFloat = 16.0;
-const WORDS_SIZE: CGFloat = 16.0;
-const WORDS_TRACKING: CGFloat = -0.015;
-const WORDS_WEIGHT: CGFloat = 750.0;
-const WORDS_WIDTH: CGFloat = 106.0;
-/// Unmeasured.
-const ABOVE_DOCK: CGFloat = 12.0;
-const SCREEN_MARGIN: CGFloat = 12.0;
-/// Measured: a Dock with 54pt tiles shows about 79pt tall.
-const DOCK_ABOVE_TILE: CGFloat = 26.0;
-/// Unmeasured: the tile size the Dock uses before anyone sets one.
-const DOCK_TILE_DEFAULT: CGFloat = 48.0;
-
-const RUST: u32 = 0x8A2A0D;
-const BONE: u32 = 0xF2EFE9;
-const RING_STRENGTH: CGFloat = 0.45;
-const OUTLINE: CGFloat = 9.0;
-const OUTLINE_CONTRAST: CGFloat = 12.0;
-const RING: CGFloat = 6.0;
-const LIGHT: CGFloat = 7.0;
-const BEHIND: CGFloat = 15.0;
-const HALO: (CGFloat, CGFloat, CGFloat, CGFloat) = (50.0, 40.0, 42.0, 16.0);
-const CUPS: [(CGFloat, CGFloat); 2] = [(15.0, 46.0), (85.0, 46.0)];
-const CUP_RADII: (CGFloat, CGFloat) = (12.0, 17.0);
-const CUP_GAP: CGFloat = 10.0;
-const HEADBAND: [Segment; 2] = [
-    Segment::Move(15.0, 32.0),
-    Segment::Cubic([15.0, -4.0, 85.0, -4.0, 85.0, 32.0]),
-];
-const BAND: CGFloat = 6.0;
-const BAND_GAP: CGFloat = 14.0;
-const WORKING_DEPTH: f64 = 0.3;
-/// The gesture, voice and fill layers turn and scale about the figure's feet.
-const PIVOT: (CGFloat, CGFloat) = (50.0, 88.0);
-const KINDLE_AFTER: f64 = 0.2;
-/// The daemon samples the level every 33ms, so each sample eases into the next.
-const LEVEL_STEP: f64 = 0.033;
-/// Antialiased glyph edges reach past the outlines' box.
-const WORDS_BLEED: CGFloat = 1.0;
 
 fn rect(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
@@ -132,9 +102,9 @@ fn ellipses(
     path
 }
 
-/// Archivo from the window's own font file, at `WORDS_WEIGHT` and `WORDS_WIDTH`. `None` when
-/// Core Text cannot read the file.
-fn archivo() -> Option<CFRetained<CTFont>> {
+/// Archivo from the window's own font file at `weight` and `width` on its
+/// axes. `None` when Core Text cannot read the file.
+fn archivo_at(weight: CGFloat, width: CGFloat, size: CGFloat) -> Option<CFRetained<CTFont>> {
     static ARCHIVO: &[u8] =
         include_bytes!("../../../../banshee-app/ui/public/fonts/archivo-latin.woff2");
     let data = CFData::from_static_bytes(ARCHIVO);
@@ -147,27 +117,34 @@ fn archivo() -> Option<CFRetained<CTFont>> {
     // SAFETY: each call copies a live descriptor with one axis value set.
     let descriptor = unsafe {
         descriptor
-            .copy_with_variation(&axis(b"wght"), WORDS_WEIGHT)
-            .copy_with_variation(&axis(b"wdth"), WORDS_WIDTH)
+            .copy_with_variation(&axis(b"wght"), weight)
+            .copy_with_variation(&axis(b"wdth"), width)
     };
     // SAFETY: a null matrix means none.
-    Some(unsafe { CTFont::with_font_descriptor(&descriptor, WORDS_SIZE, ptr::null()) })
+    Some(unsafe { CTFont::with_font_descriptor(&descriptor, size, ptr::null()) })
+}
+
+fn archivo(cut: Cut) -> Option<CFRetained<CTFont>> {
+    archivo_at(cut.weight(), cut.width(), cut.size())
+}
+
+fn system_font(size: CGFloat) -> Option<CFRetained<CTFont>> {
+    log::warn!("Archivo did not load; the chip's words use the system font");
+    // SAFETY: no language means the user's own.
+    unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::EmphasizedSystem, size, None) }
 }
 
 fn words_font() -> Option<CFRetained<CTFont>> {
-    archivo().or_else(|| {
-        eprintln!("banshee-tray: Archivo did not load; the chip's words use the system font");
-        // SAFETY: no language means the user's own.
-        unsafe {
-            CTFont::new_ui_font_for_language(CTFontUIFontType::EmphasizedSystem, WORDS_SIZE, None)
-        }
-    })
+    archivo_at(WORDS_WEIGHT, WORDS_WIDTH, WORDS_SIZE).or_else(|| system_font(WORDS_SIZE))
 }
 
-/// The font and its tracking, as the one dictionary every line of words
-/// carries. Built once: neither the font nor the tracking changes after that.
-fn text_attributes_of(font: &CTFont) -> CFRetained<CFDictionary<CFString, CFType>> {
-    let kern = CFNumber::new_f64(WORDS_TRACKING * WORDS_SIZE);
+/// The font and its tracking in points, as the one dictionary every line in
+/// that font carries.
+fn text_attributes_of(
+    font: &CTFont,
+    tracking: CGFloat,
+) -> CFRetained<CFDictionary<CFString, CFType>> {
+    let kern = CFNumber::new_f64(tracking);
     // SAFETY: Core Text defines the attribute names as immutable constants.
     let keys = unsafe { [kCTFontAttributeName, kCTKernAttributeName] };
     let values: [&CFType; 2] = [font, &kern];
@@ -183,6 +160,120 @@ fn line_of(text: &str, attributes: &CFDictionary<CFString, CFType>) -> Option<CF
     let string = unsafe { CFAttributedString::new(None, Some(&text), Some(attributes.as_ref())) }?;
     // SAFETY: `string` is a live attributed string.
     Some(unsafe { CTLine::with_attributed_string(&string) })
+}
+
+/// Archivo in every cut the card sets, each with its line attributes and the
+/// advance of its narrowest printable ASCII character.
+struct Fonts {
+    by_cut: [Option<CFRetained<CTFont>>; Cut::ALL.len()],
+    attributes: [Option<CFRetained<CFDictionary<CFString, CFType>>>; Cut::ALL.len()],
+    narrowest: [CGFloat; Cut::ALL.len()],
+}
+
+impl Fonts {
+    fn new() -> Self {
+        let by_cut = Cut::ALL.map(|cut| archivo(cut).or_else(|| system_font(cut.size())));
+        let attributes = Cut::ALL.map(|cut| {
+            by_cut[cut as usize]
+                .as_deref()
+                .map(|font| text_attributes_of(font, cut.tracking() * cut.size()))
+        });
+        let mut fonts = Fonts {
+            by_cut,
+            attributes,
+            narrowest: [0.0; Cut::ALL.len()],
+        };
+        fonts.narrowest = Cut::ALL.map(|cut| card::narrowest_ascii(|one| fonts.width(one, cut)));
+        fonts
+    }
+
+    fn line(&self, text: &str, cut: Cut) -> Option<CFRetained<CTLine>> {
+        line_of(text, self.attributes[cut as usize].as_deref()?)
+    }
+
+    fn outlines(&self, text: &str, cut: Cut) -> Option<Words> {
+        let font = self.by_cut[cut as usize].as_deref()?;
+        let line = self.line(text, cut)?;
+        glyph_outlines(&line, font)
+    }
+}
+
+impl Measure for Fonts {
+    fn width(&self, text: &str, cut: Cut) -> f64 {
+        self.line(text, cut).map_or(0.0, |line| {
+            // SAFETY: null pointers mean the caller does not ask for those metrics.
+            unsafe { line.typographic_bounds(ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) }
+        })
+    }
+
+    fn narrowest(&self, cut: Cut) -> f64 {
+        self.narrowest[cut as usize]
+    }
+}
+
+/// Each glyph of `line` as its outline, set in the run's own font, or in
+/// `font` where the run names none. A glyph Archivo lacks comes from the font
+/// Core Text falls back to.
+fn glyph_outlines(line: &CTLine, font: &CTFont) -> Option<Words> {
+    let (mut ascent, mut descent) = (0.0, 0.0);
+    // SAFETY: both pointers are to live locals, and a null leading is allowed.
+    let width = unsafe { line.typographic_bounds(&mut ascent, &mut descent, ptr::null_mut()) };
+
+    let path = CGMutablePath::new();
+    // SAFETY: a line's runs array holds runs only.
+    let runs = unsafe { line.glyph_runs() };
+    // SAFETY: as above.
+    for run in unsafe { runs.cast_unchecked::<CTRun>() }.iter() {
+        // SAFETY: `run` is a live run.
+        let count = usize::try_from(unsafe { run.glyph_count() }).unwrap_or(0);
+        if count == 0 {
+            continue;
+        }
+        let mut glyphs: Vec<CGGlyph> = vec![0; count];
+        let mut positions = vec![CGPoint::ZERO; count];
+        let all = CFRange {
+            location: 0,
+            length: 0,
+        };
+        // SAFETY: each buffer holds `count` elements, the run's glyph count, and a
+        // zero-length range asks for the whole run.
+        unsafe {
+            run.glyphs(all, ptr::NonNull::from(&mut glyphs[..]).cast());
+            run.positions(all, ptr::NonNull::from(&mut positions[..]).cast());
+        }
+        // SAFETY: a run's attributes map CFString names to CFType values.
+        let attributes = unsafe { run.attributes() };
+        // SAFETY: as above.
+        let attributes = unsafe { attributes.cast_unchecked::<CFString, CFType>() };
+        // SAFETY: Core Text defines the attribute name as an immutable constant.
+        let run_font = attributes
+            .get(unsafe { kCTFontAttributeName })
+            .and_then(|value| value.downcast::<CTFont>().ok());
+        let run_font = run_font.as_deref().unwrap_or(font);
+        for (glyph, at) in glyphs.into_iter().zip(positions) {
+            let place = CGAffineTransform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                tx: at.x,
+                ty: at.y,
+            };
+            // SAFETY: `place` is a live transform, and the glyph came from this font.
+            if let Some(outline) = unsafe { run_font.path_for_glyph(glyph, &place) } {
+                // SAFETY: a null transform means none.
+                unsafe { CGMutablePath::add_path(Some(&path), ptr::null(), Some(&outline)) };
+            }
+        }
+    }
+    let ink = ink_of(&path)?;
+    Some(Words {
+        width: width.max(ink.origin.x + ink.size.width).ceil(),
+        path,
+        ink,
+        ascent,
+        descent,
+    })
 }
 
 /// How far above the screen's bottom edge a hidden Dock's top reaches once it
@@ -205,7 +296,7 @@ fn hidden_dock_height() -> CGFloat {
         .and_then(|value| value.downcast::<CFNumber>().ok())
         .and_then(|tile| tile.as_f64())
         .unwrap_or(DOCK_TILE_DEFAULT);
-    tile + DOCK_ABOVE_TILE
+    figure::dock_height(tile)
 }
 
 /// Where the capsule goes on the screen that holds the focused window.
@@ -235,14 +326,6 @@ fn placement(mtm: MainThreadMarker) -> Option<Place> {
         right: frame.origin.x + frame.size.width - SCREEN_MARGIN,
         scale: screen.backingScaleFactor(),
     })
-}
-
-fn words_of(show: &Show) -> Option<&str> {
-    match show {
-        Show::YourTurn | Show::Answering => Some("Your turn"),
-        Show::NothingHeard(text) | Show::Broken(text) => Some(text),
-        Show::Recording | Show::Working | Show::Done(_) => None,
-    }
 }
 
 /// In the stacking order, inside the capsule. Each figure layer nests in the
@@ -278,6 +361,8 @@ impl Layers {
         let capsule = CALayer::new();
         capsule.setBackgroundColor(Some(&rust));
         capsule.setCornerRadius(CAPSULE / 2.0);
+        capsule.setBorderWidth(RIM_WIDTH);
+        capsule.setBorderColor(Some(&color(RIM, 1.0)));
         capsule.setMasksToBounds(true);
         capsule.setAnchorPoint(CGPoint::new(0.5, 0.0));
 
@@ -339,7 +424,7 @@ impl Layers {
             if lit {
                 // SAFETY: Core Animation defines the cap names as immutable constants.
                 layer.setLineCap(unsafe { kCALineCapRound });
-                layer.setLineDashPattern(Some(&dashes([0.22 * light_length, 0.78 * light_length])));
+                layer.setLineDashPattern(Some(&dashes(figure::light_dash(light_length))));
             }
             let half = if near {
                 rect(-40.0, HALO.1, 180.0, 100.0)
@@ -459,17 +544,6 @@ fn scale_tree(layer: &CALayer, scale: CGFloat) {
     }
 }
 
-/// The panel holds the capsule, the clear space below it, and room on both
-/// sides during a width transition. Any of it may take a click, so only a
-/// point in the rounded shape of the centred capsule, `capsule` points wide,
-/// counts.
-fn in_capsule(view: CGSize, capsule: CGFloat, at: CGPoint) -> bool {
-    let radius = CAPSULE / 2.0;
-    let x = at.x - (view.width - capsule) / 2.0;
-    let centre_x = x.clamp(radius, (capsule - radius).max(radius));
-    (x - centre_x).hypot(at.y - TRAVEL - radius) <= radius
-}
-
 struct Clicks {
     open: Box<dyn Fn()>,
     capsule: Retained<CALayer>,
@@ -492,10 +566,28 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            let capsule = self.ivars().capsule.bounds().size.width;
-            if in_capsule(self.bounds().size, capsule, event.locationInWindow()) {
+            let capsule = &self.ivars().capsule;
+            let size = capsule.bounds().size;
+            let view = self.bounds().size;
+            let at = event.locationInWindow();
+            if card::in_shape(
+                view.width,
+                Shape {
+                    width: size.width,
+                    height: size.height,
+                    radius: capsule.cornerRadius(),
+                },
+                at.x,
+                TRAVEL + size.height - at.y,
+            ) {
                 (self.ivars().open)();
             }
+        }
+
+        #[unsafe(method(accessibilityPerformPress))]
+        fn accessibility_perform_press(&self) -> bool {
+            (self.ivars().open)();
+            true
         }
     }
 );
@@ -523,116 +615,14 @@ struct Words {
     descent: CGFloat,
 }
 
-/// What a scene plays. Each names one function in `motion`, or the fade that
-/// stands in for it under Reduce Motion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Move {
-    Rise,
-    FadeIn,
-    Emerge,
-    Kindle,
-    KindleFade,
-    Hover,
-    Orbit,
-    Tilt,
-    Open,
-    OpenFade,
-    Cups,
-    Shake,
-    Strain,
-    Breaks,
-    Words,
-    WordsFade,
-    Float,
-    FrameSink,
-    FailureExit,
-    FadeOut,
-}
-
-/// How a scene's moves join what showed before it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Entrance {
-    /// The panel had nothing on screen.
-    Fresh,
-    /// A scene already on screen, and its words carry over unchanged.
-    SameWords,
-    /// A scene already on screen; this one starts its own words from nothing.
-    NewWords,
-}
-
-/// The moves a scene plays as its serial moves. `calm` is Reduce Motion.
-fn moves(show: &Show, entrance: Entrance, calm: bool) -> Vec<Move> {
-    let mut moves = Vec::new();
-    if entrance == Entrance::Fresh {
-        moves.push(if calm { Move::FadeIn } else { Move::Rise });
-        if !calm && matches!(show, Show::Recording) {
-            moves.push(Move::Emerge);
-        }
-    }
-    if entrance == Entrance::SameWords {
-        moves.extend_from_slice(opening(calm));
-        return moves;
-    }
-    moves.extend_from_slice(match (show, calm) {
-        (Show::Recording, false) => &[Move::Kindle][..],
-        (Show::Recording, true) => &[Move::KindleFade],
-        (Show::Working, false) => &[Move::Hover, Move::Orbit],
-        (Show::YourTurn, false) => &[Move::Cups],
-        (Show::NothingHeard(_), false) => &[Move::Shake, Move::Breaks],
-        (Show::Broken(_), false) => &[Move::Strain, Move::Breaks],
-        (Show::Done(_), false) => &[Move::Float, Move::FrameSink],
-        (Show::Done(_), true) => &[Move::FadeOut],
-        (Show::Answering, calm) => opening(calm),
-        (Show::Working | Show::YourTurn | Show::NothingHeard(_) | Show::Broken(_), true) => &[],
-    });
-    if words_of(show).is_some() {
-        moves.push(if calm { Move::WordsFade } else { Move::Words });
-    }
-    moves
-}
-
-/// What the answer plays as it opens: the fill, and the head tilting in to
-/// listen.
-fn opening(calm: bool) -> &'static [Move] {
-    if calm {
-        &[Move::OpenFade]
-    } else {
-        &[Move::Open, Move::Tilt]
-    }
-}
-
-/// Your turn becomes the answer in place: the capsule and the words stay.
-fn answer_opens(before: Option<&Show>, after: &Show) -> bool {
-    matches!((before, after), (Some(Show::YourTurn), Show::Answering))
-}
-
-/// The states whose figure fills and moves with the microphone level.
-fn holds_the_voice(show: &Show) -> bool {
-    matches!(show, Show::Recording | Show::Answering)
-}
-
-fn centred(midline: CGFloat, width: CGFloat) -> CGFloat {
-    midline - width / 2.0
-}
-
-/// How a scene leaves when none follows it. `None` for Done: its float has
-/// already carried it out.
-fn leaving(show: &Show, calm: bool) -> Option<Move> {
-    match show {
-        Show::Done(_) => None,
-        _ => Some(if calm {
-            Move::FadeOut
-        } else {
-            Move::FailureExit
-        }),
-    }
-}
-
 pub struct Panel {
     mtm: MainThreadMarker,
     window: Retained<NSPanel>,
+    view: Retained<ChipView>,
     root: Retained<CALayer>,
     layers: Layers,
+    card: CardLayers,
+    fonts: Fonts,
     font: Option<CFRetained<CTFont>>,
     text_attributes: Option<CFRetained<CFDictionary<CFString, CFType>>>,
     ellipsis: Option<CFRetained<CTLine>>,
@@ -640,6 +630,8 @@ pub struct Panel {
     outline_length: CGFloat,
     place: Option<Place>,
     on_screen: Option<Scene>,
+    /// The card or the Missed pill on screen.
+    layout: Option<Layout>,
     calm: bool,
     voice: Voice,
     voice_since: Instant,
@@ -649,7 +641,8 @@ pub struct Panel {
 }
 
 impl Panel {
-    /// `open` runs on a click on the capsule while a broken state shows.
+    /// `open` runs on a click on the capsule while a scene that takes clicks
+    /// shows, and on VoiceOver's press of the missed pill.
     pub fn new(mtm: MainThreadMarker, open: Box<dyn Fn()>) -> Self {
         let window = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
@@ -675,37 +668,41 @@ impl Panel {
 
         let root = CALayer::new();
         let layers = Layers::build(&root);
+        let card = CardLayers::build(&layers.capsule);
         let view = ChipView::new(mtm, open, layers.capsule.clone());
         view.setLayer(Some(&root));
         view.setWantsLayer(true);
         window.setContentView(Some(&view));
         // AppKit reads a borderless, status-level panel as a system dialog to
-        // VoiceOver. The panel holds no text or controls, so the window and its
-        // view stay hidden. VoiceOver must not speak while an agent's question
-        // keeps the microphone open.
+        // VoiceOver, so the window is never an element. VoiceOver must not
+        // read the card while the microphone is open.
         window.setAccessibilityElement(false);
-        window.setAccessibilityHidden(true);
-        view.setAccessibilityElement(false);
-        view.setAccessibilityHidden(true);
+        expose(&window, &view, None);
 
         let rest = figure::path_length(&figure::shroud(0.0, 0.0));
         let font = words_font();
-        let text_attributes = font.as_deref().map(text_attributes_of);
+        let text_attributes = font
+            .as_deref()
+            .map(|font| text_attributes_of(font, WORDS_TRACKING * WORDS_SIZE));
         let ellipsis = text_attributes
             .as_deref()
             .and_then(|attributes| line_of("\u{2026}", attributes));
         Panel {
             mtm,
             window,
+            view,
             layers,
+            card,
+            fonts: Fonts::new(),
             root,
             font,
             text_attributes,
             ellipsis,
-            outline_dash: dashes([0.088 * rest, 0.056 * rest]),
+            outline_dash: dashes(figure::outline_dash(rest)),
             outline_length: rest,
             place: None,
             on_screen: None,
+            layout: None,
             calm: false,
             voice: Voice::default(),
             voice_since: Instant::now(),
@@ -715,7 +712,27 @@ impl Panel {
 
     pub fn show(&mut self, scene: Option<&Scene>) {
         if self.on_screen.as_ref() == scene {
+            if let Some(countdown) = scene.and_then(|scene| scene.countdown)
+                && self.calm
+            {
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+                self.card
+                    .light(segments_lit(share_left(countdown, Instant::now())));
+                CATransaction::commit();
+            }
             return;
+        }
+        let mut laid_out = None;
+        if let (Some(shown), Some(scene), Some(place)) = (&self.on_screen, scene, self.place)
+            && shown.serial == scene.serial
+        {
+            let layout = self.lay_out(scene, place);
+            if layout.is_some() == self.layout.is_some() {
+                self.relayout(scene, layout, place);
+                return;
+            }
+            laid_out = Some(layout);
         }
         self.ticket.set(self.ticket.get() + 1);
         let Some(scene) = scene else {
@@ -736,13 +753,23 @@ impl Panel {
         };
         let workspace = NSWorkspace::sharedWorkspace();
         let contrast = workspace.accessibilityDisplayShouldIncreaseContrast();
+        let was_calm = self.calm;
         self.calm = workspace.accessibilityDisplayShouldReduceMotion();
         self.voice = Voice::default();
         self.voice_since = Instant::now();
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.layers.quiet();
-        self.draw(&scene.show, place, contrast, entering);
+        self.card.quiet();
+        // The kept layout read Reduce Motion before it was read again above.
+        let layout = laid_out
+            .filter(|_| self.calm == was_calm)
+            .unwrap_or_else(|| self.lay_out(scene, place));
+        self.dress(layout.as_ref().map(|layout| &layout.shape));
+        match &layout {
+            Some(layout) => self.draw_card(layout, place, entering),
+            None => self.draw(&scene.show, place, contrast, entering),
+        }
         let entrance = if opens {
             Entrance::SameWords
         } else if entering {
@@ -750,35 +777,74 @@ impl Panel {
         } else {
             Entrance::NewWords
         };
-        for step in moves(&scene.show, entrance, self.calm) {
+        self.layout = layout;
+        for step in moves(scene, entrance, self.calm) {
             self.play(step);
         }
         CATransaction::commit();
         self.window
-            .setIgnoresMouseEvents(!matches!(scene.show, Show::Broken(_)));
+            .setIgnoresMouseEvents(!takes_clicks(&scene.show));
+        expose(&self.window, &self.view, Some(&scene.show));
         self.window.orderFrontRegardless();
         self.on_screen = Some(scene.clone());
     }
 
-    /// Moves the figure with the microphone while it hears you.
+    /// The same state with new words: only the words and the capsule's size
+    /// change, so the figure or the glyph keeps moving with the voice.
+    fn relayout(&mut self, scene: &Scene, layout: Option<Layout>, place: Place) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        match &layout {
+            Some(layout) => self.draw_card(layout, place, false),
+            None => self.lay_words(&scene.show, place, false),
+        }
+        CATransaction::commit();
+        self.layout = layout;
+        self.on_screen = Some(scene.clone());
+    }
+
+    fn lay_out(&self, scene: &Scene, place: Place) -> Option<Layout> {
+        let room = card::room(2.0 * (place.right - place.anchor.x));
+        card::layout(scene, room, self.calm, Instant::now(), &self.fonts)
+    }
+
+    fn dress(&self, card: Option<&Shape>) {
+        let layers = &self.layers;
+        let capsule = &layers.capsule;
+        match card {
+            Some(shape) => {
+                capsule.setCornerRadius(shape.radius);
+                layers.words.setHidden(true);
+            }
+            None => capsule.setCornerRadius(CAPSULE / 2.0),
+        }
+        layers.figure.setHidden(card.is_some());
+        self.card.body.setHidden(card.is_none());
+    }
+
     pub fn level(&mut self, peak: f32) {
-        if !self
-            .on_screen
-            .as_ref()
-            .is_some_and(|scene| holds_the_voice(&scene.show))
-        {
+        let Some(scene) = self.on_screen.as_ref() else {
+            return;
+        };
+        let bars = self.layout.as_ref().is_some_and(Layout::follows_the_level);
+        let figure = self.layout.is_none() && holds_the_voice(&scene.show);
+        if !bars && !figure {
             return;
         }
         let level = self.voice.hear(peak, Instant::now());
         let t_ms = self.voice_since.elapsed().as_secs_f64() * 1000.0;
         CATransaction::begin();
         CATransaction::setAnimationDuration(LEVEL_STEP);
-        let pose = figure::pose(level, t_ms, self.calm);
-        // Reduce Motion holds the shroud where `draw` struck it.
-        if self.calm {
-            self.fill_to(pose.fill);
+        if bars {
+            self.card.strike(Glyph::Bars, level, self.calm);
         } else {
-            self.strike(pose);
+            let pose = figure::pose(level, t_ms, self.calm);
+            // Reduce Motion holds the shroud where `draw` struck it.
+            if self.calm {
+                self.fill_to(pose.fill);
+            } else {
+                self.strike(pose);
+            }
         }
         CATransaction::commit();
     }
@@ -808,6 +874,7 @@ impl Panel {
             return;
         };
         self.window.setIgnoresMouseEvents(true);
+        expose(&self.window, &self.view, None);
         let Some(step) = leaving(&was.show, self.calm) else {
             self.window.orderOut(None);
             return;
@@ -835,6 +902,7 @@ impl Panel {
         unsafe { CATransaction::setCompletionBlock(Some(&block)) };
     }
 
+    /// A layout's last block stands in for the figure pill's words.
     fn play(&self, step: Move) {
         let layers = &self.layers;
         let key = match step {
@@ -867,15 +935,20 @@ impl Panel {
             }
             Move::Shake => add(&layers.gesture, motion::head_shake()),
             Move::Strain => add(&layers.gesture, motion::strain()),
-            Move::Breaks => add(
-                &layers.outline,
-                motion::outline_breaks(self.outline_length, &self.outline_dash),
-            ),
+            Move::Breaks => add(&layers.outline, motion::outline_breaks(self.outline_length)),
             Move::Words => add(
                 &layers.words_mask,
                 motion::words_reveal(layers.words_mask.bounds().size.width),
             ),
+            Move::WordsFade if self.layout.is_some() => {
+                add(&self.card.answer, motion::fade_in(0.0));
+            }
             Move::WordsFade => add(&layers.words_mask, motion::fade_in(0.0)),
+            Move::Pulse => {
+                for (at, dot) in self.card.marks.iter().enumerate() {
+                    add(dot, motion::dot_pulse(at));
+                }
+            }
             Move::Float => add(&layers.exit, motion::float_out()),
             Move::FrameSink => add(&layers.capsule, motion::frame_sink()),
             Move::FailureExit => add(&layers.capsule, motion::failure_exit()),
@@ -903,56 +976,71 @@ impl Panel {
         fill.setStrokeColor(Some(&strength));
     }
 
-    /// The capsule's width as it shows now, part way through a transition or not.
-    fn shown_width(&self) -> CGFloat {
+    /// The capsule's size as it shows now, part way through a transition or not.
+    fn shown_size(&self) -> CGSize {
         let capsule = &self.layers.capsule;
         // SAFETY: the presentation copy is read once, on the main thread, and not kept.
         let shown = unsafe { capsule.presentationLayer() };
         shown
             .map_or_else(|| capsule.bounds(), |shown| shown.bounds())
             .size
-            .width
+    }
+
+    /// Sizes the capsule to `size`, moving from the size it shows unless it
+    /// enters or Reduce Motion is on. The panel holds the larger of the two
+    /// while the capsule moves, then fits `size`, so a pill that takes clicks
+    /// leaves no clear space above it.
+    fn resize(&self, size: CGSize, place: Place, entering: bool) {
+        let from = if entering || self.calm {
+            size
+        } else {
+            self.shown_size()
+        };
+        let (window, root, capsule) = (&self.window, &self.root, &self.layers.capsule);
+        let (span, height) = (size.width.max(from.width), size.height.max(from.height));
+        fit(window, root, capsule, place, span, height);
+        capsule.setBounds(rect(0.0, 0.0, size.width, size.height));
+        self.ticket.set(self.ticket.get() + 1);
+        CATransaction::begin();
+        if span > size.width || height > size.height {
+            let (window, root, capsule) = (window.clone(), root.clone(), capsule.clone());
+            self.after(move || {
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+                fit(&window, &root, &capsule, place, size.width, size.height);
+                CATransaction::commit();
+            });
+        }
+        if from.width != size.width {
+            let width = motion::chip_width(from.width, size.width);
+            capsule.addAnimation_forKey(&width, Some(ns_string!("width")));
+        }
+        if from.height != size.height {
+            let height = motion::chip_height(from.height, size.height);
+            capsule.addAnimation_forKey(&height, Some(ns_string!("height")));
+        }
+        CATransaction::commit();
+    }
+
+    fn draw_card(&mut self, layout: &Layout, place: Place, entering: bool) {
+        let size = CGSize::new(layout.shape.width, layout.shape.height);
+        self.resize(size, place, entering);
+        self.card.fill(layout, &self.fonts, self.calm);
     }
 
     fn draw(&self, show: &Show, place: Place, contrast: bool, entering: bool) {
         let layers = &self.layers;
         let working = matches!(show, Show::Working);
-        let failed = matches!(show, Show::NothingHeard(_) | Show::Broken(_));
+        self.lay_words(show, place, entering);
 
-        let room = 2.0 * (place.right - place.anchor.x) - (INSET + FIGURE + WORDS_GAP + WORDS_TAIL);
-        let words = words_of(show).and_then(|words| self.words(words, room));
-        let width = words.as_ref().map_or(CAPSULE, |words| {
-            INSET + FIGURE + WORDS_GAP + words.width + WORDS_TAIL
-        });
-        let from = if entering || self.calm {
-            width
-        } else {
-            self.shown_width()
-        };
-        let reach = width.max(from);
-        let (window, root, capsule) = (&self.window, &self.root, &layers.capsule);
-        fit(window, root, capsule, place, reach);
-        capsule.setBounds(rect(0.0, 0.0, width, CAPSULE));
-        if from != width {
-            layers
-                .capsule
-                .addAnimation_forKey(&motion::chip_width(from, width), Some(ns_string!("width")));
-        }
-
-        let rest = figure::pose(0.0, 0.0, self.calm);
-        let depth = if working && !self.calm {
-            WORKING_DEPTH
-        } else {
-            rest.depth
-        };
-        self.strike(Pose { depth, ..rest });
+        self.strike(rest_pose(show, self.calm));
         let outline = if contrast { OUTLINE_CONTRAST } else { OUTLINE };
         for layer in [&layers.outline, &layers.fill] {
             layer.setLineWidth(outline);
         }
         layers
             .outline
-            .setLineDashPattern(failed.then_some(&*self.outline_dash));
+            .setLineDashPattern(failed(show).then_some(&*self.outline_dash));
 
         for layer in [
             &layers.ring_far,
@@ -964,9 +1052,18 @@ impl Panel {
             layer.setHidden(!working);
         }
         layers.fill.setHidden(!holds_the_voice(show));
-        layers
-            .headphones
-            .setHidden(!matches!(show, Show::YourTurn | Show::Answering));
+        layers.headphones.setHidden(!wears_headphones(show));
+    }
+
+    /// Sizes the capsule to the scene's words and sets them in it.
+    fn lay_words(&self, show: &Show, place: Place, entering: bool) {
+        let layers = &self.layers;
+        let room = 2.0 * (place.right - place.anchor.x) - AROUND_WORDS;
+        let words = words_of(show).and_then(|(words, cut)| self.words(words, cut, room));
+        let width = words
+            .as_ref()
+            .map_or(CAPSULE, |words| figure::capsule_width(words.width));
+        self.resize(CGSize::new(width, CAPSULE), place, entering);
 
         if let Some(words) = &words {
             let line = words.ascent + words.descent;
@@ -974,7 +1071,7 @@ impl Panel {
             layers.words.setPath(Some(&words.path));
             layers.words.setBounds(words.ink);
             layers.words.setPosition(CGPoint::new(
-                INSET + FIGURE + WORDS_GAP + words.ink.origin.x,
+                WORDS_LEFT + words.ink.origin.x,
                 baseline + words.ink.origin.y,
             ));
             layers.words_mask.setBounds(rect(
@@ -991,90 +1088,351 @@ impl Panel {
         layers.words.setHidden(words.is_none());
     }
 
-    /// Lays the words out in one Core Text line, cut with a trailing ellipsis
-    /// past `room` points, and takes each glyph's outline. A glyph Archivo
-    /// lacks comes from the font Core Text falls back to.
-    fn words(&self, words: &str, room: CGFloat) -> Option<Words> {
+    /// Lays the words out in one Core Text line, cut at `cut` with an ellipsis
+    /// past `room` points, and takes each glyph's outline.
+    fn words(&self, words: &str, trim: Trim, room: CGFloat) -> Option<Words> {
         let font = self.font.as_deref()?;
         let attributes = self.text_attributes.as_deref()?;
         let whole = line_of(words, attributes)?;
+        let cut = match trim {
+            Trim::Start => CTLineTruncationType::Start,
+            Trim::End => CTLineTruncationType::End,
+        };
         // SAFETY: `whole` is live, and the ellipsis line, when present, is live too.
-        let line = unsafe {
-            whole.truncated_line(room, CTLineTruncationType::End, self.ellipsis.as_deref())
-        }
-        .unwrap_or(whole);
-        let (mut ascent, mut descent) = (0.0, 0.0);
-        // SAFETY: both pointers are to live locals, and a null leading is allowed.
-        let width = unsafe { line.typographic_bounds(&mut ascent, &mut descent, ptr::null_mut()) };
-
-        let path = CGMutablePath::new();
-        // SAFETY: a line's runs array holds runs only.
-        let runs = unsafe { line.glyph_runs() };
-        // SAFETY: as above.
-        for run in unsafe { runs.cast_unchecked::<CTRun>() }.iter() {
-            // SAFETY: `run` is a live run.
-            let count = usize::try_from(unsafe { run.glyph_count() }).unwrap_or(0);
-            if count == 0 {
-                continue;
-            }
-            let mut glyphs: Vec<CGGlyph> = vec![0; count];
-            let mut positions = vec![CGPoint::ZERO; count];
-            let all = CFRange {
-                location: 0,
-                length: 0,
-            };
-            // SAFETY: each buffer holds `count` elements, the run's glyph count, and a
-            // zero-length range asks for the whole run.
-            unsafe {
-                run.glyphs(all, ptr::NonNull::from(&mut glyphs[..]).cast());
-                run.positions(all, ptr::NonNull::from(&mut positions[..]).cast());
-            }
-            // SAFETY: a run's attributes map CFString names to CFType values.
-            let attributes = unsafe { run.attributes() };
-            // SAFETY: as above.
-            let attributes = unsafe { attributes.cast_unchecked::<CFString, CFType>() };
-            // SAFETY: Core Text defines the attribute name as an immutable constant.
-            let run_font = attributes
-                .get(unsafe { kCTFontAttributeName })
-                .and_then(|value| value.downcast::<CTFont>().ok());
-            let run_font = run_font.as_deref().unwrap_or(font);
-            for (glyph, at) in glyphs.into_iter().zip(positions) {
-                let place = CGAffineTransform {
-                    a: 1.0,
-                    b: 0.0,
-                    c: 0.0,
-                    d: 1.0,
-                    tx: at.x,
-                    ty: at.y,
-                };
-                // SAFETY: `place` is a live transform, and the glyph came from this font.
-                if let Some(outline) = unsafe { run_font.path_for_glyph(glyph, &place) } {
-                    // SAFETY: a null transform means none.
-                    unsafe { CGMutablePath::add_path(Some(&path), ptr::null(), Some(&outline)) };
-                }
-            }
-        }
-        let ink = ink_of(&path)?;
-        Some(Words {
-            width: width.max(ink.origin.x + ink.size.width).ceil(),
-            path,
-            ink,
-            ascent,
-            descent,
-        })
+        let line =
+            unsafe { whole.truncated_line(room, cut, self.ellipsis.as_deref()) }.unwrap_or(whole);
+        glyph_outlines(&line, font)
     }
 }
 
-/// Sizes the panel `span` points wide on the midline, with the clear space
-/// below, and centres the capsule in it.
-fn fit(window: &NSPanel, root: &CALayer, capsule: &CALayer, place: Place, span: CGFloat) {
+/// Sizes the panel `span` points wide and `height` tall on the midline, with
+/// the clear space below, and sets the capsule's bottom edge on the clear
+/// space's top.
+fn fit(
+    window: &NSPanel,
+    root: &CALayer,
+    capsule: &CALayer,
+    place: Place,
+    span: CGFloat,
+    height: CGFloat,
+) {
     let left = centred(place.anchor.x, span);
     window.setFrame_display(
-        rect(left, place.anchor.y - TRAVEL, span, TRAVEL + CAPSULE),
+        rect(left, place.anchor.y - TRAVEL, span, TRAVEL + height),
         true,
     );
-    root.setFrame(rect(0.0, 0.0, span, TRAVEL + CAPSULE));
+    root.setFrame(rect(0.0, 0.0, span, TRAVEL + height));
     capsule.setPosition(CGPoint::new(span / 2.0, TRAVEL));
+}
+
+/// VoiceOver reaches the missed pill as a button. Any other scene, or none,
+/// leaves the panel and its view hidden from it.
+fn expose(window: &NSPanel, view: &ChipView, show: Option<&Show>) {
+    let missed = match show {
+        Some(Show::Missed { count, .. }) => Some(*count),
+        _ => None,
+    };
+    window.setAccessibilityHidden(missed.is_none());
+    view.setAccessibilityElement(missed.is_some());
+    view.setAccessibilityHidden(missed.is_none());
+    if let Some(count) = missed {
+        // SAFETY: AppKit defines the role name as an immutable constant.
+        view.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));
+        view.setAccessibilityLabel(Some(&NSString::from_str(&missed_name(count))));
+    }
+}
+
+/// `text` in its ink, centred in a line box whose left and bottom edges sit
+/// at `left` and `bottom` in its holder. `None` when Core Text cannot set it.
+fn text_layer(
+    text: &Text,
+    left: CGFloat,
+    bottom: CGFloat,
+    fonts: &Fonts,
+) -> Option<Retained<CAShapeLayer>> {
+    let words = fonts.outlines(&text.line, text.cut)?;
+    let baseline = bottom + (text.height - (words.ascent + words.descent)) / 2.0 + words.descent;
+    let shape = CAShapeLayer::new();
+    shape.setFillColor(Some(&color(text.ink.hex(), 1.0)));
+    shape.setPath(Some(&words.path));
+    shape.setAnchorPoint(CGPoint::ZERO);
+    shape.setBounds(words.ink);
+    shape.setPosition(CGPoint::new(
+        left + words.ink.origin.x,
+        baseline + words.ink.origin.y,
+    ));
+    Some(shape)
+}
+
+/// `card` is the card's size.
+fn chip_layer(chip: &ChipBox, card: CGSize, fonts: &Fonts) -> Retained<CALayer> {
+    let ChipBox {
+        x,
+        top,
+        width,
+        height,
+        ..
+    } = *chip;
+    let layer = CALayer::new();
+    layer.setFrame(rect(x, card.height - top - height, width, height));
+    layer.setBorderWidth(CHIP_BORDER);
+    layer.setBorderColor(Some(&color(MUTED, 1.0)));
+    layer.setCornerRadius(height / 2.0);
+    let label = &chip.label;
+    let bottom = top + height - label.top - label.height;
+    if let Some(shape) = text_layer(label, label.x - x, bottom, fonts) {
+        layer.addSublayer(&shape);
+    }
+    layer
+}
+
+/// `card` is the card's size.
+fn block_layer(block: &Block, card: CGSize, fonts: &Fonts) -> Retained<CALayer> {
+    let layer = CALayer::new();
+    let bottom = card.height - block.top - block.height;
+    layer.setFrame(rect(0.0, bottom, card.width, block.height));
+    for text in &block.lines {
+        let bottom = block.top + block.height - text.top - text.height;
+        if let Some(shape) = text_layer(text, text.x, bottom, fonts) {
+            layer.addSublayer(&shape);
+        }
+    }
+    if let Some(fade) = block.fade {
+        let mask = CAGradientLayer::new();
+        mask.setFrame(layer.bounds());
+        let ends = [color(BONE, 0.0), color(BONE, 1.0)];
+        let ends: [&AnyObject; 2] = [(*ends[0]).as_ref(), (*ends[1]).as_ref()];
+        // SAFETY: a gradient's colours are CGColors, which each element is.
+        unsafe { mask.setColors(Some(&NSArray::from_slice(&ends))) };
+        mask.setStartPoint(CGPoint::new(0.5, 1.0));
+        mask.setEndPoint(CGPoint::new(0.5, 1.0 - fade / block.height));
+        // SAFETY: the mask is new, sits in no layer tree, and masks this block alone.
+        unsafe { layer.setMask(Some(&mask)) };
+    }
+    layer
+}
+
+struct CardLayers {
+    body: Retained<CALayer>,
+    blocks: Vec<Retained<CALayer>>,
+    divider: Retained<CALayer>,
+    drain: Retained<CALayer>,
+    /// The countdown the drain's track runs from.
+    draining: Option<Instant>,
+    segments: [Retained<CALayer>; SEGMENTS],
+    answer: Retained<CALayer>,
+    glyph: Retained<CALayer>,
+    marks: Vec<Retained<CAShapeLayer>>,
+    shown: Option<Glyph>,
+    chip: Option<Retained<CALayer>>,
+}
+
+impl CardLayers {
+    fn build(capsule: &CALayer) -> Self {
+        let body = CALayer::new();
+        body.setHidden(true);
+        let divider = CALayer::new();
+        divider.setBackgroundColor(Some(&color(MUTED, 1.0)));
+        let drain = CALayer::new();
+        drain.setBackgroundColor(Some(&color(BONE, 1.0)));
+        drain.setCornerRadius(DRAIN_RADIUS);
+        let segments = std::array::from_fn(|_| CALayer::new());
+        for segment in &segments {
+            segment.setCornerRadius(SEGMENT_RADIUS);
+        }
+        let answer = CALayer::new();
+        let glyph = CALayer::new();
+        glyph.setBounds(rect(0.0, 0.0, SLOT, GLYPH));
+        glyph.setGeometryFlipped(true);
+        capsule.addSublayer(&body);
+        body.addSublayer(&divider);
+        body.addSublayer(&drain);
+        for segment in &segments {
+            body.addSublayer(segment);
+        }
+        body.addSublayer(&answer);
+        answer.addSublayer(&glyph);
+        CardLayers {
+            body,
+            blocks: Vec::new(),
+            divider,
+            drain,
+            draining: None,
+            segments,
+            answer,
+            glyph,
+            marks: Vec::new(),
+            shown: None,
+            chip: None,
+        }
+    }
+
+    fn quiet(&self) {
+        self.answer.removeAllAnimations();
+        for mark in &self.marks {
+            mark.removeAllAnimations();
+        }
+    }
+
+    /// Core Animation's y runs up, so each top is measured down from the
+    /// card's height.
+    fn fill(&mut self, layout: &Layout, fonts: &Fonts, calm: bool) {
+        let size = CGSize::new(layout.shape.width, layout.shape.height);
+        let whole = rect(0.0, 0.0, size.width, size.height);
+        self.body.setFrame(whole);
+        self.answer.setFrame(whole);
+        for block in self.blocks.drain(..).chain(self.chip.take()) {
+            block.removeFromSuperlayer();
+        }
+        let scale = self.body.contentsScale();
+        if let Some(chip) = &layout.chip {
+            let layer = chip_layer(chip, size, fonts);
+            scale_tree(&layer, scale);
+            self.answer.addSublayer(&layer);
+            self.chip = Some(layer);
+        }
+        if let Some((answer, question)) = layout.blocks.split_last() {
+            for (block, holder) in question
+                .iter()
+                .map(|block| (block, &self.body))
+                .chain([(answer, &self.answer)])
+            {
+                let layer = block_layer(block, size, fonts);
+                scale_tree(&layer, scale);
+                holder.addSublayer(&layer);
+                self.blocks.push(layer);
+            }
+        }
+        let (thin, draining, stepped) = match &layout.divider {
+            Some(divider) => {
+                let track = rect(
+                    SIDE,
+                    size.height - divider.top - divider.height,
+                    size.width - 2.0 * SIDE,
+                    divider.height,
+                );
+                self.divider.setFrame(track);
+                self.drain.setPosition(track.mid());
+                match divider.kind {
+                    DividerKind::Drain {
+                        share,
+                        lasts,
+                        since,
+                    } => {
+                        self.divider.setCornerRadius(TRACK_RADIUS);
+                        let remaining = lasts.as_secs_f64() * share;
+                        self.drain_from(share, track.size.width, remaining, since);
+                        (true, true, false)
+                    }
+                    DividerKind::Stepped { lit } => {
+                        self.divider.setCornerRadius(0.0);
+                        self.stop_drain();
+                        self.lay_segments(track);
+                        self.light(lit);
+                        (false, false, true)
+                    }
+                    DividerKind::Thin => {
+                        self.divider.setCornerRadius(0.0);
+                        self.stop_drain();
+                        (true, false, false)
+                    }
+                }
+            }
+            None => {
+                self.stop_drain();
+                (false, false, false)
+            }
+        };
+        self.divider.setHidden(!thin);
+        self.drain.setHidden(!draining);
+        for segment in &self.segments {
+            segment.setHidden(!stepped);
+        }
+        if let Some(PlacedGlyph { glyph, x, top }) = layout.glyph {
+            self.glyph
+                .setFrame(rect(x, size.height - top - GLYPH, SLOT, GLYPH));
+            if self.shown != Some(glyph) {
+                self.strike(glyph, 0.0, calm);
+            }
+        }
+        self.glyph.setHidden(layout.glyph.is_none());
+    }
+
+    /// Starts the drain at `share` of `width`, closing to its centre over
+    /// `remaining` seconds, unless it already runs from `since`.
+    fn drain_from(&mut self, share: f64, width: CGFloat, remaining: f64, since: Instant) {
+        if self.draining == Some(since) {
+            return;
+        }
+        self.drain
+            .setBounds(rect(0.0, 0.0, share * width, DRAIN_HEIGHT));
+        let track = motion::drain(share, width, remaining);
+        self.drain
+            .addAnimation_forKey(&track, Some(ns_string!("drain")));
+        self.draining = Some(since);
+    }
+
+    fn stop_drain(&mut self) {
+        self.drain.removeAnimationForKey(ns_string!("drain"));
+        self.draining = None;
+    }
+
+    fn lay_segments(&self, track: CGRect) {
+        let width = segment_width(track.size.width);
+        for (at, segment) in self.segments.iter().enumerate() {
+            let x = track.origin.x + at as CGFloat * (width + SEGMENT_GAP);
+            segment.setFrame(rect(x, track.origin.y, width, SEGMENT_HEIGHT));
+        }
+    }
+
+    fn light(&self, lit: usize) {
+        let lit = lit_segments(lit);
+        let (on, off) = (color(BONE, 1.0), color(SEGMENT_OFF, 1.0));
+        for (at, segment) in self.segments.iter().enumerate() {
+            let shown = if lit.contains(&at) { &on } else { &off };
+            segment.setBackgroundColor(Some(shown));
+        }
+    }
+
+    /// Shapes the glyph's marks at `level`. A new glyph gets new layers, so
+    /// the same glyph at a new level moves its paths and strengths in place.
+    fn strike(&mut self, glyph: Glyph, level: f64, calm: bool) {
+        let marks = marks(glyph, level, calm);
+        if self.shown != Some(glyph) {
+            for layer in self.marks.drain(..) {
+                layer.removeFromSuperlayer();
+            }
+            let bone = color(BONE, 1.0);
+            for mark in &marks {
+                let layer = CAShapeLayer::new();
+                layer.setFrame(self.glyph.bounds());
+                layer.setContentsScale(self.glyph.contentsScale());
+                match mark {
+                    Mark::Stroke { width, .. } => {
+                        layer.setFillColor(None);
+                        layer.setStrokeColor(Some(&bone));
+                        layer.setLineWidth(*width);
+                        // SAFETY: Core Animation defines the cap names as immutable constants.
+                        layer.setLineCap(unsafe { kCALineCapRound });
+                    }
+                    Mark::Disc { .. } => layer.setFillColor(Some(&bone)),
+                }
+                self.glyph.addSublayer(&layer);
+                self.marks.push(layer);
+            }
+            self.shown = Some(glyph);
+        }
+        for (layer, mark) in self.marks.iter().zip(marks) {
+            let (path, opacity) = match mark {
+                Mark::Stroke {
+                    segments, opacity, ..
+                } => (shape(&segments), opacity),
+                Mark::Disc { centre, radius } => (ellipses(&[centre], (radius, radius)), 1.0),
+            };
+            layer.setPath(Some(&path));
+            layer.setOpacity(opacity as f32);
+        }
+    }
 }
 
 /// `None` for a path with no ink. Core Graphics boxes one as the null rect,
@@ -1086,7 +1444,6 @@ fn ink_of(path: &CGPath) -> Option<CGRect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chip::Done;
 
     #[test]
     fn a_path_with_no_ink_is_no_words() {
@@ -1103,191 +1460,11 @@ mod tests {
     }
 
     #[test]
-    fn a_click_lands_only_inside_the_capsules_rounded_shape() {
-        let view = CGSize::new(100.0, 44.0 + TRAVEL);
-        let at = |x, y| CGPoint::new(x, TRAVEL + y);
-        for (x, y) in [(2.0, 22.0), (98.0, 22.0), (50.0, 22.0)] {
-            assert!(in_capsule(view, 100.0, at(x, y)), "({x}, {y})");
-        }
-        for (x, y) in [(0.0, 0.0), (100.0, 0.0), (0.0, 44.0), (100.0, 44.0)] {
-            assert!(!in_capsule(view, 100.0, at(x, y)), "({x}, {y})");
-        }
-    }
-
-    #[test]
-    fn a_click_in_the_clear_space_below_the_capsule_misses() {
-        let view = CGSize::new(100.0, 44.0 + TRAVEL);
-        for y in [0.0, TRAVEL / 2.0, TRAVEL - 1.0] {
-            assert!(!in_capsule(view, 100.0, CGPoint::new(50.0, y)), "y {y}");
-        }
-    }
-
-    #[test]
-    fn a_click_beside_a_narrower_centred_capsule_misses() {
-        let view = CGSize::new(140.0, 44.0 + TRAVEL);
-        let at = |x| CGPoint::new(x, TRAVEL + 22.0);
-        for x in [2.0, 18.0, 122.0, 138.0] {
-            assert!(!in_capsule(view, 100.0, at(x)), "x {x}");
-        }
-        for x in [22.0, 70.0, 118.0] {
-            assert!(in_capsule(view, 100.0, at(x)), "x {x}");
-        }
-    }
-
-    fn failed() -> [Show; 2] {
-        [
-            Show::NothingHeard("Nothing heard".into()),
-            Show::Broken("Microphone blocked".into()),
-        ]
-    }
-
-    fn every_show() -> Vec<Show> {
-        let [nothing_heard, broken] = failed();
-        vec![
-            Show::Recording,
-            Show::Working,
-            Show::YourTurn,
-            Show::Answering,
-            nothing_heard,
-            broken,
-            Show::Done(Done::Typed),
-        ]
-    }
-
-    #[test]
-    fn only_a_scene_from_none_rises_and_only_recording_emerges() {
-        for show in every_show() {
-            let entering = moves(&show, Entrance::Fresh, false);
-            let staying = moves(&show, Entrance::NewWords, false);
-            assert_eq!(entering.first(), Some(&Move::Rise), "{show:?}");
-            assert!(!staying.contains(&Move::Rise), "{show:?}");
-            assert_eq!(
-                entering.contains(&Move::Emerge),
-                show == Show::Recording,
-                "{show:?}"
-            );
-            assert!(!staying.contains(&Move::Emerge), "{show:?}");
-        }
-    }
-
-    #[test]
-    fn each_state_plays_its_own_gesture() {
-        use Move::*;
-        assert_eq!(
-            moves(&Show::YourTurn, Entrance::NewWords, false),
-            [Cups, Words]
-        );
-        assert_eq!(
-            moves(&Show::Answering, Entrance::NewWords, false),
-            [Open, Tilt, Words]
-        );
-        let [nothing_heard, broken] = failed();
-        assert_eq!(
-            moves(&nothing_heard, Entrance::NewWords, false),
-            [Shake, Breaks, Words]
-        );
-        assert_eq!(
-            moves(&broken, Entrance::NewWords, false),
-            [Strain, Breaks, Words]
-        );
-        let done = Show::Done(Done::Typed);
-        assert_eq!(moves(&done, Entrance::NewWords, false), [Float, FrameSink]);
-    }
-
-    #[test]
-    fn the_answer_tilts_the_head_in_as_it_fills_and_calm_only_fills() {
-        use Move::*;
-        assert_eq!(opening(false), [Open, Tilt]);
-        assert_eq!(opening(true), [OpenFade]);
-    }
-
-    #[test]
-    fn answering_in_place_only_opens_and_drops_the_words_reveal() {
-        use Move::*;
-        assert_eq!(
-            moves(&Show::Answering, Entrance::SameWords, false),
-            [Open, Tilt]
-        );
-        assert_eq!(
-            moves(&Show::Answering, Entrance::SameWords, true),
-            [OpenFade]
-        );
-    }
-
-    #[test]
-    fn only_your_turn_opens_into_the_answer() {
-        assert!(answer_opens(Some(&Show::YourTurn), &Show::Answering));
-        for (before, after) in [
-            (None, Show::Answering),
-            (Some(Show::Working), Show::Answering),
-            (Some(Show::Recording), Show::Answering),
-            (Some(Show::Answering), Show::Answering),
-            (Some(Show::YourTurn), Show::YourTurn),
-            (Some(Show::YourTurn), Show::Recording),
-        ] {
-            assert!(
-                !answer_opens(before.as_ref(), &after),
-                "{before:?} to {after:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn only_a_recording_and_an_answer_hold_the_voice() {
-        for show in every_show() {
-            assert_eq!(
-                holds_the_voice(&show),
-                matches!(show, Show::Recording | Show::Answering),
-                "{show:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_capsule_is_centred_on_the_midline() {
-        assert_eq!(centred(500.0, 44.0), 478.0);
-        assert_eq!(centred(500.0, 120.0), 440.0);
-    }
-
-    #[test]
-    fn reduce_motion_keeps_only_the_fades() {
-        use Move::*;
-        assert_eq!(
-            moves(&Show::Recording, Entrance::Fresh, true),
-            [FadeIn, KindleFade]
-        );
-        assert_eq!(moves(&Show::Working, Entrance::NewWords, true), []);
-        assert_eq!(
-            moves(&Show::YourTurn, Entrance::Fresh, true),
-            [FadeIn, WordsFade]
-        );
-        assert_eq!(
-            moves(&Show::Answering, Entrance::NewWords, true),
-            [OpenFade, WordsFade]
-        );
-        for fault in failed() {
-            assert_eq!(moves(&fault, Entrance::NewWords, true), [WordsFade]);
-        }
-        assert_eq!(
-            moves(&Show::Done(Done::Sent), Entrance::NewWords, true),
-            [FadeOut]
-        );
-    }
-
-    #[test]
-    fn done_leaves_by_its_float_and_everything_else_sinks() {
-        assert_eq!(leaving(&Show::Done(Done::Finished), false), None);
-        for show in [
-            Show::Recording,
-            Show::Working,
-            Show::YourTurn,
-            Show::Answering,
-        ]
-        .into_iter()
-        .chain(failed())
-        {
-            assert_eq!(leaving(&show, false), Some(Move::FailureExit), "{show:?}");
-            assert_eq!(leaving(&show, true), Some(Move::FadeOut), "{show:?}");
-        }
+    fn the_fonts_measure_the_ask_wider_than_the_context() {
+        let fonts = Fonts::new();
+        assert!(fonts.width("Your turn", Cut::Ask) > fonts.width("Your turn", Cut::Context));
+        let narrowest = fonts.narrowest(Cut::Context);
+        assert!(narrowest > 0.0);
+        assert!(narrowest < fonts.width("i", Cut::Context) + 0.01);
     }
 }

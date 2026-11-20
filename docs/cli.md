@@ -4,74 +4,45 @@
 - Most commands ask the running daemon over its socket.
 - `setup` and `config set` ask it too, and fetch the models or write the file
   themselves only when no daemon runs.
-- `start`, `serve`, `tray` and `service` manage the daemon.
+- `start`, `serve` and `tray` manage the daemon.
 - `connect` and `bind` edit another tool's config directly.
-- `tell` runs your coding agent itself, and that agent edits your config.
 - `banshee --help` prints this table in your terminal.
 
 | Command                         | What it does                                               |
 | ------------------------------- | ---------------------------------------------------------- |
-| `banshee start`                 | Start the daemon, now and at every login; it names any model that is missing |
+| `banshee start`                 | Start the daemon, now and at every login (on macOS as a Login Item, on Linux with the desktop session); it registers again if already on and names any model that is missing |
 | `banshee stop`                  | Stop the running daemon                                    |
 | `banshee setup`                 | Download the required models; a re-run fetches only what is missing         |
+| `banshee setup --model <id>`    | Download one listening model by its id; then `banshee config set stt.model <id>` listens with it |
+| `banshee setup --model <id> --accept-licence` | The same for a model whose licence asks for acceptance; `setup --model` alone shows its terms and link |
+| `banshee setup --list`          | List every listening model: id, size, languages, whether it streams, and its licence |
 | `banshee status`                | What Banshee is doing, and what stops it working           |
 | `banshee status --json`         | The same as machine-readable state and blockers            |
 | `banshee devices`               | List the microphones, and mark the one in use              |
 | `banshee watch`                 | Follow what the daemon is doing, one line per change       |
 | `banshee watch --waybar`        | The same, as Waybar custom-module JSON                     |
-| `banshee watch --events cues,level` | Print each cue and level event as one JSON line         |
+| `banshee watch --events cues,level,words,question` | Print each cue, level, words and question event as one JSON line |
 | `banshee voices`                | List the speech voices on disk, and mark the one in use    |
 | `banshee config set <key> <value>` | Change one setting in `config.toml`                     |
 | `banshee config remote`         | Set up the remote listener and speaker in one run, after showing each value |
 | `banshee connect [agent]`       | Connect a coding agent, after showing the change           |
 | `banshee bind [hyprland]`       | Bind the record keys in your compositor's config, after showing the change. It asks for the key and offers `audio.hotkey`, or `F9` when that is a lone modifier; alone, print the snippet and name the file it would write |
 | `banshee serve`                 | Run the daemon in the foreground                           |
-| `banshee tray`                  | Show the tray icon, now and at every login                 |
-| `banshee tray --uninstall`      | Stop the tray icon and remove its start-at-login service   |
-| `banshee service uninstall`     | Remove the start-at-login service: the launch agents on macOS, the `systemd --user` units on Linux |
-| `banshee listen`                | Print recent transcriptions                                |
+| `banshee tray`                  | Show the tray icon, now and at every login; registers again if already on                 |
 | `banshee record start` / `stop` / `toggle` | Push-to-talk without the hotkey; `toggle` is one key that starts, then stops |
 | `banshee speak "<text>"`        | Speak some text aloud                                      |
-| `banshee tell "<text>"`         | Send a command to your coding agent, which changes your desktop |
-| `banshee tell --undo`           | Put the watched folders back from the newest snapshot      |
-| `banshee history`               | List all saved transcriptions                              |
-| `banshee clear-history`         | Clear the saved transcriptions                             |
-
-## Telling your agent to change the desktop
-
-- `banshee tell "make the window gaps bigger"` runs your coding agent with
-  those words.
-- Banshee sends your words and nothing else. The agent's own skills carry the
-  desktop knowledge.
-- The agent edits the config, and speaks the result through Banshee.
-- Banshee itself says nothing. `banshee tell` prints what the agent may edit
-  before it starts.
-- The tell key sounds no cue of its own. A tell recording ends on the same
-  record-stop cue as a dictation.
-- A failed run sounds the error cue. `banshee status` names the reason.
-- The menu bar icon shows Busy for the length of the run, so you can see that
-  the agent still works.
-- `banshee tell --undo` puts the watched folders back from the newest snapshot.
-- The folders, the agent and the timeouts are settings. See
-  [configuration.md](configuration.md#telling-your-agent).
-- The tell key runs the same command from any window. See
-  [linux.md](linux.md#the-key-on-wayland).
-
-Two phrases Banshee answers itself. It hands neither to the agent:
-
-- `banshee tell "start over"` ends the thread, and starts no agent.
-- `banshee tell "show me"` reopens the thread in a terminal, so you can read
-  what the agent wrote.
-- Each phrase must be the whole sentence. Case and a trailing `.` or `!` are
-  ignored.
-- A longer sentence goes to the agent, so `show me a list of themes` is a
-  command.
+| `banshee history`               | List your dictations and the questions agents asked you, with your answers. Each row's `audio` is `null`, or the seconds of audio kept and `until`, the time it is deleted (`null` when kept forever). It works with Save history off |
+| `banshee clear-history`         | Clear them. It works with Save history off                 |
+| `banshee uninstall [--data] [--yes]` | Stop Banshee and remove its login services (on macOS, its Login Items). It lists the files it would delete and asks first; for a Homebrew install it names the `brew` command that removes the rest. `--data` also deletes `~/.banshee` and, on macOS, `~/Library/Logs/com.banshee.app`, and `--yes` skips the question |
 
 ## Following what the daemon is doing
 
 - `banshee watch` prints one word per state change, and keeps running.
-- `banshee watch --events cues,level` prints each event as one JSON line. The
-  one-word lines and `--waybar` stay as they are.
+- `banshee watch --events cues,level,words,question` prints each event as one
+  JSON line. A words event carries the words heard so far while you speak, and
+  an empty text when the recording ends. A question event carries the question
+  an agent is asking, and an empty text once it ends. The one-word lines and
+  `--waybar` stay as they are.
 
 ```
 $ banshee watch
@@ -86,8 +57,7 @@ idle
 - The first line is the state at connect.
 - The daemon pushes the rest as they happen.
 - The words are `idle`, `recording`, `busy`, `speaking` and `listening`.
-- `busy` means Banshee transcribes what you said, or the agent a `banshee tell`
-  started still runs. Neither one needs you.
+- `busy` means Banshee transcribes what you said. It needs nothing from you.
 - The command exits non-zero when the daemon stops, so a supervisor can
   restart it.
 - For a single answer, not a stream, ask `banshee status`.

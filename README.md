@@ -7,22 +7,18 @@
 - Gives your AI coding agent a voice.
 - Speaks its decisions and questions out loud.
 - You answer by talking, hands-free.
-- Whisper, Kokoro and Silero run inside Banshee. Nothing to host, no account.
+- Parakeet, Silero and the voice run inside Banshee. Nothing to host, no account.
+- The default voice is Pocket TTS by Kyutai, CC-BY-4.0, speaking a synthetic voice made for Banshee. Kokoro voices stay as choices.
 - Words leave your laptop only with a remote listener or voice you set. The tray and `banshee status` say so.
 - Also a dictation tool: hold a hotkey, speak. The text lands in the app you are focused on.
-- Tell it to change your desktop: `banshee tell "make the window gaps bigger"` hands your words to your coding agent.
 
 ## Demo
-
-<https://github.com/user-attachments/assets/7ec3eaa1-33d6-4cdd-8e5b-10ae11871918>
-
-On Omarchy, one spoken request sets the desktop up for a recording: no screen lock, no top bar, no window gaps. A second request puts the gaps back, and `show me` opens the diffs.
 
 <https://github.com/user-attachments/assets/b60f2c32-19cc-4da2-a0e2-463ecb9d56c8>
 
 On macOS, Claude Code makes a weather CLI work offline. It plans out loud, takes a spoken correction, then asks about the review findings and the commit. Every answer is spoken. Nothing was typed.
 
-[More demos](docs/demos.md): a focus mode built by voice on Omarchy, and a bug in Banshee fixed by voice on macOS.
+[More demos](docs/demos.md): a bug in Banshee fixed by voice on macOS.
 
 ## Quickstart on Linux
 
@@ -88,7 +84,7 @@ This is the step that closes the voice loop: the agent speaks, and you answer ou
 - Antigravity, Claude Code, Copilot, OpenCode and Pi are verified on a real install. Codex and Cursor follow their published formats, and wait for a report.
 - Pi has its own extension API, so it gets a [native extension](integrations/pi) instead.
 
-<p align="center"><img src="assets/agents.png" width="360" alt="The Agents panel: Claude Code and OpenCode are connected, and Codex and Cursor are installed with a Connect button beside each."></p>
+<p align="center"><img src="assets/agents.png" width="360" alt="The Agents page: Claude Code and OpenCode are connected, and Codex and Cursor are installed with a Connect button beside each."></p>
 
 **From the terminal,** the same work:
 
@@ -117,45 +113,60 @@ banshee connect pi          # Pi: the native extension
 }
 ```
 
-It exposes three tools:
+It exposes two tools:
 
 | Tool                | What the agent does with it                                       |
 | ------------------- | ----------------------------------------------------------------- |
 | `speak_status`      | Say something aloud, for decisions made and work finished         |
 | `ask_user`          | Ask a question aloud, then wait for and return your spoken answer |
-| `listen_for_prompt` | Pick up anything you've said since it last checked                |
 
 ## The keys
 
 The defaults. `banshee bind hyprland` writes the Linux column:
 
-|                       | Linux, on Hyprland | macOS                    | What happens                                            |
-| --------------------- | ------------------ | ------------------------ | ------------------------------------------------------- |
-| **Dictate**           | `F9`               | `Right Option`           | The text is typed into the app you are focused on.      |
-| **Tell your agent**   | `Super` + `F9`     | `banshee tell "..."`     | Your agent changes your desktop, and speaks the result. |
-| **Keep, do not type** | `Shift` + `F9`     | `Shift` + `Right Option` | `banshee listen` prints it.                             |
+|                       | Linux, on Hyprland | macOS                    | What happens                                                                                            |
+| --------------------- | ------------------ | ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| **Dictate**           | `F9`               | `Right Option`           | The text is typed into the app you are in when you stop. Switch apps before it lands, and it is copied. |
 
-- **The key is yours.** On Linux, `banshee bind hyprland` asks for it. On macOS, run `banshee config set audio.hotkey LeftOption`, then `banshee start`. The [Linux demo videos](docs/demos.md) use `F5`.
+- **The key is yours.** On Linux, `banshee bind hyprland` asks for it. On macOS, run `banshee config set audio.hotkey LeftOption`.
 - **Hold the key** while you speak, or [tap it instead](docs/configuration.md#the-hotkey).
-- **Tell takes the first free modifier,** so a key that already holds `Super` gets `Ctrl` instead. [What tell does](docs/cli.md#telling-your-agent-to-change-the-desktop)
 
 ## Use it
 
 - **Talk over it.** The hotkey stops whatever Banshee says. `barge_in = "none"` lets it finish.
-- **The window.** `Open Banshee` in the menu bar: the last dictation with a copy button, the day's history, every setting. Quit it and dictation carries on.
-- **The figure above the Dock.** On macOS, a small rust capsule shows while Banshee records, works, waits for your answer or fails. Nothing shows at rest. `feedback.mode` picks the figure, the earcons or both. [Feedback](docs/configuration.md)
+- **The window.** `Open Banshee` in the menu bar. A sidebar reaches [History](#history), Agents and every setting. Quit it and dictation carries on.
+- **The figure at the bottom of the screen.** A small rust capsule shows while Banshee records, works, waits for your answer, copies or fails. Nothing shows at rest. On Linux it needs a desktop with layer shell, such as Hyprland, Sway or KDE. `feedback.mode` picks the figure, the earcons or both. [Feedback](docs/configuration.md)
 
 <p align="center"><img src="assets/window.png" width="360" alt="The Banshee window: the last dictation in large type with a copy button, the day's earlier dictations beneath it, and a footer naming the microphone, hotkey, voice and connected agents."></p>
 
 - The menu bar icon answers one question: can I speak right now.
+- The menu's `Listening model` and `Voice` rows list the models and voices already on this machine. A pick takes effect with no restart. Downloads stay in the window. Under a transcription or speech server, the row names the server and is greyed out.
+- A lasting problem puts an exclamation badge on the idle figure. The first menu row says what is wrong, for example `Accessibility is not granted` or `Microphone access is not allowed`, and opens Banshee. When Banshee started without Accessibility, the daemon restarts as that grant lands, and the badge clears. On macOS 14 and later, a microphone grant or refusal reaches Banshee at its next use, with no restart.
+- When Banshee is not running, the first row reads `Start Banshee` and runs `banshee start`. It reads `Starting Banshee` while that runs, and `Start failed. Open Banshee` if it fails. The tooltip reads `Banshee: Not running`.
+- The badge shows only at rest. The recording, speaking, your turn and working marks keep their shape.
+- Banshee also says a new problem aloud once after it starts, never at login. `feedback.speak_problems = false` turns that off. [Feedback](docs/configuration.md)
 
-| Idle | Recording | Busy | Speaking | Waiting for you | Not running |
+| Ready | Recording | Working | Speaking | Your turn | Not running |
 |:----:|:---------:|:----:|:--------:|:---------------:|:-----------:|
 | <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/busy.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/listening.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
 
-- Busy means Banshee transcribes what you said, or the agent a `banshee tell` started still runs.
-- Waiting for you means an agent asked a question and holds for your answer.
+- Working means Banshee transcribes what you said.
+- Your turn means an agent asked a question and holds for your answer.
 - The states differ by shape, never by colour alone, and macOS tints the template image.
+
+## History
+
+History keeps what you dictated and what agents asked you. Open it from the sidebar.
+
+- **The list.** Rows run newest first. The row you select shows beside the list, with a copy button.
+- **Dictations.** A row holds the text. A dictation that failed to transcribe holds the reason.
+- **Questions.** An agent's question sits with your spoken answer. When you gave none, the row says what happened: `No answer heard`, `Closed before you answered`, `Not transcribed` or `Not asked aloud`. Status updates are not kept.
+- **Audio.** Banshee keeps the audio of each dictation and answer for 7 days by default. Press the play button in a row's detail to hear it.
+- **Retry.** On a dictation with kept audio, `Retry with` and the model's name, for example `Retry with Parakeet Unified`, transcribes it again from the recording. With a transcription server in use, the button reads `Retry with the transcription server` and sends the recording there.
+- **Keep audio.** On `Saved history`, pick Off, 1 day, 7 days, 30 days or Forever. A shorter period deletes older audio at once, and the window asks first when that would delete any. `daemon.keep_audio` sets the same. [Saved history](docs/configuration.md)
+- **Clear.** On `Saved history`, `Clear` asks first, then deletes every row and its audio. It cannot be undone.
+
+Audio holds whatever the microphone heard, other voices too. On `Saved history`, `Stop saving` keeps nothing new, and `daemon.save_history` sets the same.
 
 ## Other ways to install
 
@@ -176,6 +187,15 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 - [docs/troubleshooting.md](docs/troubleshooting.md) - what breaks, and the fix
 - [CONTRIBUTING.md](CONTRIBUTING.md) - a build from source, and the window
 
+## Credits
+
+- The default voice is [Pocket TTS](https://huggingface.co/kyutai/pocket-tts-without-voice-cloning) by Kyutai, under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/).
+- Parakeet Unified by NVIDIA. Licensed by NVIDIA Corporation under the [NVIDIA Open Model License](https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/blob/843b1b175ace04f5a89d379c79e2518c0d065b25/LICENSE).
+- Turn detection is [Smart Turn v3.2](https://huggingface.co/pipecat-ai/smart-turn-v3) by Daily, under [BSD-2-Clause](https://opensource.org/license/bsd-2-clause).
+- The rule that fixes the words to know follows Handy's word correction ([cjpais/Handy](https://github.com/cjpais/Handy), MIT).
+
 ## License
 
 [MIT](LICENSE)
+
+<sub>Made with the help of AI: Claude Opus 5.5 and Claude Fable 5.1 in Claude Code, working to [plumbline](https://github.com/yamanahlawat/plumbline) and [superpowers](https://github.com/obra/superpowers).</sub>

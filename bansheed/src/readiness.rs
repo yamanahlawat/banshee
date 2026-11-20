@@ -4,21 +4,36 @@ use crate::state::{DaemonState, Pipeline, RecordingError};
 use crate::{models, permissions};
 
 pub fn blockers(state: &DaemonState, pipeline: &Pipeline) -> Vec<Blocker> {
+    ranked(state, pipeline, permissions::blockers(state))
+}
+
+/// For a push, which reads the state and never writes it: the microphone
+/// grant as last read, by the start, a status call or a use.
+pub fn blockers_as_read(state: &DaemonState, pipeline: &Pipeline) -> Vec<Blocker> {
+    ranked(state, pipeline, permissions::blockers_as_read(state))
+}
+
+fn ranked(state: &DaemonState, pipeline: &Pipeline, grants: Vec<Blocker>) -> Vec<Blocker> {
     let names = must_be_on_disk(
         pipeline,
-        state.stt_model(),
-        models::stt_file(&state.config()),
+        state.stt_model().map(|model| model.file),
+        models::stt_model(&state.config()).map(|model| model.file),
         state.vad_model(),
     );
-    assemble(permissions::blockers(), models::blockers(&names), pipeline)
+    assemble(
+        grants,
+        models::blockers_in(state.models_dir(), &names),
+        pipeline,
+    )
 }
 
 // A blocker says the daemon does not work, so this answers for the listener
-// that is running and never for a preset just picked: dictation carries on
+// that is running and never for a model just picked: dictation carries on
 // while a heavier model is still a download away.
 //
-// `stt_model` is seeded from the config at startup and corrected only by a load
-// that succeeds, so outside an open pipeline it names a file nothing holds.
+// Outside an open pipeline the start may have failed before any listener was
+// built, so this checks the model the file names, which the next start loads.
+// A file that names a server names no model, so the listener in force answers.
 fn must_be_on_disk<'a>(
     pipeline: &Pipeline,
     loaded: Option<&'a str>,
@@ -28,7 +43,7 @@ fn must_be_on_disk<'a>(
     let speech = if matches!(pipeline, Pipeline::Open) {
         loaded
     } else {
-        asked
+        asked.or(loaded)
     };
     speech.into_iter().chain([detector]).collect()
 }
@@ -42,8 +57,11 @@ fn assemble(
     pipeline: &Pipeline,
 ) -> Vec<Blocker> {
     let recording_error = pipeline.fault();
-    let models_explain_it =
-        !missing_models.is_empty() && matches!(recording_error, Some(RecordingError::Model(_)));
+    let models_explain_it = !missing_models.is_empty()
+        && matches!(
+            recording_error,
+            Some(RecordingError::Model(_) | RecordingError::NoListeningModel(_))
+        );
     grants.extend(missing_models);
     if let Some(error) = recording_error
         && !models_explain_it
@@ -51,20 +69,37 @@ fn assemble(
         grants.push(Blocker {
             // A model that will not load is a model fault, whatever it stops.
             kind: match error {
-                RecordingError::Model(_) => BlockerKind::Model,
-                RecordingError::Microphone(_) => BlockerKind::Pipeline,
-                RecordingError::Provider(_) => BlockerKind::Provider,
+                RecordingError::Model(_) | RecordingError::NoListeningModel(_) => {
+                    BlockerKind::Model
+                }
+                RecordingError::Microphone(_) | RecordingError::MicrophoneRefused(_) => {
+                    BlockerKind::Pipeline
+                }
+                RecordingError::Provider(_) | RecordingError::UnbuiltListener(_) => {
+                    BlockerKind::Provider
+                }
                 RecordingError::KeyFile(_) => BlockerKind::KeyFile,
             },
             role: None,
-            remedy: Some(banshee_common::Remedy::Restart),
+            remedy: match error {
+                RecordingError::NoListeningModel(_) => Some(banshee_common::Remedy::Download),
+                // A key write clears either fault, and a restart reads the
+                // same key file
+                RecordingError::Provider(_) | RecordingError::KeyFile(_) => None,
+                _ => Some(banshee_common::Remedy::Restart),
+            },
             id: "recording_pipeline".to_string(),
             // Each carries the id above, so the name is what parts them for
             // a reader.
             name: match error {
                 RecordingError::Model(_) => "Banshee needs a restart",
-                RecordingError::Microphone(_) => "The microphone is not working",
-                RecordingError::Provider(_) => "The remote listener is not reachable",
+                RecordingError::NoListeningModel(_) => "The listening model is missing",
+                RecordingError::Microphone(_) | RecordingError::MicrophoneRefused(_) => {
+                    "The microphone is not working"
+                }
+                RecordingError::Provider(_) | RecordingError::UnbuiltListener(_) => {
+                    "The remote listener is not reachable"
+                }
                 RecordingError::KeyFile(_) => "The remote listener's key file is unreadable",
             }
             .to_string(),
@@ -78,7 +113,7 @@ fn assemble(
 
 #[cfg(test)]
 mod tests {
-    use super::{assemble, must_be_on_disk};
+    use super::{assemble, blockers, must_be_on_disk};
     use banshee_common::{Blocker, BlockerKind};
 
     use crate::state::{Pipeline, RecordingError};
@@ -96,8 +131,8 @@ mod tests {
         }
     }
 
-    const LOADED: &str = "ggml-large-v3-turbo-q5_0.bin";
-    const ASKED: &str = "ggml-large-v3-q5_0.bin";
+    const LOADED: &str = "whisper-large-v3-turbo-Q5_K_M.gguf";
+    const ASKED: &str = "parakeet-unified-en-0.6b-Q8_0.gguf";
     const VAD: &str = "silero_vad.onnx";
 
     #[test]
@@ -117,6 +152,13 @@ mod tests {
     fn a_pipeline_still_opening_is_judged_on_what_the_config_asks_for() {
         let names = must_be_on_disk(&Pipeline::Opening, Some(ASKED), Some(LOADED), VAD);
         assert_eq!(names, vec![LOADED, VAD]);
+    }
+
+    #[test]
+    fn a_broken_pipeline_under_a_server_still_to_land_is_judged_on_the_model_it_waits_for() {
+        let dead = Pipeline::Broken(RecordingError::NoListeningModel("parakeet"));
+        let names = must_be_on_disk(&dead, Some(ASKED), None, VAD);
+        assert_eq!(names, vec![ASKED, VAD]);
     }
 
     #[test]
@@ -209,7 +251,7 @@ mod tests {
         let error = RecordingError::Model("missing file".to_string());
         let blockers = assemble(
             vec![],
-            vec![blocker(BlockerKind::Model, "ggml.bin")],
+            vec![blocker(BlockerKind::Model, "model.gguf")],
             &Pipeline::Broken(error.clone()),
         );
         let [blocker] = &blockers[..] else {
@@ -224,7 +266,7 @@ mod tests {
         let error = RecordingError::Microphone("no device".to_string());
         let blockers = assemble(
             vec![],
-            vec![blocker(BlockerKind::Model, "ggml.bin")],
+            vec![blocker(BlockerKind::Model, "model.gguf")],
             &Pipeline::Broken(error.clone()),
         );
         let kinds: Vec<_> = blockers.iter().map(|b| b.kind).collect();
@@ -257,7 +299,11 @@ mod tests {
             panic!("expected exactly one blocker, got {blockers:?}");
         };
         assert_eq!(blocker.kind, BlockerKind::Provider);
-        assert_eq!(blocker.command.as_deref(), Some("banshee start"));
+        assert_eq!(blocker.remedy, None, "a restart reads no key");
+        assert_eq!(
+            blocker.command.as_deref(),
+            Some("banshee config set stt.remote.api_key")
+        );
         assert!(
             blocker
                 .fix
@@ -265,6 +311,7 @@ mod tests {
             "the fix must name the key command: {}",
             blocker.fix
         );
+        assert!(!blocker.fix.contains("restart"), "{}", blocker.fix);
         assert!(!blocker.consequence.ends_with('.'));
     }
 
@@ -279,6 +326,7 @@ mod tests {
             panic!("expected exactly one blocker, got {blockers:?}");
         };
         assert_eq!(blocker.kind, BlockerKind::KeyFile);
+        assert_eq!(blocker.remedy, None, "a restart reads the same file");
         assert_eq!(blocker.name, "The remote listener's key file is unreadable");
         assert!(
             blocker.fix.contains("credentials.toml"),
@@ -293,11 +341,55 @@ mod tests {
         assert!(!blocker.consequence.ends_with('.'));
     }
 
+    /// The pipeline blocker a daemon whose microphone reads `mic` and whose
+    /// listener reads `listening` reports.
+    fn pipeline_blocker(mic: crate::state::Mic, listening: crate::state::Listening) -> Blocker {
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        state.set_listening(listening);
+        state.set_mic(mic);
+        assemble(vec![], vec![], &state.pipeline())
+            .into_iter()
+            .find(|blocker| blocker.id == "recording_pipeline")
+            .expect("a dead pipeline reports a blocker")
+    }
+
+    #[test]
+    fn a_listener_that_would_not_build_at_start_asks_for_a_restart() {
+        let blocker = pipeline_blocker(
+            crate::state::Mic::Faulted(
+                RecordingError::Provider("plain http to a public host".to_string()).at_start(),
+            ),
+            crate::state::Listening::Remote,
+        );
+        assert_eq!(blocker.kind, BlockerKind::Provider);
+        assert_eq!(blocker.remedy, Some(banshee_common::Remedy::Restart));
+        assert_eq!(blocker.command.as_deref(), Some("banshee start"));
+        assert!(blocker.fix.contains("base_url"), "{}", blocker.fix);
+        assert!(blocker.fix.contains("banshee start"), "{}", blocker.fix);
+        assert!(!blocker.fix.contains("api_key"), "{}", blocker.fix);
+    }
+
+    #[test]
+    fn a_listener_with_no_key_names_the_key_command() {
+        let blocker = pipeline_blocker(
+            crate::state::Mic::Closed,
+            crate::state::Listening::Refused(RecordingError::Provider(
+                "no key for the remote listener".to_string(),
+            )),
+        );
+        assert_eq!(blocker.kind, BlockerKind::Provider);
+        assert_eq!(blocker.remedy, None, "a key write clears it");
+        assert_eq!(
+            blocker.command.as_deref(),
+            Some("banshee config set stt.remote.api_key")
+        );
+    }
+
     #[test]
     fn a_grant_is_offered_before_a_download() {
         let blockers = assemble(
             vec![blocker(BlockerKind::Permission, "accessibility")],
-            vec![blocker(BlockerKind::Model, "ggml.bin")],
+            vec![blocker(BlockerKind::Model, "model.gguf")],
             &Pipeline::Open,
         );
         let kinds: Vec<_> = blockers.iter().map(|b| b.kind).collect();
@@ -305,6 +397,29 @@ mod tests {
             kinds,
             vec![BlockerKind::Permission, BlockerKind::Model],
             "one click should come before a gigabyte download"
+        );
+    }
+
+    #[test]
+    fn a_listening_model_in_the_machines_folder_is_no_blocker() {
+        let (commands, _drain) = std::sync::mpsc::channel();
+        let state = crate::test_support::daemon_state(commands);
+        let listening = state.stt_model().map(|model| model.file);
+        let asked = crate::models::stt_model(&state.config()).map(|model| model.file);
+        let names: Vec<&str> = listening
+            .into_iter()
+            .chain(asked)
+            .chain([state.vad_model()])
+            .collect();
+        crate::test_support::write_empty(state.models_dir(), &names);
+
+        let found = blockers(&state, &state.pipeline());
+
+        assert!(
+            found
+                .iter()
+                .all(|blocker| blocker.kind != BlockerKind::Model),
+            "{found:?}"
         );
     }
 }

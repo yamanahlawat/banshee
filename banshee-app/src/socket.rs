@@ -15,7 +15,7 @@ pub const NO_REPLY: &str = "the daemon did not answer";
 
 /// Bounds daemon work only: preview_voice answers before playback, and the window never calls
 /// ask_user.
-const REPLY_DEADLINE: Duration = Duration::from_secs(30);
+pub const REPLY_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub struct RpcError {
@@ -53,6 +53,32 @@ impl Client {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcError> {
+        let id = self.send(method, params).await?;
+        // Around the whole read, not around each line: a peer that keeps
+        // sending lines that answer some other call would reset a per-line
+        // deadline for ever.
+        tokio::time::timeout(REPLY_DEADLINE, self.read_reply(&id))
+            .await
+            .unwrap_or_else(|_| Err(io_error(NO_REPLY)))
+    }
+
+    /// No deadline: the daemon answers or closes the socket, however long it
+    /// holds the request first.
+    pub async fn call_unbounded(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
+        let id = self.send(method, params).await?;
+        self.read_reply(&id).await
+    }
+
+    /// Writes one request and answers the id its reply will carry.
+    async fn send(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, RpcError> {
         let id = self.next_id;
         self.next_id += 1;
         let request = JsonRpcRequest {
@@ -67,12 +93,7 @@ impl Client {
             .write_all(line.as_bytes())
             .await
             .map_err(unsent)?;
-        // Around the whole read, not around each line: a peer that keeps
-        // sending lines that answer some other call would reset a per-line
-        // deadline for ever.
-        tokio::time::timeout(REPLY_DEADLINE, self.read_reply(&request.id))
-            .await
-            .unwrap_or_else(|_| Err(io_error(NO_REPLY)))
+        Ok(request.id)
     }
 
     /// Reads until the reply to `id` arrives. Cancelling this leaves the bytes

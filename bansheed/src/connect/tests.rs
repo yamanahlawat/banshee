@@ -44,18 +44,6 @@ fn installed_env(home: &std::path::Path, agent: Agent) -> Env {
 const SHIM: &str = "/opt/banshee/bin/banshee-mcp-shim";
 
 #[test]
-fn detection_searches_the_resolved_path_not_the_process_path() {
-    let dir = scratch("resolved-path");
-    // Executable, because an installed CLI is: a file it cannot run is not one
-    crate::test_support::write_executable(&dir.join("codex"), "#!/bin/sh\n");
-
-    let env = Env::with_shell_path(Some(OsString::from(&dir))).unwrap();
-    let expected = dir.join("codex");
-    assert_eq!(env.program(Agent::Codex), Some(expected.as_path()));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn the_searched_path_holds_the_installer_directory() {
     let path = with_local_bin(OsString::from("/usr/bin:/bin"), Path::new("/home/someone"));
     assert_eq!(
@@ -93,6 +81,14 @@ fn readers_after_the_first_share_its_probe() {
     assert_eq!(path.get(&probe), OsString::from("/probe/1"));
     assert_eq!(path.get(&probe), OsString::from("/probe/1"));
     assert_eq!(probes.get(), 1);
+}
+
+#[test]
+fn the_path_in_hand_is_read_without_a_probe() {
+    let path = SearchPath::new();
+    assert_eq!(path.in_hand(), None);
+    path.get(|| OsString::from("/probed"));
+    assert_eq!(path.in_hand(), Some(OsString::from("/probed")));
 }
 
 #[test]
@@ -142,21 +138,6 @@ fn an_empty_answer_is_no_answer() {
         answered(Some(OsString::from("/usr/bin"))),
         Some(OsString::from("/usr/bin"))
     );
-}
-
-#[test]
-fn the_fallback_keeps_every_directory_the_process_had() {
-    let fallback = fallback_path();
-    for dir in path_dirs(&std::env::var_os("PATH").unwrap_or_default()) {
-        assert!(path_holds(&fallback, &dir), "{} is lost", dir.display());
-    }
-}
-
-#[test]
-fn every_caller_of_the_resolved_path_gets_the_installer_directory() {
-    let local_bin = crate::service::home_dir().unwrap().join(".local/bin");
-    let path = resolved_path();
-    assert!(path_holds(&path, &local_bin), "{path:?}");
 }
 
 fn fake_shell(name: &str, body: &str) -> PathBuf {
@@ -1154,6 +1135,14 @@ fn a_command_renders_as_one_quoted_line() {
 }
 
 #[test]
+fn a_word_holding_a_quote_stays_one_word() {
+    assert_eq!(
+        shell_word("/home/ada's box/bin/banshee"),
+        "'/home/ada'\\''s box/bin/banshee'"
+    );
+}
+
+#[test]
 fn a_new_file_renders_every_line_as_added() {
     let change = Change::WriteFile {
         path: PathBuf::from("/h/.codex/hooks.json"),
@@ -1769,4 +1758,43 @@ fn only_codex_carries_a_note_after_connecting() {
     {
         assert_eq!(agent.connect_note(), None, "{agent:?}");
     }
+}
+
+#[test]
+fn detection_finds_an_agent_on_the_path_it_is_given() {
+    let bin = scratch("found-on");
+    let codex = bin.join("codex");
+    crate::test_support::write_executable(&codex, "#!/bin/sh\n");
+    let found = found_on(bin.as_os_str());
+    assert_eq!(found, vec![("codex", codex)]);
+    let _ = std::fs::remove_dir_all(&bin);
+}
+
+#[test]
+fn a_child_is_waited_for_until_the_deadline_and_no_longer() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+    use std::time::{Duration, Instant};
+
+    const POLL: Duration = Duration::from_millis(1);
+    const CAP: Duration = Duration::from_millis(250);
+
+    let deadline = Instant::now() + Duration::from_millis(20);
+    assert!(exit_by(deadline, POLL, || Ok(None)).is_none());
+    assert!(Instant::now() >= deadline);
+
+    let exited = ExitStatus::from_raw(0);
+    let mut polls = 0;
+    let third = || {
+        polls += 1;
+        Ok((polls == 3).then_some(exited))
+    };
+    assert_eq!(
+        exit_by(Instant::now() + CAP, POLL, third).map(Result::unwrap),
+        Some(exited)
+    );
+
+    let gone = || Err(std::io::Error::other("gone"));
+    let failed = exit_by(Instant::now() + CAP, POLL, gone).expect("an error is an answer");
+    assert_eq!(failed.unwrap_err().to_string(), "gone");
 }

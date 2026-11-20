@@ -1,5 +1,6 @@
-use banshee_app::commands::{Daemon, NO_HOME_DIR};
+use banshee_app::commands::{Daemon, Launch, NO_HOME_DIR};
 use banshee_app::{bridge, commands};
+use banshee_common::MISSED_FLAG;
 use tauri::{Emitter, Manager};
 
 // Opening a menu bar app is what puts its icon up. Off this thread, because
@@ -12,12 +13,32 @@ fn start_the_icon() {
     });
 }
 
+#[cfg(target_os = "macos")]
+fn login_items(request: &[String]) -> i32 {
+    banshee_app::login_items::run(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn login_items(_request: &[String]) -> i32 {
+    eprintln!("banshee-app: --login-items is macOS only");
+    2
+}
+
+fn missed(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == MISSED_FLAG)
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|flag| flag == "--login-items") {
+        std::process::exit(login_items(&args[1..]));
+    }
+    let launched_missed = missed(&args);
     tauri::Builder::default()
         // The tray opens the window by running this binary, so a second press
         // starts a second process. That one hands the window over and exits.
         // This plugin registers before any other, as its own README requires.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
@@ -26,9 +47,13 @@ fn main() {
             // A second open reaches this process rather than a new one, so
             // neither the setup below nor the window's mount runs again.
             start_the_icon();
-            let _ = app.emit("app:reopened", ());
+            let _ = app.emit(
+                "app:reopened",
+                serde_json::json!({ "missed": missed(&args) }),
+            );
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(Launch::new(launched_missed))
         .setup(|app| {
             // Hyprland keeps the height of the tile it first sizes the window as
             #[cfg(target_os = "linux")]
@@ -59,10 +84,10 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::status,
+            commands::settings_table,
             commands::set_setting,
             commands::list_devices,
             commands::list_voices,
-            commands::list_languages,
             commands::preview_voice,
             commands::download_models,
             commands::detect_agents,
@@ -70,10 +95,14 @@ fn main() {
             commands::apply_connect,
             commands::history,
             commands::clear_history,
+            commands::history_audio,
+            commands::retry,
             commands::open_permission_pane,
             commands::copy_text,
+            commands::open_licence,
             commands::start_daemon,
             commands::restart_daemon,
+            commands::launch_missed,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the banshee-app window");

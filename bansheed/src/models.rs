@@ -1,9 +1,27 @@
 pub mod download;
-use banshee_common::{Blocker, BlockerKind, error::BansheeError};
+pub mod licences;
+use banshee_common::{
+    Blocker, BlockerKind, FileRole, error::BansheeError, listening::ListeningModel,
+};
 
 use crate::config::{Config, Provider};
 
 pub const VAD_MODEL: &str = "silero_vad.onnx";
+pub const TURN_MODEL: &str = "smart-turn-v3.2-cpu.onnx";
+
+/// ONNX Runtime allows one environment per process, even after the first is dropped.
+fn environment() -> Result<&'static ort::environment::Environment, BansheeError> {
+    static ENVIRONMENT: std::sync::OnceLock<Result<ort::environment::Environment, String>> =
+        std::sync::OnceLock::new();
+    ENVIRONMENT
+        .get_or_init(|| ort::init().build().map_err(|error| error.to_string()))
+        .as_ref()
+        .map_err(|error| BansheeError::Other(error.clone()))
+}
+
+pub(crate) fn onnx_fault(error: impl std::fmt::Display) -> BansheeError {
+    BansheeError::Other(error.to_string())
+}
 
 /// One ONNX session, built the same way for every model that needs one.
 pub fn onnx_session(
@@ -11,61 +29,151 @@ pub fn onnx_session(
     threads: usize,
     entries: &[(&str, &str)],
 ) -> Result<ort::session::Session, BansheeError> {
-    fn fault(error: impl std::fmt::Display) -> BansheeError {
-        BansheeError::Other(error.to_string())
-    }
-    let mut builder = ort::session::Session::builder()
-        .map_err(fault)?
+    // ort's default registers CoreML on macOS, which refuses the companion's zero-length inputs
+    let mut builder = ort::session::Session::builder(environment()?)
+        .map_err(onnx_fault)?
+        .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
+        .map_err(onnx_fault)?
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
-        .map_err(fault)?
+        .map_err(onnx_fault)?
         .with_intra_threads(threads)
-        .map_err(fault)?;
+        .map_err(onnx_fault)?;
     for (key, value) in entries {
-        builder = builder.with_config_entry(key, value).map_err(fault)?;
+        builder = builder.with_config_entry(key, value).map_err(onnx_fault)?;
     }
-    builder.commit_from_file(path).map_err(fault)
+    builder.commit_from_file(path).map_err(onnx_fault)
+}
+
+/// When a local model last used at `used` unloads under `limit`, or `None`
+/// when it stays loaded.
+pub fn unload_due(
+    used: std::time::Instant,
+    limit: Option<std::time::Duration>,
+) -> Option<std::time::Instant> {
+    limit.and_then(|limit| used.checked_add(limit))
+}
+
+/// Hands the pages an unloaded model freed back to the system. A trim walks
+/// the heap, so it runs on the thread that unloaded, never the audio callback.
+pub fn return_freed_memory() {
+    #[cfg(test)]
+    RETURNS.with(|returns| returns.set(returns.get() + 1));
+    // glibc keeps freed heap pages until asked. macOS has no call that empties
+    // its large-allocation cache, so the daemon's launch agent turns it off.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: malloc_trim takes no pointer and releases only free pages.
+        unsafe { libc::malloc_trim(0) };
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static RETURNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How often this thread has handed freed memory back.
+#[cfg(test)]
+pub fn returns_on_this_thread() -> usize {
+    RETURNS.with(std::cell::Cell::get)
 }
 
 /// Measured flat from 1 to 16 threads: a 512-sample chunk is too small for
 /// threading to reach.
 pub const VAD_THREADS: usize = 1;
 
-/// The highest count measured to pay. Past it the curve is the machine's.
-const KOKORO_THREAD_CAP: usize = 8;
+/// Threads past this count do not speed up synthesis or listening.
+const THREAD_CAP: usize = 8;
 
-/// Threads pay for synthesis, and a machine contends past its own core count.
-pub fn kokoro_threads() -> usize {
+/// Threads pay for synthesis and for listening, and a machine contends past
+/// its own core count.
+pub fn thread_count() -> usize {
     // A machine that cannot say how many cores it holds is asked for one
     std::thread::available_parallelism().map_or(1, |cores| threads_for(cores.get()))
 }
 
 fn threads_for(cores: usize) -> usize {
-    cores.min(KOKORO_THREAD_CAP)
+    cores.min(THREAD_CAP)
+}
+
+pub fn model_path(name: &str) -> Result<std::path::PathBuf, BansheeError> {
+    model_in(&download::models_dir()?, name)
 }
 
 /// Where a model file is, so every engine refuses a missing one the same way.
-pub fn model_path(name: &str) -> Result<std::path::PathBuf, BansheeError> {
-    let path = download::models_dir()?.join(name);
+pub fn model_in(dir: &std::path::Path, name: &str) -> Result<std::path::PathBuf, BansheeError> {
+    let path = dir.join(name);
     if !path.exists() {
         return Err(BansheeError::Other(format!(
-            "{name} is not in the models directory. Run 'banshee setup' to download it."
+            "{} is not in the models directory. Run 'banshee setup' to download it.",
+            name_of(name)
         )));
     }
     Ok(path)
 }
 
-/// The Whisper file the listener loads, or none: a remote listener loads no file.
-pub fn stt_file(config: &Config) -> Option<&'static str> {
+/// The model the listener loads, or none: a remote listener loads no file.
+pub fn stt_model(config: &Config) -> Option<&'static ListeningModel> {
     match config.stt.provider {
-        Provider::Local => Some(config.stt.preset.model_name()),
+        Provider::Local => config.stt.listening_model(),
         Provider::Remote => None,
+    }
+}
+
+/// Names the suggestions, the three closest ids and where to see every one.
+pub fn unknown_model(id: &str) -> String {
+    use banshee_common::listening::{CATALOGUE, SUGGESTED};
+    let asked = id.to_ascii_lowercase();
+    let suggested: Vec<&str> = SUGGESTED.iter().map(|model| model.id).collect();
+    let mut others: Vec<(f64, &str)> = CATALOGUE
+        .iter()
+        .filter(|model| !suggested.contains(&model.id))
+        .map(|model| {
+            let likeness = strsim::normalized_levenshtein(&asked, &model.id.to_ascii_lowercase());
+            (likeness, model.id)
+        })
+        .collect();
+    others.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let closest: Vec<&str> = others.into_iter().take(3).map(|(_, id)| id).collect();
+    format!(
+        "'{id}' is not a listening model Banshee knows. Suggested: {}. Closest: {}. Every model: banshee setup --list",
+        suggested.join(", "),
+        closest.join(", ")
+    )
+}
+
+/// A file as a person names it: a listening model by its id, any other by its file.
+pub fn name_of(file: &str) -> String {
+    match banshee_common::listening::find_file(file) {
+        Some(model) => format!("the listening model {}", model.id),
+        None => file.to_string(),
     }
 }
 
 /// The models the recording pipeline loads at startup, named in one place so a
 /// preflight and the daemon cannot disagree about what has to be on disk.
 pub fn required(config: &Config) -> Vec<&'static str> {
-    stt_file(config).into_iter().chain([VAD_MODEL]).collect()
+    stt_model(config)
+        .map(|model| model.file)
+        .into_iter()
+        .chain([VAD_MODEL])
+        .collect()
+}
+
+/// Whisper files that nothing loads.
+const OLD_WHISPER_FILES: [&str; 3] = [
+    "ggml-base.en.bin",
+    "ggml-large-v3-turbo-q5_0.bin",
+    "ggml-large-v3-q5_0.bin",
+];
+
+/// Answers the files it deleted.
+pub fn delete_old_whisper_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    OLD_WHISPER_FILES
+        .iter()
+        .map(|name| dir.join(name))
+        .filter(|path| std::fs::remove_file(path).is_ok())
+        .collect()
 }
 
 /// With no home directory nothing is missing and no voice is installed: the
@@ -85,99 +193,129 @@ pub fn missing_in(dir: &std::path::Path, names: &[&str]) -> Vec<String> {
         .collect()
 }
 
-// The speech models share this directory and the `.bin` extension, so only the
-// name separates them. read_dir returns them in no order.
+// An old Whisper file shares this directory and the `.bin` extension until the
+// daemon's start deletes it, so only the name separates it from a voice.
+// read_dir returns them in no order.
 fn voices_among(files: impl Iterator<Item = String>) -> Vec<String> {
     let mut voices: Vec<String> = files
         .filter_map(|file| {
             let id = file.strip_suffix(".bin")?;
-            crate::config::STTPreset::ALL
-                .iter()
-                .all(|preset| preset.model_name() != file.as_str())
-                .then(|| id.to_string())
+            (!OLD_WHISPER_FILES.contains(&file.as_str())).then(|| id.to_string())
         })
         .collect();
     voices.sort();
     voices
 }
 
-/// On-disk only: an undownloaded voice cannot be spoken with.
-pub fn installed_voices() -> Vec<String> {
-    let Ok(dir) = download::models_dir() else {
-        return Vec::new();
-    };
+/// The Kokoro voices on disk: an undownloaded voice cannot be spoken with.
+pub fn installed_voices_in(dir: &std::path::Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     voices_among(entries.filter_map(|entry| Some(entry.ok()?.file_name().to_str()?.to_string())))
 }
 
-pub fn blockers(names: &[&str]) -> Vec<Blocker> {
-    missing(names)
+pub fn blockers_in(dir: &std::path::Path, names: &[&str]) -> Vec<Blocker> {
+    missing_in(dir, names)
         .into_iter()
-        .map(|name| Blocker {
-            kind: BlockerKind::Model,
-            // A client cannot tell the speech model from the detector by filename without
-            // re-deriving the daemon's rule
-            role: Some(crate::models::download::role(&name)),
-            remedy: Some(banshee_common::Remedy::Download),
-            name: name.clone(),
-            id: name,
-            consequence: "recording, dictation, and ask_user do not work".to_string(),
-            fix: "run: banshee setup".to_string(),
-            command: Some("banshee setup".to_string()),
+        .map(|name| {
+            let role = download::role(&name);
+            let named = match role {
+                FileRole::Speech => name_of(&name),
+                _ => format!("the {}", download::label(&name).to_lowercase()),
+            };
+            Blocker {
+                kind: BlockerKind::Model,
+                // A client cannot tell the speech model from the detector by filename without
+                // re-deriving the daemon's rule
+                role: Some(role),
+                remedy: Some(banshee_common::Remedy::Download),
+                name: format!("{} is missing", crate::audio::cues::capitalised(&named)),
+                id: name,
+                consequence: "recording, dictation, and ask_user do not work".to_string(),
+                fix: "run: banshee setup".to_string(),
+                command: Some("banshee setup".to_string()),
+            }
         })
         .collect()
 }
 
 #[cfg(test)]
 mod required_tests {
-    use super::{VAD_MODEL, required, stt_file};
+    use super::{VAD_MODEL, required, stt_model};
     use crate::config::{Config, Provider};
 
     #[test]
-    fn a_local_listener_needs_its_whisper_file_and_the_detector() {
+    fn a_local_listener_needs_its_model_file_and_the_detector() {
         let config = Config::default();
-        assert_eq!(stt_file(&config), Some(config.stt.preset.model_name()));
         assert_eq!(
             required(&config),
-            vec![config.stt.preset.model_name(), VAD_MODEL]
+            vec!["parakeet-unified-en-0.6b-Q8_0.gguf", VAD_MODEL]
         );
+    }
+
+    #[test]
+    fn a_listening_model_file_is_named_by_its_id() {
+        assert_eq!(
+            super::name_of("parakeet-unified-en-0.6b-Q8_0.gguf"),
+            "the listening model parakeet-unified-en-0.6b"
+        );
+        assert_eq!(super::name_of(VAD_MODEL), VAD_MODEL);
     }
 
     #[test]
     fn a_remote_listener_needs_the_detector_alone() {
         let mut config = Config::default();
         config.stt.provider = Provider::Remote;
-        assert_eq!(stt_file(&config), None);
+        assert_eq!(stt_model(&config), None);
         assert_eq!(required(&config), vec![VAD_MODEL]);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::config::STTPreset;
     use banshee_common::BlockerKind;
 
     const ABSENT: &str = "no-such-model-9f3a.bin";
 
-    #[test]
-    fn missing_reports_a_model_that_is_not_on_disk() {
-        assert_eq!(super::missing(&[ABSENT]), vec![ABSENT.to_string()]);
+    fn blockers_of_absent_model() -> Vec<banshee_common::Blocker> {
+        let empty = crate::test_support::unique_scratch("absent-model");
+        let blockers = super::blockers_in(&empty, &[ABSENT]);
+        let _ = std::fs::remove_dir_all(&empty);
+        blockers
     }
 
     #[test]
-    fn missing_reports_nothing_for_no_models() {
-        assert!(super::missing(&[]).is_empty());
+    fn an_old_ggml_file_is_not_a_voice() {
+        let files = ["ggml-large-v3-turbo-q5_0.bin", "af_sky.bin"]
+            .into_iter()
+            .map(str::to_string);
+        assert_eq!(super::voices_among(files), ["af_sky"]);
     }
 
     #[test]
-    fn no_speech_model_is_mistaken_for_a_voice() {
-        let models = STTPreset::ALL.iter().map(|p| p.model_name().to_string());
-        assert!(
-            super::voices_among(models).is_empty(),
-            "every preset's model shares the directory and the extension"
-        );
+    fn the_old_whisper_files_are_deleted() {
+        let dir = crate::test_support::unique_scratch("old-whisper");
+        let old = [
+            "ggml-base.en.bin",
+            "ggml-large-v3-turbo-q5_0.bin",
+            "ggml-large-v3-q5_0.bin",
+        ];
+        for name in old.iter().chain(&["notes.bin"]) {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+
+        let mut deleted = super::delete_old_whisper_files(&dir);
+        deleted.sort();
+        let mut expected: Vec<_> = old.iter().map(|name| dir.join(name)).collect();
+        expected.sort();
+        assert_eq!(deleted, expected);
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(left, ["notes.bin"]);
     }
 
     // Deliberately out of order, and mixed with what the directory really holds
@@ -200,7 +338,7 @@ mod tests {
 
     #[test]
     fn a_blocker_names_the_model_a_client_has_to_fetch() {
-        let blockers = super::blockers(&[ABSENT]);
+        let blockers = blockers_of_absent_model();
         let [blocker] = &blockers[..] else {
             panic!("one absent model must raise exactly one blocker: {blockers:?}");
         };
@@ -213,11 +351,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_missing_listening_model_is_named_by_its_id_and_routed_by_its_file() {
+        let file = "parakeet-unified-en-0.6b-Q8_0.gguf";
+        let empty = crate::test_support::unique_scratch("blockers-in");
+        let blockers = super::blockers_in(&empty, &[file]);
+        let _ = std::fs::remove_dir_all(&empty);
+        assert_eq!(
+            blockers[0].name,
+            "The listening model parakeet-unified-en-0.6b is missing"
+        );
+        assert_eq!(blockers[0].id, file);
+
+        let dir = crate::test_support::unique_scratch("model-in");
+        let error = super::model_in(&dir, file).expect_err("nothing is downloaded");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            error
+                .to_string()
+                .contains("listening model parakeet-unified-en-0.6b"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_missing_detector_is_named_the_way_a_person_says_it() {
+        let empty = crate::test_support::unique_scratch("blockers-in-detector");
+        let blockers = super::blockers_in(&empty, &[super::VAD_MODEL]);
+        let _ = std::fs::remove_dir_all(&empty);
+        assert_eq!(blockers[0].name, "The voice detection model is missing");
+    }
+
     /// A client routes on `command`, so the literal is a wire contract and not
     /// an implementation detail of the sentence beside it.
     #[test]
     fn a_missing_model_names_the_command_a_client_routes_on() {
-        let blockers = super::blockers(&["no-such-model-9f3a.bin"]);
+        let blockers = blockers_of_absent_model();
         assert_eq!(blockers[0].command.as_deref(), Some("banshee setup"));
     }
 
@@ -227,8 +396,7 @@ mod tests {
     /// whatever the blocker names.
     #[test]
     fn a_model_blocker_says_what_the_file_is() {
-        const ABSENT: &str = "no-such-model-9f3a.bin";
-        let blockers = super::blockers(&[ABSENT]);
+        let blockers = blockers_of_absent_model();
         assert_eq!(blockers[0].role, Some(super::download::role(ABSENT)));
     }
 

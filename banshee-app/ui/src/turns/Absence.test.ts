@@ -1,16 +1,20 @@
-import { render } from '@testing-library/svelte';
-import { expect, it } from 'vitest';
+import { render, screen } from '@testing-library/svelte';
+import { describe, expect, it } from 'vitest';
 import Absence from './Absence.svelte';
+import source from './Absence.svelte?raw';
 
-// The indent exists to line the box up with the text column of the turns
-// beside it. A box that stands above the record has no turns to line up with,
-// only bands at the gutter they all share.
-it('sits at the band gutter, like the bands it stands among', () => {
-  const { container } = render(Absence, { label: 'Banshee is not running' });
-  expect(container.querySelector('.absence')?.classList.contains('in-record')).toBe(false);
-});
+const box = (name: string) => screen.getByRole('heading', { name }).parentElement as HTMLElement;
 
-it('takes the turn text column when it stands in for a turn', () => {
-  const { container } = render(Absence, { label: 'Nothing said yet', inRecord: true });
-  expect(container.querySelector('.absence')?.classList.contains('in-record')).toBe(true);
+describe('Absence', () => {
+  it('keeps the dashed box by default', () => {
+    render(Absence, { label: 'Not running' });
+    expect(box('Not running').classList.contains('plain')).toBe(false);
+    expect(source).toMatch(/\.absence\s*\{[^}]*border:\s*1px dashed var\(--accent\)/);
+  });
+
+  it('drops the edge and the side padding when plain', () => {
+    render(Absence, { label: 'Nothing here yet', plain: true });
+    expect(box('Nothing here yet').classList.contains('plain')).toBe(true);
+    expect(source).toMatch(/\.plain\s*\{[^}]*border:\s*none[^}]*padding:\s*0/);
+  });
 });

@@ -1,14 +1,32 @@
 <script lang="ts">
   // The platform draws its own bezel and stepper on a select unless the
   // appearance is reset, and `color-scheme` decides which bezel.
+  import { rowDescription } from '../lib/ids';
+
   export let label: string;
   export let value: string;
-  export let change: (next: string) => void;
+  /// `false` means the daemon refused it. Anything else is taken.
+  export let change: (next: string) => unknown;
   export let disabled = false;
+  export let describedBy: string | undefined = undefined;
+  const fromRow = rowDescription();
+  $: described = describedBy ?? $fromRow;
+
+  // A refusal leaves `value` where it was, so nothing renders the select back
+  // from the option the browser moved it to.
+  async function pick(select: HTMLSelectElement) {
+    if ((await change(select.value)) === false) select.value = value;
+  }
 </script>
 
 <span class="picker">
-  <select aria-label={label} {value} {disabled} on:change={(e) => change(e.currentTarget.value)}>
+  <select
+    aria-label={label}
+    aria-describedby={described}
+    {value}
+    {disabled}
+    on:change={(e) => pick(e.currentTarget)}
+  >
     <slot />
   </select>
   <svg width="11" height="7" viewBox="0 0 11 7" aria-hidden="true" focusable="false">
@@ -35,8 +53,10 @@
     align-items: center;
     flex: 1;
     min-width: 0;
+    min-height: var(--control-height);
     color: var(--ink);
-    border-bottom: 1px solid var(--ink);
+    border: 1px solid var(--dim);
+    border-radius: var(--radius);
   }
 
   select {
@@ -44,21 +64,20 @@
     -webkit-appearance: none;
     flex: 1;
     min-width: 0;
-    font-variation-settings:
-      'wght' 500,
-      'wdth' 100;
+    --wght: 500;
+    --wdth: 100;
     font-size: 15px;
     color: var(--ink);
     background: transparent;
     border: 0;
-    border-radius: 0;
-    padding: 6px 22px 6px 0;
+    border-radius: var(--radius);
+    padding: 6px 28px 6px 9px;
     margin: 0;
   }
 
   svg {
     position: absolute;
-    right: 2px;
+    right: 9px;
     pointer-events: none;
   }
 </style>

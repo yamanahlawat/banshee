@@ -51,7 +51,7 @@ it('serves a remote speaker with no key', async () => {
 });
 
 // A speaker that never started, and the flip away from it still waiting. The
-// panel's note and the Voice lead each say one sentence for this pair alone.
+// page's note and the Speaking lead each say one sentence for this pair alone.
 it('serves a speaker that never started with its flip still waiting', async () => {
   const status = await at('to-local-not-started');
   expect(tts(status).provider).toBe('local');

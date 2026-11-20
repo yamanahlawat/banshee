@@ -24,16 +24,68 @@ pub fn sibling(exe: &Path, name: &str) -> Result<PathBuf, BansheeError> {
 }
 
 /// The sibling above, ready to run. Both binaries in the bundle reach the
-/// others this way.
+/// others this way. The child logs to the terminal even when the parent logs
+/// to a file.
 pub fn sibling_command(name: &str) -> Result<std::process::Command, BansheeError> {
     let exe = std::env::current_exe()?;
-    Ok(std::process::Command::new(sibling(&exe, name)?))
+    let mut command = std::process::Command::new(sibling(&exe, name)?);
+    command.env_remove("BANSHEE_LOG_TO");
+    Ok(command)
 }
 
-/// launchd's names for the two login jobs. The daemon binary installs them and
-/// the window starts them, so the spelling is shared.
-pub const DAEMON_AGENT: &str = "com.banshee.daemon";
-pub const TRAY_AGENT: &str = "com.banshee.tray";
+/// launchd's names for the two login jobs. `banshee-app` registers both, and
+/// the CLI and the window ask it to, so the spelling is shared.
+pub const DAEMON_AGENT: &str = "com.banshee.app.daemon";
+pub const TRAY_AGENT: &str = "com.banshee.app.tray";
+
+/// The labels earlier releases registered, kept so an upgrade can remove them.
+pub const LEGACY_AGENTS: [&str; 2] = ["com.banshee.daemon", "com.banshee.tray"];
+
+/// Where macOS stands on one login job the app registers. `banshee-app
+/// --login-items` prints each job as `<label> <word>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registration {
+    Enabled,
+    RequiresApproval,
+    NotRegistered,
+    NotFound,
+}
+
+impl Registration {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::RequiresApproval => "requires-approval",
+            Self::NotRegistered => "not-registered",
+            Self::NotFound => "not-found",
+        }
+    }
+
+    pub fn is_registered(self) -> bool {
+        !matches!(self, Self::NotRegistered | Self::NotFound)
+    }
+
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "enabled" => Some(Self::Enabled),
+            "requires-approval" => Some(Self::RequiresApproval),
+            "not-registered" => Some(Self::NotRegistered),
+            "not-found" => Some(Self::NotFound),
+            _ => None,
+        }
+    }
+}
+
+/// Creates the folder and any missing parent as 0700, and tightens one that
+/// already exists.
+pub fn make_owner_only(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
 
 /// Writes `bytes` to `path` through a staged file and a rename, so a partial
 /// write never truncates a file the user hand-edits, and the bytes reach the
@@ -119,12 +171,66 @@ pub fn banshee_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".banshee"))
 }
 
+/// Where a program launchd starts on macOS writes its log, under the bundle's
+/// identifier.
+pub fn logs_dir() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join("Library/Logs/com.banshee.app"))
+}
+
+/// The log file of one program, `daemon` or `tray`.
+pub fn log_path(program: &str) -> Option<PathBuf> {
+    Some(logs_dir()?.join(format!("{program}.log")))
+}
+
 pub fn socket_path() -> Option<PathBuf> {
     Some(banshee_dir()?.join("banshee.sock"))
 }
 
+/// The menu bar icon holds an exclusive `flock` on this file while it runs.
+pub fn tray_lock_path() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("tray.lock"))
+}
+
+/// A tray claiming the lock in the instant this holds it exits 1, and launchd relaunches it.
+fn lock_held(lock: &Path) -> bool {
+    std::fs::File::open(lock)
+        .is_ok_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+}
+
+pub fn tray_runs() -> bool {
+    tray_lock_path().is_some_and(|lock| lock_held(&lock))
+}
+
+/// A socket file nobody listens on refuses the connection, so a stale file reads as false.
+/// The connect is std's blocking one: tokio's nonblocking connect on macOS reports success against a dead socket.
+/// Any other error, such as a sandbox denying the connect, cannot prove nobody listens.
+pub fn listens(socket: &Path) -> std::io::Result<bool> {
+    match std::os::unix::net::UnixStream::connect(socket) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn daemon_runs() -> std::io::Result<bool> {
+    socket_path().map_or(Ok(false), |socket| listens(&socket))
+}
+
 pub fn models_path() -> Option<PathBuf> {
     Some(banshee_dir()?.join("models"))
+}
+
+/// The licences a person accepted for listening models whose licence limits
+/// commercial use, one name per line.
+pub fn accepted_licences_path() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("accepted-licences"))
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -137,6 +243,10 @@ pub fn credentials_path() -> Option<PathBuf> {
 
 pub fn db_path() -> Option<PathBuf> {
     Some(banshee_dir()?.join("banshee.db"))
+}
+
+pub fn audio_dir() -> Option<PathBuf> {
+    Some(banshee_dir()?.join("audio"))
 }
 
 pub fn oov_log_path() -> Option<PathBuf> {
@@ -157,7 +267,9 @@ impl Subscription {
     /// The daemon's state at the moment of subscribing, and the connection that
     /// carries every later notification. The two differ in width: the opening
     /// state is the whole `banshee.status` reply, and a change carries only the
-    /// fields that move on their own. Re-read `banshee.status` for the rest.
+    /// fields that move on their own. Re-read `banshee.status` for the rest:
+    /// `history_changes` and `settings_changes` are counters that say a
+    /// re-read is due, and `settings_changes` moves after each persisted write.
     pub async fn open(events: &[&str]) -> Result<(Value, Self), BansheeError> {
         Self::subscribe(serde_json::json!({ "events": events })).await
     }
@@ -243,6 +355,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_lock_another_file_holds_reads_as_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("tray.lock");
+        let holder = std::fs::File::create(&lock).unwrap();
+        holder.lock().unwrap();
+        assert!(lock_held(&lock));
+        drop(holder);
+        assert!(
+            !lock_held(&lock),
+            "the lock goes with the file that held it"
+        );
+    }
+
+    #[test]
+    fn an_unlocked_lock_file_is_not_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("tray.lock");
+        std::fs::File::create(&lock).unwrap();
+        assert!(!lock_held(&lock));
+    }
+
+    #[test]
+    fn a_missing_lock_is_not_held() {
+        assert!(!lock_held(Path::new("/nonexistent/tray.lock")));
+    }
+
+    #[test]
+    fn a_bound_socket_listens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("banshee.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(listens(&path).unwrap());
+        drop(listener);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!listens(&path).unwrap());
+    }
+
+    #[test]
+    fn a_stale_socket_file_does_not_listen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("banshee.sock");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        assert!(!listens(&path).unwrap());
+    }
+
+    #[test]
+    fn a_socket_this_process_cannot_reach_is_not_read_as_absent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let hidden = dir.path().join("hidden");
+        std::fs::create_dir(&hidden).unwrap();
+        let path = hidden.join("banshee.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let probe = listens(&path);
+
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            probe.map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::PermissionDenied)
+        );
+    }
+
+    #[test]
     fn a_connection_that_closes_without_a_reply_is_not_a_parse_failure() {
         for nothing in ["", "   ", "\t"] {
             assert!(
@@ -271,6 +450,30 @@ mod tests {
     }
 
     #[test]
+    fn a_registration_word_round_trips() {
+        let all = [
+            Registration::Enabled,
+            Registration::RequiresApproval,
+            Registration::NotRegistered,
+            Registration::NotFound,
+        ];
+        let words: Vec<&str> = all.iter().map(|state| state.word()).collect();
+        assert_eq!(
+            words,
+            [
+                "enabled",
+                "requires-approval",
+                "not-registered",
+                "not-found"
+            ]
+        );
+        for state in all {
+            assert_eq!(Registration::from_word(state.word()), Some(state));
+        }
+        assert_eq!(Registration::from_word("Enabled"), None);
+    }
+
+    #[test]
     fn the_daemon_label_names_its_own_unit() {
         assert_eq!(systemd_unit(DAEMON_AGENT), Some(DAEMON_UNIT));
     }
@@ -280,12 +483,7 @@ mod tests {
         assert_eq!(systemd_unit(TRAY_AGENT), Some("banshee-tray.service"));
     }
 
-    struct TempDir(PathBuf);
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TempDir;
 
     #[test]
     fn a_failed_write_leaves_no_staging_file_so_the_next_write_succeeds() {

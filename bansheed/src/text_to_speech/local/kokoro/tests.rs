@@ -3,7 +3,8 @@ use super::*;
 /// A second installed voice, whichever this machine holds. Naming one would fix
 /// the test to a file `banshee setup` does not fetch.
 fn another_voice_than(loaded: &str) -> String {
-    crate::models::installed_voices()
+    let models = crate::test_support::tts_models();
+    crate::models::installed_voices_in(&models)
         .into_iter()
         .find(|id| id != loaded)
         .unwrap_or_else(|| {
@@ -20,13 +21,13 @@ fn another_voice_than(loaded: &str) -> String {
 /// The engine, or the reason it could not load. Every caller is `#[ignore]`d,
 /// so a machine that runs one wants the failure.
 fn engine_for(voice: &str) -> KokoroEngine {
-    let config = KokoroTTSConfig::new(voice);
-    KokoroEngine::new(&config, 1.0)
+    let models = crate::test_support::tts_models();
+    KokoroEngine::new(&models, voice, None)
         .unwrap_or_else(|error| panic!("run `banshee setup` first: {voice} did not load: {error}"))
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and two voices: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and two voices in BANSHEE_TTS_MODELS"]
 fn a_voice_swap_changes_the_style_and_swaps_back() {
     let mut engine = engine_for("af_sky");
     let other = another_voice_than("af_sky");
@@ -39,7 +40,7 @@ fn a_voice_swap_changes_the_style_and_swaps_back() {
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and voices: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and voices in BANSHEE_TTS_MODELS"]
 fn an_uninstalled_voice_is_refused_and_leaves_the_engine_speaking() {
     let mut engine = engine_for("af_sky");
     let before = engine.style_fingerprint();
@@ -52,7 +53,7 @@ fn an_uninstalled_voice_is_refused_and_leaves_the_engine_speaking() {
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and two voices: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and two voices in BANSHEE_TTS_MODELS"]
 fn an_ordinary_utterance_returns_the_engine_to_the_configured_voice() {
     let mut engine = engine_for("af_sky");
     let other = another_voice_than("af_sky");
@@ -68,10 +69,10 @@ fn an_ordinary_utterance_returns_the_engine_to_the_configured_voice() {
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and voices: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and voices in BANSHEE_TTS_MODELS"]
 fn a_voice_outside_the_installed_set_is_refused_without_naming_a_path() {
     let mut engine = engine_for("af_sky");
-    let models = banshee_common::utils::models_path().expect("a home directory");
+    let models = crate::test_support::tts_models();
     let error = engine
         .set_voice("../../../../etc/hosts")
         .unwrap_err()
@@ -104,7 +105,7 @@ fn an_utterance_that_names_no_voice_takes_the_configured_one() {
 }
 
 #[test]
-#[ignore = "needs the Kokoro model and voices: cargo test kokoro -- --ignored"]
+#[ignore = "needs the Kokoro model and voices in BANSHEE_TTS_MODELS"]
 fn ensure_voice_on_the_loaded_voice_reads_nothing() {
     let mut engine = engine_for("af_sky");
     let before = engine.voice_ptr();
@@ -117,50 +118,75 @@ fn ensure_voice_on_the_loaded_voice_reads_nothing() {
 }
 
 #[test]
-fn flags_letter_spelled_words_only() {
-    let mut spelled = MToken::new("nginx".into(), "NN".into(), " ".into());
-    spelled.phonemes = Some("ˈɛn dʒˈiː ˈaɪ ɛn ɛks".into());
-    assert!(is_letter_spelled(&spelled));
-
-    let mut resolved = MToken::new("build".into(), "NN".into(), " ".into());
-    resolved.phonemes = Some("bˈɪld".into());
-    assert!(!is_letter_spelled(&resolved));
-
-    let mut hyphenated = MToken::new("twenty-one".into(), "CD".into(), " ".into());
-    hyphenated.phonemes = Some("twˈɛnti wˈʌn".into());
-    assert!(!is_letter_spelled(&hyphenated));
+fn an_unknown_word_is_spelled() {
+    let spelled = letters("kustomize");
+    assert!(!spelled.is_empty(), "kustomize has no letters to read");
+    let (phonemes, _) = english_g2p().g2p("kustomize").unwrap();
+    assert_eq!(phonemes.trim(), spelled);
 }
 
-// espeak-ng is one apt package, so CI installs it and this runs there. A
-// machine without it skips, unless it asked for the fixtures.
 #[test]
-fn espeak_resolves_a_letter_spelled_word() {
-    let Some(oov) = OovFallback::detect() else {
-        assert!(
-            std::env::var_os("BANSHEE_REQUIRE_FIXTURES").is_none(),
-            "espeak-ng is missing where the fixtures were required"
-        );
-        eprintln!("espeak-ng not installed; skipping");
-        return;
-    };
-    let word = "kustomize"; // not in misaki gold or our tables
-    let mut g2p = G2P::new(Language::EnglishUS);
-    let spelled = g2p.g2p(word).unwrap().1;
+fn a_word_of_digits_and_letters_is_spelled_whole() {
+    let (phonemes, _) = english_g2p().g2p("k8s").unwrap();
     assert!(
-        spelled.iter().any(is_letter_spelled),
-        "expected {word} to start out letter-spelled"
+        !phonemes.trim().is_empty() && !phonemes.contains('❓'),
+        "k8s came back as {phonemes:?}"
     );
+    assert_eq!(phonemes.trim(), letters("k8s"));
+}
 
-    let phonemes = oov.phonemize(word).expect("espeak should phonemize");
-    g2p.lexicon
-        .golds
-        .insert(word.to_string(), PhonemeEntry::Simple(phonemes));
-
-    let after = g2p.g2p(word).unwrap().1;
-    assert!(
-        !after.iter().any(is_letter_spelled),
-        "espeak phonemes should have resolved {word}"
+// Each name is misaki's own lexicon entry: "K", "eight", "S" and so on.
+#[test]
+fn letters_names_each_letter_and_digit_and_skips_the_rest() {
+    assert_eq!(letters("src"), "ˈɛs ˈɑɹ sˈi");
+    assert_eq!(letters("K8S"), "kˈA ˈAt ˈɛs");
+    assert_eq!(letters("a.b"), "ˈA bˈi");
+    assert_eq!(
+        letters("straße"),
+        letters("strae"),
+        "ß has no name of its own"
     );
+}
+
+// Kokoro's vocab has no token for misaki's ❓ marker, so a word with no name is silent.
+#[test]
+fn a_word_with_no_latin_letter_or_digit_is_silent() {
+    assert_eq!(letters("日本語"), "");
+    let (phonemes, _) = english_g2p().g2p("日本語").unwrap();
+    assert!(token_ids(&phonemes).is_empty(), "{phonemes:?}");
+}
+
+#[test]
+fn the_g2p_lexicon_names_the_letters_as_a_fresh_load_does() {
+    let g2p = english_g2p();
+    assert_eq!(
+        letter_names(&g2p.lexicon.golds),
+        letter_names(&misaki_rs::data::load_us_gold())
+    );
+}
+
+#[test]
+fn every_letter_and_digit_name_maps_into_vocab() {
+    let all = letters("abcdefghijklmnopqrstuvwxyz0123456789");
+    assert_eq!(
+        all.split(' ').count(),
+        36,
+        "a letter or digit has no name: {all}"
+    );
+    assert_eq!(token_ids(&all).len(), all.chars().count(), "{all}");
+}
+
+#[test]
+fn only_a_word_read_by_its_letters_counts_as_spelled() {
+    let (_, tokens) = english_g2p()
+        .g2p("kustomize the API webhook, plan b, async I slash O.")
+        .unwrap();
+    let spelled: Vec<_> = tokens
+        .iter()
+        .filter(|tk| is_letter_spelled(tk))
+        .map(|tk| tk.text.as_str())
+        .collect();
+    assert_eq!(spelled, ["kustomize"]);
 }
 
 #[test]
@@ -173,29 +199,15 @@ fn g2p_output_maps_into_vocab() {
     assert!(ids.len() * 2 >= phonemes.chars().count());
 }
 
-// Needs the real model on disk: cargo test kokoro_synthesizes -- --ignored
 #[test]
-#[ignore]
+#[ignore = "needs the Kokoro model and af_sky in BANSHEE_TTS_MODELS"]
 fn kokoro_synthesizes_audible_speech() {
-    let config = KokoroTTSConfig::new("af_sky");
-    let mut engine = KokoroEngine::new(&config, 1.0).unwrap();
+    let mut engine = engine_for("af_sky");
     let samples = engine.synthesize("Kokoro is alive.").unwrap();
     // ~1s of speech at 24kHz, with actual signal in it
     assert!(samples.len() > 10_000, "too few samples: {}", samples.len());
     let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     assert!(peak > 0.05, "output is near-silence, peak {peak}");
-}
-
-// The all-caps form is the one misaki tags NNP and spells out, so it is the one
-// espeak would be asked about.
-#[test]
-fn a_curated_word_is_curated_in_every_casing() {
-    let mut g2p = G2P::new(Language::EnglishUS);
-    crate::text_to_speech::pronunciation::install_dictionary(&mut g2p);
-    for word in ["webhook", "Webhook", "WEBHOOK"] {
-        assert!(curated(&g2p.lexicon, word), "{word} must count as curated");
-    }
-    assert!(!curated(&g2p.lexicon, "Zzzq"));
 }
 
 #[test]
@@ -273,45 +285,4 @@ fn every_closing_bracket_ends_the_sentence_after_it() {
         let chunks = sentences(text).collect::<Vec<_>>();
         assert_eq!(chunks.len(), 2, "{text:?} gave {chunks:?}");
     }
-}
-
-#[test]
-fn a_synthesis_failure_is_reported_as_a_fault() {
-    let (faults, reported) = std::sync::mpsc::channel();
-    let mut played = false;
-
-    let chunk = chunk_or_fault(
-        Err(BansheeError::Other("the style file is gone".into())),
-        &mut played,
-        &faults,
-    );
-
-    assert!(chunk.is_none(), "a failed sentence plays nothing");
-    match reported.try_recv() {
-        Ok(Fault::Failed(reason)) => assert!(
-            reason.contains("the style file is gone"),
-            "the fault carries the cause: {reason}"
-        ),
-        other => panic!("the failure reaches the fault channel, got {other:?}"),
-    }
-}
-
-#[test]
-fn the_first_chunk_reports_the_utterance_played_once() {
-    let (faults, reported) = std::sync::mpsc::channel();
-    let mut played = false;
-
-    let first = chunk_or_fault(Ok(vec![0.1, 0.2]), &mut played, &faults);
-    let second = chunk_or_fault(Ok(vec![0.3]), &mut played, &faults);
-
-    assert_eq!(first.map(|chunk| chunk.samples), Some(vec![0.1, 0.2]));
-    assert_eq!(second.map(|chunk| chunk.samples), Some(vec![0.3]));
-    assert!(
-        matches!(reported.try_recv(), Ok(Fault::Played)),
-        "the first sentence clears the last speech error"
-    );
-    assert!(
-        reported.try_recv().is_err(),
-        "the second sentence reports nothing new"
-    );
 }

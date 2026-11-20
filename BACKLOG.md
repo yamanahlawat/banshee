@@ -1,238 +1,237 @@
 # Backlog
 
-What is missing or wrong today, recorded so it is not lost. Nothing here is a promise, and
-nothing here is ordered. `ROADMAP.md` holds what lands next.
+What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what lands next.
 
-## The daemon
+## macOS
 
-- The hotkey fires a dictation while the window captures a new one. The daemon binds the key
-  at OS level, so window focus does not stop it, and no protocol method suspends it. A fix
-  needs a suspend with a timeout, so a window that dies does not leave the hotkey dead.
-- The PATH probe reads no `.bashrc` that a login file does not source, so an agent installed
-  under `nvm` can stay invisible. `-i -l` and `-l` both read the login files, and bash reads
-  `.bashrc` only for an interactive shell that is not a login shell. Measured on Ubuntu with
-  a `.bash_profile` that does not source `.bashrc`: `bash -i -l -c` and `bash -l -c` miss the
-  rc file, and `bash -i -c` reads it but misses the login file. Dropping `-l` is not the fix:
-  `zsh -i -c` loses `/usr/local/bin`, because `/etc/zprofile` is what runs `path_helper`.
-  The escalation also only advances when a probe fails, and `-i -l` succeeds with an
-  incomplete PATH, so a third probe would never run. A fix means a union of the PATHs from
-  several probes, or a second probe when detection finds nothing. Narrow: `~/.local/bin` is
-  searched whatever the shell reports, so the official installer is covered either way.
-- Reading the status starts the daemon as a side effect. The restart poll asks twelve times,
-  so a daemon slow to load can be kickstarted more than once.
-- No protocol method cancels a download. A person on a metered connection can start 862 MB
-  and has no way to stop it from the window.
-- The remote speaker takes one shape only: an OpenAI-compatible `/audio/speech` endpoint.
-  ElevenLabs and any other API shape need a backend of their own.
-- The remote speaker's voice is a plain field the person fills in. The endpoint has no call
-  that lists voices, so nothing can offer the names the server accepts. A fetched list stays
-  out on purpose: `/v1/audio/voices` exists on two servers and neither OpenAI nor Groq, and a
-  server that refuses a voice names the ones it accepts, which the failure reason already
-  shows. Type a wrong voice once and read the answer.
-- The daemon chooses the speaker once, when it starts. No call picks a speaker for one
-  utterance, so every reply goes to the same one.
-- An utterance that fails after its first chunk ends where it stopped. The samples already
-  played are words the listener has heard, so no fallback starts the reply again.
-- The remote speaker's 15 s bound covers the wait for headers as well as each read, since the
-  blocking client keeps one timeout. A server that renders a whole reply before its first byte
-  costs the full 15 s.
-- A stop does not drop the in-flight request. The worker ends at the next byte or the bound,
-  whichever comes first.
-- `speed` goes out on every speech request where `tts.speed` is not 1.0. A server that refuses
-  the field refuses every utterance at those speeds.
-- Both remote keys live in `~/.banshee/credentials.toml`, which only the owner can read. The
-  macOS Keychain holds neither, so a key stays a file on disk.
-- The status reply names the remote host from the config, not from what `select_backend`
-  built. It also carries `speaker_started`, and the tray and `banshee status` each check that
-  flag before they show the host. A reply that named the built backend would remove those
-  checks.
-- `banshee setup` downloads the Kokoro model whatever `tts.provider` says, while
-  `banshee status` skips the Kokoro check under a remote speaker. The two disagree about what
-  a remote-speaker machine needs.
-- A remote `base_url` is parsed twice: the config deserializer proves it has a host, and
-  `host_of` parses it again with an empty-host path the config can no longer reach. One
-  `RemoteUrl` newtype with an infallible `host()` would remove the second parse and the dead
-  path; it touches config, both remote backends, status and the CLI.
-- The three model loads at daemon start run one after another, and none depends on the others.
-  Kokoro and the VAD build through `models::onnx_session`, and Whisper through whisper.cpp.
-- `compositor` imports `Change`, `Env`, `apply`, `apply_plan` and `split_between` from
-  `connect`, so a key binding depends on the agent connector. The plan-show-apply machinery
-  deserves a module of its own with `connect` and `compositor` as two users; the move touches
-  `api.rs`, the connect tests and the app crate's imports.
-- The supervisor's short PATH is answered with one absolute path per tool for five tools
-  (`launchctl`, `systemctl`, `open`, `ps`, `pkill`), while about eleven other `Command::new`
-  sites still resolve through PATH. The deeper fix is one
-  `PATH` in the launchd plist and the systemd unit that `service.rs` writes.
-- `failure_line` in `cli.rs` decides at the top of the program whether an io error was the socket,
-  and `download_missing` prints its own failure to escape that guess. Only `utils::call_daemon`
-  knows a failure was a daemon call; a `DaemonUnreachable` variant raised there would let the
-  top match a variant, and the guess and the workaround go.
-- The "first chunk clears the last speech error, a failure raises a fault" rule lives twice, in
-  `kokoro::chunk_or_fault` and in the remote speaker's worker. `Output::play` is the one seam both
-  pass through; an iterator of `Result<Chunk, String>` would let `Output` own the fault sender.
-- The models directory is injected into `DaemonState` for the settings path, while `model_path`,
-  `installed_voices` and the engines still read it from the home directory. One reader or the
-  other, not both.
-- `Other` carries both internal faults and sentences a person acts on, and answers `INTERNAL` for
-  either. The sites that moved to `Rejected` show the split; the rest want the same sorting. On
-  2026-10-05, 94 lines outside the tests name `Other(`.
-- `banshee status` reports a key file others can read; `Credentials::load` could repair the
-  mode to 0600 or refuse the file, and status would report what the loader decided.
-- `banshee setup` with a config that does not parse says the models to fetch are unknown, but not
-  which line is at fault: `setup` drops the reason with `.ok()` before it calls `download_missing`.
-  Passing the error through is three lines, and the seam has no test because `download_missing`
-  opens the daemon socket. `banshee status` and `banshee start` both name the line.
-- A request whose `jsonrpc` is not `"2.0"` is answered on a null id with `-32700`. JSON-RPC allows
-  a null id here, but `-32600` on the id the request carried would say more. No compliant client
-  sends another version.
-- `write_atomically` calls `sync_all`, and `banshee.configure` reaches it on a tokio worker,
-  twice when the call also sets a key. The runtime is multi-threaded and the call is rare, so this
-  is added latency on a pattern the dispatch already had, not a new kind of blocking.
-- Two socket clients speak the one protocol: `banshee-common::utils::call` opens a connection
-  per call with a fixed id and no deadline, and `banshee-app::socket::Client` keeps one, matches
-  ids and applies a 30 s deadline. One client in the shared crate needs a per-call deadline
-  first: `ask_user` waits up to 120 s and `listen` up to 30 s.
-- About ten private functions answer `Result<_, String>`; each string becomes a spoken or
-  printed sentence, so none has a caller that matches on it.
-- The MCP shim matches a tool name by suffix, so `task_user` reaches the ask handler. Nothing on
-  the wire has been seen to carry a prefix. The shim logs each tool name at `debug`; run one
-  session with `BANSHEE_LOG=debug` in the MCP server's environment, read the log, and switch to
-  an exact match if no prefix ever arrives.
-- A request with an explicit `"id": null` is read as a notification and gets no reply. MCP
-  forbids a null id, so no compliant client sends one.
-- `DaemonState` holds 45 fields and 111 methods, and every module takes the whole `Arc`. A split
-  into owned pieces is its own design.
-- A microphone is chosen by its name, and ALSA gives one card several devices with the same
-  name. `pick` takes the first match, and cpal lists `hw:` before `plughw:`. Measured on a USB
-  card: `USB Audio, USB Audio #1` opens `hw:CARD=0,DEV=1`, which offers I16 only, and its `F32`
-  `plughw:` twin cannot be reached by name. Choosing by the ALSA pcm id, or preferring
-  `plughw:` and `sysdefault:` on a tie, would fix it; both change the name contract of
-  `[audio] input_device`.
+- SentinelOne flags every new Banshee build on a managed Mac as `persistence_deception`: the
+  daemon, the window, and even `tar` unpacking the app. Each install or upgrade raises it again.
+  The app is self-signed and not notarized.
+- The Accessibility follow is measured on macOS 26 only; macOS 14 and 15 are not measured.
+- In the probe, System Settings would not remove a running app from the Accessibility list.
+  Whether that holds for Banshee, whose fix text says to remove and re-add it, is not checked.
+- While Accessibility is off, each read of it keeps about 0.7 KB in the daemon until it
+  restarts: measured from a shell, and seen in the daemon as one port per read. The daemon
+  reads it every 10 s while off and at each paste, so a day off keeps about 6 MB. A read
+  while it is on keeps nothing over 4 minutes in the daemon.
+- After a revoke the problem says "the hotkey stays inert", but the hotkey keeps working.
+  Only typing stops.
+- When focus is on something that takes no text, such as the Finder desktop, a sidebar or
+  Preview with no text, the paste lands nowhere and the Ready sound plays. The words are left
+  only in History. A check of the focused element was weighed and parked on 2026-11-05.
+  Terminals, Chromium and Electron apps cannot be judged by it, and Apple documents no read
+  that says an element takes text. No open dictation app holds back its paste on such a read.
+  A paste receipt, whether any app read the clipboard, is the untested alternative.
+- On X11, dictating keeps only copied text; an image or a file is lost. Not tested.
+- Whether a staged dictation or a restored copy reaches other devices through Universal
+  Clipboard is not checked.
+- The save before a dictation asks each app for every type it promised, with no time limit. A slow
+  app or a Universal Clipboard item delays the paste. Not measured.
+- Two dictations less than 500 ms apart can lose what was copied before the first. Not seen live.
+- An upgrade can leave both login items unable to start. On 2026-10-31, `make install` over an
+  installed build re-registered them, and launchd then failed every spawn with exit 78
+  (`EX_CONFIG`), 6 tries for the daemon and 13 for the tray. No Banshee code exits 78. The
+  binaries ran from a terminal and the bundle signature verified. A second `banshee start` and
+  `banshee tray`, about a minute later, brought both up. ~~Seen on 2026-10-31: launchd kept
+  respawning the login items while the bundle was being replaced. That is the likely cause,
+  not proven.~~ launchd's log shows `Launch Constraint Violation` on the first launch after
+  `banshee start` re-registers a new build, and macOS rebuilt its record about 10 s later. A
+  second start then worked. That happened on 3 of 3 installs over a running build, and a
+  re-register of a build that had already run worked 4 of 4. That the record pins something
+  per build, because the self-signed build has no Team ID, is inferred and not measured.
+  `banshee start` and `banshee tray` now retry once. Still open: a cask or tarball upgrade
+  followed by a login, with no `banshee start`, is not measured and not covered. The window
+  reopens the tray through its own unregister and register (`keep_the_tray_running` in
+  `banshee-app/src/login_items.rs`), and that waits for nothing.
+- The window's Start button runs `banshee start` and shows nothing while it waits, up to about
+  50 s after a refused launch.
+- The first sound from a Bluetooth headset arrives about 300 ms after the microphone opens.
+  That is measured on one headset only. Other headsets are not checked.
+- A restricted microphone (a managed Mac) still offers "Open System Settings", which cannot
+  lift the restriction.
+- On macOS 13 the daemon's microphone permission read does not change while it runs, and
+  the window offers no restart after a microphone grant, so `banshee start` applies it. Not
+  measured on a macOS 13 machine.
+- The live microphone read is measured on macOS 26 only; macOS 14 and 15 are not measured.
+- With `audio.keep_open = true`, or during one long open such as an `ask_user` answer, a
+  microphone refusal shows only at the next open or status read. Until then recordings come
+  back empty.
+- The voice files and the remote key are not blockers, so no surface shows them.
+- The tray's socket `call` has no timeout. That is inferred from the code and not measured.
+- A `banshee start` that hangs keeps the tray's first row on `Starting Banshee`.
+- When the tray brings the window forward with a panel open, focus lands on the button that
+  opened the panel. The problem sits above it.
+- A model file removed while Banshee is idle shows in the tray at the next use.
+- Every recording pipeline fault shares one id. When one fault turns into another without
+  clearing, Banshee does not say the new one.
+- A second Copied within the capsule's hold gets no second VoiceOver announcement.
+- An agent's question loads the listening model only after it has played, so the first answer
+  after an idle unload waits for the load. Dictation overlaps its load with the press. The
+  wait is not measured.
+- Each use walks every input device before it opens one. The added press latency is not
+  measured.
+- Nothing has tested a logout and login with the login items. CI registers, restarts, stops
+  and removes them on a runner, but cannot log in again.
+- The dictation pill keeps the figure and no rim while the question card has the new glyphs
+  and the rim, so the two differ in style until the pill's own item.
+- Holding the hotkey during an answer drops the words so far (hotkey.rs, publish_words(""));
+  the card shows them vanish and "Your turn" return.
+
+## Listening and speaking
+
+- A dictated password lands in History in plain text, since History stores every dictation
+  before it is typed (`keep` in `Pipeline::deliver`, `bansheed/src/hotkey.rs`).
+- `sanitize` may not be needed for speech. Both tools tell agents to use spoken names, not paths
+  or code. It changed none of 276 questions and 952 updates in this repo's Claude Code sessions,
+  3 October to 6 November 2026. Codex, Pi and other projects are not measured. History keeps
+  each question as sent, so its rows can settle this for questions. Updates are not kept.
+- `BANSHEE_LOG=debug` writes every transcription to the log, a dictated password included
+  (the `Transcription:` and `Dictating:` debug lines in `Pipeline::deliver`).
+- Any process running as the user can start a recording through the daemon's socket, and can
+  read every transcript in `banshee.db`.
+- The daemon names a socket client from its process ID, so a process that exits and a new one
+  that takes the ID can be misnamed. A pidfd on Linux 6.5 and later, and `LOCAL_PEERTOKEN` on
+  macOS 13 and later, close that gap. Take that step before anything depends on the name.
+- The shim's parent is not measured for Cursor, OpenCode or the npm Claude Code, so their
+  questions may carry another name or none. Claude Code in the desktop app reads as `claude`.
+- On Linux, when the shim's `/proc/<pid>/exe` link cannot be read, the `comm` fallback cuts
+  the name to 15 characters (`banshee-mcp-shi`). The shim is then not recognised and its agent
+  is not named. Not measured.
+- The daemon reads the caller's process again on every `speak`, `ask_user` and socket
+  recording, though a connection's process does not change. Reading it once per connection
+  would save the repeat. The cost is not measured.
+- The corrector for words to know has its threshold (0.10, Soundex weight 0.5) measured on
+  synthetic speech and plain-English references only. Real accents and jargon are not measured.
+- Orca hears nothing from the Linux capsule. The owner wants to brainstorm it.
+- After a compositor crash, a tray that systemd restarts before the compositor is back runs
+  with no capsule until the next restart. Sounds still play. Decide between `RestartSec` and a
+  retry in the capsule's open after the Hyprland restart check.
+- The tray waits for the compositor's first reply before its menu exists, with no timeout. A
+  hung compositor hangs the tray's start.
+- On Linux, a combining accent typed as a separate mark sits on the wrong spot. The words
+  ignore the shaper's glyph offsets.
+- No hand cursor shows over a clickable failure on Linux, and a click in the capsule's corner
+  goes nowhere.
+- On Linux, Reduce Motion and high contrast are not read, so the card's countdown glides
+  where macOS steps it.
+- The Linux capsule uses integer scale only; a fractional scale draws it soft.
+- Live words in characters the Archivo Latin subset lacks are left out on Linux.
+- The Linux capsule's per-frame cost is unmeasured: it allocates its masks, pixmap and buffer
+  each frame, and live words reshape the whole transcript on every partial.
+- The Linux card's bars take the raw microphone level, while macOS eases them over one level
+  step.
+- If Banshee speaks during a pause in an answer, the silence count freezes until it stops,
+  so the card's countdown line runs out early. Not measured.
+- An idea for answers: use the unusual words in an agent's question as vocabulary for that
+  answer.
+- A listening model download that fails for a reason other than a licence reaches the window
+  with no reason.
+- The aarch64 Linux release targets plain armv8-a. Whether a dotprod floor is faster is not
+  measured.
+- Banshee downloads the Silero VAD model from the `master` branch with no pinned commit and no
+  hash check (`banshee-common/src/lib.rs:437`), while the Kokoro files are pinned. A download
+  also follows a redirect to any scheme. The file
+  matched the pinned hash on 2026-10-30, but it can change under every install.
+- Dictation types the words exactly as heard. Nothing drops fillers such as "um" or applies a
+  spoken edit such as "make that a list". An idea to test: a small local model as a cleanup
+  step after transcription. It could also change what the person meant.
+- In a crowded room, other people's voices end up in an answer. Nothing separates the user's
+  voice from the room.
+- The hotkey still fires a dictation while the window is capturing a new hotkey.
+- An X11 hotkey listener that stopped at start (`start_global_hotkey` in
+  `bansheed/src/hotkey.rs`) takes a rebind and still hears nothing. A restart is the only
+  way back.
+- On X11 the app-changed check does not run. No X11 desktop was measured.
+- On Hyprland, a recording that started as the "No typing tool is installed" line played came
+  back silent. The speaker reopened and the microphone was opened again twice during it. Seen
+  once on 2026-11-05; the cause is not measured.
+- A model download cannot be cancelled once it starts.
+- A daemon that started without the voice detection model still needs `banshee start` before it
+  records.
+- No upper bound is measured for `stt.endpoint_silence_ms`, `models.unload_after`,
+  `tts.remote.sample_rate` or the length of `stt.vocabulary`. The settings table leaves three of
+  them open. It stops `tts.remote.sample_rate` at the `u32` maximum, 4294967295, the limit
+  `config set` enforces.
+- On Linux, a microphone chosen by name can open the `hw:` device that offers no float format.
+- An agent installed under `nvm` can stay invisible to `banshee connect`.
+- Some readings the voices get are untested by the round trip: `127.0.0.1` reads "one hundred
+  twenty seven point zero point zero point one", `I/O` and `N/A` read with "slash", and `€1.50`
+  reads "€one point five zero". Change each only with round-trip evidence.
+- The reading rules for units, numbers and paths each carry their own boundary checks, and those
+  checks already differ. Before more rules land, classify each whitespace-delimited token once
+  (URL, path, number, unit, word), drop the per-rule checks, and prove it with the round trip.
+
+## Remote listener and speaker
+
+- Both remote keys live in a file in `~/.banshee`, not in the Keychain.
+- The speaker takes the OpenAI `/audio/speech` shape only.
+- The remote provider code lives inside the daemon. Moving it into a crate of its own is worth
+  doing once a second provider adapter exists. Today the remote listener and speaker both use
+  the OpenAI-compatible client.
+- `banshee setup` downloads the local voice even when speech is remote, unless `tts.fallback` is `none`.
+- The remote speaker gets the same spoken text as the local voices, with versions, paths, units,
+  PR numbers and hyphenated names written out as words. How a remote voice server reads that text
+  is not measured.
+- Each remote request builds a runtime and opens a connection of its own, so every spoken line
+  and every dictation pays a TLS handshake. The client keeps no idle connection
+  (`pool_max_idle_per_host(0)`), because nothing runs between requests to see a server close one.
+  One long-lived runtime per client would allow a pool. The latency is not measured.
+- Each remote dictation copies the whole recording and starts a thread for the request.
+- The listener decides a switch on both sides of the command queue. It could decide alone from
+  the saved config, but only once a `persist: false` write of `stt.remote.model` is refused,
+  since that write never reaches the saved config.
 
 ## The window
 
-- `banshee-app/ui/src/lib/daemon.ts` maps `activity` to a `Word`, and `lampForm` maps that
-  `Word` back to the same string. One table could go, at the cost of churn across the window's
-  display type.
-- A segmented control reports `aria-checked` from the daemon's answer, so a
-  screen-reader user arrows to a cell and hears nothing become checked until the
-  round trip lands. The tab stop already moves at once.
-- `Foot.svelte` and `Segmented.svelte` each implement the roving tab stop over
-  the same `arrowStep`, in two shapes.
-- `history.ts` holds its clear generation in a module variable beside the store
-  rather than in the store, so a subscriber cannot see it and `readNewest`
-  guards the same hazard a second way.
-- The download reports a percent and a size, and no rate or time. A reader cannot tell a
-  stalled download from a slow one.
-- A vocabulary word removed by mistake cannot be put back except by typing it again.
-- The blocker calls it `Speech model` and the Microphone panel calls it `Model`, under
-  `Listening`. One thing needs one name.
-- The header buttons show their underline on hover only, so what can be pressed is learned
-  rather than seen. The foot's values carry a resting underline.
-- Speech has no panel of its own. The Voice panel holds the local voice and the remote
-  speaker, so both sets of controls grow inside one screen.
-- The window writes `-32000` for its own transport failures, which `rpc_code` names `MICROPHONE`.
-  Inert today: nothing in the window or the UI routes on the code, and the retry decision reads the
-  `transport` and `sent` flags. It is one number for two facts on one socket.
+- A vocabulary word removed by mistake has to be typed again.
+- The same model is called `Model` on the Listening page and `Listening model` in the Blockers
+  box.
+- Buttons show they can be pressed only on hover.
+- A screen reader hears a segmented control change only after the daemon answers.
+- In a wide window, the History list does not scroll to the missed question's row. The
+  detail pane shows the question.
+- Five controls repeat the same border, radius and minimum height (`Field.svelte`,
+  `Picker.svelte`, `Find.svelte`, the Hotkey page's `.key`, and `.chip` in `tokens.css`), and
+  the segmented control and the Agents row derive their height from `--control-height` with
+  hand-written offsets. A new control can get one of them wrong.
+- `banshee-app/tauri.conf.json` sets no `app.security.csp`, and the window now draws more
+  daemon and server text.
+- A voice download that fails during a run shows the general `<file> · failed. Try again when
+  you are back online.` message on History, not the voice's own words.
+- A stalled download is not shown, because Banshee reports only at each whole percent and
+  fails a file after 30 s without data.
+- The same act is called Get on Speaking, Download on Listening, and fetch in the line above
+  Download.
+- Row ties a note to its control only when the page passes `noteId`, so on Hotkey, Listening
+  and Saved history some notes are read with their control and some are not.
+- While Banshee is stopped, Saved history still offers Stop saving, and the press can only be
+  refused.
 
-## banshee tell
+## Build and tests
 
-- Nothing tells a person by ear that their words went to the agent and not into the
-  window. Both routes end on the same record-stop cue. The spec's step 3 asks for a cue
-  when the words land, and a three-note one was built and then removed: it played right
-  after the record-stop cue, so one command sounded five notes. A swap was offered, the
-  new cue instead of the stop cue rather than after it, and refused. The decision is to
-  add no cue at all until the right interface is settled, and to keep only the cues that
-  already existed. A failed run still sounds the error cue, and `banshee status` names the
-  reason.
-- Banshee itself says nothing on the hotkey path. It spoke the agent's scope, a failure
-  reason and any warnings, and all three were removed after real use: the reasons are
-  machine text, and a voice reading `opencode exited exit status: 1` is worse than a
-  beep. The scope difference is written down instead. The cost is that a failed run tells
-  you that it failed and not why, until you ask `banshee status`.
-- OpenCode runs unscoped, and nothing narrower works. It auto-rejects a write outside its
-  run directory, and the `opencode.json` permission block that should allow one makes a
-  headless run hang instead. Measured twice, past 100 seconds each time. Only `--auto`
-  works, and it allows any edit anywhere. The cause of the hang is not known, and it
-  deserves a report upstream.
-- A timed-out run leaks two threads and two descriptors inside the daemon, one pair for
-  stdout and one for stderr. `run_bounded` calls `drain` once per pipe, and a timeout
-  collects only stdout, for a grace period. The threads are never joined, because a
-  surviving descendant can hold those pipes open for ever. In the CLI the cost ends with
-  the process. In the daemon it accumulates until a restart.
-- `tell::run` has no test of its own. It opens with `state_dir()`, which resolves the real
-  home, and then spawns a real agent, so no test reaches its body. Every rule it applies is
-  tested one level down, and a review moved four more rules out of it for that reason, but
-  the orchestration is not tested. Measured: pointing the agent back at Banshee's own
-  directory, by changing both `&run_in` to `&state`, left all 661 tests green. The seam it
-  wants is a `run_in(state, ...)` that mirrors the existing `undo_in(state, ...)`.
-- A reset that works sounds nothing, by choice. The user rejected a cue for "start over"
-  after hearing the alternative. A reset that fails still sounds the error cue, so silence
-  means the thread cleared. The cost is that a dead key and a cleared thread sound alike.
-  Left here so real use can say whether that matters.
-- An agent can outlive a `banshee tell` killed by its own PID. The run lock frees at once,
-  and no deadline stops that agent. A second run can then start while it still edits. The
-  service stop and Ctrl-C kill the agent too. A process group does not close the SIGKILL
-  case, because a killed holder runs no code. The agent must watch its parent, for example
-  with `PR_SET_PDEATHSIG`.
-- Several io errors in `tell` still reach the user as a bare errno. `BansheeError::file`
-  gives a path, and `clear_thread` and the daemon socket use it, but `snapshot`,
-  `copy_tree`, `write_session` and `state_dir` do not. A user who cannot see the screen
-  hears "Permission denied (os error 13)" and no filename.
-- `banshee bind` writes binds the running daemon may not understand. After an upgrade with
-  no daemon restart, the tell key records to the mailbox and nothing says so.
-- Nothing checks the derived tell chord against bindings the user already has. `strays`
-  only finds `banshee record` lines in the file Banshee writes.
-- A running tell cannot be stopped. `banshee tell --undo` takes the same lock, correctly,
-  so a person waits out `tell.run_timeout_min` while the agent edits.
-- A restore does not put back directory permissions. `create_dir_all` applies the umask, so
-  a folder that was `0700` comes back `0755`.
-- A restore writes no snapshot of what it replaces, so a mistaken `--undo` after a day of
-  edits by hand has nothing to return to.
-- Nobody knows when a changed `tell` setting takes effect. `banshee config set` reports
-  every `tell` key as needing a restart, while `settings::configure` hands the daemon the
-  whole new config. The two disagree and neither was measured, so the documentation makes
-  no claim either way.
-- A transcribed `?` or `,` defeats `start over` and `show me`. The match strips a trailing
-  `.` and `!` only, so "Show me?" runs headlessly as an agent command and costs a run.
-  Whisper emits a question mark on a short rising phrase, so this is common rather than
-  rare. The match mirrors `is_reset`, which is the consistency that argued against
-  widening it, and no wider set has been measured against real transcripts.
-- The six state marks are drawn in three independent places: the PNGs in
-  `bansheed/assets/tray/`, the generator `scripts/make-state-tiles.sh`, and the Svelte
-  component `banshee-app/ui/src/marks/Mark.svelte`. All three carry the same reasoning
-  in their own comments. Changing the tray left the window showing the old listening bar
-  until somebody noticed, which is the first time the duplication actually cost anything.
-- The window's pending message reads the transcribing flag alone, so it stays silent
-  while an agent started by the tell key runs. The icon shows busy; the words do not.
-- No real speech has ever reached the tell arm inside a test. The path is proven on a real
-  machine and by a state-machine round trip, and by nothing in between.
+- `remote_probe`'s `a_closed_port_names_the_host` binds a port, frees it, then probes it. A
+  test running in parallel can bind that freed port first, so the probe reaches the other
+  test's server: both tests then fail (`remote_probe.rs:78` and `:118`). Seen once in a full
+  Linux run on 2026-10-31; five isolated and two full reruns passed.
+- Nothing tests the window and the daemon together.
+- One state is called "pending" in some names and "waiting" in others: `DaemonState::pending`
+  beside `Outcome.waiting`, and `markPending` beside the `$waiting` store. The `pending` status
+  field is part of the protocol and keeps its name.
+- No `rust-version` is declared.
+- `rdev` pulls crates the compiler reports as future-incompatible, and has no newer release.
+- RUSTSEC-2024-0429 flags glib 0.18, which comes with Tauri's GTK 3 stack. It affects the Linux
+  window only. No Banshee or stack code calls `VariantStrIter` (checked with grep). It moves with
+  Tauri's GTK 4 work, tauri-apps/tauri#12562.
 
-## Testing
+## Upgrade code to remove after the next release
 
-- No WebDriver acceptance layer, so nothing exercises the Rust socket and the Svelte face
-  together.
-- `banshee status` has no test harness for the checklist. Each check prints to stdout and
-  `run` probes a live daemon, so the speaker's voice check and the espeak gate carry no test.
-- Three loopback HTTP fixtures live in three test modules: the listener's reads a body by
-  `Content-Length`, the speaker's writes chunked pieces with gaps, and the probe's answers a
-  bare `GET`. All three read through `test_support::read_request`, but each binds and accepts
-  on its own, so a shared fixture would hold those steps once.
-- A `resolve.alias` in `vite.config.ts` that points at `src/mocks` passes both mock guards.
-  The lint rules read the specifier a module writes, and the bundle check reads the literals
-  a mock holds, so an aliased import of `not-running.json` ships unseen. Every other mock
-  file holds a guarded literal, and `{"running": false}` is harmless, so the route needs a
-  visible config change to be worth anything. Left open on purpose.
-- The window's `connection_recovery` tests hold two hand-rolled fake daemons beside the shared
-  one in `tests/common`, which accepts one connection and cannot drop the first unread.
-- The daemon has a `lib.rs` and a thin `main.rs`, but every module in it is private except
-  `bench`, and the public `run()` reads the process arguments and the real config. So no test
-  in `tests/` can drive the daemon. The tray and shim are tested from inside their own files.
-- The Kokoro voice-swap rules are covered only by `#[ignore]`d tests that need the model.
+Each piece runs once on an upgraded machine. Remove it in the release after the one that ships it.
 
-## Build and dependencies
-
-- No `rust-version` is declared. The code uses let-chains, so the floor is at least 1.88, but no
-  toolchain below the one on this machine has built it, so no number is stated.
-- `rdev 0.5.3` pulls `cocoa 0.22` and `block 0.1.6`, which the compiler reports as
-  future-incompatible. No newer `rdev` release exists.
+- The start deletes the old Whisper files, and the voice list leaves them out
+  (`bansheed/src/models.rs`, `OLD_WHISPER_FILES`; `bansheed/src/daemon.rs`).
+- `migrate_legacy` and `bootout_legacy` remove the old launch agents on macOS
+  (`bansheed/src/service.rs`; `LEGACY_AGENTS` in `banshee-common/src/utils.rs`).
+- `banshee connect claude` replaces the old `banshee-speak-check.sh` hook entry in place and
+  deletes the script (`old_script`, `hook_script_path` and `Change::RemoveFile` in
+  `bansheed/src/connect.rs`; `is_banshee_hook` in `bansheed/src/connect/hooks.rs`). It shipped
+  in 0.16.0, so a user on 0.15 or older who skips the next release gets two Stop hooks.

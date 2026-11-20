@@ -60,7 +60,7 @@ describe('hotkeyFrom', () => {
   it("builds a chord in the daemon's order", () => {
     expect(hotkeyFrom(press('KeyR', { ctrlKey: true, altKey: true }), ON_LINUX)).toBe('Ctrl+Alt+R');
   });
-  it('refuses Shift, which the daemon reserves', () => {
+  it('refuses Shift, which the daemon ignores', () => {
     expect(hotkeyFrom(press('ShiftLeft'), ON_LINUX)).toBeNull();
     // The rule is the chord, not the lone key, and a lone modifier alone would
     // pass here on its name rather than on the guard.

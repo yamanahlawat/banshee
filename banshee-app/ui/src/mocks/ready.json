@@ -9,10 +9,13 @@
     "Fn"
   ],
   "version": "0.11.1",
-  "stt_model": "ggml-large-v3-turbo-q5_0.bin",
+  "stt_model": "parakeet-unified-en-0.6b",
   "vad_model": "silero_vad.onnx",
   "audio_device": "MacBook Pro Microphone",
   "missing_device": null,
+  "microphone_open": false,
+  "feedback": "both",
+  "microphone_refused": false,
   "recording": false,
   "armed": false,
   "transcribing": false,
@@ -25,19 +28,19 @@
   "blockers": [],
   "config": {
     "daemon": {
-      "save_history": true
+      "save_history": true,
+      "keep_audio": "7d"
     },
     "audio": {
       "input_device": "default",
       "hotkey": "RightCommand",
       "hotkey_mode": "toggle",
       "barge_in": "stop",
-      "cues": {
-        "enabled": true
-      }
+      "keep_open": false
     },
     "feedback": {
-      "mode": "both"
+      "mode": "both",
+      "speak_problems": true
     },
     "stt": {
       "provider": "local",
@@ -45,8 +48,7 @@
         "base_url": "https://api.openai.com/v1",
         "model": "whisper-1"
       },
-      "preset": "balanced",
-      "language": "en",
+      "model": "parakeet-unified-en-0.6b",
       "translate": false,
       "vad_threshold": 0.5,
       "vocabulary": [
@@ -74,22 +76,10 @@
         "sample_rate": null
       },
       "voice": "af_sky",
-      "speed": 1.0,
-      "fallback": "system"
+      "fallback": "local"
     },
-    "tell": {
-      "agent": "",
-      "thread_timeout_min": 10,
-      "run_timeout_min": 5,
-      "snapshots": 10,
-      "paths": [
-        "~/.config/hypr",
-        "~/.config/omarchy",
-        "~/.config/alacritty",
-        "~/.config/foot",
-        "~/.config/kitty",
-        "~/.config/ghostty"
-      ]
+    "models": {
+      "unload_after": 5
     }
   },
   "pending": [],
@@ -106,11 +96,147 @@
       "key_present": false
     }
   },
-  "telling": false,
   "last_error": null,
   "last_speech_error": null,
+  "history_changes": 0,
+  "settings_changes": 0,
   "activity": "idle",
-  "english_only": false,
+  "stt_translates": false,
+  "stt_models": [
+    {
+      "id": "parakeet-unified-en-0.6b",
+      "label": "Parakeet Unified",
+      "megabytes": 731,
+      "downloaded": true,
+      "suggested": true,
+      "languages": [
+        "en"
+      ],
+      "streams": true,
+      "credit": "Parakeet Unified by NVIDIA. Licensed by NVIDIA Corporation under the NVIDIA Open Model License.",
+      "licence": {
+        "name": "NVIDIA Open Model License (2025-10-24)",
+        "summary": "Commercial use is allowed; use must follow NVIDIA's Trustworthy AI terms, and the licence ends if its guardrails are bypassed."
+      },
+      "accept_command": null
+    },
+    {
+      "id": "whisper-large-v3-turbo",
+      "label": "Whisper turbo",
+      "megabytes": 619,
+      "downloaded": false,
+      "suggested": true,
+      "languages": [
+        "af",
+        "am",
+        "ar",
+        "as",
+        "az",
+        "ba",
+        "be",
+        "bg",
+        "bn",
+        "bo",
+        "br",
+        "bs",
+        "ca",
+        "cs",
+        "cy",
+        "da",
+        "de",
+        "el",
+        "en",
+        "es",
+        "et",
+        "eu",
+        "fa",
+        "fi",
+        "fo",
+        "fr",
+        "gl",
+        "gu",
+        "haw",
+        "ha",
+        "he",
+        "hi",
+        "hr",
+        "ht",
+        "hu",
+        "hy",
+        "id",
+        "is",
+        "it",
+        "ja",
+        "jw",
+        "ka",
+        "kk",
+        "km",
+        "kn",
+        "ko",
+        "la",
+        "lb",
+        "ln",
+        "lo",
+        "lt",
+        "lv",
+        "mg",
+        "mi",
+        "mk",
+        "ml",
+        "mn",
+        "mr",
+        "ms",
+        "mt",
+        "my",
+        "ne",
+        "nl",
+        "nn",
+        "no",
+        "oc",
+        "pa",
+        "pl",
+        "ps",
+        "pt",
+        "ro",
+        "ru",
+        "sa",
+        "sd",
+        "si",
+        "sk",
+        "sl",
+        "sn",
+        "so",
+        "sq",
+        "sr",
+        "su",
+        "sv",
+        "sw",
+        "ta",
+        "te",
+        "tg",
+        "th",
+        "tk",
+        "tl",
+        "tr",
+        "tt",
+        "uk",
+        "ur",
+        "uz",
+        "vi",
+        "yi",
+        "yo",
+        "yue",
+        "zh"
+      ],
+      "streams": false,
+      "credit": null,
+      "licence": {
+        "name": "MIT",
+        "summary": "Use, copy, change and share it, keeping the copyright notice."
+      },
+      "accept_command": null
+    }
+  ],
   "download_megabytes": 0,
   "hotkey_listens": true
 }

@@ -4,12 +4,13 @@
 use crate::socket::{Client, RpcError};
 use banshee_common::{
     AgentRow, BANSHEE_AGENTS, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE, BANSHEE_CONNECT_APPLY,
-    BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES,
-    BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_SPEAK, BANSHEE_STATUS, InputDevice,
-    PlannedChange, Voice, rpc_code,
+    BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY, BANSHEE_HISTORY_AUDIO,
+    BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RETRY,
+    BANSHEE_SPEAK, BANSHEE_STATUS, InputDevice, PlannedChange, Voice, rpc_code,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 const PREVIEW_SENTENCE: &str = "The quick brown fox jumps over the lazy dog, while five brave friends quietly pack their bags for a bright Sunday morning walk by the river.";
 
@@ -19,9 +20,7 @@ const PREVIEW_SENTENCE: &str = "The quick brown fox jumps over the lazy dog, whi
 pub struct CommandError {
     pub code: i32,
     pub message: String,
-    #[serde(skip)]
     pub transport: bool,
-    #[serde(skip)]
     pub sent: bool,
 }
 
@@ -58,11 +57,6 @@ pub struct Voices {
     pub current: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Languages {
-    pub languages: Vec<banshee_common::Language>,
-}
-
 pub async fn status(client: &mut Client) -> Result<Value, CommandError> {
     client
         .call(BANSHEE_STATUS, json!({}))
@@ -85,7 +79,7 @@ pub async fn set_setting(
         )
         .await
         .map_err(CommandError::from)?;
-    serde_json::from_value(result["restart_required"].clone()).map_err(shape_mismatch)
+    waiting_of(&result)
 }
 
 pub async fn list_devices(client: &mut Client) -> Result<Devices, CommandError> {
@@ -104,20 +98,21 @@ pub async fn list_voices(client: &mut Client) -> Result<Voices, CommandError> {
     serde_json::from_value(result).map_err(shape_mismatch)
 }
 
-pub async fn list_languages(client: &mut Client) -> Result<Languages, CommandError> {
-    let result = client
-        .call(banshee_common::BANSHEE_LIST_LANGUAGES, json!({}))
-        .await
-        .map_err(CommandError::from)?;
-    serde_json::from_value(result).map_err(shape_mismatch)
-}
-
 pub async fn preview_voice(client: &mut Client, id: &str) -> Result<(), CommandError> {
     client
         .call(
             BANSHEE_SPEAK,
             json!({"text": PREVIEW_SENTENCE, "voice": id}),
         )
+        .await
+        .map_err(CommandError::from)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub async fn restart(client: &mut Client) -> Result<(), CommandError> {
+    client
+        .call(banshee_common::BANSHEE_RESTART, json!({}))
         .await
         .map_err(CommandError::from)?;
     Ok(())
@@ -173,6 +168,10 @@ fn note_of(result: &Value) -> Option<String> {
     result["note"].as_str().map(String::from)
 }
 
+fn waiting_of(result: &Value) -> Result<Vec<String>, CommandError> {
+    serde_json::from_value(result["waiting"].clone()).map_err(shape_mismatch)
+}
+
 /// `limit` is forwarded when present and omitted entirely when absent: the
 /// daemon reads an absent `limit` as every row, and an explicit `0` as none.
 pub async fn history(client: &mut Client, limit: Option<u32>) -> Result<Vec<Value>, CommandError> {
@@ -193,6 +192,31 @@ pub async fn clear_history(client: &mut Client) -> Result<(), CommandError> {
         .await
         .map_err(CommandError::from)?;
     Ok(())
+}
+
+pub async fn history_audio(client: &mut Client, id: i64) -> Result<PathBuf, CommandError> {
+    let result = client
+        .call(BANSHEE_HISTORY_AUDIO, json!({"id": id}))
+        .await
+        .map_err(CommandError::from)?;
+    serde_json::from_value(result["path"].clone()).map_err(shape_mismatch)
+}
+
+/// The daemon queues a retry behind a dictation or an open question, which can take minutes.
+pub async fn retry(client: &mut Client, id: i64) -> Result<Value, CommandError> {
+    let result = client
+        .call_unbounded(BANSHEE_RETRY, json!({"id": id}))
+        .await
+        .map_err(CommandError::from)?;
+    result
+        .get("row")
+        .filter(|row| row.is_object())
+        .cloned()
+        .ok_or_else(|| {
+            shape_mismatch(serde::de::Error::custom(
+                "the retry reply holds no row object",
+            ))
+        })
 }
 
 pub async fn open_permission_pane(client: &mut Client, id: &str) -> Result<(), CommandError> {
@@ -220,5 +244,40 @@ mod tests {
     #[test]
     fn a_connect_reply_without_a_note_gives_none() {
         assert_eq!(note_of(&json!({"applied": 1})), None);
+    }
+
+    #[test]
+    fn a_write_answers_the_keys_the_daemon_names_as_waiting() {
+        assert_eq!(
+            super::waiting_of(&json!({"ok": true, "applied": [], "waiting": ["stt.model"]}))
+                .unwrap(),
+            ["stt.model"]
+        );
+        assert!(
+            super::waiting_of(&json!({"ok": true, "restart_required": ["stt.model"]})).is_err()
+        );
+    }
+
+    fn sent_to_the_window(transport: bool, sent: bool) -> serde_json::Value {
+        let error = super::CommandError::from(crate::socket::RpcError {
+            code: -32000,
+            message: "the daemon closed the socket".to_string(),
+            transport,
+            sent,
+        });
+        serde_json::to_value(error).unwrap()
+    }
+
+    // The daemon writes -32000 for its own refusals too, so only these flags
+    // tell the window that the socket failed and whether the request had left.
+    #[test]
+    fn the_window_hears_whether_the_socket_failed_and_whether_the_request_left() {
+        let unsent = sent_to_the_window(true, false);
+        assert_eq!(unsent["transport"], json!(true));
+        assert_eq!(unsent["sent"], json!(false));
+        let unanswered = sent_to_the_window(true, true);
+        assert_eq!(unanswered["transport"], json!(true));
+        assert_eq!(unanswered["sent"], json!(true));
+        assert_eq!(sent_to_the_window(false, true)["transport"], json!(false));
     }
 }

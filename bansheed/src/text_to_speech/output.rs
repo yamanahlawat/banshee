@@ -9,7 +9,7 @@ use rodio::buffer::SamplesBuffer;
 use rodio::mixer::Mixer;
 use rodio::{DeviceSinkBuilder, Player};
 
-use crate::text_to_speech::{ActiveUtterance, Fault, lock};
+use crate::text_to_speech::{ActiveUtterance, Fault, Faults, lock};
 
 /// The rate the mixer runs at, and the rate Kokoro synthesises at.
 pub const SAMPLE_RATE: std::num::NonZero<u32> = std::num::NonZero::new(24_000).unwrap();
@@ -224,7 +224,7 @@ impl Output {
     pub fn play(
         self: &Arc<Self>,
         chunks: impl Iterator<Item = Chunk> + Send + 'static,
-        faults: std::sync::mpsc::Sender<Fault>,
+        faults: Faults,
     ) -> Result<PlayerUtterance, BansheeError> {
         let (mixer, device) = self.mixer()?;
         let player = Arc::new(Mutex::new(Arc::new(Player::connect_new(&mixer))));
@@ -276,7 +276,7 @@ struct Playing {
     held: Arc<Mutex<VecDeque<Chunk>>>,
     cancelled: Arc<Mutex<bool>>,
     output: Arc<Output>,
-    faults: std::sync::mpsc::Sender<Fault>,
+    faults: Faults,
     /// One step per `PULL_STEP` of this reply the device took. Its own, because
     /// audio another sound's device takes says nothing about this one's.
     pulls: Arc<AtomicU64>,
@@ -389,7 +389,7 @@ impl Playing {
     /// Ends a reply nothing can play. The player stops with it, so the next
     /// reply is not queued behind this one.
     fn give_up(&mut self, reason: String) {
-        let _ = self.faults.send(Fault::Failed(reason));
+        self.faults.send(Fault::Failed(reason));
         *lock(&self.cancelled) = true;
         lock(&self.player).stop();
     }
@@ -556,7 +556,8 @@ fn default_device() -> Result<Device, BansheeError> {
 #[cfg(test)]
 mod tests {
     use super::{CHANNELS, Chunk, Output, SAMPLE_RATE};
-    use crate::text_to_speech::{ActiveUtterance, Fault};
+    use crate::test_support::ignored_faults;
+    use crate::text_to_speech::{ActiveUtterance, Fault, Faults};
     use banshee_common::error::BansheeError;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -752,7 +753,10 @@ mod tests {
         let output = Arc::new(Output::silent());
         let (faults, heard) = std::sync::mpsc::channel();
         let utterance = output
-            .play(std::iter::repeat_with(a_sentence).take(5), faults)
+            .play(
+                std::iter::repeat_with(a_sentence).take(5),
+                Faults::new(faults),
+            )
             .expect("a test device opens");
         wait_until("the look-ahead fills", || {
             utterance.queued() == super::ALWAYS_QUEUED
@@ -768,29 +772,6 @@ mod tests {
             "the held sentences moved to the new player"
         );
         assert!(heard.try_recv().is_err(), "a swap that worked is no fault");
-    }
-
-    // Kokoro takes its time over a long sentence, and the player is empty until
-    // it answers. Reading that quiet as a dead device would swap the speaker in
-    // the middle of a reply that is only waiting for words.
-    #[test]
-    fn a_player_waiting_for_the_next_sentence_swaps_nothing() {
-        let (output, opened) = Output::counting();
-        let output = Arc::new(output);
-        let mut utterance = output
-            .play(std::iter::empty(), ignored_faults())
-            .expect("a test device opens");
-        wait_until("the worker ends with nothing to play", || {
-            utterance.is_finished()
-        });
-
-        thread::sleep(super::DEAD_OUTPUT + Duration::from_millis(30));
-
-        assert_eq!(
-            opened.load(Ordering::Relaxed),
-            1,
-            "a quiet player is not a dead device"
-        );
     }
 
     // Kokoro hands over a whole sentence at a time, and a spoken sentence runs
@@ -866,7 +847,10 @@ mod tests {
         let output = Arc::new(output);
         let (faults, heard) = std::sync::mpsc::channel();
         let mut utterance = output
-            .play(std::iter::repeat_with(a_sentence).take(5), faults)
+            .play(
+                std::iter::repeat_with(a_sentence).take(5),
+                Faults::new(faults),
+            )
             .expect("a test device opens");
         wait_until("the look-ahead fills", || {
             utterance.queued() == super::ALWAYS_QUEUED
@@ -1022,7 +1006,10 @@ mod tests {
         let output = Arc::new(Output::dead_after_first());
         let (faults, heard) = std::sync::mpsc::channel();
         let mut utterance = output
-            .play(std::iter::repeat_with(a_sentence).take(5), faults)
+            .play(
+                std::iter::repeat_with(a_sentence).take(5),
+                Faults::new(faults),
+            )
             .expect("a test device opens");
         wait_until("the look-ahead fills", || {
             utterance.queued() == super::ALWAYS_QUEUED
@@ -1033,11 +1020,6 @@ mod tests {
             Ok(Fault::Failed(reason)) => assert!(reason.contains("speaker"), "{reason}"),
             other => panic!("a reply that was cut must be reported: {other:?}"),
         }
-    }
-
-    /// A fault channel a test does not read.
-    fn ignored_faults() -> std::sync::mpsc::Sender<Fault> {
-        std::sync::mpsc::channel().0
     }
 
     /// A sentence that fills the look-ahead on its own, as Kokoro's do. The

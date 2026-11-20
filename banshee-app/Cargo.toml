@@ -25,7 +25,12 @@ serde_json.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-single-instance = "2"
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "fs", "macros", "time", "sync"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSString"] }
+objc2-service-management = { version = "0.3.2", default-features = false, features = ["std", "objc2", "objc2-foundation", "SMAppService"] }
 
 [dev-dependencies]
 tempfile = "3"

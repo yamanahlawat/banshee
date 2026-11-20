@@ -2,6 +2,7 @@
   // A component and not a CSS class: without the group role and label a screen
   // reader hears N separate toggles with no idea they are one choice.
   import { arrowStep } from '../lib/keys';
+  import { rowDescription } from '../lib/ids';
 
   export let label: string;
   export let value: string;
@@ -10,6 +11,8 @@
   /// The id of the sentence that says what the choice does, so the group is
   /// read with its consequence rather than as three bare words.
   export let describedBy: string | undefined = undefined;
+  const fromRow = rowDescription();
+  $: described = describedBy ?? $fromRow;
 
   let group: HTMLDivElement;
 
@@ -22,6 +25,11 @@
     0,
     options.findIndex((option) => option.value === value),
   );
+
+  export function focus(option: string) {
+    const at = options.findIndex((one) => one.value === option);
+    (group.children[at] as HTMLElement | undefined)?.focus();
+  }
 
   function pick(to: number) {
     stop = to;
@@ -43,12 +51,11 @@
   class="seg"
   role="radiogroup"
   aria-label={label}
-  aria-describedby={describedBy}
+  aria-describedby={described}
   bind:this={group}
 >
   {#each options as option, i (option.value)}
     <button
-      class="caps"
       type="button"
       role="radio"
       aria-checked={option.value === value}
@@ -68,6 +75,7 @@
        shows a fourth cell that no option fills. */
     display: inline-flex;
     border: 1px solid var(--ink);
+    border-radius: var(--radius);
   }
 
   .seg button {
@@ -75,12 +83,24 @@
     background: transparent;
     border: 0;
     border-right: 1px solid var(--ink);
-    padding: 8px 12px;
+    min-height: calc(var(--control-height) - 2px);
+    padding: 7px 12px;
+    font-size: 13px;
+    font-weight: 600;
     cursor: pointer;
+  }
+
+  .seg button:first-child {
+    border-radius: calc(var(--radius) - 1px) 0 0 calc(var(--radius) - 1px);
   }
 
   .seg button:last-child {
     border-right: 0;
+    border-radius: 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0;
+  }
+
+  .seg button[aria-checked='false']:hover {
+    background: var(--hover);
   }
 
   .seg button[aria-checked='true'] {

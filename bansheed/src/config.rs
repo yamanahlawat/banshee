@@ -1,7 +1,10 @@
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use banshee_common::{error::BansheeError, utils::config_path};
 use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::credentials::RemoteKey;
 
 // Every section denies unknown fields: TOML binds a key to whatever table
 // precedes it, so a misplaced setting parses fine and silently does nothing.
@@ -10,11 +13,45 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
     pub save_history: bool,
+    pub keep_audio: KeepAudio,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
-        Self { save_history: true }
+        Self {
+            save_history: true,
+            keep_audio: KeepAudio::default(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum KeepAudio {
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "1d")]
+    OneDay,
+    #[default]
+    #[serde(rename = "7d")]
+    SevenDays,
+    #[serde(rename = "30d")]
+    ThirtyDays,
+    #[serde(rename = "forever")]
+    Forever,
+}
+
+pub const DAY: std::time::Duration = std::time::Duration::from_secs(86_400);
+
+impl KeepAudio {
+    /// How long a file lives. `None` is forever; `Off` is no time at all.
+    pub fn period(self) -> Option<std::time::Duration> {
+        Some(match self {
+            Self::Off => std::time::Duration::ZERO,
+            Self::OneDay => DAY,
+            Self::SevenDays => 7 * DAY,
+            Self::ThirtyDays => 30 * DAY,
+            Self::Forever => return None,
+        })
     }
 }
 
@@ -32,25 +69,15 @@ pub enum BargeInMode {
     None,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-#[serde(default, deny_unknown_fields)]
-pub struct AudioCuesConfig {
-    pub enabled: bool,
-}
-
-impl Default for AudioCuesConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
 pub use banshee_common::feedback::FeedbackMode;
 
-// `None` is a file that never chose, and `Config::feedback_mode` resolves it.
+// `None` is a file that never chose, and `Config::feedback_mode` and
+// `Config::speak_problems` resolve it.
 #[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct FeedbackConfig {
     pub mode: Option<FeedbackMode>,
+    pub speak_problems: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -60,7 +87,8 @@ pub struct AudioConfig {
     pub hotkey: crate::binding::Hotkey,
     pub hotkey_mode: HotkeyMode,
     pub barge_in: BargeInMode,
-    pub cues: AudioCuesConfig,
+    /// Holds capture open for the daemon's life instead of for each use.
+    pub keep_open: bool,
 }
 
 impl Default for AudioConfig {
@@ -70,52 +98,16 @@ impl Default for AudioConfig {
             hotkey: crate::binding::Hotkey::default(),
             hotkey_mode: HotkeyMode::Hold,
             barge_in: BargeInMode::Stop,
-            cues: AudioCuesConfig::default(),
+            keep_open: false,
         }
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum STTPreset {
-    Fast,
-    Balanced,
-    Quality,
-}
-
-impl STTPreset {
-    pub const ALL: [STTPreset; 3] = [STTPreset::Fast, STTPreset::Balanced, STTPreset::Quality];
-
-    pub fn model_name(&self) -> &'static str {
-        match self {
-            STTPreset::Fast => "ggml-base.en.bin",
-            STTPreset::Balanced => "ggml-large-v3-turbo-q5_0.bin",
-            STTPreset::Quality => "ggml-large-v3-q5_0.bin",
-        }
-    }
-}
-
-fn language<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    let value = String::deserialize(deserializer)?;
-    Ok(spoken_or_english(value))
-}
-
-/// The engine's table plus auto, the config's own word for detect it; read and write both ask this.
-pub fn known_language(value: &str) -> bool {
-    value == "auto" || whisper_rs::get_lang_id(value).is_some()
-}
-
-/// A code Whisper does not know, read as English rather than refused. Nothing
-/// read this field before, so a config written then can hold anything, and a
-/// daemon that exits on it is a daemon launchd restarts for ever. `banshee
-/// config set` refuses the same value at the boundary, where a person is there
-/// to read why.
-fn spoken_or_english(value: String) -> String {
-    if known_language(&value) {
-        return value;
-    }
-    log::warn!("'{value}' is not a language Whisper knows, so English is read instead");
-    "en".to_string()
+fn listening_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let id = String::deserialize(deserializer)?;
+    banshee_common::listening::find(&id)
+        .map(|model| model.id.to_string())
+        .ok_or_else(|| serde::de::Error::custom(crate::models::unknown_model(&id)))
 }
 
 // Out of range no probability ever matches, so VAD stops firing with no error
@@ -124,18 +116,6 @@ fn probability<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Err
     if !(0.0..=1.0).contains(&value) {
         return Err(serde::de::Error::custom(format!(
             "must be between 0.0 and 1.0, got {value}"
-        )));
-    }
-    Ok(value)
-}
-
-// Below 0.5 an utterance drags, above 2.0 it slurs. The window's slider offers
-// this range, and the file has to refuse what the slider cannot ask for.
-fn rate<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
-    let value = f32::deserialize(deserializer)?;
-    if !(0.5..=2.0).contains(&value) {
-        return Err(serde::de::Error::custom(format!(
-            "must be between 0.5 and 2.0, got {value}"
         )));
     }
     Ok(value)
@@ -178,6 +158,59 @@ fn remote_url<'de, D: Deserializer<'de>>(deserializer: D, key: &str) -> Result<S
         )));
     }
     Ok(value)
+}
+
+// Not refused at load: a daemon that exits on an old config is one launchd
+// restarts for ever.
+pub fn refuse_plain_http_to_the_internet(side: RemoteKey, base_url: &str) -> Result<(), String> {
+    // A URL that does not parse is `remote_url`'s to refuse.
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return Ok(());
+    };
+    match cleartext_internet_host(&url) {
+        Some(host) => Err(format!(
+            "{} needs https for {host}. Plain http may reach only this machine or your own network",
+            side.base_url_setting()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The host a plain http request to `url` would reach across the internet.
+pub fn cleartext_internet_host(url: &reqwest::Url) -> Option<&str> {
+    url.host_str()
+        .filter(|host| url.scheme() == "http" && !stays_on_your_network(host))
+}
+
+// Reads the URL alone and resolves no name, so a public name that points at a
+// home address is refused.
+fn stays_on_your_network(host: &str) -> bool {
+    // An IPv6 host comes bracketed, as in `[::1]`.
+    match host.trim_start_matches('[').trim_end_matches(']').parse() {
+        Ok(IpAddr::V4(ip)) => {
+            // 100.64.0.0/10, where Tailscale hands out its addresses.
+            let [first, second, ..] = ip.octets();
+            let tailscale = first == 100 && (64..128).contains(&second);
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_private()
+                || ip.is_link_local()
+                || tailscale
+        }
+        Ok(IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+        Err(_) => {
+            let name = host.trim_end_matches('.');
+            !name.contains('.')
+                || [".ts.net", ".local", ".lan", ".home.arpa", ".internal"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+        }
+    }
 }
 
 fn remote_base_url<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
@@ -325,22 +358,21 @@ impl RemoteTtsConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct STTConfig {
     pub provider: Provider,
     pub remote: RemoteSttConfig,
-    pub preset: STTPreset,
-    /// A Whisper language code, or `auto` to detect it. The English-only build
-    /// holds no other language, so `preset = "fast"` reads English whatever
-    /// this says.
-    #[serde(deserialize_with = "language")]
-    pub language: String,
+    /// A listening model id, as `banshee_common::listening::find` takes it.
+    #[serde(deserialize_with = "listening_model")]
+    pub model: String,
+    /// Asked of a server, or of a model that translates. Every other model
+    /// transcribes in the language it hears.
     pub translate: bool,
     #[serde(deserialize_with = "probability")]
     pub vad_threshold: f32,
     pub vocabulary: Vec<String>,
-    // Trailing silence that ends an armed-listening answer
+    // Silence before the first end-of-answer check, and between later checks
     pub endpoint_silence_ms: u64,
 }
 
@@ -349,20 +381,27 @@ impl Default for STTConfig {
         Self {
             provider: Provider::Local,
             remote: RemoteSttConfig::default(),
-            preset: STTPreset::Balanced,
-            language: "en".to_string(),
+            model: banshee_common::listening::DEFAULT_MODEL.to_string(),
             translate: false,
             vad_threshold: 0.5,
-            vocabulary: vec!["banshee".to_string()],
+            vocabulary: Vec::new(),
             endpoint_silence_ms: 2500,
         }
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+impl STTConfig {
+    /// `None` only for a config built in code: a parsed one refuses an unknown id.
+    pub fn listening_model(&self) -> Option<&'static banshee_common::listening::ListeningModel> {
+        banshee_common::listening::find(&self.model)
+    }
+}
+
+/// What speaks when a remote speaker does not: the local voice, or nothing.
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TTSFallback {
-    System,
+    Local,
     None,
 }
 
@@ -372,8 +411,6 @@ pub struct TTSConfig {
     pub provider: Provider,
     pub remote: RemoteTtsConfig,
     pub voice: String,
-    #[serde(deserialize_with = "rate")]
-    pub speed: f32,
     pub fallback: TTSFallback,
 }
 
@@ -382,78 +419,30 @@ impl Default for TTSConfig {
         Self {
             provider: Provider::Local,
             remote: RemoteTtsConfig::default(),
-            voice: "af_sky".to_string(),
-            speed: 1.0,
-            fallback: TTSFallback::System,
+            voice: banshee_common::COMPANION_VOICE.to_string(),
+            fallback: TTSFallback::Local,
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
-pub struct TellConfig {
-    /// Empty asks Omarchy, then the connected agents.
-    pub agent: String,
-    /// Minutes a saved thread stays resumable.
-    pub thread_timeout_min: u64,
-    /// Minutes before a run is killed rather than waited on. 5 is a stated
-    /// default, not a measurement: no run has yet been timed to a limit.
-    pub run_timeout_min: u64,
-    /// How many snapshots to keep.
-    pub snapshots: usize,
-    /// The folders Banshee copies before a command. An agent that takes a
-    /// folder list gets this one.
-    pub paths: Vec<String>,
+pub struct ModelsConfig {
+    /// Minutes a local model stays loaded after its last use. 0 keeps it.
+    pub unload_after: u64,
 }
 
-const DEFAULT_THREAD_TIMEOUT_MIN: u64 = 10;
-const DEFAULT_RUN_TIMEOUT_MIN: u64 = 5;
-
-impl Default for TellConfig {
+impl Default for ModelsConfig {
     fn default() -> Self {
-        TellConfig {
-            agent: String::new(),
-            thread_timeout_min: DEFAULT_THREAD_TIMEOUT_MIN,
-            run_timeout_min: DEFAULT_RUN_TIMEOUT_MIN,
-            snapshots: 10,
-            // The list the Omarchy skill names for itself.
-            paths: [
-                "~/.config/hypr",
-                "~/.config/omarchy",
-                "~/.config/alacritty",
-                "~/.config/foot",
-                "~/.config/kitty",
-                "~/.config/ghostty",
-            ]
-            .map(String::from)
-            .to_vec(),
-        }
+        Self { unload_after: 5 }
     }
 }
 
-impl TellConfig {
-    /// Never zero: a zero would delete the copy the run just took, and
-    /// `banshee tell --undo` would never have one.
-    pub fn keep(&self) -> usize {
-        self.snapshots.max(1)
-    }
-
-    /// A zero deadline kills every run on its first poll, where a user who
-    /// writes one means no limit.
-    pub fn run_minutes(&self) -> u64 {
-        match self.run_timeout_min {
-            0 => DEFAULT_RUN_TIMEOUT_MIN,
-            minutes => minutes,
-        }
-    }
-
-    /// A zero window refuses every thread a second older than the one that
-    /// saved it.
-    pub fn thread_minutes(&self) -> u64 {
-        match self.thread_timeout_min {
-            0 => DEFAULT_THREAD_TIMEOUT_MIN,
-            minutes => minutes,
-        }
+impl ModelsConfig {
+    /// `None` keeps every local model loaded.
+    pub fn unload_limit(&self) -> Option<std::time::Duration> {
+        (self.unload_after > 0)
+            .then(|| std::time::Duration::from_secs(self.unload_after.saturating_mul(60)))
     }
 }
 
@@ -465,7 +454,7 @@ pub struct Config {
     pub feedback: FeedbackConfig,
     pub stt: STTConfig,
     pub tts: TTSConfig,
-    pub tell: TellConfig,
+    pub models: ModelsConfig,
 }
 
 impl Config {
@@ -496,66 +485,76 @@ impl Config {
                 error.into()
             }
         })?;
-        // The window reads the mode from the status reply, so a parsed config carries the
-        // resolved mode.
+        // The window reads the status reply, so a parsed config carries the
+        // resolved values.
         config.feedback.mode = Some(config.feedback_mode());
+        config.feedback.speak_problems = Some(config.speak_problems());
         Ok(config)
     }
 
     pub fn feedback_mode(&self) -> FeedbackMode {
-        self.feedback.mode.unwrap_or(if self.audio.cues.enabled {
-            FeedbackMode::Both
-        } else {
-            FeedbackMode::Off
-        })
+        self.feedback.mode.unwrap_or(FeedbackMode::Both)
+    }
+
+    pub fn speak_problems(&self) -> bool {
+        self.feedback.speak_problems.unwrap_or(true)
     }
 
     pub fn load() -> Result<Self, BansheeError> {
         Config::load_from(&Config::path()?)
     }
 
-    /// `path` is the config.toml to read. Names the file in its refusal: toml
-    /// points at the offending line but not at the file it is in, and this
-    /// machine holds two.
-    fn load_from(path: &Path) -> Result<Self, BansheeError> {
+    /// `path` is the config.toml to read. The refusal is one line that names
+    /// the file, the line in it, and toml's message, because this machine holds
+    /// two config files and `banshee status` prints one line.
+    pub(crate) fn load_from(path: &Path) -> Result<Self, BansheeError> {
         let contents = Config::read(path)?;
         Config::parse(&contents).map_err(|error| match error {
-            // Already names the setting and what to do about it
-            BansheeError::Rejected(_) => error,
-            other => BansheeError::Rejected(format!("{} does not parse: {other}", path.display())),
+            BansheeError::Rejected(refusal) => {
+                BansheeError::Rejected(format!("{}: {refusal}", path.display()))
+            }
+            BansheeError::Toml(toml) => {
+                let at = toml.span().map_or(String::new(), |span| {
+                    let line = contents[..span.start].matches('\n').count() + 1;
+                    format!(" at line {line}")
+                });
+                BansheeError::Rejected(format!(
+                    "{} does not parse{at}: {}",
+                    path.display(),
+                    toml.message()
+                ))
+            }
+            other => other,
         })
-    }
-}
-
-#[cfg(test)]
-mod language_tests {
-    /// Nothing read this field before, so a config written then can hold any
-    /// string. Exiting on one is a daemon launchd restarts for ever.
-    #[test]
-    fn an_unknown_code_reads_as_english_rather_than_stopping_the_daemon() {
-        let config: super::Config =
-            toml::from_str("[stt]\nlanguage = \"en-US\"\n").expect("an old config must load");
-        assert_eq!(config.stt.language, "en");
-    }
-
-    #[test]
-    fn a_code_the_engine_knows_is_kept() {
-        let config: super::Config = toml::from_str("[stt]\nlanguage = \"hi\"\n").unwrap();
-        assert_eq!(config.stt.language, "hi");
-    }
-
-    /// `auto` is the config's own word for detect it and is not in the engine's
-    /// table, so it has to survive the same check.
-    #[test]
-    fn auto_survives() {
-        let config: super::Config = toml::from_str("[stt]\nlanguage = \"auto\"\n").unwrap();
-        assert_eq!(config.stt.language, "auto");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keep_audio_defaults_to_seven_days() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.daemon.keep_audio, KeepAudio::SevenDays);
+    }
+
+    #[test]
+    fn keep_audio_reads_each_choice() {
+        let day = crate::test_support::DAY.as_secs();
+        for (word, period) in [
+            ("off", Some(0)),
+            ("1d", Some(day)),
+            ("7d", Some(7 * day)),
+            ("30d", Some(30 * day)),
+            ("forever", None),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[daemon]\nkeep_audio = \"{word}\"\n")).unwrap();
+            let seconds = config.daemon.keep_audio.period().map(|d| d.as_secs());
+            assert_eq!(seconds, period, "{word}");
+        }
+    }
 
     // `hotkey_mode` under `[tts]` is valid TOML, so only `deny_unknown_fields`
     // stands between a misplaced key and a silent default
@@ -598,34 +597,9 @@ mod tests {
         );
     }
 
-    // Nothing reads the audio cue file paths, so a config that names one must
-    // be refused rather than accepted and ignored.
-    #[test]
-    fn an_audio_cue_file_path_is_refused() {
-        let error = toml::from_str::<Config>("[audio.cues]\nstart = \"x.wav\"\n")
-            .expect_err("start must not parse");
-        assert!(
-            error.to_string().contains("start"),
-            "the error must name the offending key: {error}"
-        );
-    }
-
     #[test]
     fn an_absent_feedback_mode_keeps_both() {
         let config = Config::parse("").unwrap();
-        assert_eq!(config.feedback_mode(), FeedbackMode::Both);
-    }
-
-    #[test]
-    fn an_old_cue_switch_that_is_off_reads_as_none() {
-        let config = Config::parse("[audio.cues]\nenabled = false\n").unwrap();
-        assert_eq!(config.feedback_mode(), FeedbackMode::Off);
-    }
-
-    #[test]
-    fn the_feedback_mode_wins_over_the_old_cue_switch() {
-        let config =
-            Config::parse("[audio.cues]\nenabled = false\n[feedback]\nmode = \"both\"\n").unwrap();
         assert_eq!(config.feedback_mode(), FeedbackMode::Both);
     }
 
@@ -649,10 +623,27 @@ mod tests {
     }
 
     #[test]
+    fn speak_problems_defaults_on() {
+        assert!(Config::parse("").unwrap().speak_problems());
+    }
+
+    #[test]
+    fn speak_problems_false_parses() {
+        let config = Config::parse("[feedback]\nspeak_problems = false\n").unwrap();
+        assert!(!config.speak_problems());
+    }
+
+    #[test]
     fn a_parsed_config_serializes_the_resolved_mode() {
-        let config = Config::parse("[audio.cues]\nenabled = false\n").unwrap();
+        let config = Config::parse("").unwrap();
         let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["feedback"]["mode"], "none");
+        assert_eq!(json["feedback"]["mode"], "both");
+    }
+
+    #[test]
+    fn a_parsed_config_serializes_speak_problems_resolved() {
+        let json = serde_json::to_value(Config::parse("").unwrap()).unwrap();
+        assert_eq!(json["feedback"]["speak_problems"], true);
     }
 
     // A removed key is refused by name, the way every other removed key is.
@@ -687,7 +678,7 @@ mod tests {
     #[test]
     fn a_config_without_the_key_reads_as_local() {
         let config: Config =
-            toml::from_str("[stt]\npreset = \"fast\"\n\n[tts]\nvoice = \"af_sky\"\n").unwrap();
+            toml::from_str("[stt]\ntranslate = true\n\n[tts]\nvoice = \"af_sky\"\n").unwrap();
         assert_eq!(config.stt.provider, Provider::Local);
         assert_eq!(config.tts.provider, Provider::Local);
     }
@@ -794,6 +785,82 @@ mod tests {
         );
     }
 
+    fn http_stays_on_your_network(url: &str) -> bool {
+        stays_on_your_network(reqwest::Url::parse(url).unwrap().host_str().unwrap())
+    }
+
+    #[test]
+    fn plain_http_may_reach_this_machine_and_your_own_network() {
+        for url in [
+            "http://localhost:8000/v1",
+            "http://127.0.0.1/v1",
+            "http://[::1]/v1",
+            "http://192.168.1.5/v1",
+            "http://10.0.0.2/v1",
+            "http://172.16.0.1/v1",
+            "http://172.31.255.1/v1",
+            "http://100.64.0.1/v1",
+            "http://100.127.255.254/v1",
+            "http://[fd7a:115c:a1e0::1]/v1",
+            "http://0.0.0.0:8000/v1",
+            "http://[::]:8000/v1",
+            "http://169.254.10.2/v1",
+            "http://[fe80::1]/v1",
+            "http://gpu-box:8000/v1",
+            "http://gpu-box.tail1234.ts.net/v1",
+            "http://studio.local/v1",
+            "http://nas.lan/v1",
+            "http://pi.home.arpa/v1",
+            "http://gpu.internal/v1",
+            "http://nas.lan./v1",
+            "http://localhost./v1",
+        ] {
+            assert!(http_stays_on_your_network(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn plain_http_may_not_reach_the_internet() {
+        for url in [
+            "http://api.example.com/v1",
+            "http://8.8.8.8/v1",
+            "http://172.32.0.1/v1",
+            "http://100.63.255.255/v1",
+            "http://100.128.0.1/v1",
+            "http://[2001:db8::1]/v1",
+            "http://evilts.net/v1",
+            "http://local.example.com/v1",
+        ] {
+            assert!(!http_stays_on_your_network(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_the_setting_and_the_host() {
+        let refusal =
+            refuse_plain_http_to_the_internet(RemoteKey::Stt, "http://api.example.com/v1")
+                .expect_err("plain http to the internet must be refused");
+        assert!(
+            refusal.contains("stt.remote.base_url needs https for api.example.com"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn https_to_the_internet_is_not_refused() {
+        assert_eq!(
+            refuse_plain_http_to_the_internet(RemoteKey::Stt, "https://api.example.com/v1"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn an_old_config_with_plain_http_to_the_internet_still_loads() {
+        let config = Config::parse("[stt.remote]\nbase_url = \"http://api.example.com/v1\"\n")
+            .expect("an old config must load");
+        assert_eq!(config.stt.remote.base_url, "http://api.example.com/v1");
+    }
+
     #[test]
     fn an_empty_remote_model_is_refused() {
         let error = Config::parse("[stt.remote]\nmodel = \"\"\n")
@@ -828,9 +895,68 @@ mod tests {
     }
 
     #[test]
-    fn a_tts_table_that_names_no_speed_speaks_at_the_api_default() {
-        let config: Config = toml::from_str("[tts]\nvoice = \"af_sky\"\n").unwrap();
-        assert_eq!(config.tts.speed, 1.0);
+    fn a_removed_setting_on_disk_names_the_file_and_the_line() {
+        let dir = crate::test_support::unique_scratch("config-removed");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[stt]\npreset = \"fast\"\n").unwrap();
+
+        let error = super::Config::load_from(&path).expect_err("stt.preset is gone");
+        let _ = std::fs::remove_dir_all(&dir);
+        let error = error.to_string();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(
+            error.contains("at line 2") && error.contains("`preset`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_model_id_is_refused() {
+        let error =
+            Config::parse("[stt]\nmodel = \"nope\"\n").expect_err("no model is called nope");
+        assert!(error.to_string().contains("nope"), "{error}");
+        assert!(
+            error.to_string().contains("whisper-large-v3-turbo"),
+            "the refusal names the ids it takes: {error}"
+        );
+    }
+
+    #[test]
+    fn a_model_id_in_another_case_reads_as_the_catalogue_writes_it() {
+        let config = Config::parse("[stt]\nmodel = \"qwen3-asr-0.6b\"\n").unwrap();
+        assert_eq!(config.stt.model, "Qwen3-ASR-0.6B");
+    }
+
+    #[test]
+    fn the_default_words_to_know_are_empty() {
+        assert!(Config::default().stt.vocabulary.is_empty());
+        assert!(Config::parse("").unwrap().stt.vocabulary.is_empty());
+    }
+
+    #[test]
+    fn a_local_model_unloads_after_five_idle_minutes_unless_zero_keeps_it() {
+        assert_eq!(
+            Config::default().models.unload_limit(),
+            Some(std::time::Duration::from_secs(300))
+        );
+        let kept = Config::parse("[models]\nunload_after = 0\n").unwrap();
+        assert_eq!(kept.models.unload_limit(), None);
+    }
+
+    #[test]
+    fn the_default_model_is_parakeet() {
+        assert_eq!(Config::default().stt.model, "parakeet-unified-en-0.6b");
+    }
+
+    #[test]
+    fn the_default_voice_is_the_companion() {
+        assert_eq!(Config::default().tts.voice, banshee_common::COMPANION_VOICE);
+    }
+
+    #[test]
+    fn the_default_fallback_is_local() {
+        let config = Config::parse("[tts]\nprovider = \"remote\"\n").unwrap();
+        assert_eq!(config.tts.fallback, TTSFallback::Local);
     }
 
     #[test]
@@ -933,17 +1059,18 @@ mod tests {
     }
 
     #[test]
-    fn a_config_that_does_not_parse_names_the_file_it_is_in() {
+    fn a_config_that_does_not_parse_names_the_file_and_the_line() {
         let dir = crate::test_support::unique_scratch("config-load");
         let path = dir.join("config.toml");
-        std::fs::write(&path, "[stt]\nlanguage =\n").unwrap();
+        std::fs::write(&path, "# a\n\n[stt]\nmodel = 5\n").unwrap();
 
-        let error = super::Config::load_from(&path).expect_err("an unfinished value must not load");
-        assert!(
-            error.to_string().contains(&path.display().to_string()),
-            "{error}"
-        );
+        let error =
+            super::Config::load_from(&path).expect_err("a number must not load as a model id");
         let _ = std::fs::remove_dir_all(&dir);
+        let error = error.to_string();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains("at line 4:"), "{error}");
+        assert!(!error.contains('\n'), "{error}");
     }
 
     #[test]

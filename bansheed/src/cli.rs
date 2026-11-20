@@ -1,11 +1,12 @@
 use std::io::{IsTerminal, Write};
 
-use banshee_common::{Voice, error::BansheeError, utils};
+use banshee_common::{Voice, error::BansheeError, listening::ListeningModel, utils};
 
 use crate::{
     args, audio, config::Config, connect, daemon, hotkey, models, permissions, service, settings,
     status, text_to_speech,
 };
+use models::licences::{self, Accepted};
 
 fn show_progress(progress: banshee_common::DownloadProgress) {
     // Rewritten in place, so a percentage does not scroll the screen away
@@ -28,30 +29,46 @@ fn show_progress(progress: banshee_common::DownloadProgress) {
 
 // One writer at a time: the `.part` file that makes resume possible has a
 // stable name, so this process must not fetch alongside a daemon already doing it
-/// What `setup` says once files arrive through a running daemon: its pipeline
-/// was built without them, so only a restart loads them.
-fn restart_note(fetched: usize) -> Option<&'static str> {
-    (fetched > 0).then_some("Restart Banshee to use what just arrived: banshee start")
+/// What `setup` says once files arrive through a running daemon. Only the
+/// detector waits for a restart; a listening model and a voice load by themselves.
+fn restart_note(arrived: &[&str]) -> Option<&'static str> {
+    arrived
+        .iter()
+        .any(|name| crate::models::download::role(name) == banshee_common::FileRole::Detector)
+        .then_some("Restart Banshee to use what just arrived: banshee start")
 }
 
-async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(), BansheeError> {
-    let reply = utils::call_daemon(
-        banshee_common::BANSHEE_DOWNLOAD_MODELS,
-        serde_json::json!({}),
-    )
-    .await?;
+/// `retry` is the command that fetches the same files again.
+async fn follow_daemon_download(
+    mut progress: utils::Subscription,
+    params: serde_json::Value,
+    retry: &str,
+) -> Result<(), BansheeError> {
+    let reply = match utils::call_daemon(banshee_common::BANSHEE_DOWNLOAD_MODELS, params).await {
+        Ok(reply) => reply,
+        Err(error) => {
+            eprintln!("To try again: {retry}");
+            return Err(error);
+        }
+    };
     // The counter terminates because only one download runs at a time, so every
     // notification on this connection belongs to the batch just asked for
-    let mut pending: usize = reply
+    let asked: Vec<String> = reply
         .get("downloading")
         .and_then(|names| names.as_array())
-        .map_or(0, Vec::len);
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut pending = asked.len();
     if pending == 0 {
         println!("Everything is already downloaded.");
         return Ok(());
     }
 
-    let asked = pending;
     let mut failed = Vec::new();
     while pending > 0 {
         let Some(params) = progress
@@ -66,8 +83,13 @@ async fn follow_daemon_download(mut progress: utils::Subscription) -> Result<(),
         note_progress(&reported, &mut pending, &mut failed);
         show_progress(reported);
     }
-    downloads_settled(&failed)?;
-    if let Some(note) = restart_note(asked - failed.len()) {
+    downloads_settled(&failed, retry)?;
+    let arrived: Vec<&str> = asked
+        .iter()
+        .filter(|name| !failed.contains(*name))
+        .map(String::as_str)
+        .collect();
+    if let Some(note) = restart_note(&arrived) {
         println!("{note}");
     }
     Ok(())
@@ -88,12 +110,12 @@ fn note_progress(
     }
 }
 
-fn downloads_settled(failed: &[String]) -> Result<(), BansheeError> {
+fn downloads_settled(failed: &[String], retry: &str) -> Result<(), BansheeError> {
     if failed.is_empty() {
         return Ok(());
     }
     Err(BansheeError::Rejected(format!(
-        "{} failed to download; run: banshee setup",
+        "{} failed to download; run: {retry}",
         failed.join(", ")
     )))
 }
@@ -129,29 +151,60 @@ fn decoded<T: serde::de::DeserializeOwned>(reply: &serde_json::Value, key: &str)
 
 // One object per line, as Waybar requires. The same word lands in three keys
 // because Waybar splits them: `text` shows, `alt` picks a format-icon, `class`
-// picks CSS. Readiness is left out: blockers are answered once and never
-// pushed, so a bar would show them stale.
-fn waybar_line(word: &str, device: Option<&str>, missing: Option<&str>) -> String {
-    let tooltip = match (device, missing) {
+// picks CSS. A lasting problem shows only while idle, since an activity keeps
+// its own icon while it lasts. A refused microphone has its own flag, so the
+// tooltip carries that one.
+fn waybar_line(
+    word: &str,
+    device: Option<&str>,
+    missing: Option<&str>,
+    open: bool,
+    refused: bool,
+    problem: Option<&str>,
+) -> String {
+    let problem = problem.filter(|_| word == "idle");
+    let said = banshee_common::state_label(word, problem.is_some());
+    let tooltip = match device {
         // Nothing to say about the microphone, so the word stands alone
-        (None, None) => format!("Banshee is {word}"),
-        _ => format!(
-            "Banshee is {word}. Microphone: {}",
-            banshee_common::microphone_label(device, missing)
+        None => format!("Banshee: {said}"),
+        Some(_) => format!(
+            "Banshee: {said}. Microphone: {}",
+            banshee_common::microphone_label(device, missing, open, refused)
         ),
+    };
+    let tooltip = match problem {
+        Some(problem) => format!("{problem}. {tooltip}"),
+        None => tooltip,
     };
     serde_json::json!({
         "text": word,
-        "alt": word,
+        "alt": if problem.is_some() { "problem" } else { word },
         "class": word,
         "tooltip": tooltip,
     })
     .to_string()
 }
 
-fn watch_line(waybar: bool, word: &str, device: Option<&str>, missing: Option<&str>) -> String {
+fn problem_name(state: &serde_json::Value) -> Option<&str> {
+    state
+        .get("blockers")?
+        .as_array()?
+        .first()?
+        .get("name")?
+        .as_str()
+}
+
+fn watch_line(
+    waybar: bool,
+    word: &str,
+    device: Option<&str>,
+    missing: Option<&str>,
+    open: bool,
+    refused: bool,
+    problem: Option<&str>,
+) -> String {
     if waybar {
-        waybar_line(word, device, missing)
+        waybar_line(word, device, missing, open, refused, problem)
     } else {
         word.to_string()
     }
@@ -280,13 +333,10 @@ pub async fn voices() -> Result<(), BansheeError> {
                 .and_then(|voice| voice.as_str())
                 .map(str::to_string),
         ),
-        // A voice gets chosen before there is a daemon to ask. These
-        // came off the disk, so every one of them is here.
+        // A voice gets chosen before there is a daemon to ask, so the
+        // models folder answers.
         Err(error) if daemon_is_down(&error) => (
-            models::installed_voices()
-                .iter()
-                .map(|id| text_to_speech::local::voices::describe(id, true))
-                .collect(),
+            text_to_speech::local::voices::listed(&models::download::models_dir()?),
             None,
         ),
         Err(error) => return Err(error),
@@ -322,8 +372,10 @@ fn watched_events(names: &[String]) -> Result<Vec<&'static str>, BansheeError> {
         .map(|name| match name.as_str() {
             "cues" => Ok(banshee_common::EVENT_CUES),
             "level" => Ok(banshee_common::EVENT_LEVEL),
+            "words" => Ok(banshee_common::EVENT_WORDS),
+            "question" => Ok(banshee_common::EVENT_QUESTION),
             other => Err(BansheeError::Rejected(format!(
-                "'{other}' is not an event watch prints. Use cues or level."
+                "'{other}' is not an event watch prints. Use cues, level, words or question."
             ))),
         })
         .collect()
@@ -390,6 +442,9 @@ pub async fn watch(waybar: bool, events: Vec<String>) -> Result<(), BansheeError
             state_word(&state),
             banshee_common::audio_device(&state),
             banshee_common::missing_device(&state),
+            banshee_common::microphone_open(&state),
+            banshee_common::microphone_refused(&state),
+            problem_name(&state),
         );
         // The reader sees the line, so the line is what has to differ
         if line != shown {
@@ -466,22 +521,43 @@ fn ask_key(side: crate::credentials::RemoteKey) -> Result<String, BansheeError> 
     }
 }
 
-/// Answers whether a restart is needed.
-async fn write_settings(assignments: settings::Assignments) -> Result<bool, BansheeError> {
+/// How the daemon took a write.
+enum Written {
+    Now,
+    /// The keys the daemon could not use yet.
+    Waiting(Vec<String>),
+    NoDaemon,
+}
+
+async fn write_settings(assignments: settings::Assignments) -> Result<Written, BansheeError> {
     match utils::call_daemon(
         banshee_common::BANSHEE_CONFIGURE,
         serde_json::json!({ "settings": &assignments, "persist": true }),
     )
     .await
     {
-        Ok(reply) => Ok(reply
-            .get("restart_required")
-            .and_then(|keys| keys.as_array())
-            .is_some_and(|keys| !keys.is_empty())),
+        Ok(reply) => Ok(waiting_or_now(
+            reply
+                .get("waiting")
+                .and_then(|keys| keys.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|key| key.as_str().map(str::to_string))
+                .collect(),
+        )),
         // A daemon that is down never writes, so the CLI can be the one writer
-        Err(error) if daemon_is_down(&error) => settings::configure(None, assignments, true)
-            .map(|outcome| !outcome.restart_required.is_empty()),
+        Err(error) if daemon_is_down(&error) => {
+            settings::configure(None, assignments, true).map(|_| Written::NoDaemon)
+        }
         Err(error) => Err(error),
+    }
+}
+
+fn waiting_or_now(waiting: Vec<String>) -> Written {
+    if waiting.is_empty() {
+        Written::Now
+    } else {
+        Written::Waiting(waiting)
     }
 }
 
@@ -510,42 +586,121 @@ async fn config_api_key(
         return Ok(());
     };
     // The credentials file reads the empty string as the key being gone
-    let done = if key.is_empty() { "Removed" } else { "Set" };
+    let removed = key.is_empty();
     let assignments = settings::Assignments::from([(side.setting().to_string(), key.into())]);
-    match write_settings(assignments).await {
-        Ok(restart_required) => {
-            println!("{done} {}.", side.setting());
-            if restart_required {
-                println!("Restart to use it: banshee start");
-            }
-        }
-        Err(error) => return Err(error),
+    let written = write_settings(assignments).await?;
+    if removed {
+        println!("Removed {}.", side.setting());
+        return Ok(());
+    }
+    println!("Set {}.", side.setting());
+    let models_dir = models::download::models_dir()?;
+    for line in after_write(
+        side.setting(),
+        &serde_json::Value::Null,
+        &written,
+        true,
+        &models_dir,
+    ) {
+        println!("{line}");
     }
     Ok(())
 }
 
 pub async fn config(key: String, value: Option<String>) -> Result<(), BansheeError> {
+    let domain = banshee_common::settings::find(&key)
+        .ok_or_else(|| settings::not_a_setting(&key))?
+        .domain;
     if let Some(side) = crate::credentials::RemoteKey::of_setting(&key) {
         return config_api_key(side, key_change(value, || ask_key(side))?).await;
     }
     let Some(value) = value else {
         return Err(BansheeError::Rejected(format!("'{key}' needs a value")));
     };
-    // So `0.6` arrives as a number and `de` as a string
-    let value: serde_json::Value =
-        serde_json::from_str(&value).unwrap_or_else(|_| serde_json::Value::String(value.clone()));
-    let assignments = settings::Assignments::from([(key.clone(), value)]);
+    let value = domain.typed(&value);
+    let assignments = settings::Assignments::from([(key.clone(), value.clone())]);
 
-    match write_settings(assignments).await {
-        Ok(restart_required) => {
-            println!("Set {key} in config.toml.");
-            if restart_required {
-                println!("Restart to use it: banshee start");
-            }
-        }
-        Err(error) => return Err(error),
+    let written = write_settings(assignments).await?;
+    println!("{}", written_line(&key, &value));
+    let listens = if settings::is_hotkey(&key) {
+        daemon_listens().await
+    } else {
+        true
+    };
+    let models_dir = models::download::models_dir()?;
+    for line in after_write(&key, &value, &written, listens, &models_dir) {
+        println!("{line}");
     }
     Ok(())
+}
+
+/// The lines printed after `Set ... in config.toml.`
+fn after_write(
+    key: &str,
+    value: &serde_json::Value,
+    written: &Written,
+    listens: bool,
+    models_dir: &std::path::Path,
+) -> Vec<String> {
+    if settings::is_hotkey(key)
+        && let Some(hint) = hotkey_hint(listens)
+    {
+        return hint.lines().map(str::to_string).collect();
+    }
+    // A listening model whose file is absent waits for its download, and a
+    // start would run a daemon that cannot listen
+    let absent_model = || {
+        settings::listening_model_named(key, value)
+            .filter(|model| !models_dir.join(model.file).exists())
+    };
+    let waits = match written {
+        Written::Now => false,
+        Written::Waiting(keys) => keys.iter().any(|waiting| waiting == key),
+        Written::NoDaemon => true,
+    };
+    let line = match absent_model().filter(|_| waits) {
+        Some(model) => format!(
+            "{} is not downloaded yet: run banshee setup. Banshee listens with it once the file arrives.",
+            model.id
+        ),
+        None if waits => written_says(written).to_string(),
+        None => written_says(&Written::Now).to_string(),
+    };
+    vec![line]
+}
+
+/// What became of a write, said of the whole write.
+fn written_says(written: &Written) -> &'static str {
+    match written {
+        Written::Now => "Banshee uses it now.",
+        Written::Waiting(_) => "Banshee could not use it yet.",
+        Written::NoDaemon => "Banshee uses it when it starts: banshee start",
+    }
+}
+
+/// What a hotkey write tells the user when the daemon listens for no key.
+fn hotkey_hint(listens: bool) -> Option<&'static str> {
+    (!listens).then_some(
+        "The compositor holds the hotkey on Wayland, so Banshee does not listen for it.\n\
+         On Hyprland, bind it with: banshee bind hyprland",
+    )
+}
+
+/// The running daemon's answer, or this session's when no daemon answers.
+async fn daemon_listens() -> bool {
+    utils::call_daemon(banshee_common::BANSHEE_STATUS, serde_json::json!({}))
+        .await
+        .ok()
+        .and_then(|status| status.get("hotkey_listens")?.as_bool())
+        .unwrap_or_else(hotkey::listens)
+}
+
+fn written_line(key: &str, value: &serde_json::Value) -> String {
+    if value.is_null() {
+        format!("Removed {key} from config.toml.")
+    } else {
+        format!("Set {key} in config.toml.")
+    }
 }
 
 /// The speech endpoint has no default voice, so an empty voice cannot send
@@ -605,7 +760,7 @@ pub async fn config_remote() -> Result<(), BansheeError> {
     }
 
     match write_settings(assignments).await {
-        Ok(_) => {
+        Ok(written) => {
             println!();
             println!(
                 "Listening through {} with {stt_model}.",
@@ -623,7 +778,7 @@ pub async fn config_remote() -> Result<(), BansheeError> {
             } else {
                 println!("The speaker stays on this machine: name a voice to send text out.");
             }
-            println!("Restart to use it: banshee start");
+            println!("{}", written_says(&written));
         }
         Err(error) => return Err(error),
     }
@@ -643,18 +798,135 @@ fn report_key(side: crate::credentials::RemoteKey) {
 }
 
 pub async fn setup(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
-    download_missing(config_result.as_ref().ok()).await
+    let accepted = Accepted::in_banshee_dir();
+    // The download refuses this file too; said first, the reason is not lost
+    // behind a daemon's bare "failed".
+    if let Some(reason) = config_result
+        .as_ref()
+        .ok()
+        .and_then(models::stt_model)
+        .and_then(|model| licences::refusal(model, &accepted))
+    {
+        eprintln!("{reason}");
+    }
+    download_missing(config_result.as_ref().ok(), &accepted).await
+}
+
+/// Fetches one listening model by id, through the daemon when one runs.
+pub async fn setup_model(id: &str, accept_licence: bool) -> Result<(), BansheeError> {
+    let mut accepted = Accepted::in_banshee_dir();
+    let model = model_to_fetch(id, accept_licence, &mut accepted)?;
+    let dir = models::download::models_dir()?;
+    let retry = format!("banshee setup --model {}", model.id);
+    let watching = utils::Subscription::open(&[banshee_common::EVENT_DOWNLOADS]).await;
+    match watching {
+        Ok((_, subscription)) => {
+            follow_daemon_download(
+                subscription,
+                serde_json::json!({ "model": model.id }),
+                &retry,
+            )
+            .await?;
+        }
+        Err(error) if daemon_is_down(&error) => {
+            let wanted = [models::download::listening_file(model)];
+            if models::download::still_missing(&wanted, &dir).is_empty() {
+                println!("Everything is already downloaded.");
+            } else if let Err(error) =
+                models::download::download_all(&dir, &wanted, &accepted, &mut show_progress).await
+            {
+                eprintln!("{error}");
+                eprintln!("To try again: {retry}");
+                std::process::exit(1);
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    if models::missing_in(&dir, &[model.file]).is_empty() {
+        println!(
+            "To listen with it: banshee config set stt.model {}",
+            model.id
+        );
+    }
+    Ok(())
+}
+
+pub fn list_models() {
+    for line in catalogue_lines() {
+        println!("{line}");
+    }
+}
+
+/// One row per listening model: id, size, languages, whether it streams, licence.
+fn catalogue_lines() -> Vec<String> {
+    let models = banshee_common::listening::CATALOGUE;
+    let width = models.iter().map(|model| model.id.len()).max().unwrap_or(0);
+    let row = |id: &str, size: &str, languages: &str, streams: &str, licence: &str| {
+        format!("{id:<width$}  {size:>8}  {languages:<9}  {streams:<7}  {licence}")
+    };
+    std::iter::once(row("ID", "SIZE", "LANGUAGES", "STREAMS", "LICENCE"))
+        .chain(models.iter().map(|model| {
+            row(
+                model.id,
+                &size_of(model.bytes),
+                &languages_heard(model.languages),
+                if model.streams { "yes" } else { "no" },
+                &match model.credit() {
+                    Some(credit) => format!("{}, {credit}", model.licence.name),
+                    None => model.licence.name.to_string(),
+                },
+            )
+        }))
+        .collect()
+}
+
+/// "English" for the one, the codes for up to three, else a count.
+fn languages_heard(codes: &[&str]) -> String {
+    match codes {
+        ["en"] => "English".to_string(),
+        [..] if codes.len() > 3 => format!("{} languages", codes.len()),
+        _ => codes.join(", "),
+    }
+}
+
+fn size_of(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{} MB", bytes / 1_000_000)
+    }
+}
+
+/// The catalogue entry for `id` once its licence lets it download. Accepting
+/// is recorded, so later downloads of any model under that licence go ahead.
+fn model_to_fetch(
+    id: &str,
+    accept_licence: bool,
+    accepted: &mut Accepted,
+) -> Result<&'static ListeningModel, BansheeError> {
+    let model = banshee_common::listening::find(id)
+        .ok_or_else(|| BansheeError::Rejected(models::unknown_model(id)))?;
+    if accept_licence && model.licence.needs_acceptance {
+        accepted.add(model.licence.name)?;
+    }
+    match licences::refusal(model, accepted) {
+        Some(reason) => Err(BansheeError::Rejected(reason)),
+        None => Ok(model),
+    }
 }
 
 /// Fetches the models that are not on disk, through the daemon when one runs.
 /// The config is required only when no daemon runs.
-pub async fn download_missing(config: Option<&Config>) -> Result<(), BansheeError> {
+pub async fn download_missing(
+    config: Option<&Config>,
+    accepted: &Accepted,
+) -> Result<(), BansheeError> {
     // Subscribed before the download is asked for, so the first
     // notifications are not lost in the gap
     let watching = utils::Subscription::open(&[banshee_common::EVENT_DOWNLOADS]).await;
     match watching {
         Ok((_, subscription)) => {
-            follow_daemon_download(subscription).await?;
+            follow_daemon_download(subscription, serde_json::json!({}), "banshee setup").await?;
         }
         Err(error) if daemon_is_down(&error) => {
             // No daemon answers, and the daemon never downloads unasked, so this process is the only writer.
@@ -685,7 +957,7 @@ pub async fn download_missing(config: Option<&Config>) -> Result<(), BansheeErro
             // Printed here: `failure_line` reads a missing file as the daemon
             // being away, and this one is the model's
             if let Err(error) =
-                models::download::download_all(&dir, &missing, &mut show_progress).await
+                models::download::download_all(&dir, &missing, accepted, &mut show_progress).await
             {
                 eprintln!("{error}");
                 std::process::exit(1);
@@ -726,44 +998,12 @@ pub async fn status(
     Ok(())
 }
 
-pub async fn listen() -> Result<(), BansheeError> {
-    show(
-        banshee_common::BANSHEE_GET_TRANSCRIPTION,
-        serde_json::json!({}),
-    )
-    .await
-}
-
 pub async fn speak(text: String) -> Result<(), BansheeError> {
     show(
         banshee_common::BANSHEE_SPEAK,
         serde_json::json!({ "text": text }),
     )
     .await
-}
-
-/// Prints what the agent wrote. A refused `speak_status` leaves this print as
-/// the only thing the user gets.
-pub fn tell(
-    text: Option<String>,
-    undo: bool,
-    config: Result<Config, BansheeError>,
-) -> Result<(), BansheeError> {
-    let config = config?;
-    if undo {
-        println!("{}", crate::tell::undo(&config.tell)?);
-        return Ok(());
-    }
-    let text =
-        text.ok_or_else(|| BansheeError::Rejected("say what to tell it, or pass --undo".into()))?;
-    let told = crate::tell::run(&text, &config.tell, &|line| println!("{line}"))?;
-    for warning in &told.warnings {
-        eprintln!("{}", warning.text());
-    }
-    if let Some(reply) = told.reply {
-        println!("{reply}");
-    }
-    Ok(())
 }
 
 pub async fn history() -> Result<(), BansheeError> {
@@ -775,18 +1015,12 @@ pub async fn clear_history() -> Result<(), BansheeError> {
 }
 
 pub async fn record(action: args::RecordAction) -> Result<(), BansheeError> {
-    let (method, params) = match action {
-        args::RecordAction::Start { dictate, tell } => (
-            banshee_common::BANSHEE_RECORD_START,
-            serde_json::json!({ "dictate": dictate, "tell": tell }),
-        ),
-        args::RecordAction::Stop => (banshee_common::BANSHEE_RECORD_STOP, serde_json::json!({})),
-        args::RecordAction::Toggle { dictate, tell } => (
-            banshee_common::BANSHEE_RECORD_TOGGLE,
-            serde_json::json!({ "dictate": dictate, "tell": tell }),
-        ),
+    let method = match action {
+        args::RecordAction::Start => banshee_common::BANSHEE_RECORD_START,
+        args::RecordAction::Stop => banshee_common::BANSHEE_RECORD_STOP,
+        args::RecordAction::Toggle => banshee_common::BANSHEE_RECORD_TOGGLE,
     };
-    utils::call_daemon(method, params).await?;
+    utils::call_daemon(method, serde_json::json!({})).await?;
     Ok(())
 }
 
@@ -796,7 +1030,11 @@ fn missing_models_note(missing: &[String]) -> Option<String> {
     (!missing.is_empty()).then(|| {
         format!(
             "Recording waits on {}: run banshee setup",
-            missing.join(", ")
+            missing
+                .iter()
+                .map(|file| models::name_of(file))
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     })
 }
@@ -821,66 +1059,63 @@ fn link_the_command() {
 }
 
 pub async fn start(config_result: Result<Config, BansheeError>) -> Result<(), BansheeError> {
-    let log = service::install(service::Agent::Daemon)?;
+    start_with(config_result, || service::start(service::Agent::Daemon)).await
+}
+
+/// `register` starts the daemon and answers where its log is. The daemon reads
+/// the same file and exits on a refusal, so a refusal starts nothing.
+async fn start_with(
+    config_result: Result<Config, BansheeError>,
+    register: impl FnOnce() -> Result<String, BansheeError>,
+) -> Result<(), BansheeError> {
+    let config = config_result.map_err(|error| {
+        BansheeError::Rejected(format!(
+            "Banshee did not start: {}. Fix that, then run banshee start again.",
+            error.to_string().trim_end_matches('.')
+        ))
+    })?;
+    let follow_the_log = register()?;
     println!("Banshee is running, and starts again at login.");
     link_the_command();
 
     // The daemon reports these to its log, which nobody reads on a first run
     let mut blocked = false;
-    let binding = match &config_result {
-        Ok(config) => {
-            if let Some(note) = missing_models_note(&models::missing(&models::required(config))) {
-                blocked = true;
-                println!();
-                println!("{note}");
-            }
-            // A remote listener downloads nothing, so the models say nothing
-            // about whether it can hear.
-            let listener = crate::credentials::RemoteKey::Stt;
-            if config.stt.provider.is_remote()
-                && !crate::credentials::Credentials::present(listener)
-            {
-                blocked = true;
-                println!();
-                println!(
-                    "No key for the remote {}: banshee config set {}",
-                    listener.side(),
-                    listener.setting()
-                );
-            }
-            Some((config.audio.hotkey, config.audio.hotkey_mode))
-        }
-        Err(error) => {
-            eprintln!("Failed to load config: {error}");
-            blocked = true;
-            None
-        }
-    };
+    if let Some(note) = missing_models_note(&models::missing(&models::required(&config))) {
+        blocked = true;
+        println!();
+        println!("{note}");
+    }
+    // A remote listener downloads nothing, so the models say nothing about
+    // whether it can hear.
+    let listener = crate::credentials::RemoteKey::Stt;
+    if config.stt.provider.is_remote() && !crate::credentials::Credentials::present(listener) {
+        blocked = true;
+        println!();
+        println!(
+            "No key for the remote {}: banshee config set {}",
+            listener.side(),
+            listener.setting()
+        );
+    }
 
     permissions::grant_note();
 
-    match binding {
-        Some((hotkey, mode)) if !blocked => {
-            println!();
-            println!("{}", hotkey::usage_hint(hotkey, mode));
-        }
-        _ => println!("Logs: {log}"),
+    if blocked {
+        println!("Follow the log: {follow_the_log}");
+    } else {
+        println!();
+        println!(
+            "{}",
+            hotkey::usage_hint(config.audio.hotkey, config.audio.hotkey_mode)
+        );
     }
     Ok(())
 }
 
-pub fn tray(uninstall: bool) -> Result<(), BansheeError> {
-    if uninstall {
-        if service::uninstall(service::Agent::Tray)? {
-            println!("The menu bar icon no longer starts at login.");
-        } else {
-            println!("The menu bar icon was not set to start at login.");
-        }
-    } else {
-        let log = service::install(service::Agent::Tray)?;
-        println!("The menu bar icon is running, and comes back at login.");
-        println!("Logs: {log}");
-    }
+pub fn tray() -> Result<(), BansheeError> {
+    let follow_the_log = service::start(service::Agent::Tray)?;
+    println!("The menu bar icon is running, and comes back at login.");
+    println!("Follow the log: {follow_the_log}");
     Ok(())
 }
 
@@ -969,10 +1204,13 @@ pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
     // A receipt names what its installer meant to place, and the updater beside
     // them that it never recorded. Only what is on disk is offered for removal.
     software.retain(|path| path.exists());
+    let logs = utils::logs_dir().filter(|path| path.exists());
+    let logs_stay = logs.is_some();
     let unowned = data
-        .then(utils::banshee_dir)
-        .flatten()
+        .then(|| [utils::banshee_dir(), logs])
         .into_iter()
+        .flatten()
+        .flatten()
         .chain(crate::on_path::placed(running.as_deref()))
         .collect();
     let plan = crate::uninstall::plan(&owner, software, unowned, running.as_deref());
@@ -993,6 +1231,9 @@ pub async fn uninstall(data: bool, yes: bool) -> Result<(), BansheeError> {
     }
     if !data {
         println!("  ~/.banshee stays: the models, the history and the keys. --data takes it.");
+        if logs_stay {
+            println!("  ~/Library/Logs/com.banshee.app stays: the logs. --data takes it.");
+        }
     }
 
     if !yes && !confirmed()? {
@@ -1036,25 +1277,6 @@ fn confirmed() -> Result<bool, BansheeError> {
         return Ok(false);
     }
     crate::connect::confirm("Remove it? [y/N] ")
-}
-
-pub fn service(action: args::ServiceAction) -> Result<(), BansheeError> {
-    match action {
-        // Every entry, so none is left behind to fail at the next login
-        args::ServiceAction::Uninstall => {
-            let mut removed = false;
-            for agent in service::Agent::ALL {
-                if service::uninstall(agent)? {
-                    println!("The {} no longer starts at login.", agent.name());
-                    removed = true;
-                }
-            }
-            if !removed {
-                println!("Nothing was set to start at login.");
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

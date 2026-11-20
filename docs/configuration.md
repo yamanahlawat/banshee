@@ -9,29 +9,28 @@ The defaults:
 
 ```toml
 [daemon]
-save_history = true    # keep transcriptions in ~/.banshee/banshee.db
+save_history = true    # keep dictations and agent questions in ~/.banshee/banshee.db
+keep_audio = "7d"      # how long History keeps each row's audio: off | 1d | 7d | 30d | forever
 
 [stt]
 provider = "local"       # local | remote; see "A remote listener" below
-preset = "balanced"      # fast | balanced | quality (see below)
+model = "parakeet-unified-en-0.6b"  # a listening model id; see "Tuning the listener"
 vad_threshold = 0.5      # 0.0 to 1.0; higher means stricter speech detection
-vocabulary = ["banshee"] # words Whisper keeps mangling, for example ["clippy", "tokio"]
-language = "en"          # a Whisper code, or "auto" to detect it
-translate = false        # true answers in English whatever you spoke
-endpoint_silence_ms = 2500  # trailing silence that ends a spoken answer
+vocabulary = []          # words the model keeps mangling, for example ["clippy", "tokio"]
+translate = false        # true answers in English, for a model or server that translates
+endpoint_silence_ms = 2500  # silence before Banshee first checks whether you sound finished
 
 [stt.remote]                           # read when provider = "remote"
-base_url = "https://api.openai.com/v1" # an OpenAI-compatible /v1 root; an http or https URL with a host
+base_url = "https://api.openai.com/v1" # an OpenAI-compatible /v1 root; https, or http on your own network
 model = "whisper-1"                    # the model that server names
 
 [tts]
 provider = "local"     # local | remote; see "A remote voice" below
-voice = "af_sky"       # any voice from the Kokoro voices directory
-speed = 1.0            # 0.5 to 2.0; playback speed multiplier
-fallback = "system"    # system = use the OS voice (say, or espeak-ng on Linux) | none
+voice = "companion"    # companion, or any voice from the Kokoro voices directory
+fallback = "local"     # local = the voice above speaks a failed remote reply | none
 
 [tts.remote]                           # read when provider = "remote"
-base_url = "https://api.openai.com/v1" # an OpenAI-compatible /v1 root; an http or https URL with a host
+base_url = "https://api.openai.com/v1" # an OpenAI-compatible /v1 root; https, or http on your own network
 model = "tts-1"                        # the model that server names
 voice = ""                             # a voice that server names; required
 instructions = ""                      # tone and delivery, for a model that reads it
@@ -43,29 +42,30 @@ input_device = "default"  # "default" = follow the OS; otherwise match a device 
 hotkey = "RightOption" # F1-F12, a lone modifier, or a chord like "Ctrl+Alt+D"
 hotkey_mode = "hold"   # hold = record while the hotkey is down | toggle = tap to start, tap to stop
 barge_in = "stop"      # stop = the record hotkey cuts off whatever Banshee is saying | none
+keep_open = false      # true = hold the microphone open between uses
+
+[models]
+unload_after = 5       # idle minutes before local models unload; 0 = never
 
 [feedback]
 mode = "both"          # visual | sound | both | none
-
-[tell]
-agent = ""              # empty asks Omarchy's default agent, then the connected agents
-thread_timeout_min = 10 # minutes the same agent conversation stays open
-run_timeout_min = 5     # minutes before one run is killed
-snapshots = 10          # copies of the folders below to keep; 1 is the floor
-paths = [               # the folders Banshee copies, and the list a scoped agent gets
-  "~/.config/hypr", "~/.config/omarchy", "~/.config/alacritty",
-  "~/.config/foot", "~/.config/kitty", "~/.config/ghostty",
-]
+speak_problems = true  # false = never say a new problem aloud
 ```
 
-- **A new install on macOS starts on `visual`.** Its first model download writes
-  `visual`, or `both` when VoiceOver is on. Elsewhere the absent key means both.
-- **`audio.cues.enabled` is replaced by `feedback.mode`.** A file that still
-  sets it to false reads as none, until it sets `feedback.mode`.
-- **`visual` draws a small Banshee figure above the Dock on macOS.** The menu
-  bar icon draws it, and the window starts the icon. `visual` plays no earcons
-  while the menu bar icon draws the figure, and plays every sound with no
-  menu bar icon running.
+- **A new install starts on `visual`.** Its first model download writes
+  `visual`, or `both` when VoiceOver is on.
+- **`speak_problems` says a new problem aloud once.** Banshee says the problem's
+  name and its fix, after anything already queued. A model file that goes missing
+  is spoken at the next use. So is a fault in a microphone held open by
+  `audio.keep_open`. A problem present when the daemon starts is not spoken. A
+  problem that clears and comes back is spoken again. Of two that appear
+  together, only the first is spoken. A microphone refusal is spoken at the use
+  that finds it. Turn it off with
+  `banshee config set feedback.speak_problems false`.
+- **`visual` draws a small Banshee figure at the bottom of the screen.** The tray
+  draws it, and the window starts the tray. On Linux the desktop needs layer
+  shell. `visual` plays no earcons while the figure draws, and plays every sound
+  when nothing draws it.
 - **`input_device` is a case-insensitive substring** of the microphone name, so
   `"yeti"` matches `Blue Yeti Stereo Microphone`.
 - **An exact name wins** over a longer name that contains it, so a `Yeti` next
@@ -81,7 +81,8 @@ $ banshee devices
 
 - **`"default"` follows the OS while Banshee runs.**
 - Connect a headset, macOS makes it the system default, and Banshee moves
-  capture to it within about five seconds.
+  capture to it within about five seconds while the microphone is open. A device
+  plugged in between uses is picked at the next use.
 - **A device you name is not treated this way.**
 - Banshee opens the device you named, and the system default never takes its
   place while it is present.
@@ -92,10 +93,36 @@ $ banshee devices
   for.
 - **The tray, `banshee status` and `banshee watch --waybar`** all show
   `MacBook Pro Microphone (waiting for "yeti")`.
-- **Reconnect the headset** and Banshee takes it back within about five seconds.
-  Nothing needs a restart.
+- **Reconnect the headset** and Banshee takes it back at the next use, or within
+  about five seconds while the microphone is open. Nothing needs a restart.
 - **Banshee never picks a different microphone in silence.** If it cannot open
   any device at all, it says so and refuses to record.
+
+## The microphone and idle models
+
+- **The microphone opens for a use and closes right after it.** A use is a
+  hotkey press, or an agent's question after it has played. The orange dot is off
+  in between, and a Bluetooth headset keeps its stereo output.
+- **An idle microphone shows `<device>, opens when you speak`.** That is not a fault.
+- **`audio.keep_open = true` holds the microphone open between uses.**
+  - A press then starts with no open delay.
+  - The orange dot stays on, and a Bluetooth headset stays in its telephony profile.
+- **A Bluetooth headset gives its first sound about 300 ms after the open.** That
+  was measured on one headset. The start cue waits for that sound, so it plays late
+  on a headset.
+- **`models.unload_after` is the idle minutes before local models unload.**
+  - It covers the listening model, the voice detector and the voice.
+  - `0` never unloads. The default is 5.
+  - On macOS the process keeps the freed memory for reuse and gives it back when
+    the system runs short. On Linux it goes back at once.
+  - The next use loads them again. The first reply after idle pays a voice load,
+    195 to 320 ms measured.
+- **The listener, the detector and the voice load when the daemon starts.** The
+  idle count starts after that.
+- **The fallback voice behind a voice server loads only when a reply needs it.**
+- **A microphone or a model that fails to open fails that use.** Status names the
+  cause and the fix, and the next use tries again.
+- **Both settings apply at once.** The window shows them under Listening, More.
 
 ## Changing a setting without an editor
 
@@ -109,37 +136,33 @@ banshee config set feedback.mode none
 ```
 
 - **The key is the section and the field,** as they appear in the file.
-- **A number, a `true`, or a `[list]`** is read as that type. Anything else is
-  read as text.
-- **Quote twice to force text,** as in
-  `banshee config set audio.input_device '"12"'`.
+- **A value is read as the type its setting takes.** A text setting keeps digits
+  as text, so `banshee config set audio.input_device 12` needs no quotes.
+- **A key that is no setting is refused** before anything is written.
 - **A value the field does not accept is refused,** and the message lists the
   legal ones.
 - **The command works** whether or not the daemon runs.
-- **Most settings take effect at once:**
-  - `stt.vad_threshold`, `stt.vocabulary`, `stt.preset`, `stt.language`,
-    `stt.translate`
-  - `audio.input_device`, `audio.barge_in`, `feedback.mode`
-  - `tts.voice`, `tts.speed`, `daemon.save_history`
-- **The rest are read when the daemon starts,** so the command tells you to
-  restart. Among them:
-  - `audio.hotkey`, `audio.hotkey_mode`, `stt.endpoint_silence_ms`
-  - `stt.provider` and the `[stt.remote]` keys
-  - `tts.fallback`, `tts.provider` and the `[tts.remote]` keys
-- **A live setting whose model is not downloaded yet waits for the file.**
+- **Every setting takes effect at once:**
+  - `stt.vad_threshold`, `stt.endpoint_silence_ms`, `stt.vocabulary`, `stt.model`, `stt.translate`
+  - `audio.hotkey`, `audio.hotkey_mode`, `audio.input_device`, `audio.barge_in`, `audio.keep_open`
+  - `feedback.mode`, `feedback.speak_problems`
+  - `models.unload_after`
+  - `tts.voice`, `daemon.save_history`, `daemon.keep_audio`
+  - `stt.remote.api_key`, which is in use at the next dictation
+  - `stt.provider`, `stt.remote.base_url` and `stt.remote.model`, which take
+    the next dictation
+  - `tts.provider`, `tts.fallback`, the `[tts.remote]` keys and
+    `tts.remote.api_key`, which take the next reply
+- **A model or voice still to download waits for its file.**
 - Once `banshee setup` fetches it, a running daemon applies the setting as the
   download finishes.
-- **A daemon that started without its models is a different case.**
-- It has no pipeline to change, so the first setup on a new machine ends with
-  a restart.
+- **A daemon that started without its voice detection model still needs
+  `banshee start`** once the file is here.
 
 ## Pronouncing unknown words
 
-- **Install `espeak-ng`** and Banshee pronounces unfamiliar words, such as tech
-  jargon and proper nouns.
-- **Without it** Banshee spells those words out letter by letter.
-- **On macOS** that is `brew install espeak-ng`.
-- **`banshee status`** prints the command for your system.
+- **A Kokoro voice spells a word it does not know letter by letter**, so
+  `kustomize` reads "K U S T O M I Z E".
 
 ## Choosing a voice
 
@@ -148,40 +171,62 @@ with `*`:
 
 ```
 $ banshee voices
+* Companion  Pocket TTS by Kyutai, CC-BY-4.0  (companion)
   Heart  American, soft  (af_heart)
-* Sky  American, clear  (af_sky)
+  Sky  American, clear  (af_sky)
   Adam  American, low  (am_adam)
-  Santa  American, deep  (am_santa)
 
 Speak with one by: banshee config set tts.voice "<id>"
 ```
 
 - **It lists only what is downloaded,** so every name it prints works today.
-- **Nothing is marked when Kokoro did not load.** The system fallback speaks in
-  whatever voice macOS is set to, which Banshee did not choose.
-- **`voice` takes any file** in the [Kokoro voices
+- **The default is `companion`,** a synthetic voice made for Banshee. It runs
+  on Pocket TTS by Kyutai, CC-BY-4.0.
+- **Its files are about 400 MB.** They land in
+  `~/.banshee/models/pocket-english_2026-04/` when `banshee setup` or the
+  window's Get button fetches them.
+- **Speech plays at 1x.** No setting changes the rate.
+- **Nothing is marked when the voice did not load.** The daemon stays up and
+  silent, `speak` fails and names `banshee setup`, and `banshee status` says
+  why. Once the files arrive, the next reply loads the voice with no restart.
+- **A Kokoro voice needs two files:** Kokoro's engine file and the voice's own.
+- **Any other `voice` takes a file** in the [Kokoro voices
   directory](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/voices),
   for example `af_bella`, `am_michael`, or `bf_emma`.
 - **The prefix is accent and gender:** `a`merican/`b`ritish, `f`emale/`m`ale.
-- **After a change to `preset` or `voice`,** run `banshee setup` to fetch the
-  new file.
-- **The window's Voice panel** lists every voice Banshee can name and fetches
-  the one you pick, and its Microphone panel fetches a speech model you choose
+- **After a change to `voice`,** run `banshee setup` to fetch the new file.
+- **The window's Speaking page** lists every voice Banshee can name and fetches
+  the one you pick, and its Listening page fetches a listening model you choose
   and do not have.
 
 ## Tuning the listener
 
-- **Banshee waits `endpoint_silence_ms`** before it decides you are done.
+- **Banshee waits `endpoint_silence_ms`** before it first checks whether you sound finished.
+- If you sound unfinished, it keeps listening and checks again after each further
+  `endpoint_silence_ms` of silence.
 - **Lower it** if replies feel sluggish.
-- **Raise it** if Banshee cuts you off.
+- **Raise it** to delay the first check and to space the later ones further apart.
 
-The `preset` picks which Whisper model Banshee uses:
+`stt.model` names the listening model. Banshee runs it on transcribe.cpp.
 
-| Preset     | Model                          | Trade-off                                  |
-| ---------- | ------------------------------ | ------------------------------------------ |
-| `fast`     | `ggml-base.en.bin`             | Fastest and lightest, English only         |
-| `balanced` | `ggml-large-v3-turbo-q5_0.bin` | The default; accurate and reasonably quick |
-| `quality`  | `ggml-large-v3-q5_0.bin`       | Most accurate, heaviest                    |
+| Model id                    | Size   | Trade-off                                                                 |
+| --------------------------- | ------ | ------------------------------------------------------------------------- |
+| `parakeet-unified-en-0.6b`  | 731 MB | The default. English, shows live words in the chip while you speak.       |
+| `whisper-large-v3-turbo`    | 619 MB | Many languages. It does not translate, so `stt.translate` has no effect.  |
+
+- **Any of the 73 transcribe.cpp models downloads by id:** `banshee setup --model <id>`,
+  then `banshee config set stt.model <id>`. `banshee setup --list` shows each id with its
+  size, languages, whether it streams and its licence.
+- **18 models need `--accept-licence`:** the CC-BY-NC ones, Moonshine, HAI-DEF and FunASR.
+  The refusal names the licence and the command.
+  Banshee records an acceptance in `~/.banshee/accepted-licences`, one licence name per line.
+- **Typed text comes from a full pass over the recording** when you let go. The stream
+  drives only the live words in the chip, on macOS, during dictation and spoken answers.
+- **`stt.vocabulary` is empty by default.** A model that takes vocabulary receives the
+  words. For any other model, a corrector swaps a close-sounding word for the listed one,
+  with the rule from Handy (threshold 0.10, Soundex weight 0.5).
+- **Banshee deletes the old Whisper files** `ggml-base.en.bin`,
+  `ggml-large-v3-turbo-q5_0.bin` and `ggml-large-v3-q5_0.bin` from `~/.banshee/models` at start.
 
 ## Remote servers
 
@@ -196,8 +241,19 @@ The `preset` picks which Whisper model Banshee uses:
 - **Both keys go to `~/.banshee/credentials.toml`,** which only you can read.
 - **A key is never written to `config.toml`** and never appears in a status
   reply.
-- **The daemon reads the providers and both remote tables when it starts,** so
-  the command ends with a restart.
+- **A running daemon applies both sides at once.**
+- **A server out on the internet needs `https`.** Banshee accepts plain `http`
+  to this machine and to your own network:
+  - a private or link-local address, such as `192.168.1.5`
+  - a Tailscale address, or a name ending in `.ts.net`
+  - a name with no dot, such as `gpu-box`
+  - a name ending in `.local`, `.lan`, `.home.arpa` or `.internal`
+- **Banshee reads only the URL and resolves no name.** It refuses a public name
+  that points at a home address. Use the address or the Tailscale name instead.
+- **A config that already holds plain `http` to a public host still loads.**
+  That side refuses to send, and `banshee status` names the setting to change.
+- **A redirect follows the same rule.** Banshee refuses a server's redirect to
+  plain `http` on the internet, and names the host it was sent to.
 
 ### A remote listener
 
@@ -205,15 +261,27 @@ The `preset` picks which Whisper model Banshee uses:
   `[stt.remote]` and types the text it answers.
 - **Any OpenAI-compatible transcription server works:** OpenAI, Groq, or a
   Whisper server you run.
-- **The `preset` is not read.** The server's `model` is.
+- **`stt.model` is not read.** The server's `model` is.
+- **The server gets no language hint.**
 - **The `vocabulary` list goes out with each request** as the server's prompt,
   so those words leave the machine too.
 - **`banshee config set stt.remote.api_key`** asks for the key by itself.
+- **The next dictation sends the new key,** with no restart.
 - **To remove the key, pass an empty one:**
   `banshee config set stt.remote.api_key ""`.
+- **With no key on file, a press records nothing.** `banshee status` and the
+  window name the command that sets one.
 - **A failed transcription plays the error tone,** and `banshee status` and the
   window say why.
-- **Banshee never falls back** to the local model on its own.
+- **Turning the server off stops a recording on its way there.** Banshee
+  transcribes it on this machine. Without the local model, that dictation
+  fails and says why.
+- **Removing the key does the same.**
+- **A dictation recorded for one server goes to another** if you switch to it
+  before the release. One started on this machine stays here.
+- **A request already on its way to one server finishes there** when you
+  switch to another.
+- **A request that fails never falls back** to the local model.
 - **`banshee status` probes a side** whose provider is `remote` and whose key is
   on file. It asks that server for `/models` with the key.
 - **A server that answers earns a pass.**
@@ -237,11 +305,7 @@ The `preset` picks which Whisper model Banshee uses:
 - **The default `tts-1` ignores it.** A server may also refuse the whole request
   over the field: Groq answers ``unknown field `instructions` in request body``.
 - **Leave `instructions` empty** unless the model you name reads it.
-- **`tts.speed` still applies, and it stays live.** A write reaches the server
-  on the next reply.
-- **At 1.0, Banshee leaves `speed` out of the request.** 1.0 is the API's
-  default, and some servers refuse any request that names a speed their model
-  can't apply.
+- **The request carries no `speed` field.** Speech plays at 1x.
 - **`banshee config set tts.remote.api_key`** asks for the key by itself.
 - **`banshee config set tts.remote.voice marin`** names the voice.
 - **`response_format` is what the server is asked to send.** The default is
@@ -259,7 +323,7 @@ The `preset` picks which Whisper model Banshee uses:
 - **`sample_rate` changes that rate,** for a server that answers `pcm` at
   another one. Banshee sends the field to the server only when you set it,
   and never under `wav`, where the header states the rate.
-- **The Voice panel sets both.** It shows the rate only under `pcm`, and an
+- **The Speaking page sets both.** It shows the rate only under `pcm`, and an
   empty rate field goes back to 24000 Hz.
 - **The type the server declares names the format.** A type that names none,
   such as `application/octet-stream`, leaves the format Banshee asked for.
@@ -271,21 +335,31 @@ The `preset` picks which Whisper model Banshee uses:
 - **Under `pcm`, the bytes play as samples whatever they look like.** A server
   that sent another format under a type that names none would play as noise.
   None of the servers tested so far does.
-- **With `fallback = "system"`,** an utterance the server refuses plays the
-  error tone, and the system voice says it instead.
+- **With `fallback = "local"`,** the default, an utterance the server refuses
+  before its reply starts plays the error tone, and the local voice named by
+  `tts.voice` says it instead.
 - You still hear an agent's question.
-- **That voice is `say` on macOS and `espeak-ng` on Linux.** Without `espeak-ng`
-  installed, the fallback does not start, and the reason names the install
-  command.
-- **With `fallback = "none"`** the tone plays and Banshee says nothing.
+- **The local voice loads on first use.** If its files are missing, the fallback
+  stays silent, and the reason names `banshee setup`.
+- **With `fallback = "none"`** the tone plays and Banshee says nothing. A remote
+  speaker then downloads no local voice.
+- **`fallback = "system"` is refused by name.** Change it to `local` or `none`.
 - **A question asked through `ask_user`** still opens the microphone after it,
   so you hear the tone and then silence while Banshee waits for your answer.
 - **Either way three places say why:** `banshee status`, the status reply's
-  `last_speech_error` and the window's Voice panel.
+  `last_speech_error` and the window's Speaking page.
 - **A reply that fails after its first words ends where it stopped.** A restart
-  in the system voice mid-sentence is worse than a stop.
+  in another voice mid-sentence is worse than a stop.
 - **A speaker that will not start never stops the daemon,** so dictation goes
   on.
+- **A switch to or from a voice server takes the next reply.** The reply
+  already speaking finishes in its voice.
+- **Turning the server off stops the reply,** and the local voice speaks it
+  from the start.
+- **Removing the key stops it too.** The fallback voice speaks it from the
+  start, and under `fallback = "none"` nothing does.
+- **A reply on its way to one server finishes there** when you switch to
+  another. The next reply goes to the new one.
 
 ## The hotkey
 
@@ -297,78 +371,16 @@ The `preset` picks which Whisper model Banshee uses:
   stops it.
 - **The watchdog ends a recording after 120 seconds.** It returns the microphone
   and still transcribes what it heard.
-- **The key is rebindable:** `banshee config set audio.hotkey F6`, then
-  `banshee start`.
+- **The key is rebindable:** `banshee config set audio.hotkey F6`.
 - **Legal values** are an F-key (`F1`-`F12`), a modifier alone, or modifiers and
   a key, as in `Ctrl+Alt+D`.
 - **The modifiers are** `RightOption`, `LeftOption`, `LeftControl` and
   `LeftCommand`, plus `RightCommand` and `Fn` on macOS and `RightControl` on
   Linux.
-- **`Shift` and `CapsLock` are reserved, not absent.** `Shift` plus the hotkey
-  sends the speech to `banshee listen`, and Banshee does not type it.
-- **A bound `CapsLock`** flips the lock state on every press.
+- **Banshee refuses `Shift` and `CapsLock` as the hotkey.** It ignores Shift,
+  so Shift can never be part of the hotkey, even in a chord. A bound `CapsLock`
+  flips the lock state on every press, so dictation toggles caps as you speak.
 - **A modifier bound alone still works as a modifier.** `RightOption+E` types é,
   and Banshee discards the accidental recording. It does not transcribe it.
 - **On Wayland the daemon sees no key,** so `banshee bind hyprland` writes the
   binding in the compositor instead. See [linux.md](linux.md).
-
-## Telling your agent
-
-- **`banshee tell "<text>"` hands your words to a coding agent,** which edits
-  your config and speaks the result.
-- **Banshee ships no prompt and no desktop knowledge.** It sends your words and
-  nothing else, and the agent's own skills carry the rest.
-- **An empty `agent` asks `omarchy-default-agent` first,** then takes the first
-  connected agent that has a headless mode.
-- **`banshee config set tell.agent claude`** pins one instead.
-- **Claude Code and OpenCode are the two agents with a headless mode Banshee
-  has measured.** `banshee tell` names any other agent and refuses to run it.
-- **The two agents get different scopes, and the difference is wide. Read it
-  before you pick one:**
-  - **Claude Code gets the folders in `tell.paths`, and its own run directory.**
-    Nothing else is writable.
-  - **OpenCode gets no folder list, so it can edit any file on the machine.**
-    It refuses every write outside its own run directory, and the config block
-    that should allow one hangs the run instead. Only `--auto` works, and
-    `--auto` allows any edit anywhere.
-- **The agent runs in `~/.banshee/tell/run/`, and Banshee keeps nothing there.**
-  The snapshots, the saved thread and the run lock sit one level up, in
-  `~/.banshee/tell/`. An agent that lists its own directory must not find a
-  copy of your config there and edit the copy.
-- **The tell key names no scope aloud.** Banshee never speaks for itself.
-  `banshee tell` prints the scope in your terminal, on the first command of a
-  thread. For the key, this page is the record.
-- **`banshee status` names the agent it would run,** and whether it is scoped.
-- **A failed run sounds the error cue, and nothing else.** Run `banshee status`
-  for the reason: it names the last failure.
-- **A run that was refused a tool sounds the same cue.** The agent finished, but
-  it could not speak, so the key gives you silence and silence is what success
-  sounds like. `banshee status` names the tool.
-- **A run whose reply arrived too late only reaches `banshee status`.** The agent
-  already spoke while it ran, so this one sounds no cue.
-- **"start over" clears the thread and sounds nothing.** Silence is the chosen
-  answer for a reset that works. A reset that fails sounds the error cue, and
-  `banshee status` names the file Banshee could not remove.
-- **A tell failure makes no sound in none, and in visual while the menu bar
-  icon draws the figure.** The figure shows the failure in visual. `banshee
-  status` names both cases.
-- **A dictation no longer hides a tell failure.** `banshee status` keeps the last
-  tell failure until the next tell run, whatever else you dictate in between.
-- **`thread_timeout_min` is how long the same conversation stays open.** Within
-  it, "a bit more" reaches the agent that did the work. After it, the next
-  command starts a new thread.
-- **`run_timeout_min` is a stated default, not a measurement.** No run has been
-  timed to a limit. Raise it if a command is killed before it finishes.
-- **Before each agent command Banshee copies each folder in `paths`** to
-  `~/.banshee/tell/snapshots/<number>/`. The number is the Unix time in seconds.
-  Two runs in one second get separate copies, because the second name rises
-  above the first. "start over" and "show me" start no agent, so neither takes
-  a copy.
-- **Each copy carries the whole path of its folder,** with `/` written as `%`.
-  Two watched folders that share a basename then keep separate copies.
-- **It keeps the newest `snapshots` copies,** and never fewer than one.
-- **`banshee tell --undo` puts the newest copy back,** and names every folder
-  it replaced.
-- **A folder that is itself a symlink is refused rather than replaced,** and
-  named, so a link into a dotfiles repo survives.
-- **`paths` defaults to the six folders the Omarchy agent skill names.**

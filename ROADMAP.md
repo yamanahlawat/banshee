@@ -1,71 +1,30 @@
 # Roadmap
 
-What Banshee does next, in the order it is likely to land. Dates are not promises.
-Issues labelled `help wanted` are sized for a first contribution; each one says how to
-verify it on a real machine. `BACKLOG.md` holds what is missing or wrong today, in no order.
+Banshee gives your coding agents a voice: they say what they did, ask out loud, and you
+answer by talking, across every agent you run. It also types what you dictate into any app.
+This page holds what lands next and what is ruled out. `BACKLOG.md` holds what is wrong
+today, and `CHANGELOG.md` holds what has shipped.
 
-## Landed
+## Next
 
-- `banshee tell "<text>"` sends a command to your coding agent, which edits your Hyprland and
-  Omarchy config and speaks the result. `banshee bind hyprland` binds a tell key beside the
-  dictate key. Before each agent command Banshee copies the watched folders, and `banshee
-  tell --undo` puts them back. Claude Code is held to `tell.paths`; OpenCode takes no folder list,
-  so it can edit anything, and `docs/configuration.md` states the difference. `BACKLOG.md`
-  holds what real use has still to settle.
-- Linux onboarding in four commands: the installer, `banshee start` (which fetches the
-  models), `banshee bind hyprland` (which writes the F9 binding after showing it) and
-  `banshee connect claude`. `banshee record toggle` is one key for a compositor with no
-  release bind. The README leads with this path and every doc is pointers.
-- Bring your own keys. A remote listener behind `stt.provider = "remote"` and a remote voice
-  behind `tts.provider = "remote"`, each with its own key in an owner-only file. Every surface
-  says when audio or text leaves the machine.
-- The desktop window. `Open Banshee` in the menu bar opens it: the last dictation with a
-  copy button, the day's history with search, and the microphone, hotkey, voice and agent
-  settings, each printing the CLI command it stands for. It ships inside the same
-  `Banshee.app` as the daemon, the tray and the CLI.
-- `banshee connect <agent>` wires Antigravity, Claude Code, Codex, Cursor, OpenCode and Pi
-  after showing the change. Antigravity, Claude Code, OpenCode and Pi are verified on a real
-  install; Cursor and Codex wait for a report (#53, #54).
-- A microphone that disappears no longer stops dictation (#47).
-- The desktop window and the menu bar icon run on Linux. `make install` builds the icon
-  from a source clone, and the window too when GTK, WebKitGTK, npm and the Tauri CLI are
-  there. The icon sits in any bar that hosts StatusNotifierItem. The
-  blockers band names a missing Wayland typer. On Wayland the compositor holds the hotkey,
-  and the window says so instead of naming a key nothing binds.
-- On macOS, a rust capsule above the Dock shows what Banshee does, and the Banshee figure in
-  it moves with your voice. `feedback.mode` decides whether the earcons, the figure or both
-  report each step.
-
-## Next, maintainer
-
-1. Linux packaging: an AppImage and an AUR package, built by the bundle workflow with GTK and
-   WebKit installed. The window and the tray already run there, but only from a source clone,
-   which asks a user for a Rust toolchain and Node. The daemon's `PATH` still wants a blockers
-   row. It also gives the WebDriver acceptance layer its first host: `tauri-driver` runs on
-   Linux, not on macOS.
-2. Output sinks that survive a device change (the cue and Kokoro sinks still open once).
-   Measure whether spoken status dies with the earcons before designing.
-3. Notarisation with an Apple Developer ID, so the bundle opens with no dialog. Last, because
-   the Homebrew cask ships with 0.12.1 and the README shows the one-time Gatekeeper step, so
-   this removes a dialog rather than a gate.
+1. **Linux packaging:** an AppImage and an AUR package, so the window and the tray install
+   without a source clone. Release builds already target AVX2 on x86_64 and plain armv8-a on
+   aarch64. A GPU build (Vulkan, CUDA or ROCm) is tried
+   here; none is measured yet. It comes before notarization because it can start today.
+2. **Notarization,** once a Developer ID is affordable. SentinelOne doesn't flag Handy,
+   which is notarized and starts at login through `SMAppService`. Which of the two stops the
+   flag isn't measured. Check the flag once the `SMAppService` release ships, before paying
+   for a Developer ID.
 
 ## Community sized
 
-- More agents for `banshee connect`: Windsurf, Zed, Kiro, Cline and
-  Roo Code, Goose, Continue. Most take the same `mcpServers` JSON shape, so each is one
-  `Agent` variant, one `plan` arm and two tests. One issue per agent (#55 to #58).
-- A JSONC-preserving editor for the JSON hosts, so comments and trailing commas survive
-  the way they already do for Codex's TOML.
+- More agents for `banshee connect`: Windsurf (#55), Zed (#56) and Kiro (#58). Cline and Roo
+  Code, Goose and Continue have no issue yet.
+- Confirm `banshee connect cursor` (#53) and `banshee connect codex` (#54) on a real install.
 
 ## Not planned
 
-- ~~Spoken-status hooks for agents other than Claude Code.~~ Codex, Antigravity and Copilot
-  expose a Stop hook that can hold a turn, and `banshee connect` now writes one for each. Cursor's stop
-  hook can only send a follow-up message, and Windsurf, Zed and Amp have no turn-end hook.
-- `banshee narrate`. `banshee speak` is the primitive, and a shell line covers the use:
-  `cargo build; banshee speak "build $([ $? = 0 ] && echo passed || echo failed)"`. Parsing
-  arbitrary build output to guess the result is brittle, and an agent already speaks results
-  with context.
-- A process restart on config change. Subsystems reload; the daemon stays up.
-- Cloud by default. Nothing leaves the machine unless you turn a provider on, and the
-  tray says so while it is on.
+- An `ask_user` that waits for a key press. The loop depends on the microphone opening by
+  itself.
+- Desktop control through an agent, which was `banshee tell`. Open the agent instead.
+- Cloud by default. Nothing leaves the machine unless you set a remote server.
