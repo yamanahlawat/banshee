@@ -189,12 +189,12 @@ impl<'a> NewEntry<'a> {
 
 /// RFC 3339 with the machine's offset. The offset pins the instant, and
 /// keeps what the speaker's own clock read.
-pub fn stamp(at: chrono::DateTime<chrono::Local>) -> String {
-    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+pub fn stamp(at: &jiff::Zoned) -> String {
+    at.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string()
 }
 
 pub fn stamp_now() -> String {
-    stamp(chrono::Local::now())
+    stamp(&jiff::Zoned::now())
 }
 
 pub fn insert(conn: &Connection, entry: &NewEntry) -> rusqlite::Result<i64> {
@@ -708,8 +708,16 @@ mod tests {
         // `CURRENT_TIMESTAMP` answers `2026-08-27 12:07:24`, and a reader is
         // free to misread that as local time.
         assert!(
-            chrono::DateTime::parse_from_rfc3339(stamp).is_ok(),
+            stamp.parse::<jiff::Timestamp>().is_ok(),
             "not an unambiguous instant: {stamp}"
         );
+    }
+
+    #[test]
+    fn a_stamp_keeps_seconds_and_the_offset() {
+        let india: jiff::Zoned = "2026-11-17T21:33:17.9+05:30[+05:30]".parse().unwrap();
+        let utc: jiff::Zoned = "2026-11-17T16:03:17Z[UTC]".parse().unwrap();
+        assert_eq!(stamp(&india), "2026-11-17T21:33:17+05:30");
+        assert_eq!(stamp(&utc), "2026-11-17T16:03:17+00:00");
     }
 }
