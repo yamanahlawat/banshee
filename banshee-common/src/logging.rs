@@ -187,10 +187,12 @@ fn line(clock: impl std::fmt::Display, record: &Record) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDir;
 
     #[test]
     fn a_logged_line_lands_in_the_file() {
-        let (dir, path) = scratch_log("log-file");
+        let dir = TempDir::new("log-file");
+        let path = dir.0.join("daemon.log");
         std::fs::write(&path, "a line from an earlier run\n").unwrap();
         let sink = Sink::file(&path).expect("a sink on a temp folder");
         let unique = format!("a line only this test writes {}", std::process::id());
@@ -205,7 +207,6 @@ mod tests {
         }
 
         let written = std::fs::read_to_string(&path).unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(
             written.starts_with("a line from an earlier run\n"),
             "{written:?}"
@@ -217,41 +218,42 @@ mod tests {
         );
     }
 
-    fn scratch_log(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("banshee-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("daemon.log");
-        (dir, path)
-    }
-
     fn read(path: &std::path::Path, suffix: &str) -> String {
         std::fs::read_to_string(format!("{}{suffix}", path.display())).unwrap_or_default()
     }
 
     #[test]
+    fn a_missing_log_folder_is_made() {
+        let dir = TempDir::new("log-folder");
+        let path = dir.0.join("Logs/com.banshee.app/daemon.log");
+        let mut file = Rotating::new(&path, 1024, 5).unwrap();
+        file.append(b"first\n").unwrap();
+
+        assert_eq!(read(&path, ""), "first\n");
+    }
+
+    #[test]
     fn a_file_past_the_limit_moves_aside_and_the_next_line_starts_a_new_one() {
-        let (dir, path) = scratch_log("rotate");
+        let dir = TempDir::new("rotate");
+        let path = dir.0.join("daemon.log");
         let mut file = Rotating::new(&path, 10, 5).unwrap();
         file.append(b"0123456789A\n").unwrap();
         file.append(b"next\n").unwrap();
 
-        let (current, old) = (read(&path, ""), read(&path, ".1"));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(old, "0123456789A\n");
-        assert_eq!(current, "next\n");
+        assert_eq!(read(&path, ".1"), "0123456789A\n");
+        assert_eq!(read(&path, ""), "next\n");
     }
 
     #[test]
     fn only_the_newest_old_files_are_kept() {
-        let (dir, path) = scratch_log("rotate-kept");
+        let dir = TempDir::new("rotate-kept");
+        let path = dir.0.join("daemon.log");
         let mut file = Rotating::new(&path, 1, 2).unwrap();
         for line in ["a\n", "b\n", "c\n", "d\n"] {
             file.append(line.as_bytes()).unwrap();
         }
 
         let found = ["", ".1", ".2", ".3"].map(|suffix| read(&path, suffix));
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(found, ["d\n", "c\n", "b\n", ""]);
     }
 

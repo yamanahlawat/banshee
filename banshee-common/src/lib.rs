@@ -16,6 +16,9 @@ pub mod logging;
 pub mod settings;
 pub mod utils;
 
+#[cfg(test)]
+mod test_support;
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Version {
     #[default]
