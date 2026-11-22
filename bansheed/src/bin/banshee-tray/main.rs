@@ -1555,8 +1555,8 @@ mod tray {
     }
 
     // Not `open`, which resolves the bundle id and starts nothing when a
-    // second Banshee.app is registered under it. The window is this binary's
-    // sibling, so run it directly.
+    // second Banshee.app is registered under it. Run the window directly,
+    // found through `sibling`.
     fn open_the_window(open: Open) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::process::CommandExt;
 

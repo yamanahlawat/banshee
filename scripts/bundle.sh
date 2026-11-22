@@ -14,31 +14,34 @@ security find-identity -p codesigning -v | grep -q "$identity" || {
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 staging="$app.new"
-macos="$staging/Contents/MacOS"
 resources="$staging/Contents/Resources"
+agents="$staging/Contents/Library/LaunchAgents"
+helper="$staging/Contents/Helpers/BansheeMenuBar.app"
 
 # Builds into a staging path so a working install is only replaced once the
 # new one is complete and verified.
 trap 'rm -rf "$staging"' EXIT
 
+# Columns: executable, its directory in the bundle, its signing identifier.
+# The order is signing order. banshee-app is the bundle's executable, so the
+# bundle signature covers it and it signs last.
+executables="banshee Contents/MacOS com.banshee.app.daemon
+banshee-mcp-shim Contents/MacOS com.banshee.app.mcp-shim
+banshee-tray Contents/Helpers/BansheeMenuBar.app/Contents/MacOS com.banshee.app.tray
+banshee-app Contents/MacOS com.banshee.app"
+
 rm -rf "$staging"
-agents="$staging/Contents/Library/LaunchAgents"
-mkdir -p "$macos" "$resources" "$agents"
+mkdir -p "$resources" "$agents"
 
-# banshee-app is the bundle's executable. The other three run from inside it:
-# launchd starts the daemon and the tray, and ~/.cargo/bin links the CLI.
-# Each executable signs with its own identifier, the name of its launchd job.
-# The bundle signature covers banshee-app as its executable, so it signs last.
-executables="banshee:com.banshee.app.daemon banshee-tray:com.banshee.app.tray
-banshee-mcp-shim:com.banshee.app.mcp-shim banshee-app:com.banshee.app"
-
-for pair in $executables; do
-    cp "$bindir/${pair%%:*}" "$macos/${pair%%:*}"
-done
+while read -r name dir _; do
+    mkdir -p "$staging/$dir"
+    cp "$bindir/$name" "$staging/$dir/$name"
+done <<< "$executables"
 
 cp "$root/packaging/LaunchAgents/"*.plist "$agents/"
 cp "$root/assets/banshee.icns" "$resources/banshee.icns"
 sed "s/__VERSION__/$version/g" "$root/packaging/Info.plist" > "$staging/Contents/Info.plist"
+sed "s/__VERSION__/$version/g" "$root/packaging/MenuBar.Info.plist" > "$helper/Contents/Info.plist"
 
 sign() {
     codesign --force --options runtime --sign "$identity" "$@"
@@ -46,32 +49,45 @@ sign() {
 
 # --deep is unreliable and Apple deprecated it. Only the daemon captures audio,
 # so only it gets the entitlement.
-for pair in $executables; do
-    name="${pair%%:*}"
+while read -r name dir id; do
     entitlements=()
     if [ "$name" = banshee ]; then
         entitlements=(--entitlements "$root/packaging/banshee.entitlements")
     fi
-    sign --identifier "${pair#*:}" ${entitlements[@]+"${entitlements[@]}"} "$macos/$name"
-done
+    sign --identifier "$id" ${entitlements[@]+"${entitlements[@]}"} "$staging/$dir/$name"
+    if [ "$name" = banshee-tray ]; then
+        sign --identifier "$id" "$helper"
+    fi
+done <<< "$executables"
 sign "$staging"
 
+codesign --verify --strict --verbose=2 "$helper"
 codesign --verify --strict --verbose=2 "$staging"
 
 expect_identifier() {
     local id
-    id="$(codesign -dv "$macos/$1" 2>&1 | sed -n 's/^Identifier=//p')"
+    id="$(codesign -dv "$1" 2>&1 | sed -n 's/^Identifier=//p')"
     [ "$id" = "$2" ] || {
         echo "$1 is not signed as $2 (codesign printed '$id')" >&2
         exit 1
     }
 }
-for pair in $executables; do
-    expect_identifier "${pair%%:*}" "${pair#*:}"
-done
+while read -r name dir id; do
+    expect_identifier "$staging/$dir/$name" "$id"
+done <<< "$executables"
 for agent in daemon tray; do
     test -f "$agents/com.banshee.app.$agent.plist" || {
         echo "missing launch agent plist com.banshee.app.$agent.plist" >&2
+        exit 1
+    }
+done
+for plist in "$agents"/*.plist; do
+    program="$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$plist" 2> /dev/null)" || {
+        echo "$(basename "$plist") has no BundleProgram" >&2
+        exit 1
+    }
+    test -f "$staging/$program" && test -x "$staging/$program" || {
+        echo "$(basename "$plist") names BundleProgram '$program', which is missing or not an executable file" >&2
         exit 1
     }
 done
