@@ -10,7 +10,7 @@ use tiny_skia::{
 use crate::card::{
     self, Block, CHIP_BORDER, ChipBox, DRAIN_HEIGHT, DRAIN_RADIUS, Divider, DividerKind, Layout,
     MUTED, PlacedGlyph, RIM, RIM_WIDTH, SEGMENT_GAP, SEGMENT_HEIGHT, SEGMENT_OFF, SEGMENT_RADIUS,
-    SEGMENTS, SIDE, Shape, TRACK_RADIUS, Text,
+    SEGMENTS, SIDE, Scroll, Shape, TRACK_RADIUS, Text,
 };
 use crate::chip::{Show, segments_lit};
 use crate::figure::{
@@ -80,6 +80,8 @@ pub struct Frame<'a> {
     pub level: f64,
     /// The share of the countdown left, from 1 to 0. `None` with no countdown.
     pub countdown_share: Option<f64>,
+    /// How far the question's text is scrolled up from rest.
+    pub up: f64,
     pub scale: u32,
     /// The size the surface already has, which a frame never shrinks: a
     /// compositor may animate a resize by stretching the new frame.
@@ -236,8 +238,13 @@ fn paint_card(
     let Some((answer, answer_lines)) = blocks.next_back() else {
         return;
     };
-    for (block, lines) in blocks {
-        paint_block(canvas, block, lines, body, clip);
+    for (at, (block, lines)) in blocks.enumerate() {
+        if !layout.scrolls(at) {
+            paint_block(canvas, block, lines, body, clip);
+        }
+    }
+    if let Some(scroll) = &layout.scroll {
+        paint_scroll(canvas, card, scroll, frame.up, body, clip);
     }
     if let Some(divider) = &layout.divider {
         let track = layout.shape.width - 2.0 * SIDE;
@@ -254,6 +261,46 @@ fn paint_card(
             paint_chip(canvas, chip, label, body, clip);
         }
     });
+}
+
+/// The question's text, `up` from rest, inside its viewport and fading at the
+/// edges that hide more.
+fn paint_scroll(
+    canvas: &mut Pixmap,
+    card: &Card,
+    scroll: &Scroll,
+    up: f64,
+    body: Transform,
+    clip: &Mask,
+) {
+    let viewport = Rect::from_xywh(
+        0.0,
+        scroll.top as f32,
+        card.layout.shape.width as f32,
+        scroll.height as f32,
+    )
+    .expect("a finite viewport");
+    let mut mask = clip.clone();
+    mask.intersect_path(
+        &PathBuilder::from_rect(viewport),
+        FillRule::Winding,
+        false,
+        body,
+    );
+    let edges = scroll.edges(up);
+    let moved = body.pre_translate(0.0, up as f32);
+    let blocks = card.layout.blocks[scroll.blocks.clone()]
+        .iter()
+        .zip(&card.lines[scroll.blocks.clone()]);
+    for (block, lines) in blocks {
+        for (text, line) in block.lines.iter().zip(lines) {
+            let origin = line_top(text, line) + up;
+            let stops =
+                edges.map(|(share, alpha)| (scroll.top + share * scroll.height - origin, alpha));
+            let paint = faded(text.ink.hex(), &stops);
+            paint_line(canvas, text, line, &paint, moved, &mask);
+        }
+    }
 }
 
 fn paint_chip(canvas: &mut Pixmap, chip: &ChipBox, label: &Line, body: Transform, clip: &Mask) {
@@ -337,7 +384,10 @@ fn paint_block(canvas: &mut Pixmap, block: &Block, lines: &[Line], body: Transfo
         let top = line_top(text, line);
         let hex = text.ink.hex();
         let paint = match block.fade {
-            Some(fade) => faded(hex, block.top - top, block.top + fade - top),
+            Some(fade) => faded(
+                hex,
+                &[(block.top - top, 0.0), (block.top + fade - top, 1.0)],
+            ),
             None => ink(hex, 1.0),
         };
         paint_line(canvas, text, line, &paint, body, clip);
@@ -716,15 +766,19 @@ fn ink(hex: u32, alpha: f64) -> Paint<'static> {
     paint
 }
 
-/// `hex` clear at `from` and whole at `to`, down the y axis.
-fn faded(hex: u32, from: f64, to: f64) -> Paint<'static> {
+/// `hex` at each `(y, alpha)` stop, down the y axis, whole outside the
+/// first and last.
+fn faded(hex: u32, stops: &[(f64, f64)]) -> Paint<'static> {
+    let (first, last) = (stops[0].0, stops[stops.len() - 1].0);
     let shader = LinearGradient::new(
-        Point::from_xy(0.0, from as f32),
-        Point::from_xy(0.0, to as f32),
-        vec![
-            GradientStop::new(0.0, colour(hex, 0.0)),
-            GradientStop::new(1.0, colour(hex, 1.0)),
-        ],
+        Point::from_xy(0.0, first as f32),
+        Point::from_xy(0.0, last as f32),
+        stops
+            .iter()
+            .map(|&(y, alpha)| {
+                GradientStop::new(((y - first) / (last - first)) as f32, colour(hex, alpha))
+            })
+            .collect(),
         SpreadMode::Pad,
         Transform::identity(),
     );
@@ -845,6 +899,7 @@ mod tests {
             height_from: None,
             level: 0.0,
             countdown_share: None,
+            up: 0.0,
             scale: 1,
             at_least: (0, 0),
         }
@@ -1017,24 +1072,64 @@ mod tests {
         assert!(count(&pixmap, BONE, from - CAPSULE, from, 1.0) > 0);
     }
 
-    #[test]
-    fn the_fade_leaves_the_top_of_a_cut_context_fainter_than_its_bottom() {
+    fn long_question() -> String {
+        format!("{}. Which one?", vec!["word"; 400].join(" "))
+    }
+
+    /// The bone pixels in the three context lines from `top` down.
+    fn bone_below(pixmap: &Pixmap, top: f64) -> usize {
+        let band = 3.0 * card::Cut::Context.line_height();
+        count(pixmap, BONE, top, top + band, 1.0)
+    }
+
+    /// The card with its text `share` of the way from rest to fully scrolled up.
+    fn scrolled_card(share: f64) -> (Card, Pixmap, card::Scroll) {
         let show = Show::Reading;
-        let context = vec!["The migration renames the column."; 40].join(" ");
-        let card = laid(&show, &format!("{context} Retry it?")).expect("a card");
-        let pixmap = paint(&card_frame(&show, &card, &[]));
-        let block = block_of(&card.layout, card::Cut::Context);
-        assert_eq!(block.lines.len(), card::MAX_LINES);
-        assert!(block.fade.is_some());
-        let line = card::Cut::Context.line_height();
-        let bone_in = |text: &card::Text| count(&pixmap, BONE, text.top, text.top + line, 1.0);
-        let (first, last) = (&block.lines[0], &block.lines[card::MAX_LINES - 1]);
-        assert!(
-            bone_in(first) < bone_in(last),
-            "{} {}",
-            bone_in(first),
-            bone_in(last)
+        let card = laid(&show, &long_question()).expect("a card");
+        let scroll = card.layout.scroll.clone().expect("a scroll");
+        let pixmap = paint(&Frame {
+            up: share * scroll.overflow,
+            ..card_frame(&show, &card, &[])
+        });
+        (card, pixmap, scroll)
+    }
+
+    #[test]
+    fn a_question_at_rest_paints_nothing_above_its_viewport() {
+        let (card, pixmap, scroll) = scrolled_card(0.0);
+        let cue = &card.layout.blocks[scroll.blocks.start - 1];
+        assert_eq!(count(&pixmap, BONE, 0.0, cue.top, 1.0), 0);
+        assert_eq!(
+            count(&pixmap, BONE, cue.top + cue.height, scroll.top, 1.0),
+            0
         );
+        assert!(bone_below(&pixmap, scroll.top) > 0);
+    }
+
+    #[test]
+    fn the_top_of_the_viewport_is_fainter_than_the_lines_below_at_rest() {
+        let (_, pixmap, scroll) = scrolled_card(0.0);
+        let line = card::Cut::Context.line_height();
+        let bone_in = |nth: f64| {
+            let top = scroll.top + nth * line;
+            count(&pixmap, BONE, top, top + line, 1.0)
+        };
+        let (first, third) = (bone_in(0.0), bone_in(2.0));
+        assert!(2 * first < third, "{first} {third}");
+    }
+
+    #[test]
+    fn scrolled_fully_up_the_bottom_fades_and_the_top_does_not() {
+        let (_, pixmap, scroll) = scrolled_card(1.0);
+        let line = card::Cut::Context.line_height();
+        let whole = (scroll.height / line).floor() as usize;
+        let bone_in = |nth: usize| {
+            let top = scroll.top + nth as f64 * line;
+            count(&pixmap, BONE, top, top + line, 1.0)
+        };
+        let (first, middle, last) = (bone_in(0), bone_in(whole / 2), bone_in(whole - 1));
+        assert!(last < middle, "{last} {middle}");
+        assert!(last < first, "{last} {first}");
     }
 
     #[test]

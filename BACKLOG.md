@@ -76,6 +76,9 @@ What is missing or wrong today. Nothing here is ordered. `ROADMAP.md` holds what
   and the rim, so the two differ in style until the pill's own item.
 - Holding the hotkey during an answer drops the words so far (hotkey.rs, publish_words(""));
   the card shows them vanish and "Your turn" return.
+- The question card covers what sits behind it while you answer, and nothing moves it. The
+  owner asked on 2026-11-24 whether dragging it would help. Not decided. A drag needs a kept
+  position that stays on screen across displays, and must not read as a scroll.
 
 ## Listening and speaking
 

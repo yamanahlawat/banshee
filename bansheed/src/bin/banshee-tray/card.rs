@@ -25,7 +25,7 @@ pub const CONTEXT_GAP: f64 = 8.0;
 pub const AFTER_GAP: f64 = 6.0;
 pub const MORE_GAP: f64 = 4.0;
 pub const MAX_LINES: usize = 4;
-/// The clamp's mask, in em of the block's size.
+/// A scroll edge's fade, in em of the context's size.
 pub const FADE_EM: f64 = 2.2;
 pub const ANSWER_TOP: f64 = 14.0;
 pub const ANSWER_BOTTOM: f64 = 20.0;
@@ -59,7 +59,7 @@ pub const CHIP_GAP: f64 = 4.0;
 
 pub const ELLIPSIS: char = '\u{2026}';
 const TEACH: &str = "Keep talking to add more";
-const HINT: &str = "Start of the question is in History";
+const CUE: &str = "Scroll for the start of the question";
 
 pub struct Pad {
     pub top: f64,
@@ -287,15 +287,82 @@ pub struct PlacedGlyph {
     pub top: f64,
 }
 
+/// The question's text when it overflows the card, at rest: scrolled to its
+/// last line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Scroll {
+    pub top: f64,
+    pub height: f64,
+    /// How far the text scrolls up from rest.
+    pub overflow: f64,
+    pub blocks: Range<usize>,
+}
+
+impl Scroll {
+    /// The text's alpha down the viewport, `up` from rest, as (share of the
+    /// height, alpha) stops. An edge with more text beyond it fades out.
+    pub fn edges(&self, up: f64) -> [(f64, f64); 4] {
+        let fade = FADE_EM * Cut::Context.size() / self.height;
+        let alpha = |hides: bool| if hides { 0.0 } else { 1.0 };
+        [
+            (0.0, alpha(up < self.overflow)),
+            (fade, 1.0),
+            (1.0 - fade, 1.0),
+            (1.0, alpha(up > 0.0)),
+        ]
+    }
+
+    /// How far one wheel detent moves the text.
+    pub fn step() -> f64 {
+        Cut::Context.line_height()
+    }
+}
+
+/// How far the reader has scrolled the question on screen up from rest. A new
+/// question starts at rest.
+#[derive(Debug, Default)]
+pub struct Scrolled {
+    question: Option<String>,
+    up: f64,
+}
+
+impl Scrolled {
+    pub fn keep(&mut self, question: Option<&str>) {
+        if self.question.as_deref() != question {
+            self.question = question.map(str::to_string);
+            self.up = 0.0;
+        }
+    }
+
+    pub fn up(&self, scroll: &Scroll) -> f64 {
+        self.up.min(scroll.overflow)
+    }
+
+    /// Whether the text moved.
+    pub fn by(&mut self, scroll: &Scroll, delta: f64) -> bool {
+        let was = self.up(scroll);
+        self.up = (was + delta).clamp(0.0, scroll.overflow);
+        self.up != was
+    }
+}
+
 pub struct Layout {
     pub shape: Shape,
     pub blocks: Vec<Block>,
+    pub scroll: Option<Scroll>,
     pub divider: Option<Divider>,
     pub glyph: Option<PlacedGlyph>,
     pub chip: Option<ChipBox>,
 }
 
 impl Layout {
+    /// Whether block `at` is part of the question's scrolling text.
+    pub fn scrolls(&self, at: usize) -> bool {
+        self.scroll
+            .as_ref()
+            .is_some_and(|scroll| scroll.blocks.contains(&at))
+    }
+
     pub fn follows_the_level(&self) -> bool {
         self.glyph.is_some_and(|placed| placed.glyph == Glyph::Bars)
     }
@@ -381,30 +448,50 @@ pub fn layout(
         blocks.push(name);
     }
 
-    let (context, context_cut) = set(&parts.context, Cut::Context, room, MAX_LINES, measure);
-    if !context.is_empty() {
-        if context_cut {
-            let hint = block(vec![HINT.into()], Cut::Hint, Ink::Muted, SIDE, y, None);
-            y += hint.height + MORE_GAP;
-            blocks.push(hint);
+    let mut body = Vec::new();
+    let mut content = 0.0;
+    let mut viewport = 0.0;
+    let mut add = |text: &str, cut: Cut, gap: f64| {
+        let lines = wrap(text, room, |line| measure.width(line, cut));
+        if lines.is_empty() {
+            return;
         }
-        let fade = context_cut.then(|| FADE_EM * Cut::Context.size());
-        let shown = block(context, Cut::Context, Ink::Bone, SIDE, y, fade);
-        y += shown.height + CONTEXT_GAP;
-        blocks.push(shown);
+        if !body.is_empty() {
+            content += gap;
+            viewport += gap;
+        }
+        viewport += lines.len().min(MAX_LINES) as f64 * cut.line_height();
+        let shown = block(lines, cut, Ink::Bone, SIDE, content, None);
+        content += shown.height;
+        body.push(shown);
+    };
+    add(&parts.context, Cut::Context, 0.0);
+    add(&parts.ask, Cut::Ask, CONTEXT_GAP);
+    add(&parts.after, Cut::Context, AFTER_GAP);
+
+    let mut scroll = None;
+    let mut shift = y;
+    if content > viewport {
+        let cue = block(vec![CUE.into()], Cut::Hint, Ink::Muted, SIDE, y, None);
+        let top = y + cue.height + MORE_GAP;
+        blocks.push(cue);
+        let overflow = content - viewport;
+        shift = top - overflow;
+        scroll = Some(Scroll {
+            top,
+            height: viewport,
+            overflow,
+            blocks: blocks.len()..blocks.len() + body.len(),
+        });
+        y = top + viewport;
+    } else {
+        y += content;
     }
-
-    let (ask, ask_cut) = set(&parts.ask, Cut::Ask, room, MAX_LINES, measure);
-    let fade = ask_cut.then(|| FADE_EM * Cut::Ask.size());
-    let shown = block(ask, Cut::Ask, Ink::Bone, SIDE, y, fade);
-    y += shown.height;
-    blocks.push(shown);
-
-    let (after, _) = set(&parts.after, Cut::Context, room, MAX_LINES, measure);
-    if !after.is_empty() {
-        y += AFTER_GAP;
-        let shown = block(after, Cut::Context, Ink::Bone, SIDE, y, None);
-        y += shown.height;
+    for mut shown in body {
+        shown.top += shift;
+        for text in &mut shown.lines {
+            text.top += shift;
+        }
         blocks.push(shown);
     }
 
@@ -479,6 +566,7 @@ pub fn layout(
             radius: CARD_RADIUS,
         },
         blocks,
+        scroll,
         divider: Some(divider),
         glyph: Some(PlacedGlyph {
             glyph,
@@ -547,6 +635,7 @@ fn missed_pill(count: u32, ask: &str, measure: &dyn Measure) -> Layout {
             height,
             fade: None,
         }],
+        scroll: None,
         divider: None,
         glyph: None,
         chip: Some(ChipBox {
@@ -616,14 +705,12 @@ mod tests {
     use std::cell::Cell;
 
     struct Mono {
-        longest: Cell<usize>,
         marked: Cell<bool>,
     }
 
     impl Mono {
         fn new() -> Self {
             Mono {
-                longest: Cell::new(0),
                 marked: Cell::new(false),
             }
         }
@@ -632,7 +719,6 @@ mod tests {
     impl Measure for Mono {
         fn width(&self, text: &str, _cut: Cut) -> f64 {
             let count = text.chars().count();
-            self.longest.set(self.longest.get().max(count));
             if text.contains("MARKER") {
                 self.marked.set(true);
             }
@@ -796,10 +882,27 @@ mod tests {
         );
     }
 
+    fn long_question() -> String {
+        format!(
+            "MARKER {}. Which one? {}",
+            vec!["xxxxxxxxx"; 200].join(" "),
+            vec!["yyyy"; 60].join(" ")
+        )
+    }
+
+    fn body_words(card: &Layout) -> String {
+        let scroll = card.scroll.as_ref().expect("a scroll");
+        card.blocks[scroll.blocks.clone()]
+            .iter()
+            .flat_map(|block| &block.lines)
+            .map(|text| text.line.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     #[test]
-    fn a_hundred_kilobyte_question_wraps_only_its_tail() {
-        let mut question = format!("MARKER {}", vec!["xxxxxxxxx"; 10_000].join(" "));
-        question.push_str(". Which one?");
+    fn a_long_question_keeps_every_word_in_its_scroll() {
+        let question = long_question();
         let mono = Mono::new();
         let card = layout(
             &scene(Show::Reading, &question),
@@ -809,24 +912,57 @@ mod tests {
             &mono,
         )
         .unwrap();
-
-        let context = block_of(&card, Cut::Context);
-        assert_eq!(context.lines.len(), MAX_LINES);
-        assert!(context.fade.is_some());
-        assert!(
-            card.blocks
-                .iter()
-                .flat_map(|block| &block.lines)
-                .any(|text| text.cut == Cut::Hint
-                    && text.line == "Start of the question is in History")
-        );
-        assert!(mono.longest.get() <= most_chars(ROOM, 8.0, MAX_LINES) + 1);
-        assert!(!mono.marked.get());
+        assert_eq!(body_words(&card), question);
+        assert!(mono.marked.get());
     }
 
     #[test]
-    fn a_short_question_shows_no_fade_and_no_note() {
+    fn a_long_question_sets_its_text_between_the_cue_and_the_divider() {
+        let card = laid(Show::Reading, &long_question());
+        let scroll = card.scroll.as_ref().unwrap();
+        assert!(close(scroll.top, TOP + Cut::Hint.line_height() + MORE_GAP));
+        let divider = card.divider.as_ref().unwrap();
+        assert!(close(
+            divider.top,
+            (scroll.top + scroll.height + BODY_BOTTOM).round()
+        ));
+    }
+
+    #[test]
+    fn a_long_question_rests_on_its_last_line() {
+        let card = laid(Show::Reading, &long_question());
+        let scroll = card.scroll.as_ref().unwrap();
+        let body = &card.blocks[scroll.blocks.clone()];
+        let first = body.first().unwrap();
+        let last = body.last().unwrap();
+        let content = last.top + last.height - first.top;
+        assert!(close(scroll.overflow, content - scroll.height));
+        assert!(close(last.top + last.height, scroll.top + scroll.height));
+        assert!(close(first.top, scroll.top - scroll.overflow));
+    }
+
+    #[test]
+    fn a_long_question_says_it_scrolls_above_its_text() {
+        let card = laid(Show::Reading, &long_question());
+        let scroll = card.scroll.as_ref().unwrap();
+        let cue = &card.blocks[scroll.blocks.start - 1];
+        assert_eq!(cue.lines.len(), 1);
+        let line = &cue.lines[0];
+        assert_eq!(
+            (line.line.as_str(), line.cut, line.ink),
+            (
+                "Scroll for the start of the question",
+                Cut::Hint,
+                Ink::Muted
+            )
+        );
+        assert!(close(cue.top + cue.height + MORE_GAP, scroll.top));
+    }
+
+    #[test]
+    fn a_short_question_has_no_scroll_no_fade_and_no_cue() {
         let card = laid(Show::Reading, "The build is red. Retry it?");
+        assert!(card.scroll.is_none());
         assert!(
             card.blocks
                 .iter()
@@ -835,6 +971,97 @@ mod tests {
         );
         assert_eq!(block_of(&card, Cut::Context).fade, None);
         assert_eq!(block_of(&card, Cut::Ask).fade, None);
+    }
+
+    fn lines(count: usize) -> String {
+        vec!["x".repeat(59); count].join(" ")
+    }
+
+    fn text_height(context: usize, ask: usize) -> f64 {
+        context as f64 * Cut::Context.line_height()
+            + CONTEXT_GAP
+            + ask as f64 * Cut::Ask.line_height()
+    }
+
+    #[test]
+    fn a_question_scrolls_once_a_part_passes_four_lines() {
+        let fits = format!("{}. {}?", lines(4), lines(4));
+        assert!(laid(Show::Reading, &fits).scroll.is_none());
+        let context = format!("{}. {}?", lines(5), lines(1));
+        assert!(laid(Show::Reading, &context).scroll.is_some());
+        let ask = format!("{}. {}?", lines(1), lines(5));
+        assert!(laid(Show::Reading, &ask).scroll.is_some());
+    }
+
+    #[test]
+    fn a_scrolling_question_keeps_the_height_of_its_clamped_card() {
+        let short_ask = format!("{}. {}?", lines(9), lines(1));
+        let scroll = laid(Show::Reading, &short_ask).scroll.unwrap();
+        assert!(close(scroll.height, text_height(MAX_LINES, 1)));
+        let long_ask = format!("{}. {}?", lines(2), lines(9));
+        let scroll = laid(Show::Reading, &long_ask).scroll.unwrap();
+        assert!(close(scroll.height, text_height(2, MAX_LINES)));
+    }
+
+    fn a_scroll(overflow: f64) -> Scroll {
+        Scroll {
+            top: 0.0,
+            height: 100.0,
+            overflow,
+            blocks: 0..1,
+        }
+    }
+
+    #[test]
+    fn a_scroll_moves_within_its_overflow() {
+        let scroll = a_scroll(50.0);
+        let mut scrolled = Scrolled::default();
+        let mut by = |delta: f64| {
+            scrolled.by(&scroll, delta);
+            scrolled.up(&scroll)
+        };
+        assert_eq!(by(20.0), 20.0);
+        assert_eq!(by(20.0), 40.0);
+        assert_eq!(by(20.0), 50.0);
+        assert_eq!(by(-70.0), 0.0);
+    }
+
+    #[test]
+    fn the_scroll_holds_for_one_question_and_rests_for_the_next() {
+        let scroll = a_scroll(50.0);
+        let mut scrolled = Scrolled::default();
+        scrolled.keep(Some("Retry it?"));
+        assert!(scrolled.by(&scroll, 30.0));
+        scrolled.keep(Some("Retry it?"));
+        assert_eq!(scrolled.up(&scroll), 30.0);
+        assert!(!scrolled.by(&scroll, 0.0));
+        scrolled.keep(Some("Ship it?"));
+        assert_eq!(scrolled.up(&scroll), 0.0);
+    }
+
+    #[test]
+    fn the_scroll_stays_inside_a_shorter_overflow() {
+        let mut scrolled = Scrolled::default();
+        scrolled.by(&a_scroll(50.0), 40.0);
+        let shorter = a_scroll(10.0);
+        assert_eq!(scrolled.up(&shorter), 10.0);
+        assert!(scrolled.by(&shorter, -5.0));
+        assert_eq!(scrolled.up(&shorter), 5.0);
+    }
+
+    #[test]
+    fn the_edges_fade_where_more_text_waits() {
+        let scroll = a_scroll(50.0);
+        let ends = |up: f64| {
+            let edges = scroll.edges(up);
+            (edges[0].1, edges[3].1)
+        };
+        assert_eq!(ends(0.0), (0.0, 1.0));
+        assert_eq!(ends(20.0), (0.0, 0.0));
+        assert_eq!(ends(50.0), (1.0, 0.0));
+        let fade = FADE_EM * Cut::Context.size() / scroll.height;
+        let shares = scroll.edges(20.0).map(|(share, _)| share);
+        assert_eq!(shares, [0.0, fade, 1.0 - fade, 1.0]);
     }
 
     #[test]
