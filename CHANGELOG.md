@@ -20,7 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The parent is not measured for Cursor, OpenCode or the npm Claude Code.
 - **An agent's question shows on screen while you answer.** When an agent asks, the capsule
   becomes a card above the Dock: the whole question, with the ask in larger type, and a row
-  that says whether it is your turn next, your turn or Banshee is working. Clicks pass through it.
+  that says whether it is your turn next, your turn or Banshee is working. A long question
+  keeps the card's height and scrolls: it opens on the ask, and you scroll up for the start.
+  Clicks pass through the card, except while its question scrolls.
   History keeps the whole question. When you pause and Banshee hears you as unfinished, the
   line between the question and your words closes in from both ends. Speaking fills it
   again. If you stay quiet and Banshee still hears you as unfinished, it refills and runs

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tiny_skia::Pixmap;
 
-use crate::card::{self, Shape};
+use crate::card::{self, Scrolled, Shape};
 use crate::chip::{Scene, words_of};
 use crate::figure::{self, AROUND_WORDS, LEVEL_STEP, Pose, SCREEN_MARGIN, Voice, seconds};
 use crate::gesture;
@@ -40,6 +40,10 @@ pub struct Renderer {
     leave_ends: Option<Instant>,
     line: Option<Line>,
     card: Option<Card>,
+    scrolled: Scrolled,
+    /// The last scroll that moved the text: frames follow the display until
+    /// `LEVEL_STEP` after it.
+    scrolled_at: Option<Instant>,
     /// The width the capsule grows or shrinks from, and when that began.
     width_from: Option<(f64, Instant)>,
     /// The height the card grows or shrinks from, and when that began.
@@ -70,6 +74,8 @@ impl Renderer {
             leave_ends: None,
             line: None,
             card: None,
+            scrolled: Scrolled::default(),
+            scrolled_at: None,
             width_from: None,
             height_from: None,
             fonts: words::Fonts,
@@ -98,6 +104,7 @@ impl Renderer {
         if self.scene.as_ref() == Some(scene) {
             return orders;
         }
+        self.scrolled.keep(scene.question.as_deref());
         let card = card::layout(scene, self.card_room, false, now, &self.fonts).map(Card::new);
         let entrance = match &self.scene {
             None => Entrance::Fresh,
@@ -209,6 +216,25 @@ impl Renderer {
         self.heard = Some(now);
     }
 
+    /// Scrolls the question `delta` pixels up toward its start, a negative
+    /// one down toward its end.
+    pub fn scroll(&mut self, delta: f64, now: Instant) {
+        if self.leave_ends.is_some() {
+            return;
+        }
+        let Some(scroll) = self
+            .card
+            .as_ref()
+            .and_then(|card| card.layout.scroll.as_ref())
+        else {
+            return;
+        };
+        if self.scrolled.by(scroll, delta) {
+            self.stale = true;
+            self.scrolled_at = Some(now);
+        }
+    }
+
     /// Whether frames still change with nothing new coming in.
     pub fn live(&self, now: Instant) -> bool {
         let moving = self
@@ -219,8 +245,12 @@ impl Renderer {
             .heard
             .is_some_and(|heard| seconds(heard, now) < LEVEL_STEP);
         let counting = self.countdown_share(now).is_some_and(|share| share > 0.0);
+        let scrolling = self
+            .scrolled_at
+            .is_some_and(|at| seconds(at, now) < LEVEL_STEP);
         moving
             || easing
+            || scrolling
             || counting
             || self.transition(now).is_some()
             || self.height_transition(now).is_some()
@@ -263,6 +293,9 @@ impl Renderer {
             .iter()
             .map(|&(step, started, _)| (step, seconds(started, now)))
             .collect();
+        let up = self
+            .scrolling()
+            .map_or(0.0, |scroll| self.scrolled.up(scroll));
         Some(use_frame(&Frame {
             show: &scene.show,
             moves: &moves,
@@ -273,6 +306,7 @@ impl Renderer {
             height_from: self.height_transition(now),
             level: self.level,
             countdown_share: self.countdown_share(now),
+            up,
             scale,
             at_least: self.surface_size,
         }))
@@ -295,9 +329,13 @@ impl Renderer {
         Some(Draw { resize, pixmap })
     }
 
-    /// The capsule's or the pill's rectangle while it takes clicks.
+    /// The capsule's or the pill's rectangle while it takes clicks, or while
+    /// its question scrolls.
     pub fn input_region(&self, now: Instant) -> Option<Rect> {
-        let (span, shape, top) = self.clickable(now)?;
+        if !self.takes_clicks() && self.scrolling().is_none() {
+            return None;
+        }
+        let (span, shape, top) = self.shown(now)?;
         let x = ((span - shape.width) / 2.0).floor();
         Some((
             x as i32,
@@ -310,18 +348,26 @@ impl Renderer {
     /// Whether a press at `(x, y)`, surface logical pixels, lands on a
     /// capsule or a pill that takes clicks.
     pub fn opens_at(&self, x: f64, y: f64, now: Instant) -> bool {
-        self.clickable(now)
-            .is_some_and(|(span, shape, top)| card::in_shape(span, shape, x, y - top))
+        self.takes_clicks()
+            && self
+                .shown(now)
+                .is_some_and(|(span, shape, top)| card::in_shape(span, shape, x, y - top))
+    }
+
+    fn takes_clicks(&self) -> bool {
+        self.scene
+            .as_ref()
+            .is_some_and(|scene| takes_clicks(&scene.show))
+    }
+
+    fn scrolling(&self) -> Option<&card::Scroll> {
+        self.card.as_ref()?.layout.scroll.as_ref()
     }
 
     /// The surface's span, the shape as it shows and its top edge to the whole
-    /// pixel, while a scene that takes clicks shows and is not on its way out.
-    fn clickable(&self, now: Instant) -> Option<(f64, Shape, f64)> {
-        let clicks = self
-            .scene
-            .as_ref()
-            .is_some_and(|scene| takes_clicks(&scene.show));
-        if !clicks || self.leave_ends.is_some() {
+    /// pixel, while the scene is not on its way out.
+    fn shown(&self, now: Instant) -> Option<(f64, Shape, f64)> {
+        if self.leave_ends.is_some() {
             return None;
         }
         self.picture(now, 1, |frame| {
@@ -339,6 +385,7 @@ impl Renderer {
         self.leave_ends = None;
         self.line = None;
         self.card = None;
+        self.scrolled = Scrolled::default();
         self.width_from = None;
         self.height_from = None;
         self.surface_size = (0, 0);
@@ -359,6 +406,19 @@ pub fn room_on(width: i32) -> f64 {
 
 pub fn card_room_on(width: i32) -> f64 {
     card::room(f64::from(width) - 2.0 * SCREEN_MARGIN)
+}
+
+/// How far a vertical wheel or touchpad scroll moves the question up toward
+/// its start. A wheel counts a detent as one context line, and `absolute` is
+/// the pixels a touchpad reports. Wayland counts a scroll down as positive.
+pub fn scrolled_up(absolute: f64, discrete: i32, value120: i32) -> f64 {
+    let line = card::Scroll::step();
+    let down = match (value120, discrete) {
+        (0, 0) => absolute,
+        (0, steps) => f64::from(steps) * line,
+        (value120, _) => f64::from(value120) / 120.0 * line,
+    };
+    -down
 }
 
 /// tiny-skia's premultiplied RGBA as `wl_shm` ARGB8888, a premultiplied
@@ -600,6 +660,95 @@ mod tests {
             renderer.input_region(at(t0, 500)),
             Some((0, 0, shape.width.ceil() as i32, shape.height.ceil() as i32))
         );
+    }
+
+    fn overflowing(show: Show, serial: u64) -> Scene {
+        Scene {
+            question: Some(format!("{}. Which one?", vec!["word"; 400].join(" "))),
+            ..scene(show, serial)
+        }
+    }
+
+    #[test]
+    fn an_overflowing_card_takes_scrolls_but_no_clicks() {
+        let t0 = Instant::now();
+        let now = at(t0, 500);
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&overflowing(Show::YourTurn, 1)), t0);
+        let shape = renderer
+            .card
+            .as_ref()
+            .map(|card| card.layout.shape)
+            .expect("a layout");
+        assert_eq!(
+            renderer.input_region(now),
+            Some((0, 0, shape.width.ceil() as i32, shape.height.ceil() as i32))
+        );
+        assert!(!renderer.opens_at(shape.width / 2.0, shape.height / 2.0, now));
+        renderer.show(None, at(t0, 1000));
+        assert_eq!(renderer.input_region(at(t0, 1010)), None, "on its way out");
+    }
+
+    #[test]
+    fn a_scroll_moves_an_overflowing_card_and_marks_the_frame_stale() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&overflowing(Show::YourTurn, 1)), t0);
+        renderer.draw(t0, 1).expect("a card");
+        assert!(!renderer.stale);
+        let up = |renderer: &Renderer| renderer.picture(t0, 1, |frame| frame.up);
+        assert_eq!(up(&renderer), Some(0.0));
+        renderer.scroll(30.0, t0);
+        assert!(renderer.stale);
+        assert_eq!(up(&renderer), Some(30.0));
+        renderer.draw(t0, 1).expect("a card");
+        renderer.scroll(-1000.0, t0);
+        assert_eq!(up(&renderer), Some(0.0));
+        renderer.draw(t0, 1).expect("a card");
+        renderer.scroll(-1.0, t0);
+        assert!(!renderer.stale, "already at rest");
+    }
+
+    #[test]
+    fn a_scroll_paces_its_frames_until_it_settles() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&overflowing(Show::YourTurn, 1)), t0);
+        let settled = at(t0, 5000);
+        assert!(!renderer.live(settled));
+        renderer.scroll(30.0, settled);
+        assert!(renderer.live(settled));
+        let later = settled + Duration::from_secs_f64(LEVEL_STEP);
+        assert!(!renderer.live(later));
+    }
+
+    #[test]
+    fn a_scroll_on_a_short_card_does_nothing() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&card(Show::YourTurn, 1)), t0);
+        renderer.draw(t0, 1).expect("a card");
+        renderer.scroll(30.0, t0);
+        assert!(!renderer.stale);
+        assert_eq!(renderer.picture(t0, 1, |frame| frame.up), Some(0.0));
+    }
+
+    #[test]
+    fn the_scroll_holds_across_scenes_of_one_question_and_resets_for_a_new_one() {
+        let t0 = Instant::now();
+        let mut renderer = Renderer::new();
+        renderer.show(Some(&overflowing(Show::Reading, 1)), t0);
+        let overflow = renderer.scrolling().expect("an overflowing card").overflow;
+        renderer.scroll(overflow, t0);
+        renderer.show(Some(&overflowing(Show::YourTurn, 2)), at(t0, 500));
+        let up = |renderer: &Renderer| renderer.picture(at(t0, 500), 1, |frame| frame.up);
+        assert_eq!(up(&renderer), Some(overflow));
+        let other = Scene {
+            question: Some(format!("{} Which now?", vec!["other"; 400].join(" "))),
+            ..overflowing(Show::YourTurn, 3)
+        };
+        renderer.show(Some(&other), at(t0, 500));
+        assert_eq!(up(&renderer), Some(0.0));
     }
 
     #[test]
@@ -914,6 +1063,16 @@ mod tests {
     fn the_card_room_is_the_card_clear_of_both_screen_margins() {
         assert_eq!(card_room_on(1920), CARD_WIDTH - 2.0 * SIDE);
         assert_eq!(card_room_on(400), 400.0 - 2.0 * SCREEN_MARGIN - 2.0 * SIDE);
+    }
+
+    #[test]
+    fn a_wheel_detent_scrolls_one_context_line_and_down_moves_toward_the_end() {
+        let line = card::Cut::Context.line_height();
+        assert_eq!(scrolled_up(15.0, 1, 120), -line);
+        assert_eq!(scrolled_up(15.0, 1, 0), -line);
+        assert_eq!(scrolled_up(0.0, 0, -60), line / 2.0);
+        assert_eq!(scrolled_up(-7.5, 0, 0), 7.5);
+        assert_eq!(scrolled_up(0.0, 0, 0), 0.0);
     }
 
     #[test]

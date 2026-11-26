@@ -2,7 +2,7 @@
 //! figure and its words in bone, in a panel that never takes focus. Every
 //! call runs on the main thread.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ptr;
 use std::rc::Rc;
 use std::time::Instant;
@@ -38,7 +38,8 @@ use objc2_quartz_core::{
 use super::card::{
     self, Block, CHIP_BORDER, ChipBox, Cut, DRAIN_HEIGHT, DRAIN_RADIUS, DividerKind, Layout, MUTED,
     Measure, PlacedGlyph, RIM, RIM_WIDTH, SEGMENT_GAP, SEGMENT_HEIGHT, SEGMENT_OFF, SEGMENT_RADIUS,
-    SEGMENTS, SIDE, Shape, TRACK_RADIUS, Text, lit_segments, segment_width, share_left,
+    SEGMENTS, SIDE, Scroll, Scrolled, Shape, TRACK_RADIUS, Text, lit_segments, segment_width,
+    share_left,
 };
 use super::chip::{Scene, Show, Trim, missed_name, segments_lit, words_of};
 use super::figure::{
@@ -546,7 +547,10 @@ fn scale_tree(layer: &CALayer, scale: CGFloat) {
 
 struct Clicks {
     open: Box<dyn Fn()>,
+    /// Whether the scene on screen takes clicks.
+    opens: Cell<bool>,
     capsule: Retained<CALayer>,
+    reading: Rc<Reading>,
 }
 
 define_class!(
@@ -566,22 +570,23 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            let capsule = &self.ivars().capsule;
-            let size = capsule.bounds().size;
-            let view = self.bounds().size;
-            let at = event.locationInWindow();
-            if card::in_shape(
-                view.width,
-                Shape {
-                    width: size.width,
-                    height: size.height,
-                    radius: capsule.cornerRadius(),
-                },
-                at.x,
-                TRAVEL + size.height - at.y,
-            ) {
+            if self.ivars().opens.get() && self.inside(event.locationInWindow()) {
                 (self.ivars().open)();
             }
+        }
+
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            if !self.inside(event.locationInWindow()) {
+                return;
+            }
+            let delta = event.scrollingDeltaY();
+            let points = if event.hasPreciseScrollingDeltas() {
+                delta
+            } else {
+                delta * Scroll::step()
+            };
+            self.ivars().reading.by(points);
         }
 
         #[unsafe(method(accessibilityPerformPress))]
@@ -597,11 +602,108 @@ impl ChipView {
         mtm: MainThreadMarker,
         open: Box<dyn Fn()>,
         capsule: Retained<CALayer>,
+        reading: Rc<Reading>,
     ) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(Clicks { open, capsule });
+        let this = Self::alloc(mtm).set_ivars(Clicks {
+            open,
+            opens: Cell::new(false),
+            capsule,
+            reading,
+        });
         let frame = rect(0.0, 0.0, CAPSULE, TRAVEL + CAPSULE);
         // SAFETY: initWithFrame: is NSView's designated initialiser.
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    /// Whether `at`, in the window's coordinates, lies in the capsule's shape.
+    fn inside(&self, at: CGPoint) -> bool {
+        let capsule = &self.ivars().capsule;
+        let size = capsule.bounds().size;
+        card::in_shape(
+            self.bounds().size.width,
+            Shape {
+                width: size.width,
+                height: size.height,
+                radius: capsule.cornerRadius(),
+            },
+            at.x,
+            TRAVEL + size.height - at.y,
+        )
+    }
+}
+
+/// The question's text while it overflows the card: a clipped viewport whose
+/// text layer moves as the reader scrolls, with its edges faded.
+struct Reading {
+    viewport: Retained<CALayer>,
+    text: Retained<CALayer>,
+    edges: Retained<CAGradientLayer>,
+    scroll: RefCell<Option<Scroll>>,
+    scrolled: RefCell<Scrolled>,
+    /// The text layer's frame at rest.
+    rest: Cell<CGRect>,
+}
+
+impl Reading {
+    fn build(body: &CALayer) -> Self {
+        let viewport = CALayer::new();
+        viewport.setMasksToBounds(true);
+        viewport.setHidden(true);
+        let text = CALayer::new();
+        let edges = CAGradientLayer::new();
+        body.addSublayer(&viewport);
+        viewport.addSublayer(&text);
+        // SAFETY: the mask is new, sits in no layer tree, and masks the viewport alone.
+        unsafe { viewport.setMask(Some(&edges)) };
+        Reading {
+            viewport,
+            text,
+            edges,
+            scroll: RefCell::new(None),
+            scrolled: RefCell::new(Scrolled::default()),
+            rest: Cell::new(CGRect::ZERO),
+        }
+    }
+
+    /// The text shows in `card` through the viewport `scroll` sets. Without
+    /// one the viewport hides and the body holds the text.
+    fn frame(&self, scroll: Option<&Scroll>, card: CGSize) {
+        self.viewport.setHidden(scroll.is_none());
+        if let Some(scroll) = scroll {
+            let bottom = card.height - scroll.top - scroll.height;
+            self.viewport
+                .setFrame(rect(0.0, bottom, card.width, scroll.height));
+            self.edges.setFrame(self.viewport.bounds());
+            self.rest.set(rect(0.0, -bottom, card.width, card.height));
+        }
+        *self.scroll.borrow_mut() = scroll.cloned();
+        self.place();
+    }
+
+    fn by(&self, delta: f64) {
+        let moved = self
+            .scroll
+            .borrow()
+            .as_ref()
+            .is_some_and(|scroll| self.scrolled.borrow_mut().by(scroll, delta));
+        if moved {
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            self.place();
+            CATransaction::commit();
+        }
+    }
+
+    fn place(&self) {
+        let scroll = self.scroll.borrow();
+        let Some(scroll) = scroll.as_ref() else {
+            return;
+        };
+        let up = self.scrolled.borrow().up(scroll);
+        let mut frame = self.rest.get();
+        frame.origin.y -= up;
+        self.text.setFrame(frame);
+        shade(&self.edges, &scroll.edges(up));
     }
 }
 
@@ -669,7 +771,7 @@ impl Panel {
         let root = CALayer::new();
         let layers = Layers::build(&root);
         let card = CardLayers::build(&layers.capsule);
-        let view = ChipView::new(mtm, open, layers.capsule.clone());
+        let view = ChipView::new(mtm, open, layers.capsule.clone(), Rc::clone(&card.reading));
         view.setLayer(Some(&root));
         view.setWantsLayer(true);
         window.setContentView(Some(&view));
@@ -711,6 +813,11 @@ impl Panel {
     }
 
     pub fn show(&mut self, scene: Option<&Scene>) {
+        self.card
+            .reading
+            .scrolled
+            .borrow_mut()
+            .keep(scene.and_then(|scene| scene.question.as_deref()));
         if self.on_screen.as_ref() == scene {
             if let Some(countdown) = scene.and_then(|scene| scene.countdown)
                 && self.calm
@@ -782,8 +889,7 @@ impl Panel {
             self.play(step);
         }
         CATransaction::commit();
-        self.window
-            .setIgnoresMouseEvents(!takes_clicks(&scene.show));
+        self.take_mouse(scene);
         expose(&self.window, &self.view, Some(&scene.show));
         self.window.orderFrontRegardless();
         self.on_screen = Some(scene.clone());
@@ -800,7 +906,20 @@ impl Panel {
         }
         CATransaction::commit();
         self.layout = layout;
+        self.take_mouse(scene);
         self.on_screen = Some(scene.clone());
+    }
+
+    /// The panel takes the mouse for a scene that takes clicks, and for a
+    /// question that scrolls.
+    fn take_mouse(&self, scene: &Scene) {
+        let opens = takes_clicks(&scene.show);
+        let scrolls = self
+            .layout
+            .as_ref()
+            .is_some_and(|layout| layout.scroll.is_some());
+        self.view.ivars().opens.set(opens);
+        self.window.setIgnoresMouseEvents(!(opens || scrolls));
     }
 
     fn lay_out(&self, scene: &Scene, place: Place) -> Option<Layout> {
@@ -874,6 +993,7 @@ impl Panel {
             return;
         };
         self.window.setIgnoresMouseEvents(true);
+        self.view.ivars().opens.set(false);
         expose(&self.window, &self.view, None);
         let Some(step) = leaving(&was.show, self.calm) else {
             self.window.orderOut(None);
@@ -1186,6 +1306,22 @@ fn chip_layer(chip: &ChipBox, card: CGSize, fonts: &Fonts) -> Retained<CALayer> 
     layer
 }
 
+/// Sets `mask` to each `(share, alpha)` stop, with shares measured down from
+/// its top.
+fn shade(mask: &CAGradientLayer, stops: &[(f64, f64)]) {
+    mask.setStartPoint(CGPoint::new(0.5, 1.0));
+    mask.setEndPoint(CGPoint::new(0.5, 0.0));
+    let locations: Vec<_> = stops
+        .iter()
+        .map(|&(share, _)| NSNumber::new_cgfloat(share))
+        .collect();
+    mask.setLocations(Some(&NSArray::from_retained_slice(&locations)));
+    let colours: Vec<_> = stops.iter().map(|&(_, alpha)| color(BONE, alpha)).collect();
+    let colours: Vec<&AnyObject> = colours.iter().map(|colour| (**colour).as_ref()).collect();
+    // SAFETY: a gradient's colours are CGColors, which each element is.
+    unsafe { mask.setColors(Some(&NSArray::from_slice(&colours))) };
+}
+
 /// `card` is the card's size.
 fn block_layer(block: &Block, card: CGSize, fonts: &Fonts) -> Retained<CALayer> {
     let layer = CALayer::new();
@@ -1200,12 +1336,7 @@ fn block_layer(block: &Block, card: CGSize, fonts: &Fonts) -> Retained<CALayer> 
     if let Some(fade) = block.fade {
         let mask = CAGradientLayer::new();
         mask.setFrame(layer.bounds());
-        let ends = [color(BONE, 0.0), color(BONE, 1.0)];
-        let ends: [&AnyObject; 2] = [(*ends[0]).as_ref(), (*ends[1]).as_ref()];
-        // SAFETY: a gradient's colours are CGColors, which each element is.
-        unsafe { mask.setColors(Some(&NSArray::from_slice(&ends))) };
-        mask.setStartPoint(CGPoint::new(0.5, 1.0));
-        mask.setEndPoint(CGPoint::new(0.5, 1.0 - fade / block.height));
+        shade(&mask, &[(0.0, 0.0), (fade / block.height, 1.0)]);
         // SAFETY: the mask is new, sits in no layer tree, and masks this block alone.
         unsafe { layer.setMask(Some(&mask)) };
     }
@@ -1214,6 +1345,7 @@ fn block_layer(block: &Block, card: CGSize, fonts: &Fonts) -> Retained<CALayer> 
 
 struct CardLayers {
     body: Retained<CALayer>,
+    reading: Rc<Reading>,
     blocks: Vec<Retained<CALayer>>,
     divider: Retained<CALayer>,
     drain: Retained<CALayer>,
@@ -1245,6 +1377,7 @@ impl CardLayers {
         glyph.setBounds(rect(0.0, 0.0, SLOT, GLYPH));
         glyph.setGeometryFlipped(true);
         capsule.addSublayer(&body);
+        let reading = Rc::new(Reading::build(&body));
         body.addSublayer(&divider);
         body.addSublayer(&drain);
         for segment in &segments {
@@ -1254,6 +1387,7 @@ impl CardLayers {
         answer.addSublayer(&glyph);
         CardLayers {
             body,
+            reading,
             blocks: Vec::new(),
             divider,
             drain,
@@ -1292,9 +1426,17 @@ impl CardLayers {
             self.chip = Some(layer);
         }
         if let Some((answer, question)) = layout.blocks.split_last() {
+            let holder_of = |at: usize| {
+                if layout.scrolls(at) {
+                    &self.reading.text
+                } else {
+                    &self.body
+                }
+            };
             for (block, holder) in question
                 .iter()
-                .map(|block| (block, &self.body))
+                .enumerate()
+                .map(|(at, block)| (block, holder_of(at)))
                 .chain([(answer, &self.answer)])
             {
                 let layer = block_layer(block, size, fonts);
@@ -1303,6 +1445,7 @@ impl CardLayers {
                 self.blocks.push(layer);
             }
         }
+        self.reading.frame(layout.scroll.as_ref(), size);
         let (thin, draining, stepped) = match &layout.divider {
             Some(divider) => {
                 let track = rect(

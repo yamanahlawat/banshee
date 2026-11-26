@@ -35,7 +35,7 @@ use tiny_skia::Pixmap;
 
 use crate::chip::Scene;
 use crate::figure::{ABOVE_DEFAULT_DOCK, CAPSULE, TRAVEL};
-use crate::renderer::{Order, Rect, Renderer, card_room_on, room_on, to_argb};
+use crate::renderer::{Order, Rect, Renderer, card_room_on, room_on, scrolled_up, to_argb};
 
 enum Command {
     Show(Option<Scene>),
@@ -601,13 +601,21 @@ impl PointerHandler for Stage {
     ) {
         let now = Instant::now();
         for event in events {
-            let PointerEventKind::Press { button, .. } = event.kind else {
+            if !self.owns(&event.surface) {
                 continue;
-            };
-            let (x, y) = event.position;
-            if button == BTN_LEFT && self.owns(&event.surface) && self.renderer.opens_at(x, y, now)
-            {
-                (self.open)();
+            }
+            match event.kind {
+                PointerEventKind::Press { button, .. } => {
+                    let (x, y) = event.position;
+                    if button == BTN_LEFT && self.renderer.opens_at(x, y, now) {
+                        (self.open)();
+                    }
+                }
+                PointerEventKind::Axis { vertical, .. } => self.renderer.scroll(
+                    scrolled_up(vertical.absolute, vertical.discrete, vertical.value120),
+                    now,
+                ),
+                _ => {}
             }
         }
     }
