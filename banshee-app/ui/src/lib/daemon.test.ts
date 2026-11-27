@@ -69,24 +69,19 @@ describe('the state word', () => {
     expect(stateWord(state)).toBe('Recording');
     expect(lampForm('Recording')).toBe('recording');
   });
-  it('is Listening while armed, because the daemon holds the microphone open then too', () => {
+  it('is Your turn while armed, because the daemon holds the microphone open then too', () => {
     const state = reduceLive(reduceStatus(empty(), ready), armed);
     expect(state.live.recording).toBe(true);
-    expect(stateWord(state)).toBe('Listening');
+    expect(stateWord(state)).toBe('Your turn');
   });
   it('is Working while transcribing, even though the mode has not gone idle', () => {
     const state = reduceLive(reduceStatus(empty(), ready), transcribing);
     expect(stateWord(state)).toBe('Working');
     expect(lampForm('Working')).toBe('busy');
   });
-  it('is Working while an agent a tell started still runs', () => {
-    const state = reduceLive(reduceStatus(empty(), ready), { telling: true, activity: 'busy' });
-    expect(stateWord(state)).toBe('Working');
-    expect(lampForm('Working')).toBe('busy');
-  });
   // Which flag outranks which is `Activity::of`, tested in banshee-common.
   it.each([
-    ['listening', 'Listening'],
+    ['listening', 'Your turn'],
     ['recording', 'Recording'],
     ['speaking', 'Speaking'],
     ['busy', 'Working'],
@@ -95,7 +90,7 @@ describe('the state word', () => {
       activity: said,
       recording: true,
       armed: true,
-      telling: true,
+      loading_model: true,
       transcribing: true,
       speaking: true,
     });
@@ -138,18 +133,29 @@ describe('readiness', () => {
   it('is not stale before any status was read', () => {
     expect(readinessIsStale(empty(), { pipeline: 'open' })).toBe(false);
   });
+  it('is stale when a push flips the microphone refusal either way', () => {
+    expect(readinessIsStale(opening, { microphone_refused: true })).toBe(true);
+    const refused = reduceLive(opening, { microphone_refused: true });
+    expect(readinessIsStale(refused, { microphone_refused: false })).toBe(true);
+  });
+  it('is not stale when the microphone refusal is absent or unchanged', () => {
+    expect(readinessIsStale(opening, { microphone_refused: false })).toBe(false);
+    const refused = reduceLive(opening, { microphone_refused: true });
+    expect(readinessIsStale(refused, { microphone_refused: true })).toBe(false);
+    expect(readinessIsStale(refused, {})).toBe(false);
+  });
 });
 
 describe('pending', () => {
-  it('is whatever the daemon says waits for a restart', () => {
+  it('is whatever the daemon says it could not use yet', () => {
     const state = reduceStatus(empty(), pendingCues);
     expect(state.pending.has('audio.hotkey')).toBe(true);
   });
   it('clears when the daemon stops reporting the key', () => {
-    let state = markPending(reduceStatus(empty(), pendingCues), ['stt.language']);
-    expect(state.pending.has('stt.language')).toBe(true);
+    let state = markPending(reduceStatus(empty(), pendingCues), ['stt.translate']);
+    expect(state.pending.has('stt.translate')).toBe(true);
     state = reduceStatus(state, ready);
-    expect(state.pending.has('stt.language')).toBe(false);
+    expect(state.pending.has('stt.translate')).toBe(false);
     expect(state.pending.has('audio.hotkey')).toBe(false);
   });
 });
@@ -339,10 +345,10 @@ it('names the file once when the server sent no length', () => {
   expect(spokenProgress({ ...tick, bytes: 90 * 1_048_576 })).toBe('kokoro.onnx');
 });
 
-// Listening means an agent has stopped and is waiting for an answer. It shared
+// Your turn means an agent has stopped and is waiting for an answer. It shared
 // a silhouette with Ready, which is the state where doing nothing is correct.
-it('gives Listening a form of its own', () => {
-  expect(lampForm('Listening')).toBe('listening');
+it('gives Your turn a form of its own', () => {
+  expect(lampForm('Your turn')).toBe('listening');
   expect(lampForm('Ready')).toBe('idle');
 });
 
@@ -357,22 +363,20 @@ it('reads the last error off a status reply', () => {
 });
 
 describe('the facts each side reports', () => {
-  const NO_KEYS = new Set<string>();
   const KOKORO = [{ id: 'af_sky', name: 'Sky' }];
   const running = () => reduceStatus(empty(), remote as unknown as Status);
 
-  it('reads the listener the daemon runs, and the server the config asks for', () => {
-    const facts = listeningFacts(running(), NO_KEYS);
+  it('reads the listener the daemon runs', () => {
+    const facts = listeningFacts(running());
     expect(facts.remote).toBe(remote.remote.stt.remote);
     expect(facts.host).toBe(remote.remote.stt.host);
     expect(facts.keyPresent).toBe(remote.remote.stt.key_present);
-    expect(facts.willUse).toBe(new URL(remote.config.stt.remote.base_url).hostname);
     expect(facts.device).toBe(remote.audio_device);
     expect(facts.live).toBe(true);
   });
 
   it('reads the speaker the daemon runs, and not the provider the config names', () => {
-    const facts = speechFacts(running(), NO_KEYS, KOKORO);
+    const facts = speechFacts(running(), KOKORO);
     expect(remote.config.tts.provider).toBe('local');
     expect(facts.remote).toBe(remote.remote.tts.remote);
     expect(facts.started).toBe(remote.remote.tts.speaker_started);
@@ -390,23 +394,14 @@ describe('the facts each side reports', () => {
         tts: { remote: true, host: '', speaker_started: true, key_present: true },
       },
     });
-    expect(listeningFacts(state, NO_KEYS).host).toBeNull();
-    expect(speechFacts(state, NO_KEYS, KOKORO).host).toBeNull();
-  });
-
-  it('names no server when the config holds no URL to read one from', () => {
-    const state = reduceStatus(empty(), {
-      ...(remote as unknown as Status),
-      config: { stt: { remote: { base_url: 'api.openai.com' } }, tts: {} },
-    });
-    expect(listeningFacts(state, NO_KEYS).willUse).toBeNull();
-    expect(speechFacts(state, NO_KEYS, KOKORO).willUse).toBeNull();
+    expect(listeningFacts(state).host).toBeNull();
+    expect(speechFacts(state, KOKORO).host).toBeNull();
   });
 
   // Kokoro's list holds no entry for a voice a server names, so the name comes
   // from the table the speaker in force reads.
   it('takes a local voice from the list and a remote one from its own table', () => {
-    expect(speechFacts(running(), NO_KEYS, KOKORO).voiceName).toBe('Sky');
+    expect(speechFacts(running(), KOKORO).voiceName).toBe('Sky');
 
     const spoken = reduceStatus(empty(), {
       ...(remote as unknown as Status),
@@ -419,27 +414,27 @@ describe('the facts each side reports', () => {
         tts: { ...remote.config.tts, remote: { ...remote.config.tts.remote, voice: 'marin' } },
       },
     });
-    expect(speechFacts(spoken, NO_KEYS, KOKORO).voiceName).toBe('marin');
+    expect(speechFacts(spoken, KOKORO).voiceName).toBe('marin');
+  });
+
+  // The lead offers the Get button only for a voice whose files are missing.
+  it('says whether the local voice is on this machine', () => {
+    const here = [{ id: 'af_sky', name: 'Sky', downloaded: true }];
+    const missing = [{ id: 'af_sky', name: 'Sky', downloaded: false }];
+    expect(speechFacts(running(), here).voiceDownloaded).toBe(true);
+    expect(speechFacts(running(), missing).voiceDownloaded).toBe(false);
   });
 
   // A voice the daemon holds that Kokoro's list does not name still reaches the
   // reader, because the list arrives from a call of its own and can be empty.
   it('falls back to the voice the config names', () => {
-    expect(speechFacts(running(), NO_KEYS, []).voiceName).toBe(remote.config.tts.voice);
-  });
-
-  it('gives each side only the restart its own provider waits on', () => {
-    const state = running();
-    expect(listeningFacts(state, new Set(['stt.provider'])).pending).toBe(true);
-    expect(speechFacts(state, new Set(['stt.provider']), KOKORO).pending).toBe(false);
-    expect(listeningFacts(state, new Set(['tts.provider'])).pending).toBe(false);
-    expect(speechFacts(state, new Set(['tts.provider']), KOKORO).pending).toBe(true);
+    expect(speechFacts(running(), []).voiceName).toBe(remote.config.tts.voice);
   });
 
   it('says neither side is live while the daemon is down', () => {
     const state = reduceStatus(empty(), notRunning as Status);
-    expect(listeningFacts(state, NO_KEYS).live).toBe(false);
-    expect(speechFacts(state, NO_KEYS, KOKORO).live).toBe(false);
+    expect(listeningFacts(state).live).toBe(false);
+    expect(speechFacts(state, KOKORO).live).toBe(false);
   });
 
   // A pipeline blocker with another id, such as the Linux typer, stops the
@@ -459,7 +454,6 @@ describe('the facts each side reports', () => {
             },
           ],
         }),
-        NO_KEYS,
       ).stoppedBy;
     expect(stoppedBy('pipeline')).toBe('pipeline');
     expect(stoppedBy('provider')).toBe('provider');
@@ -471,7 +465,32 @@ describe('the facts each side reports', () => {
       blockers: permissions.blockers as Blocker[],
     });
     expect(ungranted.status?.blockers).toHaveLength(1);
-    expect(listeningFacts(ungranted, NO_KEYS).stoppedBy).toBeNull();
+    expect(listeningFacts(ungranted).stoppedBy).toBeNull();
+  });
+
+  it('reads whether the microphone is open, held open, or loading off the daemon', () => {
+    const idle = running();
+    expect(listeningFacts(idle).open).toBe(false);
+    expect(listeningFacts(idle).keepOpen).toBe(false);
+    expect(listeningFacts(idle).loading).toBe(false);
+
+    const using = reduceLive(idle, { microphone_open: true, loading_model: true });
+    expect(listeningFacts(using).open).toBe(true);
+    expect(listeningFacts(using).loading).toBe(true);
+
+    const kept = reduceStatus(empty(), {
+      ...(remote as unknown as Status),
+      config: { ...remote.config, audio: { ...remote.config.audio, keep_open: true } },
+    });
+    expect(listeningFacts(kept).keepOpen).toBe(true);
+  });
+
+  // The refusal is pushed, so the window hears a grant move without reading
+  // status again.
+  it('reads a refused microphone off the pushed flag', () => {
+    expect(listeningFacts(running()).refused).toBe(false);
+    const refused = reduceLive(running(), { microphone_refused: true });
+    expect(listeningFacts(refused).refused).toBe(true);
   });
 });
 

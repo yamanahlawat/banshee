@@ -2,25 +2,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use banshee_common::error::BansheeError;
+use banshee_common::listening::ListeningModel;
 use banshee_common::{
     BANSHEE_AGENTS, BANSHEE_ASK_USER, BANSHEE_CLEAR_HISTORY, BANSHEE_CONFIGURE,
-    BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS,
-    BANSHEE_GET_TRANSCRIPTION, BANSHEE_HISTORY, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_LANGUAGES,
-    BANSHEE_LIST_VOICES, BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP,
-    BANSHEE_RECORD_TOGGLE, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP, BANSHEE_STOP_SPEAKING,
-    BANSHEE_SUBSCRIBE, BANSHEE_TURN_ENDED,
+    BANSHEE_CONNECT_APPLY, BANSHEE_CONNECT_PLAN, BANSHEE_DOWNLOAD_MODELS, BANSHEE_HISTORY,
+    BANSHEE_HISTORY_AUDIO, BANSHEE_LIST_INPUT_DEVICES, BANSHEE_LIST_VOICES,
+    BANSHEE_OPEN_PERMISSION, BANSHEE_RECORD_START, BANSHEE_RECORD_STOP, BANSHEE_RECORD_TOGGLE,
+    BANSHEE_RESTART, BANSHEE_RETRY, BANSHEE_SPEAK, BANSHEE_STATUS, BANSHEE_STOP,
+    BANSHEE_STOP_SPEAKING, BANSHEE_SUBSCRIBE, BANSHEE_TURN_ENDED, NO_AUDIO,
 };
 use banshee_common::{JsonRpcRequest, JsonRpcResponse, rpc_code};
 
+use crate::client::Caller;
 use crate::connect;
+use crate::history::{Kind, NewEntry, Outcome};
 use crate::permissions;
 use crate::state::{
-    AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, TranscribeTarget,
+    AskCommand, ConsumerCommand, DaemonState, RecordingError, RecordingMode, RetryCommand,
 };
 use crate::text_to_speech::sanitizer::sanitize;
 use crate::{readiness, settings};
 
-const MAX_WAIT_MS: u64 = 30_000;
 const DEFAULT_ASK_WAIT_MS: u64 = 30_000;
 const MAX_ASK_WAIT_MS: u64 = 120_000;
 // Budget scales with question length; the per-word figure is a speech-rate
@@ -29,25 +31,39 @@ const PLAYBACK_BASE_MS: u64 = 15_000;
 const PLAYBACK_PER_WORD_MS: u64 = 700;
 const MAX_PLAYBACK_WAIT_MS: u64 = 120_000;
 
+const NO_PIPELINE: &str = "Audio pipeline is not running.";
+
 fn from_error(id: Option<serde_json::Value>, error: BansheeError) -> JsonRpcResponse {
     JsonRpcResponse::error(id, error.rpc_code(), error.rpc_message())
 }
 
-/// `Env::from_machine` polls a login shell for up to five seconds, and an
-/// apply waits on an agent's own CLI with no timeout. On a worker thread that
-/// wait holds every other socket behind it.
+/// `Env::from_machine` polls a login shell for up to five seconds, an apply
+/// waits on an agent's own CLI with no timeout, and a speaker switch builds
+/// its client and drops the old voice. On a worker thread that wait holds
+/// every other socket behind it.
 async fn off_the_worker(
     id: Option<serde_json::Value>,
     work: impl FnOnce() -> Result<serde_json::Value, BansheeError> + Send + 'static,
 ) -> JsonRpcResponse {
+    match on_a_blocking_thread(id.clone(), work).await {
+        Ok(result) => JsonRpcResponse::success(id, result),
+        Err(response) => *response,
+    }
+}
+
+/// As `off_the_worker`, for a handler that goes on with the answer.
+async fn on_a_blocking_thread<T: Send + 'static>(
+    id: Option<serde_json::Value>,
+    work: impl FnOnce() -> Result<T, BansheeError> + Send + 'static,
+) -> Result<T, Box<JsonRpcResponse>> {
     match tokio::task::spawn_blocking(work).await {
-        Ok(Ok(result)) => JsonRpcResponse::success(id, result),
-        Ok(Err(error)) => from_error(id, error),
-        Err(_) => JsonRpcResponse::error(
+        Ok(Ok(answer)) => Ok(answer),
+        Ok(Err(error)) => Err(Box::new(from_error(id, error))),
+        Err(_) => Err(Box::new(JsonRpcResponse::error(
             id,
             rpc_code::INTERNAL,
-            "The connect task stopped before it answered.",
-        ),
+            "The task stopped before it answered.",
+        ))),
     }
 }
 
@@ -131,14 +147,18 @@ impl<'a> Params<'a> {
         })
     }
 
+    fn required(&self, key: &str, more: &str) -> Box<JsonRpcResponse> {
+        Box::new(JsonRpcResponse::error(
+            self.id(),
+            rpc_code::INVALID_PARAMS,
+            format!("'{key}' is required{more}."),
+        ))
+    }
+
     fn str(&self, key: &str) -> Result<&'a str, Box<JsonRpcResponse>> {
-        self.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
-            Box::new(JsonRpcResponse::error(
-                self.id(),
-                rpc_code::INVALID_PARAMS,
-                format!("'{key}' is required and must be a string."),
-            ))
-        })
+        self.get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| self.required(key, " and must be a string"))
     }
 
     // absent → default; present but not a u64 → -32602 naming the field
@@ -165,6 +185,11 @@ impl<'a> Params<'a> {
             .map(|value| value.unwrap_or(false))
     }
 
+    fn required_i64(&self, key: &str) -> Result<i64, Box<JsonRpcResponse>> {
+        self.typed(key, serde_json::Value::as_i64, "an integer")?
+            .ok_or_else(|| self.required(key, ""))
+    }
+
     fn optional_u64(&self, key: &str) -> Result<Option<u64>, Box<JsonRpcResponse>> {
         self.typed(key, serde_json::Value::as_u64, "a non-negative integer")
     }
@@ -178,23 +203,21 @@ impl<'a> Params<'a> {
     }
 }
 
-fn count_speech(
-    params: &Params<'_>,
-    daemon_state: &DaemonState,
-) -> Result<(), Box<JsonRpcResponse>> {
-    if let Some(agent_pid) = params.optional_pid("agent_pid")? {
-        daemon_state.spoken().spoke(agent_pid);
+fn count_speech(agent: Option<u32>, daemon_state: &DaemonState) {
+    if let Some(agent) = agent {
+        daemon_state.spoken().spoke(agent);
     }
-    Ok(())
 }
 
 // The daemon started without a pipeline. The code says which fix applies, so a
 // client can prompt for a microphone or re-run setup instead of retrying.
 fn unavailable(id: Option<serde_json::Value>, error: &RecordingError) -> JsonRpcResponse {
     let code = match error {
-        RecordingError::Microphone(_) => rpc_code::MICROPHONE,
-        RecordingError::Model(_) => rpc_code::MODEL,
-        RecordingError::Provider(_) => rpc_code::PROVIDER,
+        RecordingError::Microphone(_) | RecordingError::MicrophoneRefused(_) => {
+            rpc_code::MICROPHONE
+        }
+        RecordingError::Model(_) | RecordingError::NoListeningModel(_) => rpc_code::MODEL,
+        RecordingError::Provider(_) | RecordingError::UnbuiltListener(_) => rpc_code::PROVIDER,
         RecordingError::KeyFile(_) => rpc_code::KEY_FILE,
     };
     JsonRpcResponse::error(id, code, format!("Recording is unavailable: {error}"))
@@ -211,6 +234,7 @@ struct EndsTheSession<'a> {
 impl Drop for EndsTheSession<'_> {
     fn drop(&mut self) {
         self.state.disarm(self.session);
+        self.state.publish_question("", None);
     }
 }
 
@@ -225,7 +249,7 @@ fn not_recording(
         crate::state::Pipeline::Opening => Some(Box::new(JsonRpcResponse::error(
             id,
             rpc_code::MICROPHONE,
-            "Recording is unavailable: the microphone is still opening",
+            "Recording is unavailable: Banshee is still starting",
         ))),
         crate::state::Pipeline::Broken(error) => Some(Box::new(unavailable(id, error))),
     }
@@ -243,17 +267,17 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
     // of the pipeline.
     let pipeline = daemon_state.pipeline();
     let blockers = readiness::blockers(daemon_state, &pipeline);
-    let running = daemon_state.running_config();
     // Read once for the two sides below, so one reply cannot answer from two
     // states of the file. A file that will not parse holds no key either way.
-    let credentials = crate::credentials::Credentials::load().ok();
+    let credentials = crate::credentials::Credentials::read(daemon_state.credentials_path()).ok();
     // The same call the `banshee.state_changed` push answers with, so a reply
     // and a push cannot spell one fact two ways.
-    let mut payload = live_state_at(daemon_state, &pipeline);
+    let mut payload = live_state_at(daemon_state, &pipeline, &blockers);
+    let facts = crate::speech_to_text::ModelFacts::of(daemon_state.stt_model());
     let rest = serde_json::json!({
         "running": true,
         "version": daemon_state.version(),
-        "stt_model": daemon_state.stt_model(),
+        "stt_model": daemon_state.stt_model().map(|model| model.id),
         "vad_model": daemon_state.vad_model(),
         "uptime_seconds": daemon_state.uptime().as_secs(),
         "vad_threshold": daemon_state.vad_threshold(),
@@ -264,8 +288,8 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             &daemon_state.wanted_downloads(),
             daemon_state.models_dir(),
         ),
-        // What is absent, which is not what stops Banshee working: a heavier
-        // preset chosen while dictation runs on the loaded one is a file to
+        // What is absent, which is not what stops Banshee working: another
+        // model chosen while dictation runs on the loaded one is a file to
         // fetch and no blocker at all. A client pricing one of these must not
         // reach for the sum above, which covers the detector and the voice too.
         "missing_downloads": crate::models::download::still_missing(
@@ -281,26 +305,27 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
             })
         })
         .collect::<Vec<_>>(),
-        // The English-only build reads English whatever `stt.language` says.
-        // Read off the model the listener loaded, not the configured preset:
-        // a preset applied without persist moves one and not the other.
-        "english_only": daemon_state
-            .stt_model()
-            .is_some_and(crate::speech_to_text::english_only),
+        // The model the listener runs or waits for, not the configured one: a
+        // model applied without persist moves one and not the other.
+        "stt_translates": facts.translates,
+        "stt_models": listening_models(
+            &daemon_state.config().stt.model,
+            daemon_state.models_dir(),
+            &crate::models::licences::Accepted::at(daemon_state.licences().to_path_buf()),
+        ),
         // False where the compositor holds the binding, so the window does not
         // name a key the daemon never listens for.
         "hotkey_listens": crate::hotkey::listens(),
         "bindable_modifiers": crate::binding::bindable_modifiers(),
         // Stated, so no client invents a narrower definition of ready
         "ready": ready(&blockers, &pipeline),
-        "blockers": blockers,
         "config": &*daemon_state.config(),
         "pending": daemon_state.pending(),
-        // The providers are read at startup, so the running config answers,
-        // not the file a `persist` write has already replaced. The key file is
-        // read each time: a key set after startup is "present" before the restart.
+        // The listener and the speaker in force answer for their sides. The
+        // key file is read each time.
         "remote": remote_report(
-            &running,
+            &daemon_state.listener_route(),
+            &daemon_state.speaker_spec(),
             |side| credentials.as_ref().is_some_and(|held| held.key(side).is_some()),
             daemon_state.speaker_started(),
         ),
@@ -313,78 +338,141 @@ pub fn status_payload(daemon_state: &DaemonState) -> serde_json::Value {
         .as_object_mut()
         .expect("live_state answers an object")
         .extend(rest);
-    with_key_press_access(payload)
+    #[cfg(target_os = "macos")]
+    {
+        // Only the daemon can answer this, so only its reply carries it.
+        payload["key_press_access"] = daemon_state.key_presses().as_str().into();
+    }
+    payload
+}
+
+/// The listening models the window offers: the suggestions, then each one
+/// already downloaded, then the configured one when it is neither.
+fn listening_models(
+    configured: &str,
+    dir: &std::path::Path,
+    accepted: &crate::models::licences::Accepted,
+) -> Vec<serde_json::Value> {
+    use crate::models::{download, licences};
+    use banshee_common::listening::{CATALOGUE, SUGGESTED, find};
+    let on_disk: std::collections::HashSet<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let offered: Vec<(&ListeningModel, bool, bool)> = CATALOGUE
+        .iter()
+        .map(|model| {
+            let suggested = SUGGESTED.iter().any(|one| one.id == model.id);
+            (model, suggested, on_disk.contains(model.file))
+        })
+        .filter(|&(_, suggested, here)| suggested || here)
+        .collect();
+    // Neither suggested nor here, or it would be offered already
+    let configured = find(configured)
+        .filter(|model| !offered.iter().any(|(one, ..)| one == model))
+        .map(|model| (model, false, false));
+    offered
+        .into_iter()
+        .chain(configured)
+        .map(|(model, suggested, here)| {
+            serde_json::json!({
+                "id": model.id,
+                "label": model.label(),
+                "megabytes": download::listening_file(model).megabytes,
+                "downloaded": here,
+                "suggested": suggested,
+                "languages": model.languages,
+                "streams": model.streams,
+                "credit": model.credit(),
+                "licence": {
+                    "name": model.licence.name,
+                    "summary": model.licence.summary,
+                },
+                "accept_command": (!here && accepted.blocks(model))
+                    .then(|| licences::accept_command(model)),
+            })
+        })
+        .collect()
 }
 
 /// Where each side sends what it handles, and whether its key is set. The key
 /// read is a parameter so a test can answer for one side without a key file.
-/// `speaker_started` says whether the speaker the config names is the one
-/// running. It is false under a local provider whose Kokoro failed to load,
-/// because the system voice speaks then too.
+/// `listener` is the route of the listener in force, and `speaker` what the
+/// speaker in force was built from. `speaker_started` says whether the speaker
+/// the config names is the one running. It is false under a local provider
+/// whose voice has not loaded.
 fn remote_report(
-    config: &crate::config::Config,
+    listener: &crate::speech_to_text::Route,
+    speaker: &crate::text_to_speech::SpeakerSpec,
     key_present: impl Fn(crate::credentials::RemoteKey) -> bool,
     speaker_started: bool,
 ) -> serde_json::Value {
+    let listener_host = match listener {
+        crate::speech_to_text::Route::Local => None,
+        crate::speech_to_text::Route::Remote { base_url, .. } => {
+            Some(crate::config::host_of(base_url))
+        }
+    };
     serde_json::json!({
         "stt": {
-            "remote": config.stt.provider.is_remote(),
-            "host": config.stt.provider.is_remote().then(|| config.stt.remote.host()),
+            "remote": listener_host.is_some(),
+            "host": listener_host,
             "key_present": key_present(crate::credentials::RemoteKey::Stt),
         },
         "tts": {
-            "remote": config.tts.provider.is_remote(),
-            "host": config.tts.provider.is_remote().then(|| config.tts.remote.host()),
+            "remote": speaker.provider.is_remote(),
+            "host": speaker.provider.is_remote().then(|| speaker.remote.host()),
             "speaker_started": speaker_started,
             "key_present": key_present(crate::credentials::RemoteKey::Tts),
         },
     })
 }
 
-/// Only the daemon can answer this, so only its reply carries it.
-#[cfg(target_os = "macos")]
-fn with_key_press_access(mut payload: serde_json::Value) -> serde_json::Value {
-    payload["key_press_access"] = crate::permissions::key_presses_reach_us().as_str().into();
-    payload
-}
-
-#[cfg(not(target_os = "macos"))]
-fn with_key_press_access(payload: serde_json::Value) -> serde_json::Value {
-    payload
-}
-
 /// The `banshee.state_changed` params: what moves without a client touching it.
-/// The two device fields and the pipeline move on their own, because the
-/// watchdog rebinds while the daemon idles. `vad_threshold` moves at runtime too, but only when a
-/// `configure` call asks it to, and that call already answers.
+/// The device fields and the pipeline move on their own, because capture opens
+/// and closes for each use and rebinds while it is open. The blockers move with
+/// the pipeline, with each read of the microphone grant, and when the
+/// Accessibility poll sees the switch move. `vad_threshold`
+/// moves at runtime too, but only when a `configure` call asks it to, and that
+/// call already answers.
 pub fn live_state(daemon_state: &DaemonState) -> serde_json::Value {
-    live_state_at(daemon_state, &daemon_state.pipeline())
+    let pipeline = daemon_state.pipeline();
+    let blockers = readiness::blockers_as_read(daemon_state, &pipeline);
+    live_state_at(daemon_state, &pipeline, &blockers)
 }
 
 fn live_state_at(
     daemon_state: &DaemonState,
     pipeline: &crate::state::Pipeline,
+    blockers: &[banshee_common::Blocker],
 ) -> serde_json::Value {
     let mut live = serde_json::json!({
         "recording": daemon_state.is_recording(),
         "armed": daemon_state.is_armed(),
         "transcribing": daemon_state.is_transcribing(),
         "loading_model": daemon_state.is_loading_model(),
-        "telling": daemon_state.is_telling(),
         "speaking": daemon_state.speech().is_speaking(),
         "audio_device": daemon_state.audio_device(),
         "missing_device": daemon_state.missing_device(),
+        "microphone_open": daemon_state.microphone_open(),
+        "microphone_refused": daemon_state.microphone_refusal().is_some(),
         "last_error": daemon_state.last_error(),
         "last_speech_error": daemon_state.last_speech_error(),
         "pipeline": pipeline.as_str(),
         "feedback": daemon_state.cues().mode().word(),
+        "blockers": blockers,
+        "history_changes": daemon_state.history_changes(),
+        "settings_changes": daemon_state.settings_changes(),
     });
     // Ranked once, in banshee-common, so no client ranks the flags itself.
     live["activity"] = banshee_common::Activity::of(&live).word().into();
     live
 }
 
-fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>, caller: &Caller) -> JsonRpcResponse {
     let raw_text = match params.str("text") {
         Ok(value) => value,
         Err(response) => return *response,
@@ -397,9 +485,7 @@ fn speak(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse
         Ok(value) => value,
         Err(response) => return *response,
     };
-    if let Err(response) = count_speech(&params, daemon_state) {
-        return *response;
-    }
+    count_speech(caller.client().agent, daemon_state);
 
     let clean_text = sanitize(raw_text);
 
@@ -442,33 +528,30 @@ fn stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse 
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
 }
 
-fn dictate_target(params: &Params<'_>) -> Result<TranscribeTarget, Box<JsonRpcResponse>> {
-    let dictate = params.flag("dictate")?;
-    let tell = params.flag("tell")?;
-    Ok(match (dictate, tell) {
-        (true, true) => {
-            return Err(Box::new(JsonRpcResponse::error(
-                params.id(),
-                rpc_code::INVALID_PARAMS,
-                "dictate and tell are two destinations. Pass one.",
-            )));
-        }
-        (true, false) => TranscribeTarget::Dictate,
-        (false, true) => TranscribeTarget::Tell,
-        (false, false) => TranscribeTarget::Mailbox,
-    })
+fn restart(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+    log::info!("restarting on request");
+    daemon_state.leave_to_restart();
+    JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
 }
 
-fn record_start(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let action = match dictate_target(&params) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
+/// Logs only a start that opens the microphone to record.
+fn log_the_recording(daemon_state: &DaemonState, caller: &Caller) {
+    if daemon_state.recording_mode() == RecordingMode::PushToTalk {
+        log::info!("The microphone opens for {}, to record", caller.client());
+    }
+}
+
+fn record_start(
+    params: Params<'_>,
+    daemon_state: &Arc<DaemonState>,
+    caller: &Caller,
+) -> JsonRpcResponse {
     // Checked before the transition, so -32004 keeps meaning "busy"
     if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
         return *response;
     }
-    if daemon_state.record_start(action) {
+    if daemon_state.record_start() {
+        log_the_recording(daemon_state, caller);
         JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
     } else {
         JsonRpcResponse::error(
@@ -484,15 +567,16 @@ fn record_stop(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRe
     JsonRpcResponse::success(params.id(), serde_json::json!({"ok": true}))
 }
 
-fn record_toggle(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let action = match dictate_target(&params) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
+fn record_toggle(
+    params: Params<'_>,
+    daemon_state: &Arc<DaemonState>,
+    caller: &Caller,
+) -> JsonRpcResponse {
     if let Some(response) = not_recording(params.id(), &daemon_state.pipeline()) {
         return *response;
     }
-    let recording = daemon_state.record_toggle(action);
+    let recording = daemon_state.record_toggle();
+    log_the_recording(daemon_state, caller);
     JsonRpcResponse::success(params.id(), serde_json::json!({"recording": recording}))
 }
 
@@ -522,30 +606,58 @@ async fn question_played(
     let speech = daemon_state.speech();
     let mut playing = speech.subscribe_playing();
     loop {
+        // Queued is read before started: the move from one to the other is a
+        // single step under the playback lock
         let utterance = match *playing.borrow_and_update() {
+            // A speaker switch holds every line back while it builds
+            None if speech.is_queued(question) => None,
             None if speech.has_started(question) => return Asked::Played,
             None => return Asked::Unspoken,
             Some(utterance) if utterance > question => return Asked::Played,
-            Some(utterance) => utterance,
+            Some(utterance) => Some(utterance),
         };
-        let is_question = utterance == question;
+        let is_question = utterance == Some(question);
         let bound = if is_question { budget } else { stall };
         match tokio::time::timeout(bound, playing.changed()).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => return Asked::Stalled,
             Err(_) if is_question => return Asked::Stalled,
-            Err(_) => {
-                log::warn!(
-                    "a line played {}s with no change, so the lines before the question are dropped",
-                    stall.as_secs()
-                );
-                speech.skip_to_question(utterance);
-            }
+            Err(_) => match utterance {
+                Some(utterance) => {
+                    log::warn!(
+                        "a line played {}s with no change, so the lines before the question are dropped",
+                        stall.as_secs()
+                    );
+                    speech.skip_to_question(utterance);
+                }
+                None => return Asked::Unspoken,
+            },
         }
     }
 }
 
-async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+/// Keeps a question that was never put to the owner, with the message the
+/// agent receives, and hands that refusal back.
+fn unasked(
+    state: &DaemonState,
+    question: &str,
+    client: Option<&str>,
+    refusal: JsonRpcResponse,
+) -> JsonRpcResponse {
+    if let JsonRpcResponse::Error { error, .. } = &refusal {
+        state.keep(
+            &NewEntry::question(question, None, Outcome::Unasked, Some(&error.message))
+                .with_client(client),
+        );
+    }
+    refusal
+}
+
+async fn ask_user(
+    params: Params<'_>,
+    daemon_state: &Arc<DaemonState>,
+    caller: &Caller,
+) -> JsonRpcResponse {
     let question = match params.str("question") {
         Ok(value) => value,
         Err(response) => return *response,
@@ -554,9 +666,9 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         Ok(value) => value.min(MAX_ASK_WAIT_MS),
         Err(response) => return *response,
     };
-    if let Err(response) = count_speech(&params, daemon_state) {
-        return *response;
-    }
+    let client = caller.client();
+    let name = client.name.as_deref();
+    count_speech(client.agent, daemon_state);
 
     // Dropping this call is how a waiting question leaves the line. Armed
     // before the question plays, so a press while Banshee talks holds to
@@ -564,8 +676,9 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     let (_turn, session) = match daemon_state.arm_in_turn().await {
         Ok(armed) => armed,
         Err(pipeline) => {
-            return *not_recording(params.id(), &pipeline)
+            let refusal = *not_recording(params.id(), &pipeline)
                 .expect("arm_in_turn gives back only a pipeline that is not open");
+            return unasked(daemon_state, question, name, refusal);
         }
     };
 
@@ -577,17 +690,20 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         session,
     };
 
+    daemon_state.publish_question(question, name);
+
     let clean_question = sanitize(question);
     // Queued behind what is already said. Every line after it waits for the
     // disarm that ends the session.
     let asked = match daemon_state.speech().speak_and_hold(&clean_question) {
         Ok(utterance_id) => utterance_id,
         Err(e) => {
-            return JsonRpcResponse::error(
+            let refusal = JsonRpcResponse::error(
                 params.id(),
                 rpc_code::INTERNAL,
                 format!("Failed to speak question: {e}"),
             );
+            return unasked(daemon_state, question, name, refusal);
         }
     };
 
@@ -603,34 +719,36 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
         // A press during the wait answers before the question plays
         Asked::Unspoken if daemon_state.armed_mode(session) == Some(RecordingMode::ArmedHold) => {}
         Asked::Unspoken => {
-            return JsonRpcResponse::error(
+            let refusal = JsonRpcResponse::error(
                 params.id(),
                 rpc_code::INTERNAL,
                 "The question was not spoken.",
             );
+            return unasked(daemon_state, question, name, refusal);
         }
         Asked::Stalled => {
             daemon_state.speech().stop();
-            return JsonRpcResponse::error(
+            let refusal = JsonRpcResponse::error(
                 params.id(),
                 rpc_code::INTERNAL,
                 "Question playback did not finish.",
             );
+            return unasked(daemon_state, question, name, refusal);
         }
     }
 
+    log::info!("The microphone opens for {client}, to hear an answer");
     let (reply, answer) = tokio::sync::oneshot::channel();
     let command = ConsumerCommand::Ask(AskCommand {
         reply,
+        question: question.to_string(),
+        client: client.name.clone(),
         timeout: Duration::from_millis(timeout_ms),
         session,
     });
     if daemon_state.commands().send(command).is_err() {
-        return JsonRpcResponse::error(
-            params.id(),
-            rpc_code::INTERNAL,
-            "Audio pipeline is not running.",
-        );
+        let refusal = JsonRpcResponse::error(params.id(), rpc_code::INTERNAL, NO_PIPELINE);
+        return unasked(daemon_state, question, name, refusal);
     }
 
     match answer.await {
@@ -649,48 +767,16 @@ async fn ask_user(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRp
     }
 }
 
-async fn get_transcription(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let mut since_id = match params.u64("since_id", 0) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let wait_ms = match params.u64("wait_ms", 0) {
-        Ok(value) => value.min(MAX_WAIT_MS),
-        Err(response) => return *response,
-    };
-
-    // Subscribe before the first read so a push landing in between
-    // is still seen by wait_for
-    let mut latest_id = daemon_state.subscribe_transcriptions();
-
-    // since_id ahead of the newest id = stale cursor from an older daemon run
-    if since_id > *latest_id.borrow() {
-        since_id = 0;
-    }
-
-    let mut transcriptions = daemon_state.transcriptions_since(since_id);
-
-    if transcriptions.is_empty() && wait_ms > 0 {
-        let _ = tokio::time::timeout(
-            Duration::from_millis(wait_ms),
-            latest_id.wait_for(|id| *id > since_id),
-        )
-        .await;
-        transcriptions = daemon_state.transcriptions_since(since_id);
-    }
-
-    JsonRpcResponse::success(
-        params.id(),
-        serde_json::json!({ "transcriptions": transcriptions }),
-    )
-}
-
-fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+async fn configure(
+    params: Params<'_>,
+    daemon_state: &Arc<DaemonState>,
+    caller: &Caller,
+) -> JsonRpcResponse {
     let Some(requested) = params.get("settings") else {
         return JsonRpcResponse::error(
             params.id(),
             rpc_code::INVALID_PARAMS,
-            "'settings' is required, as in {\"stt.language\": \"de\"}.",
+            "'settings' is required, as in {\"stt.model\": \"whisper-large-v3-turbo\"}.",
         );
     };
     let assignments: settings::Assignments = match serde_json::from_value(requested.clone()) {
@@ -708,22 +794,48 @@ fn configure(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResp
         Err(response) => return *response,
     };
 
-    match settings::configure(Some(daemon_state), assignments, persist) {
-        Ok(outcome) => JsonRpcResponse::success(
-            params.id(),
-            serde_json::json!({
-                "ok": true,
-                "applied": outcome.applied,
-                "restart_required": outcome.restart_required,
-            }),
-        ),
-        Err(error) => JsonRpcResponse::error(params.id(), error.rpc_code(), error.rpc_message()),
-    }
+    let state = Arc::clone(daemon_state);
+    let caller = *caller;
+    off_the_worker(params.id(), move || {
+        let outcome = settings::configure(Some(&state), assignments, persist)?;
+        if outcome.applied.iter().any(|key| key == "audio.keep_open") {
+            log::info!(
+                "audio.keep_open is {}, set by {}",
+                state.keep_open(),
+                caller.client()
+            );
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "applied": outcome.applied,
+            "waiting": outcome.waiting,
+        }))
+    })
+    .await
 }
 
+/// With `model`, fetches that listening model's file alone; without, every file
+/// the config needs.
 fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
     let dir = daemon_state.models_dir().to_path_buf();
-    let wanted = daemon_state.wanted_downloads();
+    let model = match params.optional_str("model") {
+        Ok(None) => None,
+        Ok(Some(id)) => match banshee_common::listening::find(id) {
+            Some(model) => Some(model),
+            None => {
+                return JsonRpcResponse::error(
+                    params.id(),
+                    rpc_code::INVALID_PARAMS,
+                    crate::models::unknown_model(id),
+                );
+            }
+        },
+        Err(response) => return *response,
+    };
+    let wanted = match model {
+        Some(model) => vec![crate::models::download::listening_file(model)],
+        None => daemon_state.wanted_downloads(),
+    };
     let missing = crate::models::download::still_missing(&wanted, &dir);
     if missing.is_empty() {
         return JsonRpcResponse::success(
@@ -747,34 +859,37 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
     let state = Arc::clone(daemon_state);
     let dir = dir.clone();
     tokio::spawn(async move {
-        let first = Arc::clone(&state);
-        let fetching = missing.clone();
-        let chosen = tokio::task::spawn_blocking(move || {
-            settings::write_first_feedback(
-                first.config_path(),
-                Some(&first),
-                &wanted,
-                &fetching,
-                || first.voiceover_on(),
-            )
-        })
-        .await;
-        match chosen {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => log::error!("Failed to choose a first feedback mode: {error}"),
-            Err(error) => log::error!("The first feedback mode write stopped: {error}"),
+        // One model fetched by name is not a first install.
+        if model.is_none() {
+            let first = Arc::clone(&state);
+            let fetching = missing.clone();
+            let chosen = tokio::task::spawn_blocking(move || {
+                settings::write_first_feedback(
+                    first.config_path(),
+                    Some(&first),
+                    &wanted,
+                    &fetching,
+                    || first.voiceover_on(),
+                )
+            })
+            .await;
+            match chosen {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => log::error!("Failed to choose a first feedback mode: {error}"),
+                Err(error) => log::error!("The first feedback mode write stopped: {error}"),
+            }
         }
         {
             let mut report = |progress| state.report_download(progress);
+            let accepted = crate::models::licences::Accepted::at(state.licences().to_path_buf());
             if let Err(error) =
-                crate::models::download::download_all(&dir, &missing, &mut report).await
+                crate::models::download::download_all(&dir, &missing, &accepted, &mut report).await
             {
                 log::error!("Download failed: {error}");
             }
         }
-        // The files these settings were waiting for are here now, so a
-        // preset or a voice chosen before its model arrived takes
-        // effect rather than waiting for a restart with nothing to do.
+        // A listening model or a voice chosen before its file arrived takes
+        // effect once the download brings the file.
         crate::settings::reapply_pending(&state);
         drop(slot);
     });
@@ -785,31 +900,10 @@ fn download_models(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonR
 // that can fetch one needs the whole list to offer a choice; one that
 // cannot filters to the installed ones itself.
 fn list_voices(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    let installed = crate::models::installed_voices();
-    let mut ids: Vec<String> = crate::text_to_speech::local::voices::catalogue()
-        .map(str::to_string)
-        .collect();
-    for id in &installed {
-        if !ids.contains(id) {
-            ids.push(id.clone());
-        }
-    }
-    let voices: Vec<_> = ids
-        .iter()
-        .map(|id| crate::text_to_speech::local::voices::describe(id, installed.contains(id)))
-        .collect();
+    let voices = crate::text_to_speech::local::voices::listed(daemon_state.models_dir());
     JsonRpcResponse::success(
         params.id(),
         serde_json::json!({ "voices": voices, "current": daemon_state.tts_voice() }),
-    )
-}
-
-// The engine's own list, so a client offering a choice cannot drift
-// from what the engine will accept.
-fn list_languages(params: Params<'_>) -> JsonRpcResponse {
-    JsonRpcResponse::success(
-        params.id(),
-        serde_json::json!({ "languages": crate::speech_to_text::local::languages::all() }),
     )
 }
 
@@ -842,37 +936,126 @@ fn history(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcRespon
         },
         Err(response) => return *response,
     };
-    match daemon_state.with_history(|c| crate::history::TranscriptionHistory::list(c, limit)) {
-        Some(Ok(history)) => {
+    let kind = match params.optional_str("kind") {
+        Ok(None) => None,
+        Ok(Some(name)) => match serde_json::from_value::<Kind>(name.into()) {
+            Ok(kind) => Some(kind),
+            Err(_) => {
+                return JsonRpcResponse::error(
+                    params.id(),
+                    rpc_code::INVALID_PARAMS,
+                    "'kind' must be \"dictation\" or \"question\".",
+                );
+            }
+        },
+        Err(response) => return *response,
+    };
+    match daemon_state.history(limit, kind) {
+        Ok(history) => {
             JsonRpcResponse::success(params.id(), serde_json::json!({ "history": history }))
         }
-        Some(Err(e)) => JsonRpcResponse::error(
-            params.id(),
-            rpc_code::INTERNAL,
-            format!("Failed to retrieve history: {e}"),
-        ),
-        None => JsonRpcResponse::error(
-            params.id(),
-            rpc_code::HISTORY_OFF,
-            "History is not enabled.",
-        ),
+        Err(e) => from_error(params.id(), history_failed(e)),
     }
 }
 
+fn history_failed(e: rusqlite::Error) -> BansheeError {
+    BansheeError::Other(format!("Failed to retrieve history: {e}"))
+}
+
 fn clear_history(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
-    match daemon_state.with_history(crate::history::TranscriptionHistory::clear) {
-        Some(Ok(())) => JsonRpcResponse::success(params.id(), serde_json::json!({})),
-        // Not -32003: that code names history being off, and the
-        // listing path already answers -32603 for the same failure.
-        Some(Err(e)) => JsonRpcResponse::error(
+    match daemon_state.clear_history() {
+        Ok(()) => JsonRpcResponse::success(params.id(), serde_json::json!({})),
+        Err(e) => JsonRpcResponse::error(
             params.id(),
             rpc_code::INTERNAL,
             format!("Failed to clear history: {e}"),
         ),
-        None => JsonRpcResponse::error(
+    }
+}
+
+fn no_row(id: i64) -> BansheeError {
+    BansheeError::Rejected(format!("No row has id {id}."))
+}
+
+fn history_audio(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+    let id = match params.required_i64("id") {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let path = match daemon_state.kind_and_audio_file(id) {
+        Ok(Some((_, file))) if file.is_file() => Ok(file),
+        Ok(Some(_)) => Err(BansheeError::Rejected(NO_AUDIO.to_string())),
+        Ok(None) => Err(no_row(id)),
+        Err(e) => Err(history_failed(e)),
+    };
+    match path {
+        Ok(path) => JsonRpcResponse::success(
             params.id(),
-            rpc_code::HISTORY_OFF,
-            "History is not enabled.",
+            serde_json::json!({ "path": path.to_string_lossy() }),
+        ),
+        Err(error) => from_error(params.id(), error),
+    }
+}
+
+fn dictation_samples(state: &DaemonState, id: i64) -> Result<Vec<f32>, BansheeError> {
+    let file = match state.kind_and_audio_file(id) {
+        Ok(Some((Kind::Dictation, file))) => file,
+        Ok(Some((Kind::Question, _))) => {
+            return Err(BansheeError::Rejected(
+                "Only a dictation can be retried.".to_string(),
+            ));
+        }
+        Ok(None) => return Err(no_row(id)),
+        Err(e) => return Err(history_failed(e)),
+    };
+    crate::history::audio::read(&file).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => BansheeError::Rejected(NO_AUDIO.to_string()),
+        _ => BansheeError::Other(format!("Failed to read the kept audio: {error}")),
+    })
+}
+
+/// The consumer gets the samples, never the file, and the row changes only
+/// once it answers with text.
+async fn retry(params: Params<'_>, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+    let id = match params.required_i64("id") {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let state = Arc::clone(daemon_state);
+    let samples =
+        match on_a_blocking_thread(params.id(), move || dictation_samples(&state, id)).await {
+            Ok(samples) => samples,
+            Err(response) => return *response,
+        };
+    // No pipeline check: a retry needs no microphone, the consumer refuses
+    // while its model is not ready, and a daemon with no consumer answers at
+    // the send.
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let command = ConsumerCommand::Retry(RetryCommand { id, samples, reply });
+    if daemon_state.commands().send(command).is_err() {
+        return JsonRpcResponse::error(params.id(), rpc_code::INTERNAL, NO_PIPELINE);
+    }
+    let text = match answer.await {
+        Ok(Ok(text)) => text,
+        Ok(Err(reason)) => {
+            return JsonRpcResponse::error(params.id(), rpc_code::LISTENING_FAILED, reason);
+        }
+        Err(_) => {
+            return JsonRpcResponse::error(
+                params.id(),
+                rpc_code::INTERNAL,
+                "The retry ended before it answered.",
+            );
+        }
+    };
+    match daemon_state.retried(id, &text) {
+        Ok(row) => JsonRpcResponse::success(params.id(), serde_json::json!({ "row": row })),
+        // A clear landed while the retry transcribed
+        Err(rusqlite::Error::QueryReturnedNoRows) => from_error(params.id(), no_row(id)),
+        Err(e) => JsonRpcResponse::error(
+            params.id(),
+            rpc_code::INTERNAL,
+            format!("Failed to keep the retried text: {e}"),
         ),
     }
 }
@@ -924,22 +1107,25 @@ fn open_permission(params: Params<'_>) -> JsonRpcResponse {
     }
 }
 
-pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) -> JsonRpcResponse {
+pub async fn dispatch(
+    request: JsonRpcRequest,
+    daemon_state: &Arc<DaemonState>,
+    caller: &Caller,
+) -> JsonRpcResponse {
     let params = Params::new(&request);
     match request.method.as_str() {
-        BANSHEE_SPEAK => speak(params, daemon_state),
+        BANSHEE_SPEAK => speak(params, daemon_state, caller),
         BANSHEE_STOP_SPEAKING => stop_speaking(params, daemon_state),
         BANSHEE_STOP => stop(params, daemon_state),
-        BANSHEE_RECORD_START => record_start(params, daemon_state),
+        BANSHEE_RESTART => restart(params, daemon_state),
+        BANSHEE_RECORD_START => record_start(params, daemon_state, caller),
         BANSHEE_RECORD_STOP => record_stop(params, daemon_state),
-        BANSHEE_RECORD_TOGGLE => record_toggle(params, daemon_state),
-        BANSHEE_ASK_USER => ask_user(params, daemon_state).await,
+        BANSHEE_RECORD_TOGGLE => record_toggle(params, daemon_state, caller),
+        BANSHEE_ASK_USER => ask_user(params, daemon_state, caller).await,
         BANSHEE_TURN_ENDED => turn_ended(params, daemon_state),
-        BANSHEE_GET_TRANSCRIPTION => get_transcription(params, daemon_state).await,
-        BANSHEE_CONFIGURE => configure(params, daemon_state),
+        BANSHEE_CONFIGURE => configure(params, daemon_state, caller).await,
         BANSHEE_DOWNLOAD_MODELS => download_models(params, daemon_state),
         BANSHEE_LIST_VOICES => list_voices(params, daemon_state),
-        BANSHEE_LIST_LANGUAGES => list_languages(params),
         BANSHEE_LIST_INPUT_DEVICES => list_input_devices(params, daemon_state),
         // Subscribing answers with the poll, so a client needs no first poll and
         // cannot miss a change in the gap before the pushes start. `daemon.rs`
@@ -947,6 +1133,8 @@ pub async fn dispatch(request: JsonRpcRequest, daemon_state: &Arc<DaemonState>) 
         BANSHEE_STATUS | BANSHEE_SUBSCRIBE => status(params, daemon_state),
         BANSHEE_HISTORY => history(params, daemon_state),
         BANSHEE_CLEAR_HISTORY => clear_history(params, daemon_state),
+        BANSHEE_HISTORY_AUDIO => history_audio(params, daemon_state),
+        BANSHEE_RETRY => retry(params, daemon_state).await,
         BANSHEE_AGENTS => agents(params).await,
         BANSHEE_CONNECT_PLAN => connect(params, read_the_plan).await,
         BANSHEE_CONNECT_APPLY => connect(params, write_the_plan).await,

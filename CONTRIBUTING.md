@@ -31,7 +31,7 @@
 ```bash
 git clone https://github.com/yamanahlawat/banshee.git
 cd banshee
-cargo build    # Metal + CoreML acceleration for Whisper enabled automatically
+cargo build    # Metal acceleration for transcribe.cpp enabled automatically
 ```
 
 - On Linux, exclude `banshee-app`:
@@ -53,15 +53,22 @@ cargo build --release --workspace --exclude banshee-app
 - It carries on when no systemd user bus answers. See "Install on Linux"
   below.
 
-- The VAD tests read `silero_vad.onnx` from `~/.banshee/models/`; run
-  `banshee setup` once before the suite.
-- CI downloads the same file in its own step, and installs `espeak-ng` for the
-  out-of-vocabulary test.
+- The VAD tests read the committed `bansheed/tests/data/silero_vad.onnx`, so
+  plain `cargo test` needs no setup.
 - The Kokoro tests need the model and two voices, which are too large for CI, so
-  they are `#[ignore]`d. Run them on a machine that has them:
+  they are `#[ignore]`d. Run them on a machine that has them, naming the
+  folder that holds them:
 
 ```bash
-cargo test kokoro -- --ignored
+BANSHEE_TTS_MODELS=$HOME/.banshee/models cargo test kokoro -- --ignored
+```
+
+- The Pocket tests need the companion voice's files, about 400 MB, so they are
+  `#[ignore]`d too. Fetch them into `~/.banshee/models/pocket-english_2026-04/`
+  with `banshee setup`, then run:
+
+```bash
+BANSHEE_TTS_MODELS=$HOME/.banshee/models cargo test pocket -- --ignored
 ```
 
 - Before opening a PR, make sure both of these pass:
@@ -147,9 +154,12 @@ make install
 - It builds the release binaries and signs `/Applications/Banshee.app` with
   `banshee-dev`.
 - It symlinks `banshee` and `banshee-mcp-shim` from `~/.cargo/bin` into the
-  bundle, then starts the daemon and the tray launch agents.
-- The bundled binaries sign under `com.banshee.app`, a different identifier
-  from the binary's own, so macOS asks for Accessibility once more.
+  bundle, then registers the daemon and the tray as Login Items through
+  `SMAppService`. Nothing is written to `~/Library/LaunchAgents`.
+- Run `banshee-app --login-items status` to see the registration state.
+- Each bundled program signs under its own identifier: `com.banshee.app` for
+  the window, `com.banshee.app.daemon`, `com.banshee.app.tray` and
+  `com.banshee.app.mcp-shim`. macOS asks for Accessibility once more.
 - A grant only applies to a freshly started process: approve the prompt,
   run `banshee start` again, and repeat until the hotkey earcon plays.
 - After that, the signature never changes and the grant sticks.
@@ -190,14 +200,12 @@ cargo bench -p banshee --bench speech_out -- g2p
   if yours differs.
 - The `g2p` group runs G2P once per sentence, as the daemon does.
 - The bench uses the daemon's default settings, not your `config.toml`.
-- It prints the voice, the speed, the thread count and whether espeak-ng is present.
+- It prints the voice and the thread count.
 - Elements per second divided by 24000 gives the realtime factor.
 - Machine load changes Kokoro timing by a large margin. Compare runs only on an idle machine.
 - These numbers are for the `release` profile. Shipped archives use `dist`, which adds thin LTO.
 - A filter such as `-- g2p` still loads the Kokoro model and synthesizes two texts, when the
   model is on disk.
-- When espeak-ng is absent, every engine load probes for it again. `warm_cache_load` and
-  `first_speech` include that probe.
 - A full run takes about 4 minutes on an Apple M5 Pro. `docs/benchmarks.md` records the time
   and load of each run.
 

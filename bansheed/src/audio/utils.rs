@@ -22,6 +22,9 @@ pub struct StreamingResampler {
     resampler: Option<Fft<f32>>,
     carry: Vec<f32>,
     scratch: Vec<f32>,
+    /// Input frames pushed and output frames written since the last reset.
+    taken: usize,
+    given: usize,
 }
 
 impl StreamingResampler {
@@ -46,12 +49,16 @@ impl StreamingResampler {
             resampler,
             carry: Vec::new(),
             scratch: Vec::new(),
+            taken: 0,
+            given: 0,
         })
     }
 
     // For a capture gap: the carried window must not bridge it
     pub fn reset(&mut self) {
         self.carry.clear();
+        self.taken = 0;
+        self.given = 0;
         if let Some(resampler) = self.resampler.as_mut() {
             resampler.reset();
         }
@@ -59,11 +66,40 @@ impl StreamingResampler {
 
     // A partial window waits for the next push
     pub fn push(&mut self, samples: &[f32], out: &mut Vec<f32>) -> Result<(), BansheeError> {
-        let Some(resampler) = self.resampler.as_mut() else {
+        if self.resampler.is_none() {
             out.extend_from_slice(samples);
             return Ok(());
-        };
+        }
+        self.taken += samples.len();
         self.carry.extend_from_slice(samples);
+        self.convert(out)
+    }
+
+    /// Pads the last partial window with silence and drains what the filter
+    /// still holds, so `out` covers every frame pushed, as `resample_audio`
+    /// does. `out` keeps one filter delay, `output_delay` frames, at the start.
+    pub fn finish(&mut self, out: &mut Vec<f32>) -> Result<(), BansheeError> {
+        let Some(resampler) = self.resampler.as_ref() else {
+            return Ok(());
+        };
+        let window = resampler.input_frames_next();
+        let wanted = resampler.output_delay()
+            + (self.taken as f64 * resampler.resample_ratio()).ceil() as usize;
+        while self.given < wanted {
+            let padded = self.carry.len().div_ceil(window).max(1) * window;
+            self.carry.resize(padded, 0.0);
+            self.convert(out)?;
+        }
+        out.truncate(out.len() - (self.given - wanted));
+        self.given = wanted;
+        self.carry.clear();
+        Ok(())
+    }
+
+    fn convert(&mut self, out: &mut Vec<f32>) -> Result<(), BansheeError> {
+        let Some(resampler) = self.resampler.as_mut() else {
+            return Ok(());
+        };
         let window = resampler.input_frames_next();
         let mut consumed = 0;
         while self.carry.len() - consumed >= window {
@@ -79,6 +115,7 @@ impl StreamingResampler {
                 .process_into_buffer(&input, &mut output, None)
                 .map_err(|e| BansheeError::Other(format!("Failed to resample audio: {e}")))?;
             consumed += frames_in;
+            self.given += frames_out;
             out.extend_from_slice(&self.scratch[..frames_out]);
         }
         self.carry.drain(..consumed);
@@ -150,6 +187,48 @@ mod tests {
             "unexpected output length {}",
             out.len()
         );
+    }
+
+    fn streamed_and_finished(input: &[f32], from: u32) -> Vec<f32> {
+        let mut resampler = StreamingResampler::new(from, 16000).unwrap();
+        let delay = resampler.resampler.as_ref().unwrap().output_delay();
+        let mut out = Vec::new();
+        // Odd batch size so windows straddle push boundaries
+        for batch in input.chunks(1447) {
+            resampler.push(batch, &mut out).unwrap();
+        }
+        resampler.finish(&mut out).unwrap();
+        out.drain(..delay);
+        out
+    }
+
+    #[test]
+    fn a_finished_stream_matches_the_whole_resample() {
+        for (from, frames) in [(48_000u32, 48_000usize), (44_100, 30_001)] {
+            let input: Vec<f32> = (0..frames).map(|i| (i as f32 * 0.01).sin()).collect();
+            let whole = resample_audio(&input, from, 16000).unwrap();
+            assert_eq!(
+                streamed_and_finished(&input, from),
+                whole,
+                "{frames} frames at {from} Hz"
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_stream_shorter_than_a_window_has_the_whole_length() {
+        let input: Vec<f32> = (0..700).map(|i| (i as f32 * 0.01).sin()).collect();
+        let whole = resample_audio(&input, 48_000, 16000).unwrap();
+        assert_eq!(streamed_and_finished(&input, 48_000).len(), whole.len());
+    }
+
+    #[test]
+    fn finishing_a_matching_rate_adds_nothing() {
+        let mut resampler = StreamingResampler::new(16000, 16000).unwrap();
+        let mut out = Vec::new();
+        resampler.push(&[0.1, 0.2, 0.3], &mut out).unwrap();
+        resampler.finish(&mut out).unwrap();
+        assert_eq!(out, vec![0.1, 0.2, 0.3]);
     }
 
     #[test]

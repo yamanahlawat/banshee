@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { land } from './lib/focus';
   import {
     daemon,
@@ -7,14 +7,13 @@
     endsTheRun,
     hotkeyListens as listensForHotkey,
     isDown,
-    lampForm,
     listeningFacts,
     applyPush,
     applyPushedStatus,
     refreshStatus,
     readinessIsStale,
     speechFacts,
-    waitsOnARestart,
+    waiting as waitingKeys,
     stateWord,
     type Live,
     type Status,
@@ -25,12 +24,12 @@
     listeningLead,
     problem,
     report,
+    reports,
     speechLead,
-    A_SERVER,
     DICTATION_FAILED,
     DICTATION_FAILURE,
     failureSays,
-    RESTART_SAYS,
+    audioGoesTo,
     SPEECH_FAILED,
     SPEECH_FAILURE,
     failureReads,
@@ -38,15 +37,19 @@
   } from './lib/copy';
   import {
     followSaveHistory,
-    freshLead,
+    kept,
+    newestUnanswered,
     readAll,
     readLatest,
     readNewest,
     table,
+    view,
   } from './lib/history';
   import { agents, refresh as readAgents } from './lib/agents';
-  import { forgetTheAsk } from './lib/downloads';
+  import { forgetRefusals, loadTable } from './lib/settings';
+  import { forgetSamples, forgetTheAsk, record } from './lib/downloads';
   import {
+    launchMissed,
     listen,
     listVoices,
     restartDaemon,
@@ -54,95 +57,120 @@
     status,
     type Down,
     type DownloadProgress,
-    type HistoryRow,
+    type Reopened,
     type Voices,
   } from './lib/tauri';
   import { humanize } from './lib/hotkey';
-  import { keysClaimed } from './lib/keys';
-  import { formatWhen, sinceDay } from './lib/time';
-  import { formatCount } from './lib/history';
-  import Header from './bands/Header.svelte';
-  import Foot from './bands/Foot.svelte';
-  import Panel from './bands/Panel.svelte';
+  import { claimKeys, keysClaimed } from './lib/keys';
+  import Sidebar from './bands/Sidebar.svelte';
+  import Page from './bands/Page.svelte';
+  import { PAGE_HEADING, SIDEBAR } from './bands/page';
+  import { listAndDetail, sidebarShown } from './lib/layout';
+  import { reduced } from './lib/travel';
+  import { waitingOn, type Page as PageName } from './lib/nav';
   import Blockers from './bands/Blockers.svelte';
   import Find from './bands/Find.svelte';
-  import Ledger from './bands/Ledger.svelte';
-  import TheRecord from './bands/Record.svelte';
-  import Turn from './turns/Turn.svelte';
-  import RecordList from './turns/RecordList.svelte';
+  import HostLine from './bands/HostLine.svelte';
   import Absence from './turns/Absence.svelte';
-  import Pending from './turns/Pending.svelte';
-  import MicrophonePanel from './jobs/MicrophonePanel.svelte';
-  import HotkeyPanel from './jobs/HotkeyPanel.svelte';
-  import VoicePanel from './jobs/VoicePanel.svelte';
-  import AgentsPanel from './jobs/AgentsPanel.svelte';
+  import HistoryPage from './jobs/HistoryPage.svelte';
+  import ListeningPage from './jobs/ListeningPage.svelte';
+  import HotkeyPage from './jobs/HotkeyPage.svelte';
+  import SpeakingPage from './jobs/SpeakingPage.svelte';
+  import AgentsPage from './jobs/AgentsPage.svelte';
+  import SavedHistoryPage from './jobs/SavedHistoryPage.svelte';
 
-  let wasTranscribing = false;
+  let seenChanges: number | null = null;
+  let seenSettings: number | null = null;
   let wasLoadingModel = false;
   let voices: Voices = { voices: [], current: null };
   let voicesRead = false;
   let agentsRead = false;
-  type Job = 'Microphone' | 'Hotkey' | 'Voice' | 'Agents' | 'Record';
-  let job: Job | null = null;
-  let foot: Foot;
-
-  // An id, never the node: the click destroys most of these openers.
-  const RETURNS_TO = {
-    ledger: 'ledger',
-    absence: 'nothing-yet',
-    agents: 'no-agents',
-    failure: 'failure-notice',
-  };
-  let cameFrom = '';
+  // Nothing remembers the page, so every launch opens on History.
+  let page: PageName = 'History';
 
   // `updateCallbackDone` settles before the crossfade finishes.
   type ViewTransition = { updateCallbackDone: Promise<void> };
   // Awaited, because the platform runs the callback in a later task once it has
   // the old snapshot. Returning before then leaves the focus move below looking
-  // for a panel that has not rendered.
+  // for a page that has not rendered.
   async function swap(run: () => void): Promise<void> {
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const start = (
       document as Document & { startViewTransition?: (run: () => void) => ViewTransition }
     ).startViewTransition;
-    if (reduce || !start) {
+    if (reduced() || !start) {
       run();
       return;
     }
     await start.call(document, run).updateCallbackDone.catch(() => {});
   }
 
-  // `at` lands after the panel's own mount focus. It cannot live in the panel:
-  // one already open never mounts again when the job changes under it.
-  async function openJob(next: Job | null, from = '', at = '') {
-    cameFrom = next === null ? cameFrom : from;
+  // One scroller serves every page, so a page arrives at its own top.
+  let body: HTMLElement;
+  async function show(next: PageName) {
+    if (next === page) return;
     await swap(() => {
-      job = next;
+      forgetRefusals();
+      page = next;
+      if (body) body.scrollTop = 0;
     });
-    if (next !== null) {
-      if (at !== '') await land(() => document.getElementById(at));
-      return;
+  }
+
+  /// `at` names an element on the page to land on in place of its heading.
+  async function go(next: PageName, at = '') {
+    await show(next);
+    await land(() => document.getElementById(at || PAGE_HEADING));
+  }
+
+  let drawer: HTMLDialogElement;
+  let unfold: HTMLButtonElement | null = null;
+  // Held while the drawer is open, so no key reaches the page behind it.
+  let drawerKeys: (() => void) | null = null;
+
+  function openDrawer() {
+    drawer.showModal();
+    drawerKeys = claimKeys();
+  }
+
+  function closedDrawer() {
+    drawerKeys?.();
+    drawerKeys = null;
+    unfold?.focus();
+  }
+
+  async function chooseFromDrawer(next: PageName) {
+    drawer.close();
+    await show(next);
+  }
+
+  // Runs before the DOM swaps one sidebar for the other, so focus is read
+  // while the sidebar it sits in still exists. A dialog removed while open
+  // fires no close event.
+  function refold(shown: boolean) {
+    if (shown && drawerKeys) {
+      drawerKeys();
+      drawerKeys = null;
+      land(() =>
+        document.getElementById(SIDEBAR)?.querySelector<HTMLElement>('[aria-current="page"]'),
+      );
+    } else if (!shown && document.getElementById(SIDEBAR)?.contains(document.activeElement)) {
+      land(() => unfold);
     }
-    await land(() => document.getElementById(cameFrom));
-    cameFrom = '';
   }
-  let query = '';
-  let finding = false;
-  // One instant for the whole paint, so two rows cannot straddle midnight.
-  // Both are read for their dependency alone: the live state moves the pending
-  // caret's time, and adds no row.
-  $: now = ($table.rows, $daemon.live, new Date());
-  $: rightNow = formatWhen(now.toISOString(), now);
+  $: refold($sidebarShown);
 
-  type Live_ = 'recording' | 'transcribing' | null;
+  let search: Find | undefined;
+  // Moved by every reopen, which draws History afresh, following the newest row.
+  let reopened = 0;
+  let history: HistoryPage | undefined;
+  let reading = false;
+  let back: HTMLButtonElement | null = null;
 
-  // Speaking is absent deliberately: the daemon stores nothing Banshee says, so
-  // a caret would hold a place no turn ever fills.
-  function pendingOf(live: Live): Live_ {
-    if (live.transcribing) return 'transcribing';
-    if (live.recording) return 'recording';
-    return null;
+  // Runs before the DOM drops Back, so focus is read while Back still holds it.
+  function unback(wide: boolean) {
+    if (wide && back && document.activeElement === back) tick().then(() => history?.focusDetail());
   }
+  $: unback($listAndDetail);
+
   function onKeydown(event: KeyboardEvent) {
     if (keysClaimed()) return;
     // `key`, so the shortcut follows the character the way macOS does: `code`
@@ -155,40 +183,25 @@
       event.key.toLowerCase() === 'f'
     ) {
       event.preventDefault();
-      openJob(null);
-      finding = true;
-      return;
+      show('History').then(async () => {
+        await tick();
+        await search?.open();
+      });
     }
-    if (event.key !== 'Escape') return;
-    if (job !== null) openJob(null);
-    else if (finding) closeFind();
-  }
-
-  function closeFind() {
-    finding = false;
-    query = '';
-    // The field unmounts under the focus it holds, so the keyboard lands back
-    // on the control that opened it. Absent when the record is empty, and then
-    // the skip link keeps the keyboard inside the window.
-    land(
-      () => document.getElementById('ledger-find') ?? document.querySelector<HTMLElement>('.skip'),
-    );
   }
 
   $: word = stateWord($daemon);
-  $: form = lampForm(word);
   $: config = ($daemon.status?.config ?? {}) as Record<string, Record<string, unknown>>;
   $: live = !isDown($daemon);
   $: connected = $agents.filter((a) => a.presence === 'connected').length;
+  // Only once the daemon has answered, so a failed read never claims none.
+  $: agentless = live && agentsRead && connected === 0;
   // Wayland grants no global grab, so the daemon binds nothing and says so.
   $: hotkeyListens = listensForHotkey($daemon);
   // The window names no key it has not been told. `audio.hotkey_mode` decides
   // the verb, because "Hold" is a lie when a tap is what starts it.
   $: boundKey = humanize(String(config.audio?.hotkey ?? ''));
   $: holdToTalk = String(config.audio?.hotkey_mode ?? 'hold') !== 'toggle';
-  // Said on the home screen only while it is true, so it needs no dismissal to
-  // remember: connecting one is what clears it.
-  $: noAgentYet = live && agentsRead && connected === 0;
 
   // Dictation is the way in, so it takes the one slot when both sides failed.
   // The daemon clears each on the next one that works, so neither is dismissed
@@ -197,226 +210,132 @@
     ? null
     : $daemon.live.last_error
       ? {
-          says: 'Dictation failed',
-          job: 'Microphone' as Job,
+          page: 'Listening' as PageName,
           at: DICTATION_FAILURE,
           said: failureSays(DICTATION_FAILED, $daemon.live.last_error),
           reads: failureReads(DICTATION_FAILED, $daemon.live.last_error),
         }
       : $daemon.live.last_speech_error
         ? {
-            says: 'Speech failed',
-            job: 'Voice' as Job,
+            page: 'Speaking' as PageName,
             at: SPEECH_FAILURE,
             said: failureSays(SPEECH_FAILED, $daemon.live.last_speech_error),
             reads: failureReads(SPEECH_FAILED, $daemon.live.last_speech_error),
           }
         : null;
 
-  // The window says it, not the panel: a panel is mounted only while it is
-  // open, and a failure arrives with no control moving.
+  // The window says it, not the page: a page is mounted only while it shows,
+  // and a failure arrives with no control moving.
   const sawFailure = announcer<string | null>();
   $: said = failed?.said ?? null;
   $: sawFailure(said, said ?? '');
 
   // The daemon says which listener and which speaker are in force; the config
-  // says only which ones were asked for. The heading, the panel's note and the
-  // foot cell all read one record of each side, so no two of them can state a
-  // different truth.
-  $: listening = listeningFacts($daemon, $waitsOnARestart);
-  $: speech = speechFacts($daemon, $waitsOnARestart, voices.voices);
+  // says only which ones were asked for. The heading, the page's note and the
+  // sidebar foot all read one record of each side, so no two of them can state
+  // a different truth.
+  $: listening = listeningFacts($daemon);
+  $: host = audioGoesTo(listening);
+  $: speech = speechFacts($daemon, voices.voices);
   // The opening line names a host only while text reaches it.
   $: textLeavesTo = speech.started ? speech.host : null;
 
-  // Spelled, because a sentence should not open on a digit. Six agents are
-  // detectable today, so the list needs no more than this.
-  // Name and lead are declared together. "Record" would collide with the RECORDING state word, so
-  // the panel is named for what is kept. Every lead reads live state, never the config: the config
-  // says only what was asked for. The one exception is the sentence about a listener that waits on
-  // a restart, and that sentence says in its own words that it is not in force yet.
-  $: panels = {
-    Microphone: {
-      name: 'Microphone',
-      lead: listeningLead(listening),
-    },
-    Hotkey: {
-      name: 'Hotkey',
-      lead: !hotkeyListens
+  // Every lead reads live state, never the config: the config says only what
+  // was asked for. History has no statement, so its title heads it.
+  $: leads = {
+    History: null,
+    // Spelled, because a sentence should not open on a digit. Six agents are
+    // detectable today, so the list needs no more than this.
+    Agents:
+      connected === 0
+        ? 'No agent can speak to you yet.'
+        : `${spell(connected, true)} agent${connected === 1 ? '' : 's'} can speak to you and ask you questions out loud.`,
+    Listening: listeningLead(listening),
+    Speaking: speechLead(speech),
+    Hotkey: !live
+      ? 'Banshee is not running, so no key starts dictation.'
+      : !hotkeyListens
         ? 'Your compositor holds this binding. Banshee binds no key here.'
         : !boundKey
           ? 'No key is bound, so nothing starts dictation.'
           : holdToTalk
             ? `Hold ${boundKey} to talk.`
             : `Tap ${boundKey} to start, and again to stop.`,
-    },
-    Voice: {
-      name: 'Voice',
-      lead: speechLead(speech),
-    },
-    Agents: {
-      name: 'Agents',
-      lead:
-        connected === 0
-          ? 'No agent can speak to you yet.'
-          : `${spell(connected, true)} agent${connected === 1 ? '' : 's'} can speak to you and ask you questions out loud.`,
-    },
-    Record: {
-      name: 'What Banshee keeps',
-      lead: !savingHistory
-        ? 'Banshee is keeping nothing you say.'
+    'Saved history': live
+      ? !savingHistory
+        ? 'Banshee is keeping nothing new you say.'
         : $table.total === 0
           ? 'Banshee is keeping what you say, and you have not said anything yet.'
-          : `Banshee is keeping ${formatCount($table.total)} things you have said, on this machine.`,
-    },
-  } as Record<Job, { name: string; lead: string }>;
+          : `Banshee is keeping ${kept($table.total)}, on this machine.`
+      : !savingHistory
+        ? 'Saving is off, and Banshee is not running.'
+        : $table.total === 0
+          ? 'Banshee has kept nothing yet.'
+          : `Banshee kept ${kept($table.total)} on this machine.`,
+  } satisfies Record<PageName, string | null>;
 
-  $: rows = $table.rows;
-  $: needle = query.trim().toLowerCase();
-  $: shown = needle ? rows.filter((r) => r.text.toLowerCase().includes(needle)) : rows;
-  // The record windows itself over any length, so no page control counts it.
-  // Find still reads every one of the rows above.
-  let body: HTMLElement;
-  let scrollTop = 0;
-  let viewportH = 0;
-  let scrollFrame = 0;
-  // Native scroll events outrun the display on a trackpad fling, and every one
-  // of them moves the record's window. One read a frame is all a paint can use.
-  function onScroll() {
-    if (scrollFrame || !body) return;
-    scrollFrame = requestAnimationFrame(() => {
-      scrollFrame = 0;
-      scrollTop = body.scrollTop;
-    });
-  }
-  // The height changes only when the window does, so it stays off the scroll
-  // path, where reading it forces a layout for a value that did not move.
-  function readViewport() {
-    if (!body) return;
-    scrollTop = body.scrollTop;
-    viewportH = body.clientHeight;
-  }
-  // One block, so the flush lands with `leadArrives` still matching this id.
-  let debutedLead: HistoryRow['id'] | null = null;
-  let leadArrives = false;
-  $: leadId = rows[0]?.id ?? null;
-  $: if (leadId !== debutedLead) {
-    leadArrives = needle === '' && freshLead(debutedLead, leadId);
-    debutedLead = leadId;
-  }
-  // The column's bottom edge. Read from every row rather than the shown ones,
-  // so a filter cannot move the day the record starts.
-  $: origin = rows.length > 0 ? sinceDay(rows[rows.length - 1].timestamp, now) : '';
   // The daemon sets `armed` from `ask_user` alone, and sends no question with
-  // it, so the turn can say an agent is waiting and nothing further.
+  // it, so History can say an agent is waiting and nothing further.
   $: waiting = $daemon.live.armed;
-  $: pending = waiting ? null : pendingOf($daemon.live);
-  $: nothingYet = $table.loaded && rows.length === 0;
+  $: nothingYet = $table.loaded && $table.rows.length === 0;
   $: blockers = $daemon.status?.blockers ?? [];
+  $: downloading = $daemon.download !== null;
+  $: blocking = blockers.length > 0 || downloading;
+  // Each says why History may hold nothing new, so it stands above the list.
+  $: alerting = blocking || !live || failed !== null;
   // The daemon answers this, and the config only says what was asked for. A
   // history file that will not open leaves the two disagreeing.
   $: savingHistory = ($daemon.status?.history_enabled ?? config.daemon?.save_history) !== false;
 
   // The window restarts the daemon itself rather than naming a terminal command.
   let restarting = false;
-  const COMING_BACK = 12;
+  // launchd.plist(5): ThrottleInterval, the least time between two launches of a
+  // job, defaults to 10 seconds.
+  const LAUNCHD_THROTTLE_MS = 10_000;
+  const POLL_MS = 250;
   async function restart() {
     restarting = true;
     try {
       await restartDaemon();
-      // `launchctl kickstart -k` answers when launchd accepts the request, not
-      // when the new process listens. Reading straight away finds a dead socket
-      // and tells the user Banshee has stopped, which is the opposite of what
-      // just happened. Nothing measured this count; it trades how slow a
-      // machine may be against how long the window waits before believing it.
-      for (let left = COMING_BACK; left > 0; left--) {
+      // The restart answers once the daemon has the request, not when the new
+      // process listens, and launchd may hold the relaunch for its throttle.
+      // Reading straight away finds a dead socket and tells the user Banshee
+      // has stopped, which is the opposite of what just happened.
+      for (let left = LAUNCHD_THROTTLE_MS / POLL_MS; left > 0; left--) {
         if (await readStatus(false)) break;
-        await new Promise((wake) => setTimeout(wake, 250));
+        await new Promise((wake) => setTimeout(wake, POLL_MS));
       }
       await readLatest();
     } catch {
-      // The pending keys are still pending, so the notice already says it.
+      // The blocker still stands, so its box already says it.
     }
     restarting = false;
   }
 
   let starting = false;
+  /// What `banshee start` said when it refused, such as a config it will not read.
+  let startRefusal = '';
+  function startRefused(error: unknown) {
+    startRefusal = (error as { message?: string })?.message || '';
+  }
+
   async function start() {
     starting = true;
     try {
       await startDaemon();
       await readDaemon();
-    } catch {
-      // The state word still says Not running, so the failure is already said.
+    } catch (error) {
+      startRefused(error);
     }
     starting = false;
   }
 
-  // Empty when the daemon is stopped. The hotkey is never applied live and the daemon reports no
-  // bound key. Pending is the only way the foot stops naming a key nobody listens for.
-  // audio.input_device always applies.
-  $: footValues = ((): {
-    id: string;
-    label: Job;
-    title?: string;
-    value: string;
-    pending?: string;
-  }[] => {
-    const said = (value: string) => (live ? value : '');
-    const waits = (...keys: string[]) =>
-      live && keys.some((key) => $waitsOnARestart.has(key)) ? RESTART_SAYS : undefined;
-    // The prefix form, so a `[tts.remote]` key added later cannot be left off a
-    // hand-written list and lose its mark.
-    const waitsUnder = (prefix: string) =>
-      live && [...$waitsOnARestart].some((key) => key.startsWith(prefix))
-        ? RESTART_SAYS
-        : undefined;
-    return [
-      {
-        // Where the words are heard, not the device they are picked up on: the
-        // cell reports the one fact the panel's whole group is about.
-        id: 'job-microphone',
-        label: 'Microphone',
-        title: 'Listening',
-        value: said(listening.remote ? (listening.host ?? 'A remote server') : 'On this machine'),
-        pending:
-          live && listening.pending
-            ? listening.remote
-              ? 'changing to this machine when Banshee restarts'
-              : `changing to ${listening.willUse ?? A_SERVER} when Banshee restarts`
-            : waitsUnder('stt.remote.'),
-      },
-      {
-        id: 'job-hotkey',
-        label: 'Hotkey',
-        value: said(hotkeyListens ? humanize(String(config.audio?.hotkey ?? '')) : 'Compositor'),
-        pending: waits('audio.hotkey', 'audio.hotkey_mode'),
-      },
-      {
-        id: 'job-voice',
-        label: 'Voice',
-        value: said(speech.voiceName),
-        // The voice shown is the one being replaced, so a flip names what it
-        // changes to rather than marking the value as taken.
-        pending:
-          live && speech.pending
-            ? speech.remote
-              ? 'changing to this machine when Banshee restarts'
-              : `changing to ${speech.willUse ?? A_SERVER} when Banshee restarts`
-            : (waits('tts.voice', 'tts.speed') ?? waitsUnder('tts.remote.')),
-      },
-      {
-        id: 'job-agents',
-        label: 'Agents',
-        value: said(connected > 0 ? `${connected} connected` : 'None yet'),
-      },
-    ];
-  })();
-
-  // The name a job wears on screen is the foot cell's, not the internal one:
-  // the dictation cell is labelled Listening.
-  $: failedTitle = failed
-    ? (footValues.find((row) => row.label === failed.job)?.title ?? String(failed.job))
-    : '';
+  // A stopped daemon has no key to apply and no failure in force.
+  $: waitingPages = live ? waitingOn($waitingKeys) : {};
+  $: warned = [
+    ...(live && $daemon.live.last_error ? ['Listening' as const] : []),
+    ...(live && $daemon.live.last_speech_error ? ['Speaking' as const] : []),
+  ];
 
   $: if ($daemon.status) followSaveHistory(savingHistory);
 
@@ -434,17 +353,38 @@
     }
   }
 
+  function advance(seen: number | null, now: number | undefined): [number | null, boolean] {
+    if (now === undefined) return [seen, false];
+    return [now, seen !== null && now !== seen];
+  }
+
+  // Every kept row and every clear moves the count, whatever the activity was.
+  function noteChanges(now: number | undefined) {
+    let moved: boolean;
+    [seenChanges, moved] = advance(seenChanges, now);
+    if (moved) readNewest().catch(() => {});
+  }
+
+  // A read only records the count; a push that moves it is what asks for a read.
+  function noteSettingsChanges(now: number | undefined): boolean {
+    let moved: boolean;
+    [seenSettings, moved] = advance(seenSettings, now);
+    return moved;
+  }
+
   /// andStart is off for the restart poll: launchd is already bringing the daemon back.
   async function readStatus(andStart = true): Promise<boolean> {
     try {
       await refreshStatus(status);
-      wasTranscribing = $daemon.live.transcribing;
+      startRefusal = '';
+      noteChanges($daemon.live.history_changes);
+      noteSettingsChanges($daemon.live.settings_changes);
       wasLoadingModel = $daemon.live.loading_model;
       return true;
     } catch (error) {
       const reason = (error as { message?: string })?.message || 'not running';
       daemon.update((s) => ({ ...s, down: reason }));
-      if (andStart) startDaemon().catch(() => {});
+      if (andStart) startDaemon().catch(startRefused);
       return false;
     }
   }
@@ -473,25 +413,16 @@
     agentsRead = gotAgents;
   }
 
+  function openAt(missed: boolean) {
+    const chosen = missed ? (newestUnanswered($table.rows)?.id ?? null) : null;
+    view.set({ query: '', chosen });
+    if (chosen !== null) history?.reveal(chosen);
+  }
+
   onMount(() => {
     // Focus alone misses a window unhidden without the pointer landing in it.
     document.addEventListener('visibilitychange', onReturn);
     return () => document.removeEventListener('visibilitychange', onReturn);
-  });
-
-  onMount(() => {
-    readViewport();
-    // The window grows taller under the reader, so the plan never trusts a
-    // viewport it read earlier. Absent where no observer exists.
-    if (typeof ResizeObserver === 'undefined' || !body) {
-      return () => cancelAnimationFrame(scrollFrame);
-    }
-    const watcher = new ResizeObserver(readViewport);
-    watcher.observe(body);
-    return () => {
-      cancelAnimationFrame(scrollFrame);
-      watcher.disconnect();
-    };
   });
 
   onMount(async () => {
@@ -506,9 +437,9 @@
       listen<Partial<Live> & Pick<Status, 'pipeline'>>('daemon:state', (e) => {
         if (readinessIsStale($daemon, e.payload)) readStatus(false);
         applyPush(e.payload);
-        if (e.payload.transcribing === false && wasTranscribing) readNewest().catch(() => {});
-        if (e.payload.transcribing !== undefined) wasTranscribing = e.payload.transcribing;
-        // `stt_model` and `english_only` come only with a full status, and the
+        noteChanges(e.payload.history_changes);
+        if (noteSettingsChanges(e.payload.settings_changes)) readStatus(false);
+        // `stt_model` and `stt_translates` come only with a full status, and the
         // read a write does happens before the file lands, so this is the only
         // word that the model in force moved. Held rather than read off the
         // store, which `applyPush` above has already advanced.
@@ -519,6 +450,8 @@
         const progress = e.payload;
         const last = endsTheRun(progress);
         forgetTheAsk();
+        if (last) forgetSamples();
+        else record(progress, performance.now());
         daemon.update((s) => ({ ...s, download: last ? null : progress }));
 
         // `downloadModels` answers as soon as the daemon takes the task, so a
@@ -539,239 +472,234 @@
         }
       }),
       listen<Down>('daemon:down', (e) => daemon.update((s) => ({ ...s, down: e.payload.reason }))),
-      listen('app:reopened', () => readDaemon()),
+      // Opening the window moves no focus: the user is always inside another
+      // application.
+      listen<Reopened>('app:reopened', async (e) => {
+        openAt(false);
+        reopened += 1;
+        show('History');
+        await readDaemon();
+        if (e.payload.missed) openAt(true);
+      }),
     ]);
-    // The foot needs neither, so it does not queue behind the whole-table read.
-    await Promise.all([readDaemon(), readTheRest()]);
+    const missed = launchMissed();
+    // The sidebar needs neither, so it does not queue behind the whole-table read.
+    await Promise.all([loadTable(), readDaemon(), readTheRest()]);
+    if (await missed) openAt(true);
   });
 </script>
 
 <svelte:window on:keydown={onKeydown} on:focus={onReturn} />
 
-<main>
-  <h1 class="sr">Banshee</h1>
-  <!-- Invisible until it takes focus. The roving foot collapses four stops into
-       one, but the copy controls are the bulk of them and they have to stay
-       reachable, so the keyboard needs a way over the record entirely. -->
-  <button class="skip" on:click={() => foot.enter()}> Skip to the jobs </button>
+<div class="window" class:folded={!$sidebarShown}>
+  <!-- Invisible until it takes focus. Six sidebar stops come first, so the
+       keyboard needs a way past them to the page. -->
+  <button class="btn skip" on:click={() => document.getElementById(PAGE_HEADING)?.focus()}>
+    Skip to the page
+  </button>
 
-  <Header
-    {word}
-    {form}
-    waiting={live && $waitsOnARestart.size > 0}
-    {restart}
-    {restarting}
-    failure={failed?.says ?? null}
-    failureId={RETURNS_TO.failure}
-    showFailure={() => failed && openJob(failed.job, RETURNS_TO.failure, failed.at)}
-  />
+  {#if $sidebarShown}
+    <Sidebar {page} {go} state={word} {host} pending={waitingPages} {warned} />
+  {:else}
+    <dialog class="drawer" aria-label="Sidebar" bind:this={drawer} on:close={closedDrawer}>
+      <Sidebar {page} go={chooseFromDrawer} state={word} {host} pending={waitingPages} {warned} />
+    </dialog>
+  {/if}
 
-  <div class="body" bind:this={body} on:scroll={onScroll}>
-    <!-- Outside the panel branch on purpose: a voice that will not play is
-         reported from inside a panel, and the reader has to see it there. The
-         region is always in the DOM, because one that arrives with its own
-         content is not reliably announced. -->
-    <div aria-live="polite">
-      {#if $problem}
-        <Absence label={$problem} action="Dismiss" act={() => problem.set('')} />
-      {/if}
-    </div>
-
-    {#if job}
-      <Panel name={panels[job].name} lead={panels[job].lead} close={() => openJob(null)}>
-        {#if job === 'Record'}
-          <TheRecord saving={savingHistory} />
-        {:else if job === 'Microphone'}
-          <MicrophonePanel />
-        {:else if job === 'Hotkey'}
-          <HotkeyPanel />
-        {:else if job === 'Voice'}
-          <VoicePanel {voices} />
-        {:else if job === 'Agents'}
-          <AgentsPanel />
-        {/if}
-      </Panel>
-    {:else}
-      {#if failed}
-        <!-- The header names the failure in two words; this states it where the
-             reader looks, with the fix in a button like a blocker's. The header
-             keeps the notice, because only that band survives a scroll. -->
-        <div class="failure">
-          <p class="note">{failed.reads}</p>
-          <button
-            class="btn btn-ghost"
-            on:click={() => openJob(failed.job, RETURNS_TO.failure, failed.at)}
-          >
-            Open {failedTitle}
+  <main>
+    <h1 class="sr">Banshee</h1>
+    <Page
+      name={page}
+      lead={leads[page]}
+      regions={page === 'History'}
+      titled={!(page === 'History' && reading)}
+      bind:scroller={body}
+    >
+      <svelte:fragment slot="start">
+        {#if !$sidebarShown}
+          <button class="btn btn-ghost unfold" bind:this={unfold} on:click={openDrawer}>
+            <span class="sr">Show sidebar</span>
+            <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <rect x="1.5" y="2.5" width="13" height="11" rx="2" />
+              <path d="M6 2.5 V13.5" />
+            </svg>
           </button>
+        {/if}
+        {#if page === 'History' && reading}
+          <button class="btn btn-ghost back" bind:this={back} on:click={() => history?.back()}>
+            <svg class="icon" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+              <path d="M7.5 2.5 L4 6 L7.5 9.5" />
+            </svg>
+            <span class="sr">Back to</span> History
+          </button>
+        {/if}
+      </svelte:fragment>
+      <svelte:fragment slot="end">
+        {#if page === 'History' && $table.rows.length > 0}
+          <Find bind:this={search} />
+        {/if}
+      </svelte:fragment>
+      <!-- Above every page on purpose: a voice that will not play is reported
+           from inside a page, and the reader has to see it there. The region is
+           always in the DOM, because one that arrives with its own content is
+           not reliably announced. -->
+      <svelte:fragment slot="notice">
+        <!-- History draws it at the top of its own notices. -->
+        {#if !$sidebarShown && host !== null && page !== 'History'}
+          <HostLine {host} inset />
+        {/if}
+        <div aria-live="polite">
+          {#key $reports}
+            {#if $problem}
+              <Absence label={$problem} action="Dismiss" act={() => problem.set('')} />
+            {/if}
+          {/key}
         </div>
+      </svelte:fragment>
+
+      {#if page === 'Agents'}
+        <AgentsPage />
+      {:else if page === 'Listening'}
+        <ListeningPage />
+      {:else if page === 'Speaking'}
+        <SpeakingPage {voices} />
+      {:else if page === 'Hotkey'}
+        <HotkeyPage />
+      {:else if page === 'Saved history'}
+        <SavedHistoryPage saving={savingHistory} />
+      {:else}
+        {#key reopened}
+          <HistoryPage
+            bind:this={history}
+            bind:reading
+            saving={savingHistory}
+            {alerting}
+            {downloading}
+            {agentless}
+            {waiting}
+            {host}
+            compositor={!hotkeyListens}
+            hotkey={live ? boundKey : null}
+            verb={holdToTalk ? 'Hold' : 'Tap'}
+            {go}
+          >
+            <svelte:fragment slot="alerts">
+              {#if blocking}
+                <Blockers
+                  {blockers}
+                  {restart}
+                  busy={restarting}
+                  download={$daemon.download}
+                  models={$daemon.status?.stt_models ?? []}
+                  chosen={String(config.stt?.model ?? '')}
+                  megabytes={Number($daemon.status?.download_megabytes ?? 0)}
+                  first={savingHistory && nothingYet}
+                  remoteHost={listening.stoppedBy === null ? listening.host : null}
+                  speechHost={textLeavesTo}
+                />
+              {/if}
+
+              {#if !live}
+                <Absence
+                  label="Banshee is not running"
+                  detail={startRefusal ||
+                    'Dictation and the hotkey do nothing until it starts. What you said before is still here.'}
+                  action={starting ? 'Starting' : 'Start Banshee'}
+                  act={start}
+                  busy={starting}
+                />
+              {/if}
+
+              {#if failed}
+                <!-- The sidebar marks the page in two words; this states it where the
+                     reader looks, with the fix in a button like a blocker's. -->
+                <div class="failure">
+                  <p class="note">{failed.reads}</p>
+                  <button
+                    class="btn btn-ghost"
+                    on:click={() => failed && go(failed.page, failed.at)}
+                  >
+                    Open {failed.page}
+                  </button>
+                </div>
+              {/if}
+            </svelte:fragment>
+          </HistoryPage>
+        {/key}
       {/if}
+    </Page>
 
-      {#if blockers.length > 0 || $daemon.download !== null}
-        <Blockers
-          {blockers}
-          {restart}
-          busy={restarting}
-          download={$daemon.download}
-          preset={String(config.stt?.preset ?? 'balanced')}
-          megabytes={Number($daemon.status?.download_megabytes ?? 0)}
-          first={savingHistory && nothingYet}
-          remoteHost={listening.stoppedBy === null ? listening.host : null}
-          speechHost={textLeavesTo}
-        />
-      {/if}
-
-      {#if !live}
-        <Absence
-          label="Banshee is not running"
-          detail="Dictation and the hotkey do nothing until it starts. What you said before is still here."
-          action={starting ? 'Starting' : 'Start Banshee'}
-          act={start}
-          busy={starting}
-        />
-      {/if}
-
-      {#if live && ($table.total > 0 || !savingHistory)}
-        <Ledger
-          id={RETURNS_TO.ledger}
-          total={$table.total}
-          saving={savingHistory}
-          open={() => openJob('Record', RETURNS_TO.ledger)}
-          find={() => {
-            finding = true;
-          }}
-        />
-        <!-- With the record it searches, not above the blockers: the header
-             stays up while search is open, and DOM order matches the eye. -->
-        {#if finding}
-          <Find bind:query matches={shown.length} close={closeFind} />
-        {/if}
-      {:else if finding}
-        <Find bind:query matches={shown.length} close={closeFind} />
-      {/if}
-
-      {#if noAgentYet && !finding && blockers.length === 0}
-        <Absence
-          label="No agent can speak to you yet"
-          detail="A connected agent can ask you questions out loud and hear your answer, so you can leave the screen while it works."
-          action="Connect an agent"
-          id={RETURNS_TO.agents}
-          act={() => openJob('Agents', RETURNS_TO.agents)}
-        />
-      {/if}
-
-      {#if waiting}
-        <!-- The lead while it stands: a person who glances at the window during
-             this moment is the one person the window exists for. No copy
-             control, because the daemon sends no question to copy. -->
-        <Turn
-          lead
-          speaker="agent"
-          time={rightNow}
-          text="An agent asked a question and is waiting for your answer."
-        >
-          {#if !hotkeyListens}
-            <p class="how">Press your compositor's Banshee binding to answer.</p>
-          {:else if boundKey}
-            <p class="how">{holdToTalk ? 'Hold' : 'Tap'} {boundKey} to answer.</p>
-          {/if}
-        </Turn>
-      {:else if pending}
-        <Pending mode={pending} time={rightNow} />
-      {/if}
-
-      {#if shown.length > 0}
-        <RecordList rows={shown} {scrollTop} viewport={viewportH} container={body}>
-          <svelte:fragment let:row let:index>
-            <Turn
-              lead={index === 0 && !waiting}
-              arrive={index === 0 && !waiting && leadArrives}
-              speaker="user"
-              id={String(row.id)}
-              time={formatWhen(row.timestamp, now)}
-              text={row.text}
-            />
-          </svelte:fragment>
-        </RecordList>
-        <!-- Reads as margin under the record rather than as a rule. -->
-        {#if !needle && origin}
-          <!-- The second clause is about the record, and it only stands while
-               the machine is also the one that hears. Over a remote listener
-               it would sit a band above a foot naming the host, and read as a
-               claim the window cannot back. -->
-          <p class="note colophon">
-            The record starts here, {origin}. Banshee keeps it on this machine{listening.remote
-              ? '.'
-              : ' and sends it nowhere.'}
-          </p>
-        {/if}
-      {:else if needle}
-        <Absence
-          inRecord
-          label="No match"
-          detail={`Nothing said so far contains \u201c${query.trim()}\u201d.`}
-        />
-      {:else if !savingHistory}
-        <Absence
-          inRecord
-          label="Nothing is kept"
-          detail="Dictation still works and still lands in whatever app has focus. Banshee is simply not writing any of it down."
-        />
-      {:else if nothingYet && blockers.length === 0}
-        <Absence
-          inRecord
-          label="Nothing said yet"
-          detail={!hotkeyListens
-            ? 'Your compositor starts dictation here. What you say lands in whatever app you are using, and shows up here.'
-            : boundKey
-              ? `${holdToTalk ? 'Hold' : 'Tap'} ${boundKey} and speak. What you say lands in whatever app you are using, and shows up here.`
-              : 'No key is bound yet, so nothing starts dictation. The Hotkey panel below binds one.'}
-          action={panels.Record.name}
-          id={RETURNS_TO.absence}
-          act={() => openJob('Record', RETURNS_TO.absence)}
-        />
-      {/if}
-    {/if}
-  </div>
-
-  <!-- Foot hands back the label it was given, so the narrowing is sound. -->
-  <Foot
-    bind:this={foot}
-    values={footValues}
-    active={job}
-    open={(name, id) => openJob(job === name ? null : (name as Job), id)}
-  />
-
-  <span class="sr" aria-live="polite">{word}{$announcement ? `. ${$announcement}` : ''}</span>
-</main>
+    <span class="sr" aria-live="polite">{word}{$announcement ? `. ${$announcement}` : ''}</span>
+  </main>
+</div>
 
 <style>
-  main {
-    display: flex;
-    flex-direction: column;
+  .window {
+    display: grid;
+    grid-template-columns: 208px minmax(0, 1fr);
     height: 100%;
     overflow: hidden;
   }
 
-  /* Exactly one scrolling region, so the foot stays reachable however long the
-     day runs. */
-  .body {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding-top: 22px;
-    /* Already the default; stated so it reads as chosen. */
-    overflow-anchor: auto;
+  .window.folded {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  /* Banshee's own voice closing the column, so it takes the agent cut and the
-     secondary readout's colour. The rule above it is the band-edge weight: it
-     ends the record the way the ledger's rule opens it. */
-  .colophon {
-    margin: 26px var(--gutter) 0;
-    padding-top: 14px;
-    border-top: 1px solid var(--rule);
-    color: var(--dim);
+  .drawer {
+    width: 208px;
+    max-width: none;
+    height: 100%;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+
+  .drawer[open] {
+    display: grid;
+  }
+
+  /* `::backdrop` inherits no custom property before Safari 17.4, so each
+     appearance writes its tint out. */
+  .drawer::backdrop {
+    background: rgba(8, 12, 15, 0.14);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .drawer::backdrop {
+      background: rgba(0, 0, 0, 0.5);
+    }
+  }
+
+  .unfold {
+    display: flex;
+    flex: none;
+    padding: 7px;
+  }
+
+  .unfold svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .back {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .back svg {
+    width: 12px;
+    height: 12px;
+  }
+
+  main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
   }
 
   /* The swap hurries: a reader catching up never waits on it. Global, because
@@ -781,18 +709,9 @@
     animation-duration: 180ms;
   }
 
-  /* The readout voice: an instruction the config answers, not a thing anyone
-     said. */
-  .how {
-    margin: 12px 0 0;
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--accent);
-  }
-
   /* Ink, not the accent: this is prose, and the accent does not emphasise
-     prose. The header's own notice carries the alarm in the accent, and two
-     lines of it here would say the same thing a second time, louder. */
+     prose. The sidebar's mark carries the alarm in the accent, and two lines of
+     it here would say the same thing a second time, louder. */
   .failure {
     max-width: 520px;
     margin: 0 var(--gutter) 16px;
@@ -807,17 +726,6 @@
     position: absolute;
     left: -9999px;
     z-index: 1;
-    background: var(--ink);
-    color: var(--ground);
-    border: 0;
-    border-radius: 0;
-    padding: 8px 14px;
-    font-family: var(--mono);
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    cursor: pointer;
   }
 
   .skip:focus {

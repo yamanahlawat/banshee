@@ -5,8 +5,8 @@
 # the mark changes, then commit what it writes.
 #
 # The menu bar images in bansheed/assets/tray are not written here. Those are
-# template images macOS tints, drawn at 36px where the arcs need their own
-# spacing, and they are the artist's originals.
+# template images macOS tints, drawn in code at 36px where the arcs need their
+# own spacing. The tray composes the problem badge in code.
 #
 # A regeneration on another machine can rewrite some tiles. This is not a
 # drawing change. Where ImageMagick delegates SVG to librsvg, the first two

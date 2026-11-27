@@ -1,8 +1,10 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { beforeEach, expect, it, vi } from 'vitest';
+import axe from 'axe-core';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ready from './mocks/ready.json';
 import permissions from './mocks/permissions.json';
 import remote from './mocks/remote.json';
+import { dictated } from './lib/history.mock';
 
 // Local noon, because the history helpers read the local calendar day.
 const NOW = new Date(2026, 7, 27, 12, 0, 0);
@@ -11,10 +13,23 @@ function stamp(minutesAgo: number): string {
   return `${new Date(NOW.getTime() - minutesAgo * 60_000).toISOString().slice(0, 19)}Z`;
 }
 
+const asked = (id: number, row: Partial<HistoryRow>): HistoryRow => ({
+  id,
+  kind: 'question',
+  question: 'Which branch should I use?',
+  text: null,
+  outcome: 'no_answer',
+  reason: null,
+  timestamp: stamp(1),
+  client: null,
+  audio: null,
+  ...row,
+});
+
 // The daemon answers oldest first, so the newest row is last.
 const rows = [
-  { id: 1, text: 'the older one', timestamp: stamp(9) },
-  { id: 2, text: 'Yes, open the pull request.', timestamp: stamp(1) },
+  dictated(1, 'the older one', stamp(9)),
+  dictated(2, 'Yes, open the pull request.', stamp(1)),
 ];
 
 vi.mock('./lib/tauri', async () => (await import('./lib/tauri.mock')).mockTauri());
@@ -22,8 +37,8 @@ vi.mock('./lib/tauri', async () => (await import('./lib/tauri.mock')).mockTauri(
 import {
   detectAgents,
   history,
+  launchMissed,
   listen,
-  listLanguages,
   listVoices,
   listDevices,
   downloadModels,
@@ -36,19 +51,57 @@ import {
   status,
 } from './lib/tauri';
 import { get } from 'svelte/store';
+import type { HistoryRow } from './lib/tauri';
 import { agents } from './lib/agents';
-import { table as historyTable } from './lib/history';
+import { table as historyTable, view } from './lib/history';
 import { daemon, empty, reduceStatus, type Blocker } from './lib/daemon';
 import { forgetTheAsk } from './lib/downloads';
-import { announcement, forgetCopy, DICTATION_FAILURE, RESTART_SAYS } from './lib/copy';
+import {
+  announcement,
+  forgetCopy,
+  report,
+  waitingSays,
+  DICTATION_FAILURE,
+  WAITING_SAYS,
+  WAITS_FOR_ITS_FILE,
+} from './lib/copy';
 import { forgetKeys } from './lib/keys';
+import { PAGES } from './lib/nav';
+import { LIST_AND_DETAIL_FROM, SIDEBAR_FOLDS_BELOW } from './lib/layout';
+import { stubMatchMedia } from './lib/media.mock';
 import App from './App.svelte';
 
-// A panel's heading is its lead statement now, and that sentence moves with
-// the daemon. The section keeps the short name, so tests ask for that and read
-// the heading inside it.
-const panel = (name: string) => screen.getByRole('region', { name });
-const panelHeading = (name: string) => within(panel(name)).getByRole('heading');
+// jsdom draws no modal dialog. This stands in for the parts the window leans
+// on: the open state, Escape closing it, and the close event.
+function dismissOnEscape(this: HTMLDialogElement, event: KeyboardEvent) {
+  if (event.key === 'Escape' && this.dispatchEvent(new Event('cancel', { cancelable: true }))) {
+    this.close();
+  }
+}
+HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+  this.setAttribute('open', '');
+  this.addEventListener('keydown', dismissOnEscape);
+};
+HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+  if (!this.hasAttribute('open')) return;
+  this.removeAttribute('open');
+  this.removeEventListener('keydown', dismissOnEscape);
+  this.dispatchEvent(new Event('close'));
+};
+
+// A page's heading is its lead statement, and that sentence moves with the
+// daemon. The region keeps the page's name, so tests ask for that and read the
+// heading inside it.
+const page = (name: string) => screen.getByRole('region', { name });
+const pageHeading = (name: string) => within(page(name)).getByRole('heading');
+const sidebar = () => screen.getByRole('navigation', { name: 'Banshee' });
+// Anchored at the start only: an item's name runs on with its marks.
+const item = (name: string) =>
+  within(sidebar()).getByRole('button', { name: new RegExp(`^${name}`) });
+const choose = (name: string) => fireEvent.click(item(name));
+// The newest row reads in the list and again in the detail, so the window has
+// read History once its option is drawn.
+const listed = () => screen.findByRole('option', { name: /^Yes, open the pull request\./ });
 
 // The daemon's pushes, captured so a test can deliver one.
 const pushes = new Map<string, (event: { payload: unknown }) => void>();
@@ -61,6 +114,7 @@ beforeEach(async () => {
   daemon.set(empty());
   agents.set([]);
   historyTable.set({ rows: [], total: 0, loaded: false, saving: null });
+  view.set({ query: '', chosen: null });
   forgetCopy();
   forgetTheAsk();
   forgetKeys();
@@ -69,18 +123,13 @@ beforeEach(async () => {
   // `clearAllMocks` empties the call list and leaves the implementation, so a
   // rejection set by one test is still set for the next one without this.
   vi.mocked(clearHistory).mockResolvedValue(undefined);
+  vi.mocked(startDaemon).mockResolvedValue(undefined);
   pushes.clear();
   vi.mocked(listen).mockImplementation((name: string, handler: unknown) => {
     pushes.set(name, handler as (event: { payload: unknown }) => void);
     return Promise.resolve(() => {});
   });
   vi.mocked(listDevices).mockResolvedValue({ devices: [], current: null });
-  vi.mocked(listLanguages).mockResolvedValue({
-    languages: [
-      { code: 'en', name: 'English' },
-      { code: 'hi', name: 'Hindi' },
-    ],
-  });
   vi.mocked(listVoices).mockResolvedValue({
     voices: [{ id: 'af_sky', name: 'Sky', description: 'American, clear', downloaded: true }],
     current: 'af_sky',
@@ -88,36 +137,41 @@ beforeEach(async () => {
   vi.mocked(detectAgents).mockResolvedValue([]);
 });
 
-it('names the speaker in words, because the type cut says nothing to a screen reader', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  expect(screen.getAllByText(/^You said at /).length).toBe(rows.length);
-});
-
-it('sets the newest turn apart from the ones below it', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  const turns = container.querySelectorAll('article.turn');
-  expect(turns.length).toBe(rows.length);
-  expect(turns[0].classList.contains('lead')).toBe(true);
-  expect(turns[1].classList.contains('lead')).toBe(false);
-});
-
 it('draws an empty history rather than leaving the body blank', async () => {
   vi.mocked(history).mockResolvedValue([]);
   render(App);
-  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
+  expect(screen.queryByRole('listbox')).toBeNull();
 });
 
-// It stands where the turns would be, so it takes the column they would have
-// taken. The two absences differ because their places differ.
-it('puts the empty record in the column the turns would have used', async () => {
+it('claims no missing key on an empty History while Banshee is stopped', async () => {
+  vi.mocked(status).mockResolvedValue({ running: false });
   vi.mocked(history).mockResolvedValue([]);
   render(App);
-  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
+  expect(screen.getByText('Banshee is not running')).toBeTruthy();
+  expect(screen.queryByText(/No key is bound/)).toBeNull();
+});
 
-  const box = screen.getByText('Nothing said yet').closest('.absence');
-  expect(box?.classList.contains('in-record')).toBe(true);
+it('asks for an agent on an empty History only once the daemon says none is connected', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Connect an agent' })).toBeTruthy(),
+  );
+  await fireEvent.click(screen.getByRole('button', { name: 'Connect an agent' }));
+  await waitFor(() => expect(pageHeading('Agents')).toBeTruthy());
+});
+
+it('asks for no agent while one is connected', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  vi.mocked(detectAgents).mockResolvedValue([
+    { id: 'claude', name: 'Claude Code', presence: 'connected', note: '' },
+  ]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
+  await waitFor(() => expect(get(agents)).toHaveLength(1));
+  expect(screen.queryByRole('button', { name: 'Connect an agent' })).toBeNull();
 });
 
 it('says what a blocker stops and offers the pane that clears it', async () => {
@@ -131,9 +185,29 @@ it('says what a blocker stops and offers the pane that clears it', async () => {
   expect(vi.mocked(openPermissionPane)).toHaveBeenCalled();
 });
 
+it('lands on History when the window is reopened', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...permissions,
+    blockers: permissions.blockers as Blocker[],
+  });
+  render(App);
+  await screen.findAllByRole('button', { name: /^Open System Settings for / });
+  await choose('Listening');
+  await waitFor(() => expect(page('Listening')).toBeTruthy());
+
+  pushes.get('app:reopened')?.({ payload: { missed: false } });
+
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Listening' })).toBeNull());
+  expect(page('History')).toBeTruthy();
+  expect(item('History').getAttribute('aria-current')).toBe('page');
+  expect(
+    screen.getAllByRole('button', { name: /^Open System Settings for / }).length,
+  ).toBeGreaterThan(0);
+});
+
 it('shows that an agent is waiting, without claiming to know the question', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
   daemon.update((s) => ({ ...s, live: { ...s.live, armed: true } }));
   await waitFor(() =>
     expect(
@@ -142,143 +216,339 @@ it('shows that an agent is waiting, without claiming to know the question', asyn
   );
 });
 
-it('opens a job into the body and closes it again', async () => {
+it('swaps History for a page, and back again from the sidebar', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
-  await fireEvent.click(screen.getByRole('button', { name: /Hotkey/ }));
-  expect(screen.getByRole('button', { name: 'Done' })).toBeTruthy();
+  await choose('Hotkey');
+  await waitFor(() => expect(page('Hotkey')).toBeTruthy());
   expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Done' })).toBeNull();
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await choose('History');
+  await listed();
+});
+
+it('lists every page in the sidebar, with the settings in a named group', async () => {
+  render(App);
+  await listed();
+
+  const names = within(sidebar())
+    .getAllByRole('button')
+    .map((button) => button.textContent?.trim());
+  expect(names).toEqual(['History', 'Agents', 'Listening', 'Speaking', 'Hotkey', 'Saved history']);
+  const settings = within(sidebar()).getByRole('group', { name: 'Settings' });
+  expect(
+    within(settings)
+      .getAllByRole('button')
+      .map((button) => button.textContent?.trim()),
+  ).toEqual(['Listening', 'Speaking', 'Hotkey', 'Saved history']);
+
+  expect(item('History').getAttribute('aria-current')).toBe('page');
+  await choose('Hotkey');
+  await waitFor(() => expect(item('Hotkey').getAttribute('aria-current')).toBe('page'));
+  expect(item('History').hasAttribute('aria-current')).toBe(false);
+});
+
+it('lands focus on the heading of the page chosen, and moves none on open', async () => {
+  render(App);
+  await listed();
+  expect(document.activeElement).toBe(document.body);
+
+  await choose('Hotkey');
+  await waitFor(() => expect(document.activeElement).toBe(pageHeading('Hotkey')));
+
+  await choose('History');
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(page('History')).getByRole('heading', { name: 'History' }),
+    ),
+  );
+});
+
+it('says the state in the sidebar foot on every page', async () => {
+  render(App);
+  await listed();
+  expect(within(sidebar()).getByText('Ready')).toBeTruthy();
+
+  await choose('Agents');
+  daemon.update((s) => ({ ...s, live: { ...s.live, activity: 'recording', recording: true } }));
+  await waitFor(() => expect(within(sidebar()).getByText('Recording')).toBeTruthy());
+  expect(within(sidebar()).queryByText(/Audio goes to/)).toBeNull();
+});
+
+it('holds Feedback on the Hotkey page, with no page of its own', async () => {
+  render(App);
+  await listed();
+  expect(within(sidebar()).queryByRole('button', { name: /^Feedback/ })).toBeNull();
+
+  await choose('Hotkey');
+  await waitFor(() => expect(page('Hotkey')).toBeTruthy());
+  expect(within(page('Hotkey')).getByRole('radiogroup', { name: 'Feedback' })).toBeTruthy();
+});
+
+it('forgets a refused setting once another page is chosen', async () => {
+  vi.mocked(setSetting).mockRejectedValueOnce({
+    code: -32000,
+    message: 'the daemon closed the socket',
+    transport: true,
+  });
+  render(App);
+  await listed();
+  await choose('Hotkey');
+  await waitFor(() => expect(page('Hotkey')).toBeTruthy());
+  await fireEvent.click(within(page('Hotkey')).getByRole('radio', { name: 'Off' }));
+  await screen.findByText('Not changed. Banshee is not running.');
+
+  await choose('Speaking');
+  await waitFor(() => expect(page('Speaking')).toBeTruthy());
+  await choose('Hotkey');
+  await waitFor(() => expect(page('Hotkey')).toBeTruthy());
+  expect(screen.queryByText('Not changed. Banshee is not running.')).toBeNull();
+});
+
+it('opens the Feedback note with the mode the daemon reports, under a lead about the key', async () => {
+  // The config still asks for both: the note reads the cues in force.
+  vi.mocked(status).mockResolvedValue({ ...ready, feedback: 'none' });
+  render(App);
+  await listed();
+  await choose('Hotkey');
+  const group = await waitFor(() =>
+    within(page('Hotkey')).getByRole('radiogroup', { name: 'Feedback' }),
+  );
+  const note = document.getElementById(group.getAttribute('aria-describedby') ?? '');
+  expect(note?.textContent).toMatch(/^Banshee shows nothing and plays no sound\. /);
+  expect(pageHeading('Hotkey').textContent).not.toMatch(/sound/);
 });
 
 it('asks before it deletes the record', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  // Reachable from the head of the list, because the foot of a long list is not.
-  await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  await listed();
+  await choose('Saved history');
+  await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
   expect(screen.getByText(/This cannot be undone/)).toBeTruthy();
 });
 
-it('mounts the whole record where nothing is measurable, with no paging controls', async () => {
-  const many = Array.from({ length: 95 }, (_, i) => ({
-    id: i + 1,
-    text: `dictation ${i + 1}`,
-    timestamp: stamp(95 - i),
-  }));
+it('mounts the whole list where nothing is measurable, with no paging controls', async () => {
+  const many = Array.from({ length: 95 }, (_, i) =>
+    dictated(i + 1, `dictation ${i + 1}`, stamp(95 - i)),
+  );
   vi.mocked(history).mockResolvedValue(many);
 
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('dictation 95')).toBeTruthy());
+  render(App);
+  await screen.findByRole('option', { name: /^dictation 95,/ });
 
   // jsdom lays nothing out, so the windowing math has no viewport to work
   // against and the fallback mounts every row. The windowed path is held by
-  // lib/vlist instead, where sizes are numbers rather than hopes.
-  expect(container.querySelectorAll('article.turn').length).toBe(95);
+  // lib/vlist and the list's own tests, where sizes are given.
+  expect(screen.getAllByRole('option').length).toBe(95);
   expect(screen.queryByRole('button', { name: /older/i })).toBeNull();
 });
 
-it('filters what was said instead of opening a second place for it', async () => {
+it('opens History and its search on Cmd+F, and Escape clears it with the selection kept', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
+  await choose('Hotkey');
+  await waitFor(() => expect(page('Hotkey')).toBeTruthy());
 
-  expect(screen.queryByRole('searchbox')).toBeNull();
   await fireEvent.keyDown(window, { key: 'f', metaKey: true });
+  const find = await screen.findByRole('searchbox', { name: 'Search' });
+  await waitFor(() => expect(document.activeElement).toBe(find));
+  expect(page('History')).toBeTruthy();
 
-  const find = screen.getByRole('searchbox', { name: 'Find in what was said' });
   await fireEvent.input(find, { target: { value: 'older' } });
-
-  await waitFor(() => expect(screen.getByText('the older one')).toBeTruthy());
-  expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
+  await waitFor(() => expect(screen.getAllByRole('option').length).toBe(1));
+  expect(screen.getByRole('option', { name: /^the older one,/ })).toBeTruthy();
 
   await fireEvent.input(find, { target: { value: 'nothing matches this' } });
   await waitFor(() => expect(screen.getByText('No match')).toBeTruthy());
 
-  await fireEvent.keyDown(window, { key: 'Escape' });
-  await waitFor(() => expect(screen.queryByRole('searchbox')).toBeNull());
-  expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
+  await fireEvent.input(find, { target: { value: 'older' } });
+  await fireEvent.keyDown(find, { key: 'Escape' });
+  await waitFor(() => expect(screen.getAllByRole('option').length).toBe(2));
+  expect((find as HTMLInputElement).value).toBe('');
+  expect(document.activeElement).toBe(find);
+  expect(
+    screen.getByRole('option', { name: /^the older one,/ }).getAttribute('aria-selected'),
+  ).toBe('true');
+});
+
+it('a moved settings counter re-reads status', async () => {
+  render(App);
+  await listed();
+  await waitFor(() => expect(status).toHaveBeenCalled());
+
+  vi.mocked(status).mockClear();
+  pushes.get('daemon:state')?.({ payload: { settings_changes: 0 } });
+  await Promise.resolve();
+  expect(status).not.toHaveBeenCalled();
+
+  vi.mocked(status).mockResolvedValue({ ...ready, settings_changes: 1 });
+  pushes.get('daemon:state')?.({ payload: { settings_changes: 1 } });
+  await waitFor(() => expect(status).toHaveBeenCalledTimes(1));
+
+  pushes.get('daemon:state')?.({ payload: { settings_changes: 1 } });
+  await Promise.resolve();
+  expect(status).toHaveBeenCalledTimes(1);
+});
+
+it('follows the newest row again when the window is reopened', async () => {
+  render(App);
+  await listed();
+  const older = () => screen.getByRole('option', { name: /^the older one,/ });
+  await fireEvent.click(older());
+  expect(older().getAttribute('aria-selected')).toBe('true');
+
+  vi.mocked(history).mockResolvedValue([...rows, dictated(3, 'The newest one.', stamp(0))]);
+  pushes.get('daemon:state')?.({ payload: { history_changes: 1 } });
+  const newest = await screen.findByRole('option', { name: /^The newest one\./ });
+  expect(newest.getAttribute('aria-selected')).toBe('false');
+
+  pushes.get('app:reopened')?.({ payload: { missed: false } });
+  await waitFor(() =>
+    expect(
+      screen.getByRole('option', { name: /^The newest one\./ }).getAttribute('aria-selected'),
+    ).toBe('true'),
+  );
+  expect(older().getAttribute('aria-selected')).toBe('false');
+});
+
+it('empties the search when the window is reopened', async () => {
+  render(App);
+  await listed();
+  await fireEvent.keyDown(window, { key: 'f', metaKey: true });
+  const find = await screen.findByRole('searchbox', { name: 'Search' });
+  await fireEvent.input(find, { target: { value: 'older' } });
+  await waitFor(() => expect(screen.getAllByRole('option').length).toBe(1));
+
+  pushes.get('app:reopened')?.({ payload: { missed: false } });
+  await waitFor(() => expect(screen.getAllByRole('option').length).toBe(2));
+  expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('');
+});
+
+const selectedRow = () => screen.getByRole('region', { name: 'Selected row' });
+
+it('lands on the newest unanswered question when reopened for a missed one', async () => {
+  vi.mocked(history).mockResolvedValue([
+    asked(3, { question: 'Should I update the reports?', timestamp: stamp(8) }),
+    ...rows,
+  ]);
+  render(App);
+  await listed();
+  expect(within(selectedRow()).queryByText('Should I update the reports?')).toBeNull();
+
+  pushes.get('app:reopened')?.({ payload: { missed: true } });
+  await waitFor(() =>
+    expect(within(selectedRow()).getByText('Should I update the reports?')).toBeTruthy(),
+  );
+  expect(
+    screen
+      .getByRole('option', { name: /^An agent asked Should I update the reports\?/ })
+      .getAttribute('aria-selected'),
+  ).toBe('true');
+});
+
+it('lands on the newest unanswered question when launched for a missed one', async () => {
+  vi.mocked(history).mockResolvedValue([
+    asked(3, { question: 'Should I update the reports?', timestamp: stamp(8) }),
+    ...rows,
+  ]);
+  vi.mocked(launchMissed).mockResolvedValueOnce(true);
+  render(App);
+  await waitFor(() =>
+    expect(within(selectedRow()).getByText('Should I update the reports?')).toBeTruthy(),
+  );
+});
+
+it('a reopen with no target follows the newest row', async () => {
+  vi.mocked(history).mockResolvedValue([
+    asked(3, { question: 'Should I update the reports?', timestamp: stamp(8) }),
+    ...rows,
+  ]);
+  render(App);
+  await listed();
+  const older = () => screen.getByRole('option', { name: /^the older one,/ });
+  await fireEvent.click(older());
+
+  pushes.get('app:reopened')?.({ payload: { missed: false } });
+  await waitFor(() =>
+    expect(
+      screen
+        .getByRole('option', { name: /^Yes, open the pull request\./ })
+        .getAttribute('aria-selected'),
+    ).toBe('true'),
+  );
+  expect(get(view).chosen).toBeNull();
+});
+
+// The list below keeps its height only while the stack scrolls on its own.
+it('holds tall blockers in a notice region of their own, apart from the list', async () => {
+  vi.mocked(status).mockResolvedValue({
+    ...permissions,
+    blockers: permissions.blockers as Blocker[],
+  });
+  render(App);
+  const fixes = await screen.findAllByRole('button', { name: /^Open System Settings for / });
+  const notices = screen.getByRole('region', { name: 'Notices' });
+  expect(fixes.every((one) => notices.contains(one))).toBe(true);
+  const list = await screen.findByRole('listbox');
+  expect(notices.contains(list)).toBe(false);
+  expect(list.contains(notices)).toBe(false);
 });
 
 // A regex here would throw on the paren.
 it('treats find metacharacters as text rather than a pattern', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
   await fireEvent.keyDown(window, { key: 'f', metaKey: true });
 
-  const find = screen.getByRole('searchbox', { name: 'Find in what was said' });
+  const find = await screen.findByRole('searchbox', { name: 'Search' });
   await fireEvent.input(find, { target: { value: '.*(' } });
 
   await waitFor(() => expect(screen.getByText('No match')).toBeTruthy());
-  expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
+  expect(screen.queryByRole('option')).toBeNull();
 });
 
-it('says what Banshee does with your words without being asked', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  expect(screen.getByRole('button', { name: 'Stop saving' })).toBeTruthy();
-  expect(screen.getByRole('button', { name: /saved/ })).toBeTruthy();
-});
-
-it('marks a foot value the daemon has not taken', async () => {
+it('marks the page that holds a key the daemon has not taken', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, pending: ['audio.hotkey'] });
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
-  // The daemon reports no bound key, so the foot names the configured one. The
-  // mark is the only thing that stops it reading as the key in force.
-  //
+  expect(item('Hotkey').textContent).toContain(WAITING_SAYS);
+  expect(item('Listening').textContent).not.toContain(WAITING_SAYS);
+
   // The class carries the dashed rule. jsdom resolves no scoped stylesheet, so
   // the class is the only part of the visual mark a test here can see.
-  expect(screen.getByText('Right Command').classList.contains('pending')).toBe(true);
-  expect(screen.getByText('— set, and in effect when Banshee restarts')).toBeTruthy();
+  await choose('Hotkey');
+  await waitFor(() =>
+    expect(within(page('Hotkey')).getByText(WAITING_SAYS).classList.contains('pending')).toBe(true),
+  );
 });
 
-it('leaves a foot value unmarked when the daemon has taken it', async () => {
+it('leaves every page unmarked when the daemon has taken each key', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  expect(screen.getByText('Right Command').classList.contains('pending')).toBe(false);
-  expect(screen.queryByText('— set, and in effect when Banshee restarts')).toBeNull();
+  await listed();
+  expect(screen.queryByText(WAITING_SAYS)).toBeNull();
 });
 
 it('marks the saving switch the daemon has not taken', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, pending: ['daemon.save_history'] });
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
+  await choose('Saved history');
 
   const swtch = screen.getByRole('button', {
-    name: /Stop saving.*in effect when Banshee restarts/,
+    name: /Stop saving.*could not use it yet/,
   });
   expect(swtch.classList.contains('pending')).toBe(true);
 });
 
-it('restarts from the header rather than naming a command', async () => {
+// Every setting applies at once, so a key that waits is one the daemon could
+// not use.
+it('offers no restart for a key that waits', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, pending: ['audio.hotkey'] });
   render(App);
-
-  // `audio.hotkey` is never applied live, so the only way out is a new process.
-  // The window can do that, so the notice is the control.
-  const notice = await screen.findByRole('button', { name: 'Restart to apply' });
-  await fireEvent.click(notice);
-  expect(vi.mocked(restartDaemon)).toHaveBeenCalled();
-});
-
-it('asks for a restart in the header, which a panel does not cover', async () => {
-  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['audio.hotkey'] });
-  render(App);
-  await waitFor(() => expect(screen.getByText('Restart to apply')).toBeTruthy());
-
-  // The ledger scrolls away and a job takes the body; the header does neither.
-  await fireEvent.click(screen.getByRole('button', { name: /Hotkey/ }));
-  await waitFor(() => expect(panelHeading('Hotkey')).toBeTruthy());
-  expect(screen.getByText('Restart to apply')).toBeTruthy();
-});
-
-it('asks for no restart when the daemon has taken everything', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(WAITING_SAYS)).toBeTruthy());
   expect(screen.queryByText('Restart to apply')).toBeNull();
 });
 
@@ -287,49 +557,28 @@ it('follows what the daemon says about history, not what the config asked for', 
   // the config and the daemon kept its old connection.
   vi.mocked(status).mockResolvedValue({ ...ready, history_enabled: false });
   render(App);
+  await listed();
+  await choose('Saved history');
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start saving' })).toBeTruthy());
   expect(screen.queryByRole('button', { name: 'Stop saving' })).toBeNull();
 });
 
-it('holds the place words will take while the microphone is open', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  daemon.update((s) => ({ ...s, live: { ...s.live, recording: true } }));
-  await waitFor(() =>
-    expect(screen.getByText('Recording. What you say will appear here.')).toBeTruthy(),
-  );
-  // The sentence is the row's own text, not something only a screen reader is
-  // given. A 3px bar said nothing to a reader, and told recording and working
-  // apart by hue alone.
-  const pending = container.querySelector('.turn');
-  expect(pending?.querySelector('.sr')).toBeNull();
-  expect(pending?.querySelector('.caret')).toBeNull();
-
-  daemon.update((s) => ({ ...s, live: { ...s.live, recording: false, transcribing: true } }));
-  await waitFor(() => expect(screen.getByText('Working out what you said.')).toBeTruthy());
-
-  // Speaking produces no turn, so it must not hold a place for one.
-  daemon.update((s) => ({ ...s, live: { ...s.live, transcribing: false, speaking: true } }));
-  await waitFor(() => expect(screen.queryByText('Working out what you said.')).toBeNull());
-});
-
 it('offers a way back when the daemon has stopped', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
   daemon.update((s) => ({ ...s, down: 'not running' }));
   await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
   expect(screen.getByRole('button', { name: 'Start Banshee' })).toBeTruthy();
   // What was said before is still readable.
-  expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
+  expect(await listed()).toBeTruthy();
 });
 
 // The box the person sees under the blockers band. It aligns with the bands
 // it stands among, not with a text column that no turn is drawing beside it.
 it('aligns the stopped-daemon box with the bands above it', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
   daemon.update((s) => ({ ...s, down: 'not running' }));
   await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
@@ -340,67 +589,70 @@ it('aligns the stopped-daemon box with the bands above it', async () => {
 
 it('stops naming a microphone once the daemon has stopped', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
   daemon.update((s) => ({
     ...s,
-    live: { ...s.live, audio_device: 'MacBook Pro Microphone' },
+    live: { ...s.live, audio_device: 'MacBook Pro Microphone', microphone_open: false },
   }));
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
+  await choose('Listening');
   await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toContain('listening through'),
+    expect(pageHeading('Listening').textContent).toBe(
+      'Banshee opens the MacBook Pro Microphone when you speak.',
+    ),
   );
 
   daemon.update((s) => ({ ...s, down: 'not running' }));
   await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toContain('Banshee is not running'),
+    expect(pageHeading('Listening').textContent).toContain('Banshee is not running'),
   );
 });
 
-// The device the words were picked up on is not where they went, and the panel
+// The device the words were picked up on is not where they went, and the page
 // that says so is the one a person opens to check.
 it('says where audio goes when a remote server listens', async () => {
   vi.mocked(status).mockResolvedValue(remote);
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
+  await choose('Listening');
   await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toContain(
+    expect(pageHeading('Listening').textContent).toContain(
       'Banshee sends what you say to api.openai.com to be heard.',
     ),
   );
 });
 
-// The cell reports where listening happens, which is the one fact the panel's
-// listener group is about. The device it is picked up on is in that panel.
-it('names the host in the foot rather than the microphone', async () => {
+// The foot shows on every page, so audio leaving the machine is never one
+// click away. The device it is picked up on is on the Listening page.
+it('names the host in the sidebar foot on every page, rather than the microphone', async () => {
   vi.mocked(status).mockResolvedValue(remote);
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  render(App);
+  await listed();
 
-  const cell = container.querySelector('#job-microphone') as HTMLElement;
-  expect(cell.textContent).toContain('Listening');
-  expect(cell.textContent).toContain('api.openai.com');
-  expect(cell.textContent).not.toContain('MacBook Pro Microphone');
+  for (const name of PAGES) {
+    await choose(name);
+    await waitFor(() => expect(page(name)).toBeTruthy());
+    const line = within(sidebar()).getByText(/Audio goes to/);
+    expect(line.textContent).toBe('Audio goes to api.openai.com');
+    expect(line.textContent).not.toContain('MacBook Pro Microphone');
+  }
 });
 
-it('says the listening happens on this machine when it does', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+it('names no host in the sidebar while the listening happens on this machine', async () => {
+  render(App);
+  await listed();
 
-  const cell = container.querySelector('#job-microphone') as HTMLElement;
-  expect(cell.textContent).toContain('On this machine');
-  expect(cell.querySelector('.pending')).toBeNull();
+  expect(within(sidebar()).queryByText(/Audio goes to/)).toBeNull();
+  expect(item('Listening').textContent).not.toContain(WAITING_SAYS);
 });
 
-it('marks the microphone cell for a pending stt.remote key', async () => {
+it('marks Listening for a pending stt.remote key', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, pending: ['stt.remote.model'] });
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  render(App);
+  await listed();
 
-  const cell = container.querySelector('#job-microphone') as HTMLElement;
-  await waitFor(() => expect(cell.textContent).toContain(RESTART_SAYS));
+  await waitFor(() => expect(item('Listening').textContent).toContain(WAITING_SAYS));
 });
 
 it('names a remote listener the daemon cannot name', async () => {
@@ -413,63 +665,22 @@ it('names a remote listener the daemon cannot name', async () => {
       tts: { remote: false, host: null, speaker_started: true, key_present: false },
     },
   });
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  render(App);
+  await listed();
 
-  const cell = container.querySelector('#job-microphone') as HTMLElement;
-  expect(cell.textContent).toContain('A remote server');
+  expect(within(sidebar()).getByText(/Audio goes to/).textContent).toBe(
+    'Audio goes to a transcription server',
+  );
 
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
+  await choose('Listening');
   await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toContain(
-      'Banshee sends what you say to a remote server to be heard.',
+    expect(pageHeading('Listening').textContent).toContain(
+      'Banshee sends what you say to a transcription server to be heard.',
     ),
   );
 });
 
-// The mark says the value is not the one coming, so the phrase beside it names
-// what is coming rather than repeating that a restart is owed.
-it('marks the value in force and says which way it is changing', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...remote,
-    remote: {
-      stt: { remote: false, host: null, key_present: true },
-      tts: { remote: false, host: null, speaker_started: true, key_present: false },
-    },
-    pending: ['stt.provider'],
-  });
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const cell = container.querySelector('#job-microphone') as HTMLElement;
-  expect(screen.getByText('On this machine').classList.contains('pending')).toBe(true);
-  expect(cell.textContent).toContain('changing to api.openai.com when Banshee restarts');
-});
-
-it('says the listening comes back to this machine while it waits', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...remote,
-    config: { ...remote.config, stt: { ...remote.config.stt, provider: 'local' } },
-    pending: ['stt.provider'],
-  });
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const cell = container.querySelector('#job-microphone') as HTMLElement;
-  expect(screen.getByText('api.openai.com').classList.contains('pending')).toBe(true);
-  expect(cell.textContent).toContain('changing to this machine when Banshee restarts');
-
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
-  await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toContain(
-      'Banshee sends what you say to api.openai.com until it restarts.',
-    ),
-  );
-});
-
-// The lead is otherwise the live device, which is still the truth about where
-// nothing goes yet.
-it('says a remote listener is coming while it waits on a restart', async () => {
+it('marks the listener in force when the one asked for could not start', async () => {
   vi.mocked(status).mockResolvedValue({
     ...remote,
     remote: {
@@ -479,79 +690,15 @@ it('says a remote listener is coming while it waits on a restart', async () => {
     pending: ['stt.provider'],
   });
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
-  await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toContain(
-      'Banshee will send what you say to api.openai.com when it restarts.',
-    ),
-  );
-});
-
-// A sentence with a hole in it was the first thing the flip rendered, because
-// the address is set after the choice is.
-it('names no host it does not have, in the heading or the foot', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...remote,
-    config: { ...remote.config, stt: { ...remote.config.stt, remote: { model: 'whisper-1' } } },
-    remote: {
-      stt: { remote: false, host: null, key_present: false },
-      tts: { remote: false, host: null, speaker_started: true, key_present: false },
-    },
-    pending: ['stt.provider'],
-  });
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const cell = container.querySelector('#job-microphone') as HTMLElement;
-  expect(cell.textContent).toContain('changing to a remote server when Banshee restarts');
-
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
-  await waitFor(() =>
-    expect(panelHeading('Microphone').textContent).toBe(
-      'Banshee will send what you say to a remote server when it restarts.',
-    ),
-  );
-});
-
-it('does not reflow the paragraph when a copy is confirmed', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const named = screen.getAllByRole('button', { name: /^Copy what you said at \d\d:\d\d$/ });
-  expect(named.length).toBeGreaterThan(1);
-  const copy = named[0];
-  // NOT COVERED HERE: that the box keeps its width between the two labels.
-  // jsdom resolves no scoped stylesheet and has no layout engine, so
-  // `getComputedStyle` answers `auto` with the reservation deleted. The
-  // reservation is `width: 68px` in Turn.svelte, verified against a real render.
-  await fireEvent.click(copy);
-  await waitFor(() => expect(screen.getAllByText('Copied').length).toBeGreaterThan(0));
-  // What this can prove: confirming one turn's copy does not touch another's.
-  const others = container.querySelectorAll('article.turn button');
-  expect([...others].filter((b) => b.textContent?.includes('Copied')).length).toBe(1);
-});
-
-it('keeps the newest turn monumental while the microphone is open', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  daemon.update((s) => ({ ...s, live: { ...s.live, recording: true } }));
-  await waitFor(() =>
-    expect(screen.getByText('Recording. What you say will appear here.')).toBeTruthy(),
-  );
-
-  const turns = container.querySelectorAll('article.turn');
-  const leads = container.querySelectorAll('article.turn.lead');
-  expect(leads.length).toBe(1);
-  expect(leads[0].textContent).toContain('Yes, open the pull request.');
-  expect(turns[0].classList.contains('lead')).toBe(false);
+  expect(within(sidebar()).queryByText(/Audio goes to/)).toBeNull();
+  expect(item('Listening').textContent).toContain(WAITING_SAYS);
 });
 
 it('subscribes to every push the daemon sends before reading it', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
   const events = vi.mocked(listen).mock.calls.map((c) => c[0]);
   for (const name of [
     'daemon:status',
@@ -571,17 +718,27 @@ it('starts the daemon itself when it finds it gone', async () => {
   await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
 });
 
+it('says why the daemon would not start', async () => {
+  const refusal =
+    'Banshee did not start: Delete `preset` under [stt]. Fix that, then run banshee start again.';
+  vi.mocked(status).mockRejectedValue({ message: 'not running' });
+  vi.mocked(startDaemon).mockRejectedValue({ message: refusal });
+  render(App);
+  await waitFor(() => expect(screen.getByText(refusal)).toBeTruthy());
+  expect(screen.getByText('Banshee is not running')).toBeTruthy();
+});
+
 it('reads the voices and the agents the strip needs', async () => {
   render(App);
   await waitFor(() => expect(vi.mocked(listVoices)).toHaveBeenCalled());
   await waitFor(() => expect(vi.mocked(detectAgents)).toHaveBeenCalled());
   // Neither read may take the status and the history down with it.
-  expect(screen.getByText('Yes, open the pull request.')).toBeTruthy();
+  expect(await listed()).toBeTruthy();
 });
 
-it('empties the record when the daemon says it is no longer saving', async () => {
+it('keeps the rows listed when the daemon says it is no longer saving', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
   // The daemon reports both once it takes the switch.
   const off = {
@@ -590,9 +747,113 @@ it('empties the record when the daemon says it is no longer saving', async () =>
     config: { ...ready.config, daemon: { save_history: false } },
   };
   daemon.update((s) => reduceStatus(s, off));
-  // The daemon refuses the read outright while this is off.
-  await waitFor(() => expect(screen.getByText('Nothing is kept')).toBeTruthy());
-  expect(screen.queryByText('Yes, open the pull request.')).toBeNull();
+  const notices = await screen.findByRole('region', { name: 'Notices' });
+  expect(within(notices).getByText('Save history is off, so nothing new is kept.')).toBeTruthy();
+  expect(await listed()).toBeTruthy();
+});
+
+it('counts the rows Saved history keeps', async () => {
+  render(App);
+  await listed();
+  await choose('Saved history');
+  await waitFor(() =>
+    expect(pageHeading('Saved history').textContent).toBe(
+      'Banshee is keeping 2 dictations and questions, on this machine.',
+    ),
+  );
+});
+
+// A stopped Banshee keeps nothing, so the count is what it kept.
+it('counts the rows Banshee kept while it is stopped', async () => {
+  render(App);
+  await listed();
+  daemon.update((s) => ({ ...s, down: 'not running' }));
+  await choose('Saved history');
+  await waitFor(() =>
+    expect(pageHeading('Saved history').textContent).toBe(
+      'Banshee kept 2 dictations and questions on this machine.',
+    ),
+  );
+});
+
+it('says Banshee is keeping what you say before anything is said', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
+  await choose('Saved history');
+  await waitFor(() =>
+    expect(pageHeading('Saved history').textContent).toBe(
+      'Banshee is keeping what you say, and you have not said anything yet.',
+    ),
+  );
+});
+
+// Stopped from the start, nothing says whether saving is on, so the lead says
+// only what is on the machine.
+it('says Banshee has kept nothing while it is stopped and holds nothing', async () => {
+  vi.mocked(history).mockResolvedValue([]);
+  vi.mocked(status).mockResolvedValue({ running: false });
+  render(App);
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
+  await choose('Saved history');
+  await waitFor(() =>
+    expect(pageHeading('Saved history').textContent).toBe('Banshee has kept nothing yet.'),
+  );
+});
+
+// The last answer Banshee gave stands while it is stopped.
+it('says saving is off while Banshee is stopped with saving off', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, history_enabled: false });
+  render(App);
+  await listed();
+  daemon.update((s) => ({ ...s, down: 'not running' }));
+  await choose('Saved history');
+  await waitFor(() =>
+    expect(pageHeading('Saved history').textContent).toBe(
+      'Saving is off, and Banshee is not running.',
+    ),
+  );
+});
+
+it('says what stays when saving is off and rows exist', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, history_enabled: false });
+  render(App);
+  await listed();
+  await fireEvent.click(screen.getByRole('button', { name: 'Open Saved history' }));
+  await waitFor(() =>
+    expect(screen.getByText(/What it kept stays until you clear it/)).toBeTruthy(),
+  );
+  expect(pageHeading('Saved history').textContent).toBe('Banshee is keeping nothing new you say.');
+});
+
+it('a question with no answer reaches the record without a transcription', async () => {
+  render(App);
+  await listed();
+
+  vi.mocked(history).mockResolvedValue([
+    ...rows,
+    asked(3, { question: 'Which branch should I use?', outcome: 'no_answer' }),
+  ]);
+  pushes.get('daemon:state')?.({ payload: { history_changes: 1 } });
+
+  expect(
+    await screen.findByRole('option', {
+      name: /^An agent asked Which branch should I use\?, .*, No answer heard$/,
+    }),
+  ).toBeTruthy();
+});
+
+it('search finds a question by its question', async () => {
+  vi.mocked(history).mockResolvedValue([
+    ...rows,
+    asked(3, { question: 'Which branch should I use?', outcome: 'no_answer' }),
+  ]);
+  render(App);
+  await screen.findByRole('option', { name: /Which branch should I use/ });
+  await fireEvent.keyDown(window, { key: 'f', metaKey: true });
+  await fireEvent.input(await screen.findByRole('searchbox'), { target: { value: 'branch' } });
+  await waitFor(() => expect(screen.getAllByRole('option').length).toBe(1));
+  expect(screen.getByRole('option', { name: /Which branch should I use/ })).toBeTruthy();
 });
 
 it('says no stream is open, rather than that there is no microphone', async () => {
@@ -616,17 +877,17 @@ it('says no stream is open, rather than that there is no microphone', async () =
   });
   render(App);
 
-  // The foot says where listening happens, and the panel says whether any
-  // stream is open. Neither says the machine has no microphone.
-  await waitFor(() => expect(screen.getByText('On this machine')).toBeTruthy());
+  // The page says whether any stream is open. Nothing says the machine has no
+  // microphone.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
   expect(screen.queryByText(/no microphone/i)).toBeNull();
 
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
-  await waitFor(() => expect(panel('Microphone')).toBeTruthy());
-  expect(panelHeading('Microphone').textContent).toContain('Banshee is not listening yet');
+  await choose('Listening');
+  await waitFor(() => expect(page('Listening')).toBeTruthy());
+  expect(pageHeading('Listening').textContent).toContain('Banshee is not listening yet');
 });
 
-it('asks which speech model to fetch before it fetches one', async () => {
+it('asks which listening model to fetch before it fetches one', async () => {
   vi.mocked(status).mockResolvedValue({
     ...ready,
     ready: false,
@@ -646,12 +907,14 @@ it('asks which speech model to fetch before it fetches one', async () => {
   });
   render(App);
 
-  // The preset decides what the run costs, and nothing else asks. The daemon
+  // The model decides what the run costs, and nothing else asks. The daemon
   // answers with what is still missing rather than a fixed total.
   await waitFor(() =>
-    expect(screen.getByRole('radiogroup', { name: 'Speech model' })).toBeTruthy(),
+    expect(screen.getByRole('radiogroup', { name: 'Listening model' })).toBeTruthy(),
   );
-  expect(screen.getByRole('radio', { name: 'Balanced' }).getAttribute('aria-checked')).toBe('true');
+  expect(screen.getByRole('radio', { name: 'Parakeet Unified' }).getAttribute('aria-checked')).toBe(
+    'true',
+  );
   expect(screen.getByText(/About 860 MB to fetch/)).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy();
 
@@ -687,10 +950,10 @@ it('offers a restart, not a download, when the files are already there', async (
   // Every file is on disk in this state, so counting it as a missing file lies.
   expect(screen.getByText('Banshee needs a restart')).toBeTruthy();
   expect(screen.queryByText(/file is missing|files are missing/)).toBeNull();
-  expect(screen.queryByRole('radiogroup', { name: 'Speech model' })).toBeNull();
+  expect(screen.queryByRole('radiogroup', { name: 'Listening model' })).toBeNull();
 
-  // `startDaemon` runs `launchctl kickstart`, which leaves a running job alone.
-  // This blocker is offered while the daemon runs, so only a restart clears it.
+  // `startDaemon` is for a daemon that is down. This blocker is offered while
+  // the daemon runs, so only a restart clears it.
   vi.mocked(status).mockResolvedValue({ ...ready, blockers: [] });
   await fireEvent.click(screen.getByRole('button', { name: 'Restart Banshee' }));
   expect(vi.mocked(restartDaemon)).toHaveBeenCalled();
@@ -724,7 +987,7 @@ it('says which file is downloading and how far it has come', async () => {
   pushes.get('daemon:downloads')?.({
     payload: {
       model: 'ggml.bin',
-      label: 'Speech model',
+      label: 'Listening model',
       index: 1,
       count: 4,
       bytes: 40,
@@ -732,13 +995,13 @@ it('says which file is downloading and how far it has come', async () => {
       state: 'downloading',
     },
   });
-  await waitFor(() => expect(screen.getByText('Speech model, 1 of 4 · 40%')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText('Listening model, 1 of 4 · 40%')).toBeTruthy());
 
   // The two blocking files land before the other two, so the daemon starts
   // asking for a restart while the run is still going. One thing is happening,
   // and the box says which.
   expect(screen.getByText(/Getting Banshee's models/)).toBeTruthy();
-  expect(screen.queryByRole('radiogroup', { name: 'Speech model' })).toBeNull();
+  expect(screen.queryByRole('radiogroup', { name: 'Listening model' })).toBeNull();
 
   vi.mocked(status).mockResolvedValue({
     ...ready,
@@ -772,7 +1035,7 @@ it('says which file is downloading and how far it has come', async () => {
       ],
     }),
   );
-  await waitFor(() => expect(screen.getByText('Speech model, 1 of 4 · 40%')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText('Listening model, 1 of 4 · 40%')).toBeTruthy());
   expect(screen.queryByRole('button', { name: 'Restart Banshee' })).toBeNull();
 });
 
@@ -808,19 +1071,20 @@ it('re-reads the daemon when a download ends, so the box stops asking', async ()
 it('offers nothing to stop before anything has been said', async () => {
   vi.mocked(history).mockResolvedValue([]);
   render(App);
-  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
 
-  // The ledger and the absence would state one emptiness twice, and the switch
-  // would offer to stop a thing that has never started.
+  // The switch would offer to stop a thing that has never started.
   expect(screen.queryByRole('button', { name: 'Stop saving' })).toBeNull();
   expect(screen.queryByText(/Nothing saved yet/)).toBeNull();
 });
 
-it('still says so when it is keeping nothing, which is the claim', async () => {
+it('still says so when it is keeping nothing new and holds nothing', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, history_enabled: false });
   vi.mocked(history).mockResolvedValue([]);
   render(App);
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Start saving' })).toBeTruthy());
+  expect(
+    await screen.findByRole('heading', { name: 'Save history is off, so nothing new is kept.' }),
+  ).toBeTruthy();
 });
 
 it('offers no command to copy, because every fix is a button', async () => {
@@ -845,40 +1109,6 @@ it('offers no command to copy, because every fix is a button', async () => {
   expect(screen.queryByRole('button', { name: 'banshee setup' })).toBeNull();
 });
 
-// Choosing a preset marks it pending at once, because the daemon cannot load a
-// model that is not on disk. A restart reads the same config and fails the same
-// way, so the notice would be advice that cannot work.
-it('does not ask for a restart while the files it needs are still missing', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    ready: false,
-    pending: ['stt.preset'],
-    blockers: [
-      {
-        kind: 'model',
-        id: 'ggml-large-v3-turbo-q5_0.bin',
-        name: 'ggml-large-v3-turbo-q5_0.bin',
-        role: 'speech',
-        remedy: 'download',
-        consequence: 'recording, dictation, and ask_user do not work',
-        fix: 'run: banshee setup',
-        command: 'banshee setup',
-      },
-    ],
-  });
-  render(App);
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
-  expect(screen.queryByRole('button', { name: 'Restart to apply' })).toBeNull();
-});
-
-it('asks for a restart once the files are there and a setting still waits', async () => {
-  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['stt.preset'] });
-  render(App);
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Restart to apply' })).toBeTruthy(),
-  );
-});
-
 // The voice files arrive with the download, and the last one a run fetches is a
 // voice, so the list read at startup is answered before any of them exist.
 it('reads the voices again once their files have landed', async () => {
@@ -901,7 +1131,8 @@ it('reads the voices again once their files have landed', async () => {
   });
   render(App);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy());
-  expect(screen.getByText('af_sky')).toBeTruthy();
+  await choose('Speaking');
+  await waitFor(() => expect(pageHeading('Speaking').textContent).toContain('af_sky'));
 
   vi.mocked(status).mockResolvedValue({ ...ready, blockers: [] });
   vi.mocked(listVoices).mockResolvedValue({
@@ -920,12 +1151,12 @@ it('reads the voices again once their files have landed', async () => {
     },
   });
 
-  // The foot names the voice, rather than the file the daemon fetched.
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  // The page names the voice, rather than the file the daemon fetched.
+  await waitFor(() => expect(pageHeading('Speaking').textContent).toBe('Banshee speaks as Sky.'));
 });
 
 // A window that can only offer what is on disk cannot offer a choice at all.
-it('offers every voice, and fetches the one that is chosen', async () => {
+it('offers every voice, and fetches the one Get chooses', async () => {
   vi.mocked(listVoices).mockResolvedValue({
     current: 'af_sky',
     voices: [
@@ -934,19 +1165,20 @@ it('offers every voice, and fetches the one that is chosen', async () => {
     ],
   });
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Voice/ }));
+  await listed();
+  await choose('Speaking');
 
-  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
-  expect(screen.getByText('George')).toBeTruthy();
+  await waitFor(() => expect(pageHeading('Speaking')).toBeTruthy());
+  const more = screen.getByRole('list', { name: 'More voices' });
+  expect(within(more).getByText('George')).toBeTruthy();
+  expect(screen.queryByRole('radio', { name: /George/ })).toBeNull();
 
   expect(screen.queryByRole('button', { name: 'Play George' })).toBeNull();
-  expect(screen.getByRole('button', { name: /Get George/ })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Play Sky' }).hasAttribute('disabled')).toBe(false);
 
-  await fireEvent.click(screen.getByRole('button', { name: /Get George/ }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Get George and switch to it' }));
   await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'bm_george'));
-  expect(vi.mocked(downloadModels)).toHaveBeenCalled();
+  await waitFor(() => expect(vi.mocked(downloadModels)).toHaveBeenCalled());
 });
 
 it('does not fetch a voice that is already here', async () => {
@@ -958,9 +1190,9 @@ it('does not fetch a voice that is already here', async () => {
     ],
   });
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Voice/ }));
-  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
+  await listed();
+  await choose('Speaking');
+  await waitFor(() => expect(pageHeading('Speaking')).toBeTruthy());
 
   await fireEvent.change(screen.getByRole('radio', { name: /Sky/ }));
   await waitFor(() => expect(vi.mocked(setSetting)).toHaveBeenCalledWith('tts.voice', 'af_sky'));
@@ -968,14 +1200,12 @@ it('does not fetch a voice that is already here', async () => {
 });
 
 // Choosing a voice that is not here writes it, and the daemon refuses until the
-// file lands, so `tts.voice` is pending for the second the fetch takes. A
-// restart is not the remedy: the daemon applies it when the run ends.
-it('does not ask for a restart while the file it waits on is still arriving', async () => {
+// file lands, so `tts.voice` waits for the second the fetch takes. The download
+// speaks for it while it runs, and the daemon applies it when the run ends.
+it('leaves a voice that waits for its file to the download while one runs', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, pending: ['tts.voice'] });
   render(App);
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Restart to apply' })).toBeTruthy(),
-  );
+  await waitFor(() => expect(item('Speaking').textContent).toContain(WAITS_FOR_ITS_FILE));
 
   pushes.get('daemon:downloads')?.({
     payload: {
@@ -988,9 +1218,15 @@ it('does not ask for a restart while the file it waits on is still arriving', as
       state: 'downloading',
     },
   });
-  await waitFor(() =>
-    expect(screen.queryByRole('button', { name: 'Restart to apply' })).toBeNull(),
-  );
+  await waitFor(() => expect(item('Speaking').textContent).not.toContain(WAITS_FOR_ITS_FILE));
+});
+
+// The row on the page says the same sentence, so the two cannot disagree.
+it('says a plain waiting key could not be used yet', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, pending: ['tts.remote.model'] });
+  render(App);
+  await waitFor(() => expect(item('Speaking').textContent).toContain(WAITING_SAYS));
+  expect(item('Speaking').textContent).not.toContain(WAITS_FOR_ITS_FILE);
 });
 
 // A run reports once per file. A download writes no history, so the record
@@ -1036,7 +1272,7 @@ it('keeps a permission reachable while a download runs', async () => {
       {
         kind: 'permission',
         id: 'accessibility',
-        name: 'Accessibility',
+        name: 'Accessibility is not granted',
         consequence: 'dictation cannot type and the hotkey stays inert',
         fix: 'grant it in System Settings',
       },
@@ -1060,7 +1296,7 @@ it('keeps a permission reachable while a download runs', async () => {
   pushes.get('daemon:downloads')?.({
     payload: {
       model: 'ggml.bin',
-      label: 'Speech model',
+      label: 'Listening model',
       index: 1,
       count: 4,
       bytes: 1,
@@ -1099,9 +1335,9 @@ it('says so when an action is refused', async () => {
   await waitFor(() => expect(screen.getByText(/Download did not work/)).toBeTruthy());
 });
 
-// `audio.hotkey` is read once at startup and no arriving file answers it, so a
-// download must not quiet the notice that says so.
-it('still asks for a restart for a key no download can settle', async () => {
+// No arriving file answers `audio.hotkey`, so a download must not quiet the
+// mark that says the daemon could not use it.
+it('still marks a key no download can settle', async () => {
   vi.mocked(status).mockResolvedValue({
     ...ready,
     ready: false,
@@ -1120,73 +1356,17 @@ it('still asks for a restart for a key no download can settle', async () => {
     ],
   });
   render(App);
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Restart to apply' })).toBeTruthy(),
-  );
+  await waitFor(() => expect(item('Hotkey').textContent).toContain(WAITING_SAYS));
 });
 
-// Whisper translates one way only, any language in and English out, so the
-// answer control means nothing until a language other than English is set.
-it('offers a language, and asks what to answer in only once it can mean something', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'en' } },
-  });
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
-  await waitFor(() => expect(screen.getByRole('combobox', { name: 'Language' })).toBeTruthy());
-
-  expect(screen.queryByRole('radiogroup', { name: 'Answer in' })).toBeNull();
-
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'hi' } },
-  });
-  daemon.update((state) =>
-    reduceStatus(state, {
-      ...ready,
-      running: true,
-      config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'hi' } },
-    }),
-  );
-  await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Answer in' })).toBeTruthy());
-});
-
-// The English-only build holds no other language, so a control that looked
-// live would quietly do nothing.
-it('will not offer a language the fast model cannot hear', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    english_only: true,
-    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'fast', language: 'en' } },
-  });
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
-
-  const picker = await screen.findByRole('combobox', { name: 'Language' });
-  expect(picker.hasAttribute('disabled')).toBe(true);
-  expect(screen.getByText(/Fast hears English only/)).toBeTruthy();
-});
-
-// The ledger is the only route to the Record panel and it stands down while the
-// record is empty, so a fresh install could not reach the saving switch at all.
-it('reaches what Banshee keeps before anything has been said', async () => {
+it('reaches Saved history before anything has been said', async () => {
   vi.mocked(history).mockResolvedValue([]);
   render(App);
-  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
+  await waitFor(() => expect(screen.getByText('Nothing here yet')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'What Banshee keeps' }));
-  await waitFor(() => expect(panelHeading('What Banshee keeps')).toBeTruthy());
+  await choose('Saved history');
+  await waitFor(() => expect(pageHeading('Saved history')).toBeTruthy());
   expect(screen.getByRole('button', { name: /Stop saving/ })).toBeTruthy();
-});
-
-it('names the agent capability on a fresh record, beside the first dictation', async () => {
-  vi.mocked(history).mockResolvedValue([]);
-  render(App);
-  await waitFor(() => expect(screen.getByText('Nothing said yet')).toBeTruthy());
-  expect(screen.getByText('No agent can speak to you yet')).toBeTruthy();
 });
 
 // A microphone fault and a model fault carry the same command, and restarting
@@ -1215,174 +1395,86 @@ it('does not call an unplugged microphone a restart', async () => {
   expect(screen.getByText(/onnect the microphone/)).toBeTruthy();
 });
 
-// `auto` is a value the config takes and the engine reads as detect it, so a
-// picker that cannot show it misreports the daemon and cannot set it back.
-it('offers detection among the languages', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'auto' } },
-  });
+// A page replaces History. The notice's button is destroyed by the click it is
+// answering, so the keyboard is left on a node that is gone.
+it('puts the keyboard on the page a notice opens', async () => {
+  vi.mocked(status).mockResolvedValue({ ...ready, history_enabled: false });
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
+  await listed();
 
-  const picker = await screen.findByRole('combobox', { name: 'Language' });
-  expect(screen.getByRole('option', { name: 'Detect it' })).toBeTruthy();
-  expect((picker as HTMLSelectElement).value).toBe('auto');
-});
-
-// A panel replaces the whole body. The control that opened it is destroyed by
-// the click it is answering, so the keyboard is left on a node that is gone.
-it('puts the keyboard in a panel when it opens, and back where it came from', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const opener = screen.getByRole('button', { name: /^Listening/ });
+  const opener = screen.getByRole('button', { name: 'Open Saved history' });
   opener.focus();
   await fireEvent.click(opener);
 
-  await waitFor(() => expect(panel('Microphone')).toBeTruthy());
-  const title = panelHeading('Microphone');
-  expect(document.activeElement).toBe(title);
-
-  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
-  await waitFor(() =>
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Listening/ })),
-  );
+  await waitFor(() => expect(page('Saved history')).toBeTruthy());
+  expect(document.activeElement).toBe(pageHeading('Saved history'));
 });
 
-// The ledger sits in the body it opens over, so the way back is the control's
-// name and not the node, which no longer exists.
-it('gives the keyboard back to the ledger after the record closes', async () => {
+// A page has no Escape action: the sidebar is the way out.
+it('keeps the page and the focus on Escape', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
-  const opener = screen.getByRole('button', { name: /saved/ });
+  const opener = item('Speaking');
   opener.focus();
   await fireEvent.click(opener);
-  await waitFor(() => expect(panel('What Banshee keeps')).toBeTruthy());
-
-  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
-  await waitFor(() =>
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: /saved/ })),
-  );
-});
-
-// Escape closes a panel too, and leaves the keyboard in the same place a click
-// on Done would.
-it('gives the keyboard back when Escape closes a panel', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const opener = screen.getByRole('button', { name: /^Voice/ });
-  opener.focus();
-  await fireEvent.click(opener);
-  await waitFor(() => expect(panel('Voice')).toBeTruthy());
-  expect(document.activeElement).toBe(panelHeading('Voice'));
+  await waitFor(() => expect(page('Speaking')).toBeTruthy());
+  expect(document.activeElement).toBe(pageHeading('Speaking'));
 
   await fireEvent.keyDown(window, { key: 'Escape' });
-  await waitFor(() =>
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Voice/ })),
-  );
-});
-
-// With no heading anywhere, a screen reader has no way to reach the record but
-// to walk the whole window.
-it('carries a heading for the record', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  expect(screen.getAllByRole('heading').length).toBeGreaterThan(0);
-});
-
-// The device picker keeps a row for a device that is not there. The language
-// picker had no such guard, so a code Whisper's table does not name left a
-// `select` whose value matched no option, which draws as an empty control.
-it('keeps a row for a language the daemon did not name', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    config: { ...ready.config, stt: { ...ready.config.stt, preset: 'balanced', language: 'cy' } },
-  });
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
-
-  const picker = await screen.findByRole('combobox', { name: 'Language' });
-  expect((picker as HTMLSelectElement).value).toBe('cy');
-});
-
-// A swallowed failure left the same empty control with nothing to explain it.
-it('says when the language list did not arrive', async () => {
-  vi.mocked(listLanguages).mockRejectedValue(new Error('no such method'));
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /Listening/ }));
-
-  await waitFor(() => expect(screen.getByText(/could not list the languages/)).toBeTruthy());
+  expect(page('Speaking')).toBeTruthy();
+  expect(document.activeElement).toBe(pageHeading('Speaking'));
 });
 
 // The key sat on the same ink underline the pickers use, so it read as a field
 // to type into while being a span.
 it('lets the hotkey be changed by the key it names', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
+  await listed();
+  await choose('Hotkey');
 
-  const key = await screen.findByRole('button', { name: /Right Command — change the hotkey/ });
+  const key = await screen.findByRole('button', { name: 'Right Command, change the hotkey' });
   await fireEvent.click(key);
   await waitFor(() => expect(screen.getByText('Press a key')).toBeTruthy());
 });
 
 // The differentiating moment cannot be the window's quietest pixel.
-it('gives the waiting agent the lead, and names the key that answers it', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  // Armed arrives as a live push mid-session, after the config is known. Set
-  // before mount, the turn draws before the window has been told which key.
+it('says an agent is waiting above the list, and names the key that answers it', async () => {
+  render(App);
+  await listed();
+  // Armed arrives as a live push mid-session, after the config is known.
   daemon.update((s) => ({ ...s, live: { ...s.live, armed: true } }));
   // hotkey_mode is toggle in `ready.json`, so the verb is Tap, not Hold.
-  await waitFor(() => expect(screen.getByText(/Tap Right Command to answer/)).toBeTruthy());
-
-  // Normalized, because the sentence wraps in the source and textContent keeps
-  // the newline that HTML itself collapses.
-  const lead = container.querySelector('.lead')?.textContent?.replace(/\s+/g, ' ');
-  expect(lead).toMatch(/is waiting for your answer/);
-  // The newest thing you said stands down while an agent is blocked on you.
-  expect(lead).not.toMatch(/Yes, open the pull request/);
+  const notices = await screen.findByRole('region', { name: 'Notices' });
+  expect(
+    within(notices).getByText('An agent asked a question and is waiting for your answer.'),
+  ).toBeTruthy();
+  // Only the key name is a machine value, so only it takes the mono face.
+  const how = within(notices).getByText(
+    (_, node) => node?.tagName === 'P' && node.textContent === 'Tap Right Command to answer.',
+  );
+  expect(within(how).getByText('Right Command').classList.contains('mono')).toBe(true);
 });
 
-// Giving an agent a voice is the job nothing else here does. Zero connected
-// agents is the state that has to say so.
-it('offers the agent job on the home screen when none is connected', async () => {
+// Each item is its own Tab stop, so no item hides behind another.
+it('makes every sidebar item a Tab stop that opens nothing on focus', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await waitFor(() => expect(screen.getByText(/can speak to you/)).toBeTruthy());
+  await listed();
 
-  await fireEvent.click(screen.getByRole('button', { name: /Connect an agent/ }));
-  await waitFor(() => expect(panelHeading('Agents')).toBeTruthy());
-});
+  const items = within(sidebar()).getAllByRole('button');
+  expect(items.map((one) => one.tabIndex)).toEqual(items.map(() => 0));
 
-// The foot is the only route to every setting, so it cannot sit behind every
-// copy control on the page.
-it('makes the foot one tab stop the arrows move inside', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const cells = [...container.querySelectorAll('footer button')] as HTMLElement[];
-  expect(cells.map((c) => c.tabIndex)).toEqual([0, -1, -1, -1]);
-
-  cells[0].focus();
-  await fireEvent.keyDown(cells[0], { key: 'ArrowRight' });
-  expect(document.activeElement).toBe(cells[1]);
-  // Moving inside a toolbar moves the focus and opens nothing.
-  expect(screen.queryByRole('button', { name: 'Done' })).toBeNull();
+  items[3].focus();
+  await fireEvent.keyDown(items[3], { key: 'ArrowDown' });
+  expect(page('History')).toBeTruthy();
 });
 
 // Nobody needs 21 steps of a value the window only ever reads back as one of
 // three words. The control shows the band the current float falls in.
 it('sets sensitivity by band, and writes a float for it', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
+  await listed();
+  await choose('Listening');
 
   const group = await screen.findByRole('radiogroup', { name: 'Sensitivity' });
   expect(group).toBeTruthy();
@@ -1390,14 +1482,16 @@ it('sets sensitivity by band, and writes a float for it', async () => {
   expect(screen.getByRole('radio', { name: 'Medium' }).getAttribute('aria-checked')).toBe('true');
 
   await fireEvent.click(screen.getByRole('radio', { name: 'High' }));
+  await waitFor(() => expect(setSetting).toHaveBeenCalledWith('stt.vad_threshold', 0.15));
+  await fireEvent.click(screen.getByRole('radio', { name: 'Low' }));
   await waitFor(() => expect(setSetting).toHaveBeenCalledWith('stt.vad_threshold', 0.85));
 });
 
 // tts.fallback serves no job this audience has, and belongs to the CLI.
-it('does not spend the Voice panel on a key that belongs to the CLI', async () => {
+it('does not spend the Speaking page on a key that belongs to the CLI', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /^Voice/ }));
+  await listed();
+  await choose('Speaking');
 
   await waitFor(() => expect(screen.getByRole('radio', { name: /Sky/ })).toBeTruthy());
   expect(screen.queryByText(/If a voice is missing/i)).toBeNull();
@@ -1413,8 +1507,8 @@ it('collapses agents that are not installed into one line', async () => {
     { id: 'antigravity', name: 'Antigravity', presence: 'absent', note: '' },
   ]);
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /^Agents/ }));
+  await listed();
+  await choose('Agents');
 
   await waitFor(() => expect(screen.getByText('Claude Code')).toBeTruthy());
   expect(screen.getByText(/also works with/)).toBeTruthy();
@@ -1424,56 +1518,30 @@ it('collapses agents that are not installed into one line', async () => {
 // Keeping is the primary, and the prompt names how much would go.
 it('makes keeping the record the primary, and names what would be lost', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
+  await listed();
+  await choose('Saved history');
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
 
-  expect(screen.getByText(/Delete all 2\?/)).toBeTruthy();
+  expect(
+    screen.getByText(/Clear everything Banshee kept\? 2 dictations and questions/),
+  ).toBeTruthy();
   const buttons = screen.getAllByRole('button').map((b) => b.textContent?.trim());
-  expect(buttons.indexOf('Keep it')).toBeLessThan(buttons.indexOf('Delete everything'));
+  expect(buttons.indexOf('Keep it')).toBeLessThan(buttons.indexOf('Clear everything'));
 });
 
-// Abandoning a half-typed word must not also throw the reader out of the panel.
+// Abandoning a half-typed word must not also throw the reader off the page.
 // The field claims the keyboard for exactly this, and releasing the claim
 // inside the same keydown lets the event reach the window handler unclaimed.
-it('keeps the panel open when Escape abandons a vocabulary word', async () => {
+it('keeps the page open when Escape abandons a vocabulary word', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /^Listening/ }));
+  await listed();
+  await choose('Listening');
   await fireEvent.click(await screen.findByRole('button', { name: 'Add a word' }));
 
   const field = screen.getByRole('textbox', { name: 'New word' });
   await fireEvent.keyDown(field, { key: 'Escape' });
 
-  expect(screen.queryByRole('region', { name: 'Microphone' })).toBeTruthy();
-});
-
-// The way out of a panel cannot sit behind every control in it.
-it('reaches Done by tabbing forward from the panel heading', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /^Voice/ }));
-  await waitFor(() => expect(panel('Voice')).toBeTruthy());
-
-  const order = [...container.querySelectorAll('.panel button, .panel input, .panel select')];
-  const heading = panelHeading('Voice');
-  const done = screen.getByRole('button', { name: 'Done' });
-  // Focus lands on the heading, so Done has to come after it in the order the
-  // keyboard walks, not before.
-  expect(heading.compareDocumentPosition(done) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(order[0]).toBe(done);
-});
-
-// Tab out and back should return where the arrows left, which is what a roving
-// tab stop is for.
-it('moves the foot tab stop with the arrows', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const cells = [...container.querySelectorAll('footer button')] as HTMLElement[];
-  cells[0].focus();
-  await fireEvent.keyDown(cells[0], { key: 'ArrowRight' });
-  expect(cells.map((c) => c.tabIndex)).toEqual([-1, 0, -1, -1]);
+  expect(screen.queryByRole('region', { name: 'Listening' })).toBeTruthy();
 });
 
 // A hand-edited config, or one written by a newer daemon, holds values these
@@ -1484,8 +1552,8 @@ it('keeps a tab stop when no option matches the daemon', async () => {
     config: { ...ready.config, audio: { ...ready.config.audio, barge_in: 'something-else' } },
   });
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
+  await listed();
+  await choose('Hotkey');
 
   const group = await screen.findByRole('radiogroup', { name: 'While Banshee is talking' });
   const stops = [...group.querySelectorAll('button')].map((b) => (b as HTMLElement).tabIndex);
@@ -1496,7 +1564,7 @@ it('keeps a tab stop when no option matches the daemon', async () => {
 it('draws a failure where a reader can see it, and keeps it there', async () => {
   vi.mocked(copyText).mockRejectedValue(new Error('no clipboard'));
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
   await fireEvent.click(screen.getAllByRole('button', { name: /^Copy/ })[0]);
   const shown = await screen.findByText(/Nothing was copied/);
@@ -1510,40 +1578,43 @@ it('draws a failure where a reader can see it, and keeps it there', async () => 
 it('lets a failure be dismissed', async () => {
   vi.mocked(clearHistory).mockRejectedValue(new Error('locked'));
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
+  await listed();
+  await choose('Saved history');
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Delete everything' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Clear everything' }));
 
   await waitFor(() => expect(screen.getByText(/could not be cleared/)).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
   await waitFor(() => expect(screen.queryByText(/could not be cleared/)).toBeNull());
 });
 
-it('opens find on Cmd+F whatever Caps Lock says', async () => {
+// A live region speaks a change, so the same failure again has to leave the
+// region and come back for a reader to hear it.
+it('speaks the same failure a second time', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
+  report('The audio did not play.');
+  const first = await screen.findByText('The audio did not play.');
+  report('The audio did not play.');
+  await waitFor(() => expect(screen.getByText('The audio did not play.')).not.toBe(first));
+});
+
+it('speaks the same failure reported three times in a row', async () => {
+  render(App);
+  await listed();
+  report('The audio did not play.');
+  const first = await screen.findByText('The audio did not play.');
+  report('The audio did not play.');
+  report('The audio did not play.');
+  await waitFor(() => expect(screen.getByText('The audio did not play.')).not.toBe(first));
+});
+
+it('opens search on Cmd+F whatever Caps Lock says', async () => {
+  render(App);
+  await listed();
   await fireEvent.keyDown(window, { key: 'F', metaKey: true });
-  expect(await screen.findByRole('searchbox', { name: /Find/i })).toBeTruthy();
-});
-
-it('opens find from the ledger without the shortcut', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /find in what was said/i }));
-  expect(await screen.findByRole('searchbox', { name: /Find/i })).toBeTruthy();
-});
-
-// Dismissing the field destroys the node holding focus. Without a move it falls
-// to the body, and the ledger button that opened it is two Tabs away from the top.
-it('keeps the ledger up while finding and hands focus back on escape', async () => {
-  render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /find in what was said/i }));
-  await screen.findByRole('searchbox', { name: /Find/i });
-  expect(screen.getByRole('button', { name: /saved/ })).toBeTruthy();
-  await fireEvent.keyDown(window, { key: 'Escape' });
-  await waitFor(() => expect(document.activeElement?.id).toBe('ledger-find'));
+  const find = await screen.findByRole('searchbox', { name: 'Search' });
+  await waitFor(() => expect(document.activeElement).toBe(find));
 });
 
 // Activating Clear destroys the button that was activated. Without a move the
@@ -1551,8 +1622,8 @@ it('keeps the ledger up while finding and hands focus back on escape', async () 
 // document to reach the question they just asked for. axe cannot see this.
 it('moves focus into the confirm, and back out of it', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
+  await listed();
+  await choose('Saved history');
 
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
   const keep = await screen.findByRole('button', { name: 'Keep it' });
@@ -1566,12 +1637,12 @@ it('moves focus into the confirm, and back out of it', async () => {
 // back there drops it as surely as never moving it.
 it('keeps focus somewhere real after the record is deleted', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
+  await listed();
+  await choose('Saved history');
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
   // The daemon keeps nothing once it has cleared, so a re-read finds nothing.
   vi.mocked(history).mockResolvedValue([]);
-  await fireEvent.click(await screen.findByRole('button', { name: 'Delete everything' }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'Clear everything' }));
 
   await waitFor(() => expect(screen.queryByRole('button', { name: 'Clear' })).toBeNull());
   expect(document.activeElement).not.toBe(document.body);
@@ -1583,11 +1654,11 @@ it('takes one delete however many times the button is pressed', async () => {
   let release: () => void = () => {};
   vi.mocked(clearHistory).mockReturnValue(new Promise<void>((resolve) => (release = resolve)));
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /saved/ }));
+  await listed();
+  await choose('Saved history');
   await fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
 
-  const destroy = await screen.findByRole('button', { name: 'Delete everything' });
+  const destroy = await screen.findByRole('button', { name: 'Clear everything' });
   await fireEvent.click(destroy);
   await fireEvent.click(destroy);
   release();
@@ -1595,8 +1666,8 @@ it('takes one delete however many times the button is pressed', async () => {
 });
 
 // The heading reads the daemon for what is in force and the config for what was
-// asked, so the four forms cannot contradict the panel below them.
-it('says where text goes in the Voice heading and in the foot', async () => {
+// asked, so the four forms cannot contradict the page below them.
+it('says where text goes in the Speaking heading', async () => {
   const remoteSpeaker = {
     ...ready,
     config: {
@@ -1620,103 +1691,9 @@ it('says where text goes in the Voice heading and in the foot', async () => {
   vi.mocked(status).mockResolvedValue(remoteSpeaker);
   render(App);
 
-  const cell = await waitFor(() => {
-    const found = screen.getByRole('button', { name: /^Voice/ });
-    expect(found.textContent).toContain('marin');
-    return found;
-  });
-
-  await fireEvent.click(cell);
+  await fireEvent.click(await waitFor(() => item('Speaking')));
   await waitFor(() =>
     expect(screen.getByText('Banshee speaks through api.openai.com as marin.')).toBeTruthy(),
-  );
-});
-
-it('says the speaker is waiting on a restart, in whichever direction it waits', async () => {
-  const base = {
-    ...ready,
-    config: {
-      ...ready.config,
-      tts: {
-        ...ready.config.tts,
-        provider: 'remote',
-        remote: {
-          base_url: 'https://api.openai.com/v1',
-          model: 'tts-1',
-          voice: 'marin',
-          instructions: '',
-        },
-      },
-    },
-  };
-  vi.mocked(status).mockResolvedValue({
-    ...base,
-    remote: {
-      stt: { remote: false, host: null, key_present: false },
-      tts: { remote: false, host: null, speaker_started: true, key_present: true },
-    },
-    pending: ['tts.provider'],
-  });
-  const going = render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
-  await waitFor(() =>
-    expect(
-      screen.getByText('Banshee will speak through api.openai.com when it restarts.'),
-    ).toBeTruthy(),
-  );
-  going.unmount();
-
-  vi.mocked(status).mockResolvedValue({
-    ...base,
-    config: { ...base.config, tts: { ...base.config.tts, provider: 'local' } },
-    remote: {
-      stt: { remote: false, host: null, key_present: false },
-      tts: { remote: true, host: 'api.openai.com', speaker_started: true, key_present: true },
-    },
-    pending: ['tts.provider'],
-  });
-  render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
-  await waitFor(() =>
-    expect(
-      screen.getByText('Banshee speaks through api.openai.com until it restarts.'),
-    ).toBeTruthy(),
-  );
-});
-
-// The reader flipped Speaking back to this machine, and the speaker they
-// flipped away from never started. It spoke nothing through that host, so the
-// lead says the restart is coming and claims no speech through the server.
-it('says a speaker that never started speaks through no host while a flip waits', async () => {
-  vi.mocked(status).mockResolvedValue({
-    ...ready,
-    config: {
-      ...ready.config,
-      tts: {
-        ...ready.config.tts,
-        provider: 'local',
-        remote: {
-          base_url: 'https://api.openai.com/v1',
-          model: 'tts-1',
-          voice: 'marin',
-          instructions: '',
-        },
-      },
-    },
-    remote: {
-      stt: { remote: false, host: null, key_present: false },
-      tts: { remote: true, host: 'api.openai.com', speaker_started: false, key_present: true },
-    },
-    pending: ['tts.provider'],
-  });
-  render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
-  await waitFor(() =>
-    expect(
-      screen.getByText(
-        'Banshee cannot speak through api.openai.com. Your choice takes effect when it restarts.',
-      ),
-    ).toBeTruthy(),
   );
 });
 
@@ -1724,7 +1701,7 @@ it('says a speaker that never started speaks through no host while a flip waits'
 // local arms of the heading are the ones most people read.
 it('names the local voice Kokoro speaks in', async () => {
   render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await fireEvent.click(await waitFor(() => item('Speaking')));
   await waitFor(() => expect(screen.getByText('Banshee speaks as Sky.')).toBeTruthy());
 });
 
@@ -1734,7 +1711,7 @@ it('says a local speaker with no voice set has none yet', async () => {
     config: { ...ready.config, tts: { ...ready.config.tts, voice: '' } },
   });
   render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await fireEvent.click(await waitFor(() => item('Speaking')));
   await waitFor(() => expect(screen.getByText('Banshee has no voice yet.')).toBeTruthy());
 });
 
@@ -1762,7 +1739,7 @@ it('says a remote speaker with no voice cannot speak', async () => {
     },
   });
   render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await fireEvent.click(await waitFor(() => item('Speaking')));
   await waitFor(() =>
     expect(
       screen.getByText('Banshee cannot speak through api.openai.com until you name a voice.'),
@@ -1794,7 +1771,7 @@ it('says a remote speaker with no key cannot speak', async () => {
     },
   });
   render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await fireEvent.click(await waitFor(() => item('Speaking')));
   await waitFor(() =>
     expect(
       screen.getByText('Banshee cannot speak through api.openai.com until you paste a key.'),
@@ -1827,7 +1804,7 @@ it('says a remote speaker that never started cannot speak', async () => {
     },
   });
   render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await fireEvent.click(await waitFor(() => item('Speaking')));
   await waitFor(() =>
     expect(screen.getByText('Banshee cannot speak through api.openai.com.')).toBeTruthy(),
   );
@@ -1858,7 +1835,7 @@ it('names the host alone when a started speaker has lost its name', async () => 
     },
   });
   render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await fireEvent.click(await waitFor(() => item('Speaking')));
   await waitFor(() =>
     expect(screen.getByText('Banshee speaks through api.openai.com.')).toBeTruthy(),
   );
@@ -1911,18 +1888,26 @@ it('names no listening host on a first run when the pipeline blocker stops the l
 it('blames the stopped daemon rather than the voice', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, running: false });
   render(App);
-  await fireEvent.click(await waitFor(() => screen.getByRole('button', { name: /^Voice/ })));
+  await fireEvent.click(await waitFor(() => item('Speaking')));
   await waitFor(() =>
     expect(screen.getByText('Banshee is not running, so nothing is spoken.')).toBeTruthy(),
   );
 });
 
-// Every key in the speaker's table waits on the same restart, and the cell read
-// a hand-written list of them, so the two added last carried no mark. A key of
-// another job's is the discriminating half: it marks that job's cell instead.
+// A stopped Banshee binds no key, and has not said which one it would bind.
+it('says on the Hotkey page that no key works while Banshee is stopped', async () => {
+  vi.mocked(status).mockResolvedValue({ running: false });
+  render(App);
+  await fireEvent.click(await waitFor(() => item('Hotkey')));
+  const heading = await waitFor(() => pageHeading('Hotkey'));
+  expect(heading.textContent).toBe('Banshee is not running, so no key starts dictation.');
+});
+
+// The cell reads every key under the speaker's table, so a key added later
+// cannot be left off a hand-written list and lose its mark. A key of another
+// job's is the discriminating half: it marks that job's cell instead.
 const VOICE_WAITS: [string, boolean][] = [
   ['tts.voice', true],
-  ['tts.speed', true],
   ['tts.remote.base_url', true],
   ['tts.remote.model', true],
   ['tts.remote.voice', true],
@@ -1930,38 +1915,35 @@ const VOICE_WAITS: [string, boolean][] = [
   ['tts.remote.api_key', true],
   ['tts.remote.response_format', true],
   ['tts.remote.sample_rate', true],
-  ['stt.language', false],
+  ['stt.model', false],
   ['audio.hotkey', false],
 ];
 
-it.each(VOICE_WAITS)('marks the voice cell for %s: %s', async (key, marked) => {
+it.each(VOICE_WAITS)('marks the Speaking item for %s: %s', async (key, marked) => {
   vi.mocked(status).mockResolvedValue({ ...ready, pending: [key] });
-  const { container } = render(App);
-  const cell = () => container.querySelector('#job-voice')?.textContent ?? '';
-  // The name arriving is what says the reply and the voice list both landed, so
-  // an unmarked cell is not merely one nothing has reached yet.
-  await waitFor(() => expect(cell()).toContain('Sky'));
-  if (marked) await waitFor(() => expect(cell()).toContain(RESTART_SAYS));
-  else expect(cell()).not.toContain(RESTART_SAYS);
+  render(App);
+  // The row arrives after the status it follows, so an unmarked item is not
+  // merely one nothing has reached yet.
+  await listed();
+  if (marked) {
+    await waitFor(() => expect(item('Speaking').textContent).toContain(waitingSays(key)));
+  } else expect(item('Speaking').textContent).not.toContain('Set. Banshee');
 });
 
-// A stopped daemon has no key to apply and the cell shows no value either, so a
-// mark on it would point at nothing.
+// A stopped daemon has no key to apply, so a mark would point at nothing.
 it('marks no waiting voice key while the daemon is down', async () => {
   vi.mocked(status).mockResolvedValue({
     ...ready,
     running: false,
     pending: ['tts.remote.model'],
   });
-  const { container } = render(App);
+  render(App);
   await waitFor(() => expect(screen.getByText('Banshee is not running')).toBeTruthy());
-  expect(container.querySelector('#job-voice')?.textContent).not.toContain(RESTART_SAYS);
+  expect(item('Speaking').textContent).not.toContain(WAITING_SAYS);
 });
 
-// The voice in force is the one being replaced, so the cell names what it
-// changes to, as LISTENING does.
-it('says what the voice changes to, in whichever direction it waits', async () => {
-  const base = {
+it('marks the voice in force when the speaker asked for could not start', async () => {
+  vi.mocked(status).mockResolvedValue({
     ...ready,
     config: {
       ...ready.config,
@@ -1976,64 +1958,38 @@ it('says what the voice changes to, in whichever direction it waits', async () =
         },
       },
     },
-  };
-  vi.mocked(status).mockResolvedValue({
-    ...base,
     remote: {
       stt: { remote: false, host: null, key_present: false },
       tts: { remote: false, host: null, speaker_started: true, key_present: true },
     },
     pending: ['tts.provider'],
   });
-  const going = render(App);
-  await waitFor(() =>
-    expect(going.container.querySelector('#job-voice')?.textContent).toContain(
-      'changing to api.openai.com when Banshee restarts',
-    ),
-  );
-  expect(going.container.querySelector('#job-voice')?.textContent).not.toContain(
-    'set, and in effect',
-  );
-  going.unmount();
-
-  vi.mocked(status).mockResolvedValue({
-    ...base,
-    config: { ...base.config, tts: { ...base.config.tts, provider: 'local' } },
-    remote: {
-      stt: { remote: false, host: null, key_present: false },
-      tts: { remote: true, host: 'api.openai.com', speaker_started: true, key_present: true },
-    },
-    pending: ['tts.provider'],
-  });
-  const back = render(App);
-  await waitFor(() =>
-    expect(back.container.querySelector('#job-voice')?.textContent).toContain(
-      'changing to this machine when Banshee restarts',
-    ),
-  );
+  render(App);
+  await waitFor(() => expect(item('Speaking').textContent).toContain(WAITING_SAYS));
 });
 
 // Wayland grants no global grab, so the daemon binds nothing and says so.
 // Every place the window named a key was a promise nobody could keep.
 const onWayland = { ...ready, hotkey_listens: false };
 
-it('names the compositor in the foot, not a key nobody listens for', async () => {
+it('names the compositor on the Hotkey page, not a key nobody listens for', async () => {
   vi.mocked(status).mockResolvedValue(onWayland);
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
-  const cell = screen.getByRole('button', { name: /^Hotkey/ });
-  expect(cell.textContent).toMatch(/Compositor/);
-  expect(cell.textContent).not.toMatch(/Right Command/);
+  await choose('Hotkey');
+  const heading = await waitFor(() => pageHeading('Hotkey'));
+  expect(heading.textContent).toMatch(/compositor/);
+  expect(heading.textContent).not.toMatch(/Right Command/);
 });
 
 it('offers the compositor commands instead of a capture that writes nothing', async () => {
   vi.mocked(status).mockResolvedValue(onWayland);
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: /^Hotkey/ }));
+  await listed();
+  await choose('Hotkey');
 
-  expect(await screen.findByText(/banshee record start --dictate/)).toBeTruthy();
+  expect(await screen.findByText(/^banshee record start banshee record stop$/)).toBeTruthy();
   // The capture writes `audio.hotkey`, and no listener reads it in this session.
   expect(screen.queryByRole('button', { name: /change the hotkey/ })).toBeNull();
 });
@@ -2041,7 +1997,7 @@ it('offers the compositor commands instead of a capture that writes nothing', as
 it('sends the answerer to the compositor binding while an agent waits', async () => {
   vi.mocked(status).mockResolvedValue(onWayland);
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
   daemon.update((s) => ({ ...s, live: { ...s.live, armed: true } }));
 
   await waitFor(() =>
@@ -2050,40 +2006,47 @@ it('sends the answerer to the compositor binding while an agent waits', async ()
   expect(screen.queryByText(/Tap Right Command to answer/)).toBeNull();
 });
 
-// A failure reported by the daemon lives in a panel nobody has open.
-it('names a failed reply in the header, and opens the voice panel on it', async () => {
+// A failure reported by the daemon lives on a page nobody has open, so the
+// item that opens that page carries the mark.
+it('marks Speaking for a failed reply, and opens it from the note above History', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await listed();
   daemon.update((s) => ({
     ...s,
     live: { ...s.live, last_speech_error: 'api.deepinfra.com says no' },
   }));
 
-  const notice = await screen.findByRole('button', { name: 'Speech failed' });
-  await fireEvent.click(notice);
-  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
+  await waitFor(() =>
+    expect(
+      within(sidebar()).getByRole('button', { name: 'Speaking needs attention' }),
+    ).toBeTruthy(),
+  );
+  expect(within(sidebar()).getByRole('button', { name: 'Listening' })).toBeTruthy();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Open Speaking' }));
+  await waitFor(() => expect(pageHeading('Speaking')).toBeTruthy());
   expect(document.getElementById('speech-failure')?.textContent).toContain(
     'api.deepinfra.com says no',
   );
 });
 
-it('names a failed dictation in the header, and opens the microphone panel on it', async () => {
+it('marks Listening for a failed dictation, and its item opens that page', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await listed();
   daemon.update((s) => ({ ...s, live: { ...s.live, last_error: 'api.groq.com says no' } }));
 
-  await fireEvent.click(await screen.findByRole('button', { name: 'Dictation failed' }));
-  await waitFor(() => expect(panelHeading('Microphone')).toBeTruthy());
+  await fireEvent.click(await waitFor(() => item('Listening needs attention')));
+  await waitFor(() => expect(document.activeElement).toBe(pageHeading('Listening')));
 });
 
-// The header names the failure in two words, so the body states the reason and
-// the fix where the reader already looks.
+// The mark names the page in two words, so History states the reason and the
+// fix where the reader already looks.
 it('states a failed dictation and its fix inline, above the record', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await listed();
   daemon.update((s) => ({ ...s, live: { ...s.live, last_error: 'api.groq.com says no' } }));
 
   await waitFor(() => {
@@ -2092,33 +2055,36 @@ it('states a failed dictation and its fix inline, above the record', async () =>
   });
   expect(screen.getByRole('button', { name: 'Open Listening' })).toBeTruthy();
   expect(container.querySelector('.failure')?.textContent).not.toContain('Microphone');
-  expect(screen.getByRole('button', { name: 'Dictation failed' })).toBeTruthy();
+  expect(within(sidebar()).getByRole('button', { name: 'Listening needs attention' })).toBeTruthy();
 });
 
-it('carries the dictation failure when both sides have one', async () => {
+// The note has one place, and dictation is the way in. Each mark is its own.
+it('carries the dictation failure in the note, and marks both when both fail', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await listed();
   daemon.update((s) => ({
     ...s,
     live: { ...s.live, last_error: 'no microphone', last_speech_error: 'no voice' },
   }));
 
-  expect(await screen.findByRole('button', { name: 'Dictation failed' })).toBeTruthy();
-  expect(screen.queryByRole('button', { name: 'Speech failed' })).toBeNull();
+  expect(await screen.findByRole('button', { name: 'Open Listening' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Open Speaking' })).toBeNull();
+  expect(within(sidebar()).getByRole('button', { name: 'Listening needs attention' })).toBeTruthy();
+  expect(within(sidebar()).getByRole('button', { name: 'Speaking needs attention' })).toBeTruthy();
 });
 
-it('names no failure in the header when the daemon reports none', async () => {
+it('marks no item when the daemon reports no failure', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
-  expect(screen.queryByRole('button', { name: /failed/i })).toBeNull();
+  await listed();
+  expect(within(sidebar()).queryByRole('button', { name: /needs attention/ })).toBeNull();
 });
 
-it('speaks a failure that arrives while no panel is open', async () => {
+it('speaks a failure that arrives while its page is not open', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await listed();
   expect(get(announcement)).toBe('');
 
   daemon.update((s) => ({
@@ -2132,99 +2098,46 @@ it('speaks a failure that arrives while no panel is open', async () => {
   );
 });
 
-it('returns focus to the header notice when its panel closes', async () => {
+// On a remote speaker the failure sits below the fold, so opening the page is
+// only half of what the note promises.
+it('lands on the failure itself, not the top of the page it opens', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await listed();
   daemon.update((s) => ({ ...s, live: { ...s.live, last_speech_error: 'no voice' } }));
 
-  const notice = await screen.findByRole('button', { name: 'Speech failed' });
-  await fireEvent.click(notice);
-  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
-  await waitFor(() => expect(document.activeElement).toBe(notice));
-});
-
-// On a remote speaker the failure sits below the fold, so opening the panel is
-// only half of what the notice promises.
-it('lands on the failure itself, not the top of the panel it opens', async () => {
-  vi.mocked(status).mockResolvedValue(ready);
-  render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
-  daemon.update((s) => ({ ...s, live: { ...s.live, last_speech_error: 'no voice' } }));
-
-  await fireEvent.click(await screen.findByRole('button', { name: 'Speech failed' }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'Open Speaking' }));
   await waitFor(() =>
     expect(document.activeElement).toBe(document.getElementById('speech-failure')),
   );
 });
 
-it('the skip link enters the jobs where the reader left them', async () => {
+// Six sidebar stops come first in the tab order, so the keyboard needs a way
+// past them to the page itself.
+it('the skip link enters the page that is showing', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await listed();
 
-  await fireEvent.click(document.getElementById('job-voice')!);
-  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
-  await waitFor(() => expect(document.activeElement?.id).toBe('job-voice'));
+  const skip = screen.getByRole('button', { name: 'Skip to the page' });
+  expect(skip.compareDocumentPosition(sidebar()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await fireEvent.click(skip);
+  expect(document.activeElement).toBe(
+    within(page('History')).getByRole('heading', { name: 'History' }),
+  );
+
+  await choose('Speaking');
+  await waitFor(() => expect(pageHeading('Speaking')).toBeTruthy());
   (document.activeElement as HTMLElement).blur();
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Skip to the jobs' }));
-  expect(document.activeElement?.id).toBe('job-voice');
-});
-
-// Switching panels keeps the same Panel mounted, so nothing remounts.
-it('lands on the failure when another panel is already open', async () => {
-  vi.mocked(status).mockResolvedValue(ready);
-  render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
-  await fireEvent.click(document.getElementById('job-microphone')!);
-  await waitFor(() => expect(panelHeading('Microphone')).toBeTruthy());
-  daemon.update((s) => ({ ...s, live: { ...s.live, last_speech_error: 'no voice' } }));
-
-  await fireEvent.click(await screen.findByRole('button', { name: 'Speech failed' }));
-  await waitFor(() => expect(panelHeading('Voice')).toBeTruthy());
-  expect(document.activeElement).toBe(document.getElementById('speech-failure'));
-});
-
-it('closes the record with the day it starts', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const line = container.querySelector('.colophon')?.textContent ?? '';
-  expect(line).toContain('The record starts here, today');
-  expect(line).toContain('keeps it on this machine and sends it nowhere');
-});
-
-// The claim is about the record, and the foot names the host a band below it.
-it('drops the nowhere claim while a remote server does the listening', async () => {
-  vi.mocked(status).mockResolvedValue(remote);
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  const line = container.querySelector('.colophon')?.textContent ?? '';
-  expect(line).toContain('keeps it on this machine');
-  expect(line).not.toContain('sends it nowhere');
-});
-
-// The last match is not the start of anything, so the edge would lie.
-it('draws no closing line under a filter', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  await fireEvent.keyDown(window, { key: 'f', metaKey: true });
-  await fireEvent.input(screen.getByRole('searchbox', { name: /Find/i }), {
-    target: { value: 'older' },
-  });
-
-  await waitFor(() => expect(screen.queryByText('Yes, open the pull request.')).toBeNull());
-  expect(container.querySelector('.colophon')).toBeNull();
+  await fireEvent.click(skip);
+  expect(document.activeElement).toBe(pageHeading('Speaking'));
 });
 
 it('states a failure as one sentence rather than two run together', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
   daemon.update((s) => ({ ...s, live: { ...s.live, last_error: 'the key was refused' } }));
 
   await waitFor(() =>
@@ -2237,7 +2150,7 @@ it('states a failure as one sentence rather than two run together', async () => 
 // jsdom has no view transitions, so every other test takes the synchronous
 // path. The platform runs the callback in a later task, and focus is moved on
 // the line after the swap.
-it('lands focus in the panel even where the platform defers the swap', async () => {
+it('lands focus on the page even where the platform defers the swap', async () => {
   const deferred = (run: () => void) => {
     const updateCallbackDone = new Promise<void>((resolve) => {
       setTimeout(() => {
@@ -2255,7 +2168,7 @@ it('lands focus in the panel even where the platform defers the swap', async () 
   try {
     vi.mocked(status).mockResolvedValue(ready);
     render(App);
-    await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+    await listed();
     daemon.update((s) => ({ ...s, live: { ...s.live, last_error: 'the key was refused' } }));
 
     const open = await screen.findByRole('button', { name: 'Open Listening' });
@@ -2267,13 +2180,13 @@ it('lands focus in the panel even where the platform defers the swap', async () 
   }
 });
 
-// `stt_model` and `english_only` arrive only with a full status, and the read a
+// `stt_model` and `stt_translates` arrive only with a full status, and the read a
 // write does happens before the file has landed, so without this the window
 // keeps reporting the model it was told about at the moment of the write.
 it('reads the daemon again when a model finishes loading', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await listed();
 
   pushes.get('daemon:state')?.({ payload: { loading_model: true } });
   const readsBefore = vi.mocked(status).mock.calls.length;
@@ -2285,7 +2198,7 @@ it('reads the daemon again when a model finishes loading', async () => {
 it('does not re-read the daemon when no model was loading', async () => {
   vi.mocked(status).mockResolvedValue(ready);
   render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await listed();
 
   const readsBefore = vi.mocked(status).mock.calls.length;
   pushes.get('daemon:state')?.({ payload: { loading_model: false } });
@@ -2299,7 +2212,7 @@ it('does not re-read the daemon when no model was loading', async () => {
 it('follows up a load it learned from a status read rather than a push', async () => {
   vi.mocked(status).mockResolvedValue({ ...ready, loading_model: true });
   render(App);
-  await waitFor(() => expect(screen.getByText('Sky')).toBeTruthy());
+  await listed();
 
   const readsBefore = vi.mocked(status).mock.calls.length;
   pushes.get('daemon:state')?.({ payload: { loading_model: false } });
@@ -2307,27 +2220,12 @@ it('follows up a load it learned from a status read rather than a push', async (
   await waitFor(() => expect(vi.mocked(status).mock.calls.length).toBeGreaterThan(readsBefore));
 });
 
-// Filtering moves which row is drawn first; it does not make that row news.
-it('does not replay the lead entrance when a filter is cleared', async () => {
-  const { container } = render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-
-  await fireEvent.keyDown(window, { key: 'f', metaKey: true });
-  const find = screen.getByRole('searchbox', { name: /Find/i });
-  await fireEvent.input(find, { target: { value: 'older' } });
-  await waitFor(() => expect(screen.queryByText('Yes, open the pull request.')).toBeNull());
-  await fireEvent.keyDown(window, { key: 'Escape' });
-
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
-  expect(container.querySelector('article.turn.lead.arrive')).toBeNull();
-});
-
 // A grant made in System Settings, a hand-edited config.toml and a model file
 // added outside Banshee reach no push. Returning to the window is what catches
 // them, and the reader is always coming back from another application.
 it('reads the daemon again when the window is returned to', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
   const readsBefore = vi.mocked(status).mock.calls.length;
   await fireEvent.focus(window);
@@ -2350,7 +2248,7 @@ it('does not start the daemon when the window is returned to', async () => {
 // A window unhidden without the pointer landing in it fires no focus event.
 it('reads the daemon again when the window becomes visible', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
   const readsBefore = vi.mocked(status).mock.calls.length;
   document.dispatchEvent(new Event('visibilitychange'));
@@ -2362,7 +2260,7 @@ it('reads the daemon again when the window becomes visible', async () => {
 // being hidden has nobody to show a fresh reading to.
 it('does not read the daemon when the window is hidden', async () => {
   render(App);
-  await waitFor(() => expect(screen.getByText('Yes, open the pull request.')).toBeTruthy());
+  await listed();
 
   const readsBefore = vi.mocked(status).mock.calls.length;
   const visible = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
@@ -2398,19 +2296,217 @@ it('releases the download controls once the run reports', async () => {
   const start = await screen.findByRole('button', { name: /Download/ });
   await fireEvent.click(start);
 
-  await waitFor(() =>
-    expect((screen.getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(
-      true,
-    ),
-  );
+  const held = () => screen.getByRole('button', { name: /Download/ });
+  await waitFor(() => expect(held().getAttribute('aria-disabled')).toBe('true'));
+  expect((held() as HTMLButtonElement).disabled).toBe(false);
 
   pushes.get('daemon:downloads')?.({
     payload: { model: 'ggml-x.bin', bytes: 10, total: 100, state: 'done' },
   });
 
-  await waitFor(() =>
-    expect((screen.getByRole('button', { name: /Download/ }) as HTMLButtonElement).disabled).toBe(
-      false,
-    ),
-  );
+  await waitFor(() => expect(held().hasAttribute('aria-disabled')).toBe(false));
+});
+
+describe('below the width the sidebar folds at', () => {
+  const WIDE = `(min-width: ${SIDEBAR_FOLDS_BELOW}px)`;
+  let widen: (query: string, matches: boolean) => void;
+  const unfold = () => screen.getByRole('button', { name: 'Show sidebar' });
+  const drawer = () => screen.queryByRole('dialog', { name: 'Sidebar' });
+  // Whole, because the host sits in its own span. The Listening page's note
+  // says the same words with a full stop.
+  const hostLine = (_: string, node: Element | null) =>
+    node?.textContent === 'Audio goes to api.openai.com';
+
+  beforeEach(() => {
+    widen = stubMatchMedia({ [WIDE]: false });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('opens the sidebar from a toolbar button in a modal dialog', async () => {
+    const modal = vi.spyOn(HTMLDialogElement.prototype, 'showModal');
+    render(App);
+    await listed();
+    expect(screen.queryByRole('navigation', { name: 'Banshee' })).toBeNull();
+    expect(drawer()).toBeNull();
+
+    await fireEvent.click(unfold());
+    expect(modal).toHaveBeenCalled();
+    expect(within(drawer()!).getByRole('navigation', { name: 'Banshee' })).toBeTruthy();
+    expect(within(page('History')).getByRole('button', { name: 'Show sidebar' })).toBe(unfold());
+
+    await fireEvent.keyDown(item('Agents'), { key: 'Escape' });
+    expect(drawer()).toBeNull();
+    expect(document.activeElement).toBe(unfold());
+
+    await fireEvent.click(unfold());
+    await choose('Hotkey');
+    await waitFor(() => expect(page('Hotkey')).toBeTruthy());
+    expect(drawer()).toBeNull();
+    expect(document.activeElement).toBe(unfold());
+    modal.mockRestore();
+  });
+
+  it('carries no accessibility violations with the sidebar open', async () => {
+    const { container } = render(App);
+    await listed();
+    await fireEvent.click(unfold());
+    expect(drawer()).toBeTruthy();
+    const results = await axe.run(container, { rules: { 'color-contrast': { enabled: false } } });
+    expect(results.violations.map((v) => `${v.id}: ${v.nodes.length} node(s)`)).toEqual([]);
+  });
+
+  it('names the host above the page content', async () => {
+    vi.mocked(status).mockResolvedValue(remote);
+    render(App);
+    await listed();
+
+    const line = within(page('History')).getByText(hostLine);
+    expect(
+      line.compareDocumentPosition(screen.getByText('Yes, open the pull request.')) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await fireEvent.click(unfold());
+    await choose('Listening');
+    await waitFor(() => expect(page('Listening')).toBeTruthy());
+    expect(
+      within(page('Listening'))
+        .getByText(hostLine)
+        .compareDocumentPosition(pageHeading('Listening')) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    widen(WIDE, true);
+    await waitFor(() => expect(within(page('Listening')).queryByText(hostLine)).toBeNull());
+    expect(within(sidebar()).getByText(/Audio goes to/)).toBeTruthy();
+  });
+
+  it('reveals search from a toolbar icon, and Escape puts it away again', async () => {
+    render(App);
+    await listed();
+    expect(screen.queryByRole('searchbox')).toBeNull();
+
+    const reveal = screen.getByRole('button', { name: 'Search' });
+    await fireEvent.click(reveal);
+    const find = await screen.findByRole('searchbox', { name: 'Search' });
+    await waitFor(() => expect(document.activeElement).toBe(find));
+
+    await fireEvent.input(find, { target: { value: 'older' } });
+    await fireEvent.keyDown(find, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('searchbox')).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Search' }));
+    expect(screen.getAllByRole('option').length).toBe(2);
+  });
+
+  it('leaves the page behind the open sidebar to its own keys', async () => {
+    render(App);
+    await listed();
+    await fireEvent.click(unfold());
+
+    await fireEvent.keyDown(item('Agents'), { key: 'f', metaKey: true, ctrlKey: true });
+    await fireEvent.keyDown(item('Agents'), { key: 'c', metaKey: true, ctrlKey: true });
+    expect(drawer()).toBeTruthy();
+    expect(screen.queryByRole('searchbox')).toBeNull();
+    expect(copyText).not.toHaveBeenCalled();
+  });
+
+  // One key, one effect: the Escape that closes the dialog also reaches the window.
+  it('leaves the search as it was when Escape closes the sidebar', async () => {
+    render(App);
+    await listed();
+    await fireEvent.keyDown(window, { key: 'f', metaKey: true });
+    const find = await screen.findByRole('searchbox', { name: 'Search' });
+    await fireEvent.input(find, { target: { value: 'older' } });
+
+    await fireEvent.click(unfold());
+    await fireEvent.keyDown(item('Agents'), { key: 'Escape' });
+    expect(drawer()).toBeNull();
+    expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('older');
+    expect(screen.getAllByRole('option').length).toBe(1);
+  });
+
+  it('opens the missed question in place of the list when reopened for it', async () => {
+    vi.mocked(history).mockResolvedValue([
+      asked(3, { question: 'Should I update the reports?', timestamp: stamp(8) }),
+      ...rows,
+    ]);
+    render(App);
+    await listed();
+    expect(screen.queryByRole('region', { name: 'Selected row' })).toBeNull();
+    const focused = document.activeElement;
+
+    pushes.get('app:reopened')?.({ payload: { missed: true } });
+    await waitFor(() =>
+      expect(within(selectedRow()).getByText('Should I update the reports?')).toBeTruthy(),
+    );
+    expect(screen.getByRole('button', { name: 'Back to History' })).toBeTruthy();
+    expect(document.activeElement).toBe(focused);
+  });
+
+  it('opens the missed question in place of the list when launched for it', async () => {
+    vi.mocked(history).mockResolvedValue([
+      asked(3, { question: 'Should I update the reports?', timestamp: stamp(8) }),
+      ...rows,
+    ]);
+    vi.mocked(launchMissed).mockResolvedValueOnce(true);
+    render(App);
+    await waitFor(() =>
+      expect(within(selectedRow()).getByText('Should I update the reports?')).toBeTruthy(),
+    );
+  });
+
+  it('puts Back in the toolbar while a row is open, and it returns to the same option', async () => {
+    render(App);
+    await listed();
+    expect(screen.queryByRole('button', { name: 'Back to History' })).toBeNull();
+    expect(
+      within(page('History')).getByRole('heading', { name: 'History' }).classList.contains('sr'),
+    ).toBe(false);
+
+    await fireEvent.click(screen.getByRole('option', { name: /^the older one,/ }));
+    const back = await screen.findByRole('button', { name: 'Back to History' });
+    const heading = within(page('History')).getByRole('heading', { name: 'History' });
+    expect(heading.parentElement!.contains(back)).toBe(true);
+    expect(heading.classList.contains('sr')).toBe(true);
+    expect(screen.getByRole('region', { name: 'Selected row' }).contains(back)).toBe(false);
+
+    await fireEvent.click(back);
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole('option', { name: /^the older one,/ })),
+    );
+    expect(screen.queryByRole('region', { name: 'Selected row' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Back to History' })).toBeNull();
+  });
+
+  it('lands focus on the detail heading when Back goes as the window widens', async () => {
+    render(App);
+    await listed();
+    await fireEvent.click(screen.getByRole('option', { name: /^the older one,/ }));
+    const back = await screen.findByRole('button', { name: 'Back to History' });
+    back.focus();
+
+    widen(`(min-width: ${LIST_AND_DETAIL_FROM}px)`, true);
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(screen.getByRole('region', { name: 'Selected row' })).getByRole('heading'),
+      ),
+    );
+  });
+
+  it('keeps focus in the sidebar or on its button as the window crosses the width', async () => {
+    render(App);
+    await listed();
+    await fireEvent.click(unfold());
+    await choose('Hotkey');
+    await waitFor(() => expect(page('Hotkey')).toBeTruthy());
+    await fireEvent.click(unfold());
+
+    widen(WIDE, true);
+    await waitFor(() => expect(drawer()).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(item('Hotkey')));
+    expect(item('Hotkey').getAttribute('aria-current')).toBe('page');
+    expect(screen.queryByRole('button', { name: 'Show sidebar' })).toBeNull();
+
+    widen(WIDE, false);
+    await waitFor(() => expect(document.activeElement).toBe(unfold()));
+  });
 });

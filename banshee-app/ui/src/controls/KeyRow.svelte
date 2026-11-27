@@ -5,7 +5,7 @@
   import { write } from '../lib/settings';
   import { announce } from '../lib/copy';
   import Field from './Field.svelte';
-  import SubRow from './SubRow.svelte';
+  import Row from './Row.svelte';
 
   export let setting: string;
   export let present: boolean;
@@ -13,7 +13,7 @@
   // The daemon reads an empty key as removal.
   async function removeKey() {
     if (await write(setting, '')) {
-      announce('The key is removed. It takes effect when Banshee restarts.');
+      announce('The key is removed.');
     }
   }
 
@@ -27,13 +27,23 @@
   }
 </script>
 
-<SubRow name="key">
+<Row name="Key" {setting} line={null} let:describedBy>
   {#if present && !replacing}
     <span class="held">A key is set</span>
-    <button class="caps btn-underline act" aria-label="Remove the key" on:click={removeKey}>
+    <button
+      class="btn-underline act"
+      aria-label="Remove the key"
+      aria-describedby={describedBy}
+      on:click={removeKey}
+    >
       Remove
     </button>
-    <button class="caps btn-underline act" aria-label="Replace the key" on:click={replaceKey}>
+    <button
+      class="btn-underline act"
+      aria-label="Replace the key"
+      aria-describedby={describedBy}
+      on:click={replaceKey}
+    >
       Replace
     </button>
   {:else}
@@ -50,28 +60,23 @@
       }}
     />
   {/if}
-</SubRow>
+</Row>
 
 <style>
-  /* A resting rule, or an 11px word beside a field reads as part of the value. */
+  /* A resting rule, or a word beside a field reads as part of the value. Each
+     invisible click box reaches 6px past its label, and 12px on top of the
+     control's gap keeps the reaches apart. */
   .act {
+    margin-left: 12px;
     color: var(--ink);
     border-bottom-color: currentcolor;
-  }
-
-  /* The pair sits in one control with no gap of its own, and each invisible
-     click box reaches 6px past its label. Twelve px meets the two reaches
-     exactly, and the word space adds the rest, so Remove keeps its clicks. */
-  .act + .act {
-    margin-left: 12px;
   }
 
   /* The field's own box, so the row's baseline and its edge stay put when the
      line and the field swap places. */
   .held {
-    font-variation-settings:
-      'wght' 500,
-      'wdth' 100;
+    --wght: 500;
+    --wdth: 100;
     font-size: 15px;
     padding: 6px 0 7px;
   }

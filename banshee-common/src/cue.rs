@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Target {
     Dictate,
-    Mailbox,
-    Tell,
     Answer,
 }
 
@@ -27,8 +25,6 @@ pub enum ReasonCode {
     Starting,
     PipelineBroken,
     SpeechFailed,
-    TellFailed,
-    TellWarned,
 }
 
 /// `text` is what every client shows.
@@ -53,8 +49,6 @@ impl Reason {
             ReasonCode::Starting => "Banshee is still starting".to_string(),
             ReasonCode::PipelineBroken => "Banshee cannot record".to_string(),
             ReasonCode::SpeechFailed => "The reply did not play".to_string(),
-            ReasonCode::TellFailed => "The agent run failed".to_string(),
-            ReasonCode::TellWarned => "The agent did not answer".to_string(),
         };
         Reason { code, text }
     }
@@ -83,11 +77,19 @@ pub enum Signal {
     Answered {
         heard: bool,
     },
-    Told,
     Cancelled {
         target: Target,
     },
     Onset,
+    /// A check judged a pause in an answer unfinished. With no turn model, the
+    /// pause began. `remaining_ms` of quiet end the answer unless a check
+    /// holds it.
+    Quiet {
+        remaining_ms: u64,
+    },
+    Speech,
+    /// A dictation went to the clipboard instead of being typed.
+    Copied,
 }
 
 #[cfg(test)]
@@ -103,10 +105,11 @@ mod tests {
                     target: Target::Dictate,
                 },
             ),
+            (r#"{"cue":"copied"}"#, Signal::Copied),
             (
-                r#"{"cue":"ready","target":"mailbox"}"#,
+                r#"{"cue":"ready","target":"dictate"}"#,
                 Signal::Ready {
-                    target: Target::Mailbox,
+                    target: Target::Dictate,
                 },
             ),
             (
@@ -135,8 +138,12 @@ mod tests {
             ),
             (r#"{"cue":"arm"}"#, Signal::Arm),
             (r#"{"cue":"disarm"}"#, Signal::Disarm),
-            (r#"{"cue":"told"}"#, Signal::Told),
             (r#"{"cue":"onset"}"#, Signal::Onset),
+            (
+                r#"{"cue":"quiet","remaining_ms":2468}"#,
+                Signal::Quiet { remaining_ms: 2468 },
+            ),
+            (r#"{"cue":"speech"}"#, Signal::Speech),
             (
                 r#"{"cue":"cancelled","target":"dictate"}"#,
                 Signal::Cancelled {
@@ -155,13 +162,13 @@ mod tests {
 
     #[test]
     fn every_signal_survives_the_wire() {
-        let reason = Reason::new(ReasonCode::TellWarned, None);
+        let reason = Reason::new(ReasonCode::TypeFailed, None);
         for signal in [
             Signal::RecordStart {
                 target: Target::Answer,
             },
             Signal::RecordStop {
-                target: Target::Tell,
+                target: Target::Dictate,
             },
             Signal::Ready {
                 target: Target::Dictate,
@@ -172,16 +179,18 @@ mod tests {
             },
             Signal::Error {
                 reason,
-                target: Some(Target::Tell),
+                target: Some(Target::Dictate),
             },
             Signal::Arm,
             Signal::Disarm,
             Signal::Answered { heard: false },
-            Signal::Told,
             Signal::Cancelled {
-                target: Target::Mailbox,
+                target: Target::Dictate,
             },
             Signal::Onset,
+            Signal::Quiet { remaining_ms: 2468 },
+            Signal::Speech,
+            Signal::Copied,
         ] {
             let line = serde_json::to_string(&signal).unwrap();
             assert_eq!(

@@ -8,7 +8,7 @@ export function arrowStep(key: string, at: number, count: number): number | null
 }
 
 // The window's own key handlers are registered first and would otherwise win,
-// so a panel capturing keystrokes has to claim them.
+// so a page capturing keystrokes has to claim them.
 let held = false;
 
 // Releasing twice is a no-op, so a component may release in a handler and
@@ -36,9 +36,4 @@ export function forgetKeys(): void {
 /// is what is left to read.
 export function onMac(userAgent: string = navigator.userAgent): boolean {
   return userAgent.includes('Mac OS X');
-}
-
-/// The chord that opens Find, written the way the host platform names it.
-export function findChord(userAgent: string = navigator.userAgent): string {
-  return onMac(userAgent) ? '\u2318F' : 'Ctrl+F';
 }

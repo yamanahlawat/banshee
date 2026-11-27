@@ -61,6 +61,8 @@ install:
 	# A machine with no user systemd bus fails this step. The install must not
 	# abort here, since the symlinks above already point at a working build.
 	"$(BIN_DIR)/banshee" start || echo "could not register the systemd --user service; start it yourself with: $(BIN_DIR)/banshee serve"
+	# Only a running tray moves to this build: a headless machine has none to start.
+	if systemctl --user is-active --quiet banshee-tray 2>/dev/null; then "$(BIN_DIR)/banshee" tray || echo "could not move the menu bar icon to this build; run: $(BIN_DIR)/banshee tray"; fi
 	@echo "installed to $(BIN_DIR); make sure it's on your PATH"
 # A missing window dependency skips the window instead of failing, so a
 # headless machine keeps its one-command install.

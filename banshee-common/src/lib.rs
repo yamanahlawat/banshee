@@ -11,8 +11,13 @@ use serde_json::Value;
 pub mod cue;
 pub mod error;
 pub mod feedback;
+pub mod listening;
 pub mod logging;
+pub mod settings;
 pub mod utils;
+
+#[cfg(test)]
+mod test_support;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Version {
@@ -107,9 +112,13 @@ pub const BANSHEE_SPEAK: &str = "banshee.speak";
 pub const BANSHEE_STOP_SPEAKING: &str = "banshee.stop_speaking";
 pub const BANSHEE_STATUS: &str = "banshee.status";
 pub const BANSHEE_CONFIGURE: &str = "banshee.configure";
-pub const BANSHEE_GET_TRANSCRIPTION: &str = "banshee.get_transcription";
 pub const BANSHEE_HISTORY: &str = "banshee.history";
 pub const BANSHEE_CLEAR_HISTORY: &str = "banshee.clear_history";
+/// `{"id": integer}`, answers `{"path": string}`: where that row's kept audio is.
+pub const BANSHEE_HISTORY_AUDIO: &str = "banshee.history_audio";
+pub const NO_AUDIO: &str = "No audio is kept for this row.";
+/// `{"id": integer}`, answers `{"row": ...}`: the dictation transcribed again from its kept audio.
+pub const BANSHEE_RETRY: &str = "banshee.retry";
 pub const BANSHEE_ASK_USER: &str = "banshee.ask_user";
 pub const BANSHEE_TURN_ENDED: &str = "banshee.turn_ended";
 
@@ -123,12 +132,13 @@ pub enum TurnVerdict {
 }
 
 pub const BANSHEE_STOP: &str = "banshee.stop";
+/// Replies `{"ok": true}`, then the daemon exits with status 75 so its supervisor starts it again.
+pub const BANSHEE_RESTART: &str = "banshee.restart";
 pub const BANSHEE_RECORD_START: &str = "banshee.record_start";
 pub const BANSHEE_RECORD_STOP: &str = "banshee.record_stop";
 pub const BANSHEE_RECORD_TOGGLE: &str = "banshee.record_toggle";
 pub const BANSHEE_LIST_INPUT_DEVICES: &str = "banshee.list_input_devices";
 pub const BANSHEE_LIST_VOICES: &str = "banshee.list_voices";
-pub const BANSHEE_LIST_LANGUAGES: &str = "banshee.list_languages";
 pub const BANSHEE_DOWNLOAD_MODELS: &str = "banshee.download_models";
 pub const BANSHEE_SUBSCRIBE: &str = "banshee.subscribe";
 pub const BANSHEE_AGENTS: &str = "banshee.agents";
@@ -140,6 +150,13 @@ pub const BANSHEE_STATE_CHANGED: &str = "banshee.state_changed";
 pub const BANSHEE_DOWNLOAD_PROGRESS: &str = "banshee.download_progress";
 pub const BANSHEE_CUE: &str = "banshee.cue";
 pub const BANSHEE_LEVEL: &str = "banshee.level";
+/// `{"text": ...}`: the committed words of the recording in progress, and an
+/// empty text when a recording ends.
+pub const BANSHEE_WORDS: &str = "banshee.words";
+/// `{"text", "client"}`: the question an agent is asking, raw as the agent
+/// sent it, and the name of the program asking, null when nothing reads. An
+/// empty text means the question ended.
+pub const BANSHEE_QUESTION: &str = "banshee.question";
 
 /// The codes a reply carries. JSON-RPC reserves -32700 to -32600; the
 /// -32000 block is this daemon's, one code per fix a client can offer.
@@ -152,7 +169,6 @@ pub mod rpc_code {
     pub const MICROPHONE: i32 = -32000;
     /// Recording is unavailable: the transcription model did not load.
     pub const MODEL: i32 = -32002;
-    pub const HISTORY_OFF: i32 = -32003;
     /// A recording or a question is already in progress.
     pub const BUSY: i32 = -32004;
     pub const DOWNLOAD_RUNNING: i32 = -32005;
@@ -168,6 +184,12 @@ pub const EVENT_STATE: &str = "state";
 pub const EVENT_DOWNLOADS: &str = "downloads";
 pub const EVENT_CUES: &str = "cues";
 pub const EVENT_LEVEL: &str = "level";
+pub const EVENT_WORDS: &str = "words";
+pub const EVENT_QUESTION: &str = "question";
+
+/// The tray starts the window with this argument to open History at the newest
+/// missed question.
+pub const MISSED_FLAG: &str = "--missed";
 
 /// The microphone the daemon records from. A `banshee.status` reply and a
 /// `state_changed` push both carry it, so a subscriber reads it from every
@@ -195,9 +217,9 @@ pub fn remote_tts_host(status: &Value) -> Option<&str> {
 
 /// Whether the speaker the config names is the one running. The daemon holds
 /// a voice only for a backend that started, so this is false whenever the
-/// system voice took over: a key that is missing, a voice that is not named,
-/// a server the daemon cannot reach at startup, or a local Kokoro that failed
-/// to load.
+/// fallback or silence took over: a key that is missing, a voice that is not
+/// named, a server the daemon cannot reach at startup, or a local voice that
+/// failed to load.
 pub fn speaker_started(status: &Value) -> bool {
     status["remote"]["tts"]["speaker_started"].as_bool() == Some(true)
 }
@@ -214,15 +236,58 @@ pub fn pipeline(status: &Value) -> Option<&str> {
     status.get("pipeline").and_then(Value::as_str)
 }
 
-/// The sentence every surface shows for these two fields. Each client adds its
-/// own lead-in and nothing else, so all of them spell the absent case alike.
-/// Nothing open is not an absent device: a model that fails to load closes capture.
-pub fn microphone_label(open: Option<&str>, missing: Option<&str>) -> String {
-    let open = open.unwrap_or("Not open");
-    match missing {
+/// Whether capture is open now: for a use, or for good under
+/// `audio.keep_open`. False between uses, when `audio_device` names the
+/// device the next use opens.
+pub fn microphone_open(status: &Value) -> bool {
+    flag(status, "microphone_open")
+}
+
+/// Whether macOS refuses Banshee the microphone, read from its grant. Always
+/// false elsewhere.
+pub fn microphone_refused(status: &Value) -> bool {
+    flag(status, "microphone_refused")
+}
+
+/// The device and the one the config waits for, as one name. `None` when no
+/// device is known.
+pub fn microphone_name(device: Option<&str>, missing: Option<&str>) -> Option<String> {
+    let device = device?;
+    Some(match missing {
         // The quotes keep two multi-word names apart
-        Some(missing) => format!("{open} (waiting for \"{missing}\")"),
-        None => open.to_string(),
+        Some(missing) => format!("{device} (waiting for \"{missing}\")"),
+        None => device.to_string(),
+    })
+}
+
+/// The sentence every surface shows for the microphone. Each client adds its
+/// own lead-in and nothing else, so all of them spell each case alike. A
+/// closed microphone is no fault: the next use opens the device named.
+pub fn microphone_label(
+    device: Option<&str>,
+    missing: Option<&str>,
+    open: bool,
+    refused: bool,
+) -> String {
+    match microphone_name(device, missing) {
+        None => "not available".to_string(),
+        Some(name) if refused => format!("{name}, not allowed by macOS"),
+        Some(name) if open => format!("{name}, open"),
+        Some(name) => format!("{name}, opens when you speak"),
+    }
+}
+
+/// The human word for a wire activity word. A lasting problem changes only
+/// the idle word. An unknown word comes back as it came in.
+pub fn state_label(word: &str, problem: bool) -> &str {
+    match word {
+        "idle" if problem => "Not ready",
+        "idle" => "Ready",
+        "recording" => "Recording",
+        "speaking" => "Speaking",
+        "listening" => "Your turn",
+        "busy" => "Working",
+        other => other,
     }
 }
 
@@ -232,7 +297,7 @@ pub fn flag(state: &Value, name: &str) -> bool {
 }
 
 /// What the daemon is doing, read from the `armed`, `recording`, `speaking`,
-/// `transcribing` and `telling` flags. Both a `banshee.status` reply and a
+/// `transcribing` and `loading_model` flags. Both a `banshee.status` reply and a
 /// `state_changed` push carry them. The ranking is defined here; `stateWord`
 /// in banshee-app/ui/src/lib/daemon.ts mirrors it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,7 +306,7 @@ pub enum Activity {
     Recording,
     Speaking,
     Listening,
-    /// Banshee transcribes, or the agent a `tell` started still runs.
+    /// Banshee transcribes, or reads a model off disk.
     Busy,
 }
 
@@ -263,10 +328,7 @@ impl Activity {
             Activity::Recording
         } else if flag(state, "speaking") {
             Activity::Speaking
-        } else if flag(state, "transcribing")
-            || flag(state, "telling")
-            || flag(state, "loading_model")
-        {
+        } else if flag(state, "transcribing") || flag(state, "loading_model") {
             Activity::Busy
         } else {
             Activity::Idle
@@ -358,6 +420,7 @@ pub enum FileRole {
     Detector,
     Engine,
     Voice,
+    Turn,
 }
 
 /// What clears a blocker. `kind` says which part is at fault and `command` is
@@ -368,14 +431,6 @@ pub enum Remedy {
     Download,
     Restart,
     Grant,
-}
-
-/// A language Whisper can read, as the engine itself spells it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Language {
-    /// What `stt.language` carries, as in `en` or `hi`.
-    pub code: String,
-    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,23 +460,6 @@ pub struct PlannedChange {
     pub path: Option<String>,
     /// What `banshee connect` prints for this change, unchanged.
     pub diff: String,
-}
-
-pub struct WhisperConfig {
-    pub model_name: String,
-    pub download_url: String,
-}
-
-impl WhisperConfig {
-    pub fn new(model_name: &str) -> Self {
-        Self {
-            model_name: model_name.to_string(),
-            download_url: format!(
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
-                model_name
-            ),
-        }
-    }
 }
 
 pub struct SileroVADConfig {
@@ -464,12 +502,25 @@ impl KokoroTTSConfig {
     }
 }
 
+/// The one voice Pocket speaks, built into the daemon.
+pub const COMPANION_VOICE: &str = "companion";
+
+pub const POCKET_DIR: &str = "pocket-english_2026-04";
+
 #[cfg(test)]
 mod wire_tests {
     use super::{
         Activity, BANSHEE_STATE_CHANGED, Blocker, BlockerKind, DownloadProgress, DownloadState,
         InputDevice, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, Version,
     };
+
+    #[test]
+    fn file_role_turn_serialises_as_turn() {
+        assert_eq!(
+            serde_json::to_string(&super::FileRole::Turn).unwrap(),
+            "\"turn\""
+        );
+    }
 
     /// The window's `BlockerKind` union spells this one `keyfile`, so the wire
     /// name is a contract between the two.
@@ -504,7 +555,7 @@ mod wire_tests {
             role: None,
             remedy: None,
             id: "accessibility".to_string(),
-            name: "Accessibility".to_string(),
+            name: "Accessibility is not granted".to_string(),
             consequence: "dictation cannot type".to_string(),
             fix: "grant it in System Settings".to_string(),
             command: None,
@@ -515,7 +566,7 @@ mod wire_tests {
             serde_json::json!({
                 "kind": "permission",
                 "id": "accessibility",
-                "name": "Accessibility",
+                "name": "Accessibility is not granted",
                 "consequence": "dictation cannot type",
                 "fix": "grant it in System Settings",
             })
@@ -548,8 +599,8 @@ mod wire_tests {
     #[test]
     fn progress_serializes_with_the_keys_clients_read() {
         let wire = serde_json::to_value(DownloadProgress {
-            model: "ggml-base.en.bin".to_string(),
-            label: "Speech model".to_string(),
+            model: "parakeet-unified-en-0.6b-Q8_0.gguf".to_string(),
+            label: "Listening model".to_string(),
             index: 1,
             count: 3,
             bytes: 512,
@@ -560,8 +611,8 @@ mod wire_tests {
         assert_eq!(
             wire,
             serde_json::json!({
-                "model": "ggml-base.en.bin",
-                "label": "Speech model",
+                "model": "parakeet-unified-en-0.6b-Q8_0.gguf",
+                "label": "Listening model",
                 "index": 1,
                 "count": 3,
                 "bytes": 512,
@@ -618,7 +669,7 @@ mod wire_tests {
         assert_eq!(Activity::of(&dictating), Activity::Recording);
     }
 
-    // On the other three flags alone, a slow Whisper run reads as idle.
+    // On the other three flags alone, a slow transcription reads as idle.
     #[test]
     fn transcribing_alone_is_busy() {
         let transcribing = serde_json::json!({
@@ -642,18 +693,9 @@ mod wire_tests {
     }
 
     #[test]
-    fn a_running_agent_is_busy() {
-        let telling = serde_json::json!({
-            "recording": false, "armed": false, "speaking": false, "telling": true
-        });
-        assert_eq!(Activity::of(&telling), Activity::Busy);
-    }
-
-    // The agent speaks its answer through Banshee while its run is still open,
-    // so these two are true together for the length of a spoken reply.
-    #[test]
     fn the_speaker_outranks_work_the_user_is_no_part_of() {
-        let both = serde_json::json!({"speaking": true, "telling": true, "transcribing": true});
+        let both =
+            serde_json::json!({"speaking": true, "loading_model": true, "transcribing": true});
         assert_eq!(
             Activity::of(&both),
             Activity::Speaking,
@@ -663,13 +705,13 @@ mod wire_tests {
         let recording = serde_json::json!({"recording": true, "transcribing": true});
         assert_eq!(Activity::of(&recording), Activity::Recording);
 
-        let armed = serde_json::json!({"armed": true, "telling": true});
+        let armed = serde_json::json!({"armed": true, "transcribing": true});
         assert_eq!(Activity::of(&armed), Activity::Listening);
     }
 
     #[test]
     fn neither_flag_is_idle() {
-        let quiet = serde_json::json!({"transcribing": false, "telling": false});
+        let quiet = serde_json::json!({"transcribing": false, "loading_model": false});
         assert_eq!(Activity::of(&quiet), Activity::Idle);
     }
 
@@ -717,28 +759,72 @@ mod wire_tests {
 
 #[cfg(test)]
 mod label_tests {
-    use super::microphone_label;
+    use super::{microphone_label, microphone_open, microphone_refused, state_label};
+
+    #[test]
+    fn each_activity_word_has_one_human_word() {
+        for (word, problem, expected) in [
+            ("idle", false, "Ready"),
+            ("idle", true, "Not ready"),
+            ("recording", false, "Recording"),
+            ("recording", true, "Recording"),
+            ("speaking", false, "Speaking"),
+            ("listening", false, "Your turn"),
+            ("busy", false, "Working"),
+            ("other", false, "other"),
+        ] {
+            assert_eq!(state_label(word, problem), expected, "{word} {problem}");
+        }
+    }
 
     // The tray, `banshee status` and `banshee watch --waybar` all show this
     // sentence, so it is spelled once and tested once
     #[test]
-    fn the_microphone_label_covers_both_fields() {
-        for (open, missing, expected) in [
+    fn the_microphone_label_names_the_device_and_whether_it_is_open() {
+        for (device, missing, open, expected) in [
             (
                 Some("MacBook Pro Microphone"),
-                Some("yeti"),
-                "MacBook Pro Microphone (waiting for \"yeti\")",
+                None,
+                false,
+                "MacBook Pro Microphone, opens when you speak",
             ),
             (
                 Some("MacBook Pro Microphone"),
                 None,
-                "MacBook Pro Microphone",
+                true,
+                "MacBook Pro Microphone, open",
             ),
-            (None, Some("yeti"), "Not open (waiting for \"yeti\")"),
-            (None, None, "Not open"),
+            (
+                Some("MacBook Pro Microphone"),
+                Some("yeti"),
+                false,
+                "MacBook Pro Microphone (waiting for \"yeti\"), opens when you speak",
+            ),
+            (None, Some("yeti"), false, "not available"),
+            (None, None, true, "not available"),
         ] {
-            assert_eq!(microphone_label(open, missing), expected);
+            assert_eq!(microphone_label(device, missing, open, false), expected);
         }
+        assert_eq!(
+            microphone_label(Some("MacBook Pro Microphone"), None, false, true),
+            "MacBook Pro Microphone, not allowed by macOS"
+        );
+        assert_eq!(microphone_label(None, None, false, true), "not available");
+    }
+
+    #[test]
+    fn the_microphone_reads_as_open_only_where_the_reply_says_so() {
+        assert!(microphone_open(
+            &serde_json::json!({ "microphone_open": true })
+        ));
+        assert!(!microphone_open(
+            &serde_json::json!({ "microphone_open": false })
+        ));
+        assert!(!microphone_open(&serde_json::json!({})));
+        assert!(microphone_refused(
+            &serde_json::json!({ "microphone_refused": true })
+        ));
+        assert!(!microphone_refused(&serde_json::json!({})));
     }
 }
 

@@ -1,7 +1,7 @@
-use banshee_common::utils::{banshee_dir, socket_path};
+use banshee_common::utils::{banshee_dir, make_owner_only, socket_path};
 use banshee_common::{
-    BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_LEVEL, BANSHEE_STATE_CHANGED,
-    BANSHEE_SUBSCRIBE, JsonRpcNotification, JsonRpcRequest, SileroVADConfig, error::BansheeError,
+    BANSHEE_CUE, BANSHEE_DOWNLOAD_PROGRESS, BANSHEE_LEVEL, BANSHEE_QUESTION, BANSHEE_STATE_CHANGED,
+    BANSHEE_SUBSCRIBE, BANSHEE_WORDS, JsonRpcNotification, JsonRpcRequest, error::BansheeError,
 };
 use std::fs;
 use std::io;
@@ -16,8 +16,9 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::api::{dispatch, live_state};
+use crate::client::Caller;
 use crate::config::Config;
-use crate::speech_to_text::vad::VADEngine;
+use crate::speech_to_text::vad::Detector;
 use crate::state::{ConsumerCommand, DaemonState, RecordingError};
 use crate::{audio, history, hotkey, models, permissions, text_to_speech};
 
@@ -28,6 +29,8 @@ pub fn claim() -> Result<(std::path::PathBuf, UnixListener, fs::File), BansheeEr
     })?;
 
     if let Some(dir) = banshee_dir() {
+        // `banshee start`, the tray and a config write can create the directory
+        // first, at the default mode.
         make_owner_only(&dir).map_err(|e| BansheeError::file(&dir, e))?;
     }
     if let Some(parent_dir) = socket_path.parent() {
@@ -41,92 +44,88 @@ pub fn claim() -> Result<(std::path::PathBuf, UnixListener, fs::File), BansheeEr
     Ok((socket_path, listener, lock))
 }
 
-/// `open_capture` writes the device name once `play()` succeeds, so a name left
-/// behind after a failure shows a microphone nothing holds.
-pub(crate) fn drop_device_name(daemon_state: &DaemonState) {
-    daemon_state.set_audio_device(None);
-}
-
-/// What startup built and resolved. `open` and `missing` seed the watchdog, so
-/// its binding never reads them back out of `DaemonState`.
+/// What startup built: the thread that turns audio into text, and the capture
+/// it reads, which the thread that owns capture fills.
 struct Recording {
-    stream: cpal::Stream,
     thread: std::thread::JoinHandle<()>,
     capture: Arc<hotkey::Capture>,
-    open: String,
-    missing: Option<String>,
 }
 
-/// Capture, the models, and the thread that turns audio into text. All of it or
-/// none: with any piece missing the daemon cannot transcribe, so they share one
-/// error path and one reason for `banshee status` to report.
+/// The models and the thread that turns audio into text. All of it or none:
+/// with any piece missing the daemon cannot transcribe, so they share one
+/// error path and one reason for `banshee status` to report. A listening model
+/// still to download, and a remote listener with no key, are the exceptions:
+/// the rest stands, and the listener serves once the file or the key arrives.
+/// The microphone is not part of it: it opens for each use.
 fn start_recording(
     daemon_state: &Arc<DaemonState>,
     config: &Config,
     command_receiver: std::sync::mpsc::Receiver<ConsumerCommand>,
     cues: audio::cues::Cues,
 ) -> Result<Recording, RecordingError> {
-    // Startup selects through the same function the watchdog tick uses, so a
-    // device that is absent at boot falls back rather than leaving capture dead
-    let selection =
-        audio::select(&config.audio.input_device).map_err(RecordingError::Microphone)?;
-    // Both failures stringify to BansheeError::Other, so the stage that failed
-    // is only knowable here, at the call
-    let capture = audio::open_capture(Arc::clone(daemon_state), &selection)
-        .map_err(|e| RecordingError::Microphone(e.to_string()))?;
-    match &selection.missing {
-        Some(name) => log::info!(
-            "Capture opened {}, still waiting for {name}",
-            selection.open
+    let listener =
+        crate::speech_to_text::select_transcriber(&config.stt, daemon_state.credentials_path())?;
+    let vad = models::model_path(models::VAD_MODEL)
+        .and_then(Detector::open)
+        .map_err(|e| RecordingError::Model(e.to_string()))?;
+    // Before the consumer exists, so a load a write queued meanwhile lands
+    // after this and is not overwritten by it.
+    let listening = match (listener.awaiting, listener.refused) {
+        (Some(model), _) => {
+            log::warn!(
+                "Recording waits for the listening model {}: run banshee setup",
+                model.id
+            );
+            crate::state::Listening::Missing(model)
+        }
+        (None, Some(refused)) => {
+            log::warn!("The remote listener cannot send yet: {refused}");
+            crate::state::Listening::Refused(refused)
+        }
+        (None, None) => models::stt_model(config).map_or(
+            crate::state::Listening::Remote,
+            crate::state::Listening::Loaded,
         ),
-        None => log::info!("Capture opened {}", selection.open),
-    }
-    let speech_to_text =
-        crate::speech_to_text::select_transcriber(&config.stt).inspect_err(|_| {
-            drop_device_name(daemon_state);
-        })?;
-    let vad = VADEngine::new(SileroVADConfig::new(models::VAD_MODEL)).map_err(|e| {
-        drop_device_name(daemon_state);
-        RecordingError::Model(e.to_string())
-    })?;
-    // One capture, held by the consumer thread and by the watchdog that
-    // replaces it. A question that is already listening reads it too.
-    let shared_capture = Arc::new(hotkey::Capture::new(hotkey::CaptureSource {
-        consumer: capture.consumer,
-        sample_rate: capture.sample_rate,
-    }));
+    };
+    daemon_state.install_listener(crate::speech_to_text::Route::of(&config.stt), listening);
+    let credentials = daemon_state.credentials_path().to_path_buf();
+    // One capture, read by the consumer thread and filled by the thread that
+    // owns the stream. A question that is already listening reads it too.
+    let capture = Arc::new(hotkey::Capture::new(hotkey::CaptureSource::unopened()));
     let thread = hotkey::hotkey_listener(
         hotkey::Pipeline {
-            source: Arc::clone(&shared_capture),
-            speech_to_text,
+            source: Arc::clone(&capture),
+            speech_to_text: listener.engine,
             vad,
+            // An empty path never loads, so no models directory means no turn model
+            judge: Box::new(crate::speech_to_text::SmartTurn::new(
+                models::download::models_dir()
+                    .map(|dir| dir.join(models::TURN_MODEL))
+                    .unwrap_or_default(),
+            )),
             state: Arc::clone(daemon_state),
             cues,
-            endpoint_silence_ms: config.stt.endpoint_silence_ms,
+            used: std::time::Instant::now(),
+            build_listener: Box::new(move |stt| {
+                crate::speech_to_text::select_on_demand(stt, &credentials)
+            }),
+            withdrawals_seen: daemon_state.listener_withdrawals(),
         },
         command_receiver,
     );
-    // Written once the whole pipeline stands. A model failure drops capture, and
-    // a substitution recorded with nothing open contradicts the accessor.
-    daemon_state.set_missing_device(selection.missing.clone());
-    Ok(Recording {
-        stream: capture.stream,
-        thread,
-        capture: shared_capture,
-        open: selection.open,
-        missing: selection.missing,
-    })
+    Ok(Recording { thread, capture })
 }
 
-pub async fn start(config: Config) -> Result<(), BansheeError> {
+/// Returns the status the process exits with.
+pub async fn start(config: Config) -> Result<u8, BansheeError> {
     let config = Arc::new(config);
     let (socket_path, listener, _lock) = claim()?;
+    transcribe_cpp::init_logging();
+    for deleted in models::delete_old_whisper_files(&models::download::models_dir()?) {
+        log::info!("Deleted {}, which nothing loads now", deleted.display());
+    }
     permissions::ask_for_accessibility();
-    let db_connection = if config.daemon.save_history {
-        Some(history::open()?)
-    } else {
-        None
-    };
+    let history = history::open(config.daemon.keep_audio)?;
 
     // Created before the backend, because the backend holds the sender and the
     // drain holds the state the backend must not see
@@ -134,41 +133,77 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
     // One output for every sound the daemon makes. The voice and the cues on
     // one device is the point: two holders drift apart the moment one dies.
     let output = Arc::new(text_to_speech::output::Output::lazy());
-    let speech = text_to_speech::select_backend(&config.tts, faults, Arc::clone(&output))?;
+    std::thread::spawn(text_to_speech::pronunciation::warm);
+    let credentials = crate::credentials::Credentials::path()?;
+    let models_dir = models::download::models_dir()?;
+    let licences = banshee_common::utils::accepted_licences_path().ok_or_else(|| {
+        BansheeError::Other("Could not find the accepted licences record".to_string())
+    })?;
+    let speech = text_to_speech::select_backend(
+        &config.tts,
+        &models_dir,
+        &credentials,
+        faults.clone(),
+        Arc::clone(&output),
+    );
+    let build_speaker: text_to_speech::BuildSpeaker = {
+        let (credentials, output, models_dir) =
+            (credentials.clone(), Arc::clone(&output), models_dir.clone());
+        Box::new(move |tts| {
+            text_to_speech::select_live(
+                tts,
+                &models_dir,
+                &credentials,
+                faults.clone(),
+                Arc::clone(&output),
+            )
+        })
+    };
     let (commands, command_receiver) = std::sync::mpsc::channel();
     let cues = audio::cues::start_cue_player(config.feedback_mode(), output);
+    let speech_player = text_to_speech::SpeechPlayer::new(speech.backend);
+    speech_player.set_builder(build_speaker);
     let daemon_state = Arc::new(DaemonState::new(
         Arc::clone(&config),
-        db_connection,
-        text_to_speech::SpeechPlayer::new(speech.backend),
+        history,
+        speech_player,
         speech.speaker,
         commands,
         cues.clone(),
         crate::state::Machine {
-            models: models::download::models_dir()?,
+            models: models_dir,
             config: Config::path()?,
+            credentials,
+            licences,
             voiceover: crate::settings::voiceover_on,
+            frontmost: crate::frontmost::frontmost,
+            #[cfg(target_os = "macos")]
+            accessibility: permissions::accessibility_granted,
+            #[cfg(target_os = "macos")]
+            microphone: permissions::microphone_access,
+            #[cfg(target_os = "macos")]
+            key_presses: permissions::key_presses_reach_us,
+            #[cfg(all(unix, not(target_os = "macos")))]
+            typer_blockers: permissions::live_typer_blockers,
         },
     ));
     tokio::spawn(crate::level::sample(Arc::clone(&daemon_state)));
+    let voice_keeper = text_to_speech::unload_when_idle(Arc::clone(&daemon_state));
+    daemon_state.set_voice_keeper(voice_keeper.thread().clone());
 
     if let Some(reason) = speech.fault {
         daemon_state.set_last_speech_error(Some(reason));
     }
 
-    permissions::restart_when_granted(
-        {
-            let state = Arc::clone(&daemon_state);
-            move || state.is_downloading()
-        },
-        {
-            let state = Arc::clone(&daemon_state);
-            move || {
-                state.request_restart();
-                state.shutdown().notify_one();
-            }
-        },
-    );
+    permissions::follow_accessibility(Arc::clone(&daemon_state));
+    // Before the speak task, so a refusal already there is part of its
+    // baseline and is not spoken.
+    #[cfg(target_os = "macos")]
+    permissions::read_microphone(&daemon_state);
+    tokio::spawn(speak_new_problems(
+        Arc::clone(&daemon_state),
+        StateWatches::of(&daemon_state),
+    ));
 
     // After the state, which the drain writes
     let draining_state = Arc::clone(&daemon_state);
@@ -178,29 +213,25 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
     });
 
     // Off this thread, because the socket is already bound and `run` below is
-    // what answers it. The device walk enters Core Audio, which stalls for
-    // minutes on a virtual device whose plugin stops answering, and a stall
-    // here leaves every client connected to a daemon that says nothing.
+    // what answers it, and loading the models takes seconds.
     let building = {
         let state = Arc::clone(&daemon_state);
         let config = Arc::clone(&config);
         std::thread::spawn(move || {
-            // The watchdog owns the stream past daemon::run: stopping it stops
-            // capture, and the thread is the only thing left to join
             match start_recording(&state, &config, command_receiver, cues) {
                 Ok(started) => {
-                    let watchdog = audio::watchdog::spawn(
-                        Arc::clone(&state),
-                        started.stream,
-                        started.capture,
-                        started.open,
-                        started.missing,
-                    );
-                    state.set_pipeline(crate::state::Pipeline::Open);
+                    // Before the owner starts, which may open at once and
+                    // must not have its open overwritten
+                    state.set_mic(crate::state::Mic::Closed);
+                    let watchdog =
+                        audio::watchdog::spawn(Arc::clone(&state), started.capture, audio::Cpal);
+                    // A download that ended while the listener was built
+                    // found no listener waiting for it.
+                    crate::settings::reconcile_listening(&state);
                     Some((watchdog, started.thread))
                 }
-                // A missing mic or model leaves the daemon useful rather than
-                // exiting, which the supervisor reads as a crash and retries
+                // A missing model or listener leaves the daemon useful rather
+                // than exiting, which the supervisor reads as a crash and retries
                 Err(error) => {
                     log::error!("Recording is unavailable: {error}");
                     log::info!(
@@ -208,7 +239,7 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
                              Recording, dictation, and ask_user do not."
                     );
                     log::info!("Run `banshee status` for the fix.");
-                    state.set_pipeline(crate::state::Pipeline::Broken(error));
+                    state.set_mic(crate::state::Mic::Faulted(error.at_start()));
                     None
                 }
             }
@@ -216,32 +247,25 @@ pub async fn start(config: Config) -> Result<(), BansheeError> {
     };
     // A press that lands before the pipeline stands answers with the error cue:
     // record_start refuses anything but an open pipeline.
-    hotkey::start_global_hotkey(
-        Arc::clone(&daemon_state),
-        config.audio.hotkey,
-        config.audio.hotkey_mode,
-    );
+    hotkey::start_global_hotkey(Arc::clone(&daemon_state));
     let result = run(&daemon_state, socket_path, listener).await;
-    // A build still parked in Core Audio cannot be woken, so the process leaves
-    // without it rather than never leaving at all.
+    // A build still loading a model cannot be woken, so the process leaves
+    // without it rather than never leaving at all. Core Audio, which stalls
+    // for minutes on a virtual device whose plugin stops answering, can park
+    // only the thread that owns capture, and `watchdog.stop` below joins it.
     if building.is_finished()
         && let Ok(Some((watchdog, consumer_thread))) = building.join()
     {
         // Capture stops first, so no Rebind arrives at a thread that
         // has already left its loop
         watchdog.stop();
-        // Drop the Whisper context before atexit: ggml's Metal cleanup
+        // Drop the listening model before atexit: ggml's Metal cleanup
         // asserts if buffers are still resident
         let _ = daemon_state.commands().send(ConsumerCommand::Shutdown);
         let _ = consumer_thread.join();
     }
     result?;
-    if daemon_state.restart_wanted() {
-        return Err(BansheeError::Other(
-            "the Accessibility grant landed; starting again to pick it up".to_string(),
-        ));
-    }
-    Ok(())
+    Ok(daemon_state.exit_code())
 }
 
 pub async fn run(
@@ -253,7 +277,8 @@ pub async fn run(
 
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
-    // Coarse tick: the ceiling it enforces is measured in minutes
+    // Coarse tick: the ceiling it enforces is measured in minutes. The first
+    // tick fires at once, so the purge also runs at start.
     let mut watchdog = tokio::time::interval(Duration::from_secs(30));
 
     loop {
@@ -262,6 +287,8 @@ pub async fn run(
             _ = sigterm.recv() => break,
             _ = watchdog.tick() => {
                 daemon_state.expire_stuck_recording();
+                let state = Arc::clone(daemon_state);
+                tokio::task::spawn_blocking(move || state.purge_audio());
             }
             // Stop RPC: wait a beat so the client task can flush its response
             _ = daemon_state.shutdown().notified() => {
@@ -271,7 +298,8 @@ pub async fn run(
             accepted = listener.accept() => match accepted {
                 Ok((stream, _addr)) => {
                     log::debug!("New client connected!");
-                    tokio::spawn(serve(stream, Arc::clone(daemon_state)));
+                    let caller = caller_of(&stream);
+                    tokio::spawn(serve(stream, Arc::clone(daemon_state), caller));
                 }
                 Err(error) => log::warn!("Connection failed, Error: {error}"),
             }
@@ -300,6 +328,8 @@ struct Events {
     downloads: bool,
     cues: bool,
     level: bool,
+    words: bool,
+    question: bool,
     draws: bool,
 }
 
@@ -321,6 +351,8 @@ fn requested_events(params: Option<&serde_json::Value>) -> Events {
         downloads: asked(banshee_common::EVENT_DOWNLOADS),
         cues: asked(banshee_common::EVENT_CUES),
         level: asked(banshee_common::EVENT_LEVEL),
+        words: asked(banshee_common::EVENT_WORDS),
+        question: asked(banshee_common::EVENT_QUESTION),
         draws: params
             .and_then(|params| params.get("draws"))
             .and_then(serde_json::Value::as_bool)
@@ -369,18 +401,73 @@ async fn push_level(writer: Arc<Mutex<OwnedWriteHalf>>, mut level: watch::Receiv
     }
 }
 
+async fn push_watched<T: Clone>(
+    writer: Arc<Mutex<OwnedWriteHalf>>,
+    method: &'static str,
+    mut values: watch::Receiver<T>,
+    params: fn(T) -> serde_json::Value,
+) {
+    while values.changed().await.is_ok() {
+        let value = values.borrow_and_update().clone();
+        let notification = JsonRpcNotification::new(method, params(value));
+        if write_line(&mut *writer.lock().await, &notification)
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 /// Everything a state subscription waits on.
 struct StateWatches {
     recording: watch::Receiver<bool>,
     playing: watch::Receiver<Option<u64>>,
     transcribing: watch::Receiver<bool>,
     loading_model: watch::Receiver<bool>,
-    telling: watch::Receiver<bool>,
     devices: watch::Receiver<u64>,
     pipeline: watch::Receiver<crate::state::Pipeline>,
-    last_error: watch::Receiver<Option<crate::state::Failed>>,
+    last_error: watch::Receiver<Option<String>>,
     last_speech_error: watch::Receiver<Option<String>>,
     feedback: watch::Receiver<crate::config::FeedbackMode>,
+    history: watch::Receiver<u64>,
+    settings: watch::Receiver<u64>,
+}
+
+impl StateWatches {
+    fn of(state: &DaemonState) -> Self {
+        Self {
+            recording: state.subscribe_recording(),
+            playing: state.speech().subscribe_playing(),
+            transcribing: state.subscribe_transcribing(),
+            loading_model: state.subscribe_loading_model(),
+            devices: state.device_changes(),
+            pipeline: state.subscribe_pipeline(),
+            last_error: state.subscribe_last_error(),
+            last_speech_error: state.subscribe_last_speech_error(),
+            feedback: state.subscribe_feedback(),
+            history: state.subscribe_history_changes(),
+            settings: state.subscribe_settings_changes(),
+        }
+    }
+
+    /// Only wakes the caller, which reads the state fresh. An error is the
+    /// daemon going away.
+    async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        tokio::select! {
+            woken = self.recording.changed() => woken,
+            woken = self.playing.changed() => woken,
+            woken = self.transcribing.changed() => woken,
+            woken = self.loading_model.changed() => woken,
+            woken = self.devices.changed() => woken,
+            woken = self.pipeline.changed() => woken,
+            woken = self.last_error.changed() => woken,
+            woken = self.last_speech_error.changed() => woken,
+            woken = self.feedback.changed() => woken,
+            woken = self.history.changed() => woken,
+            woken = self.settings.changed() => woken,
+        }
+    }
 }
 
 /// Sends one connection its state changes, until the daemon stops or the client
@@ -392,23 +479,7 @@ async fn push_changes(
     mut watches: StateWatches,
     mut told: serde_json::Value,
 ) {
-    loop {
-        // Every arm only wakes the task; the state is read fresh below
-        let woken = tokio::select! {
-            woken = watches.recording.changed() => woken,
-            woken = watches.playing.changed() => woken,
-            woken = watches.transcribing.changed() => woken,
-            woken = watches.loading_model.changed() => woken,
-            woken = watches.telling.changed() => woken,
-            woken = watches.devices.changed() => woken,
-            woken = watches.pipeline.changed() => woken,
-            woken = watches.last_error.changed() => woken,
-            woken = watches.last_speech_error.changed() => woken,
-            woken = watches.feedback.changed() => woken,
-        };
-        if woken.is_err() {
-            break;
-        }
+    while watches.changed().await.is_ok() {
         let now = live_state(&state);
         if now == told {
             continue;
@@ -424,8 +495,60 @@ async fn push_changes(
     }
 }
 
+/// Says the first problem that was absent a moment before. What stands once
+/// the daemon has started is the baseline, so a start or a login says nothing.
+async fn speak_new_problems(state: Arc<DaemonState>, mut watches: StateWatches) {
+    if watches
+        .pipeline
+        .wait_for(|pipeline| !matches!(pipeline, crate::state::Pipeline::Opening))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut before = ids_of(&problems(&state));
+    while watches.changed().await.is_ok() {
+        let blockers = problems(&state);
+        if state.speaks_problems()
+            && let Some(blocker) = blockers.iter().find(|b| !before.contains(&b.id))
+            && let Err(error) = state.speech().speak(&spoken_problem(blocker), false, None)
+        {
+            log::warn!("Failed to say the problem {}: {error}", blocker.id);
+        }
+        before = ids_of(&blockers);
+    }
+}
+
+/// Kokoro drops `>`, so a menu path is read as steps.
+fn spoken_problem(blocker: &banshee_common::Blocker) -> String {
+    let fix = blocker.fix.replace(" > ", ", then ");
+    format!(
+        "{}. {}.",
+        blocker.name,
+        crate::audio::cues::capitalised(&fix)
+    )
+}
+
+pub(crate) fn problems(state: &DaemonState) -> Vec<banshee_common::Blocker> {
+    crate::readiness::blockers_as_read(state, &state.pipeline())
+}
+
+pub(crate) fn ids_of(blockers: &[banshee_common::Blocker]) -> Vec<String> {
+    blockers.iter().map(|blocker| blocker.id.clone()).collect()
+}
+
+fn caller_of(stream: &UnixStream) -> Caller {
+    let pid = stream
+        .peer_cred()
+        .ok()
+        .and_then(|credentials| credentials.pid())
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0);
+    Caller::of(pid)
+}
+
 /// The subscription lives and dies with the connection.
-async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
+async fn serve(stream: UnixStream, state: Arc<DaemonState>, caller: Caller) {
     let (reader, writer) = stream.into_split();
     // Pushing is a task of its own, because ask_user parks this one inside
     // dispatch for minutes while it holds the microphone open
@@ -437,6 +560,8 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
     let mut pushing_downloads: Option<tokio::task::JoinHandle<()>> = None;
     let mut pushing_cues: Option<tokio::task::JoinHandle<()>> = None;
     let mut pushing_level: Option<tokio::task::JoinHandle<()>> = None;
+    let mut pushing_words: Option<tokio::task::JoinHandle<()>> = None;
+    let mut pushing_question: Option<tokio::task::JoinHandle<()>> = None;
     let mut drawn: Option<crate::audio::cues::Drawn> = None;
     let mut watching_level: Option<crate::state::LevelWatch> = None;
     // A request that arrived while an earlier call was still running. The
@@ -471,29 +596,18 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         } else {
             Events::default()
         };
-        let opening_state = (asked.state && pushing_state.is_none()).then(|| {
-            (
-                StateWatches {
-                    recording: state.subscribe_recording(),
-                    playing: state.speech().subscribe_playing(),
-                    transcribing: state.subscribe_transcribing(),
-                    loading_model: state.subscribe_loading_model(),
-                    telling: state.subscribe_telling(),
-                    devices: state.device_changes(),
-                    pipeline: state.subscribe_pipeline(),
-                    last_error: state.subscribe_last_error(),
-                    last_speech_error: state.subscribe_last_speech_error(),
-                    feedback: state.subscribe_feedback(),
-                },
-                live_state(&state),
-            )
-        });
+        let opening_state = (asked.state && pushing_state.is_none())
+            .then(|| (StateWatches::of(&state), live_state(&state)));
         let opening_downloads =
             (asked.downloads && pushing_downloads.is_none()).then(|| state.subscribe_downloads());
         let opening_cues =
             (asked.cues && pushing_cues.is_none()).then(|| state.cues().subscribe_signals());
         let opening_level =
             (asked.level && pushing_level.is_none()).then(|| state.subscribe_level());
+        let opening_words =
+            (asked.words && pushing_words.is_none()).then(|| state.subscribe_words());
+        let opening_question =
+            (asked.question && pushing_question.is_none()).then(|| state.subscribe_question());
         if asked.cues && asked.draws && drawn.is_none() {
             drawn = Some(state.cues().drawn());
         }
@@ -504,7 +618,7 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         // Watched while it runs: `ask_user` parks here for minutes holding the
         // microphone, and a client that goes away in the meantime is asking
         // for none of it. Dropping the call is what ends the work.
-        let mut call = std::pin::pin!(dispatch(request, &state));
+        let mut call = std::pin::pin!(dispatch(request, &state, &caller));
         let answered = loop {
             tokio::select! {
                 response = &mut call => break Some(response),
@@ -547,6 +661,26 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         if let Some(level) = opening_level {
             pushing_level = Some(tokio::spawn(push_level(Arc::clone(&writer), level)));
         }
+        if let Some(words) = opening_words {
+            let writer = Arc::clone(&writer);
+            pushing_words = Some(tokio::spawn(push_watched(
+                writer,
+                BANSHEE_WORDS,
+                words,
+                |text| serde_json::json!({ "text": text }),
+            )));
+        }
+        if let Some(mut question) = opening_question {
+            // A tray that subscribes while an agent asks still gets the question.
+            question.mark_changed();
+            let writer = Arc::clone(&writer);
+            pushing_question = Some(tokio::spawn(push_watched(
+                writer,
+                BANSHEE_QUESTION,
+                question,
+                |question| serde_json::json!(question),
+            )));
+        }
     }
 
     for task in [
@@ -554,6 +688,8 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
         pushing_downloads,
         pushing_cues,
         pushing_level,
+        pushing_words,
+        pushing_question,
     ]
     .into_iter()
     .flatten()
@@ -562,17 +698,8 @@ async fn serve(stream: UnixStream, state: Arc<DaemonState>) {
     }
 }
 
-// Probe with std's blocking connect: tokio's nonblocking UDS connect on
-// macOS reports success against a dead socket
 pub fn socket_answers(socket_path: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
-}
-
-/// `banshee start`, the tray and a config write can create the directory
-/// first, at the default mode.
-fn make_owner_only(dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+    banshee_common::utils::listens(socket_path).unwrap_or(false)
 }
 
 fn claim_socket(socket_path: &Path) -> io::Result<(UnixListener, fs::File)> {

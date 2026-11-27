@@ -24,85 +24,29 @@ fn key(text: &str) -> Hotkey {
 
 const LUA_HOLD: &str = "\
 -- BEGIN BANSHEE MANAGED BLOCK
-o.bind(\"F9\", \"Banshee: hold to dictate\", \"banshee record start --dictate\")
+o.bind(\"F9\", \"Banshee: hold to dictate\", \"banshee record start\")
 o.bind(\"F9\", nil, \"banshee record stop\", { release = true })
-o.bind(\"SHIFT + F9\", \"Banshee: hold to record\", \"banshee record start\")
-o.bind(\"SHIFT + F9\", nil, \"banshee record stop\", { release = true })
-o.bind(\"SUPER + F9\", \"Banshee: hold to tell the agent\", \"banshee record start --tell\")
-o.bind(\"SUPER + F9\", nil, \"banshee record stop\", { release = true })
 -- END BANSHEE MANAGED BLOCK
 ";
 
 const LUA_TAP: &str = "\
 -- BEGIN BANSHEE MANAGED BLOCK
-o.bind(\"F9\", \"Banshee: tap to dictate\", \"banshee record toggle --dictate\")
-o.bind(\"SHIFT + F9\", \"Banshee: tap to record\", \"banshee record toggle\")
-o.bind(\"SUPER + F9\", \"Banshee: tap to tell the agent\", \"banshee record toggle --tell\")
+o.bind(\"F9\", \"Banshee: tap to dictate\", \"banshee record toggle\")
 -- END BANSHEE MANAGED BLOCK
 ";
 
 const CONF_HOLD: &str = "\
 # BEGIN BANSHEE MANAGED BLOCK
-bind  = , F9, exec, banshee record start --dictate
+bind  = , F9, exec, banshee record start
 bindr = , F9, exec, banshee record stop
-bind  = SHIFT, F9, exec, banshee record start
-bindr = SHIFT, F9, exec, banshee record stop
-bind  = SUPER, F9, exec, banshee record start --tell
-bindr = SUPER, F9, exec, banshee record stop
 # END BANSHEE MANAGED BLOCK
 ";
 
 const CONF_TAP: &str = "\
 # BEGIN BANSHEE MANAGED BLOCK
-bind = , F9, exec, banshee record toggle --dictate
-bind = SHIFT, F9, exec, banshee record toggle
-bind = SUPER, F9, exec, banshee record toggle --tell
+bind = , F9, exec, banshee record toggle
 # END BANSHEE MANAGED BLOCK
 ";
-
-#[test]
-fn the_tell_key_is_the_dictate_key_with_super() {
-    let dir = scratch("tell-key");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("bindings.lua"), "").unwrap();
-    let rebind = plan(&dir, key("F9"), HotkeyMode::Hold).unwrap();
-    let (_, _, after) = written(&rebind.changes);
-    assert!(
-        after.contains("SUPER + F9") && after.contains("--tell"),
-        "the block must bind the tell key: {after}"
-    );
-    assert_eq!(rebind.tell.as_deref(), Some("SUPER + F9"));
-}
-
-#[test]
-fn a_dictate_key_that_already_holds_super_takes_ctrl_instead() {
-    // Cmd+F9 as the dictate key would give the tell bind the same chord.
-    let dir = scratch("tell-key-super");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("bindings.lua"), "").unwrap();
-    let rebind = plan(&dir, key("Cmd+F9"), HotkeyMode::Hold).unwrap();
-    let (_, _, after) = written(&rebind.changes);
-    assert!(
-        after.contains("CTRL + SUPER + F9"),
-        "the tell chord must differ from the dictate chord: {after}"
-    );
-}
-
-#[test]
-fn a_key_with_every_modifier_held_gets_no_tell_bind() {
-    // A block that repeated a chord would break the dictate key rather than
-    // add a second one.
-    let dir = scratch("tell-key-full");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("bindings.lua"), "").unwrap();
-    let rebind = plan(&dir, key("Ctrl+Alt+Cmd+F9"), HotkeyMode::Hold).unwrap();
-    let (_, _, after) = written(&rebind.changes);
-    assert!(
-        !after.contains("--tell"),
-        "no free modifier is left: {after}"
-    );
-    assert_eq!(rebind.tell, None);
-}
 
 #[test]
 fn an_omarchy_lua_config_gets_the_lua_block() {
@@ -167,12 +111,8 @@ fn a_chord_key_takes_hyprland_modifier_names_in_lua() {
     assert_eq!(
         after,
         "-- BEGIN BANSHEE MANAGED BLOCK
-o.bind(\"CTRL + ALT + D\", \"Banshee: hold to dictate\", \"banshee record start --dictate\")
+o.bind(\"CTRL + ALT + D\", \"Banshee: hold to dictate\", \"banshee record start\")
 o.bind(\"CTRL + ALT + D\", nil, \"banshee record stop\", { release = true })
-o.bind(\"SHIFT + CTRL + ALT + D\", \"Banshee: hold to record\", \"banshee record start\")
-o.bind(\"SHIFT + CTRL + ALT + D\", nil, \"banshee record stop\", { release = true })
-o.bind(\"SUPER + CTRL + ALT + D\", \"Banshee: hold to tell the agent\", \"banshee record start --tell\")
-o.bind(\"SUPER + CTRL + ALT + D\", nil, \"banshee record stop\", { release = true })
 -- END BANSHEE MANAGED BLOCK
 "
     );
@@ -190,9 +130,7 @@ fn a_chord_key_takes_hyprland_modifier_names_in_conf() {
     assert_eq!(
         after,
         "# BEGIN BANSHEE MANAGED BLOCK
-bind = SUPER, 7, exec, banshee record toggle --dictate
-bind = SHIFT SUPER, 7, exec, banshee record toggle
-bind = CTRL SUPER, 7, exec, banshee record toggle --tell
+bind = SUPER, 7, exec, banshee record toggle
 # END BANSHEE MANAGED BLOCK
 "
     );
@@ -200,31 +138,63 @@ bind = CTRL SUPER, 7, exec, banshee record toggle --tell
 }
 
 #[test]
-fn choosing_tap_replaces_a_hold_block_in_place() {
-    let hypr = scratch("lua-hold-to-tap");
-    let before = format!("-- mine\n\n{LUA_HOLD}-- later\n");
-    std::fs::write(hypr.join("bindings.lua"), &before).unwrap();
+fn choosing_a_mode_replaces_the_other_mode_block_in_place() {
+    let cases = [
+        (
+            "lua, hold to tap",
+            "bindings.lua",
+            format!("-- mine\n\n{LUA_HOLD}-- later\n"),
+            HotkeyMode::Toggle,
+            format!("-- mine\n\n{LUA_TAP}-- later\n"),
+        ),
+        (
+            "conf, tap to hold",
+            "hyprland.conf",
+            format!("monitor=,preferred,auto,1\n\n{CONF_TAP}exec-once = waybar\n"),
+            HotkeyMode::Hold,
+            format!("monitor=,preferred,auto,1\n\n{CONF_HOLD}exec-once = waybar\n"),
+        ),
+    ];
 
-    let rebind = plan(&hypr, key("F9"), HotkeyMode::Toggle).unwrap();
+    for (name, file, before, mode, expected) in cases {
+        let hypr = scratch("in-place");
+        std::fs::write(hypr.join(file), &before).unwrap();
 
-    let (_, _, after) = written(&rebind.changes);
-    assert_eq!(after, &format!("-- mine\n\n{LUA_TAP}-- later\n"));
-    let _ = std::fs::remove_dir_all(&hypr);
+        let rebind = plan(&hypr, key("F9"), mode).unwrap();
+
+        let (_, _, after) = written(&rebind.changes);
+        assert_eq!(after, &expected, "{name}");
+        let _ = std::fs::remove_dir_all(&hypr);
+    }
 }
 
 #[test]
-fn choosing_hold_replaces_a_tap_block_in_place() {
-    let hypr = scratch("conf-tap-to-hold");
-    let before = format!("monitor=,preferred,auto,1\n\n{CONF_TAP}exec-once = waybar\n");
-    std::fs::write(hypr.join("hyprland.conf"), &before).unwrap();
+fn bind_replaces_an_old_block_with_tell_and_shift_lines() {
+    let hypr = scratch("lua-old-block");
+    let old = "\
+-- BEGIN BANSHEE MANAGED BLOCK
+o.bind(\"F9\", \"Banshee: hold to dictate\", \"banshee record start --dictate\")
+o.bind(\"F9\", nil, \"banshee record stop\", { release = true })
+o.bind(\"SHIFT + F9\", \"Banshee: hold to record\", \"banshee record start\")
+o.bind(\"SHIFT + F9\", nil, \"banshee record stop\", { release = true })
+o.bind(\"SUPER + F9\", \"Banshee: hold to tell the agent\", \"banshee record start --tell\")
+o.bind(\"SUPER + F9\", nil, \"banshee record stop\", { release = true })
+-- END BANSHEE MANAGED BLOCK
+";
+    std::fs::write(
+        hypr.join("bindings.lua"),
+        format!("-- mine\n\n{old}-- later\n"),
+    )
+    .unwrap();
 
     let rebind = plan(&hypr, key("F9"), HotkeyMode::Hold).unwrap();
 
     let (_, _, after) = written(&rebind.changes);
-    assert_eq!(
-        after,
-        &format!("monitor=,preferred,auto,1\n\n{CONF_HOLD}exec-once = waybar\n")
-    );
+    assert_eq!(after.matches(BLOCK_START).count(), 1, "{after}");
+    assert!(!after.contains("--tell"), "{after}");
+    assert!(!after.contains("SHIFT"), "{after}");
+    assert_eq!(after, &format!("-- mine\n\n{LUA_HOLD}-- later\n"));
+    assert_eq!(rebind.strays, Vec::<usize>::new());
     let _ = std::fs::remove_dir_all(&hypr);
 }
 
@@ -296,9 +266,7 @@ o.bind(\"SHIFT + F9\", \"Banshee: tap to record\", \"banshee record toggle\")
         &format!(
             "{before}
 -- BEGIN BANSHEE MANAGED BLOCK
-o.bind(\"F5\", \"Banshee: tap to dictate\", \"banshee record toggle --dictate\")
-o.bind(\"SHIFT + F5\", \"Banshee: tap to record\", \"banshee record toggle\")
-o.bind(\"SUPER + F5\", \"Banshee: tap to tell the agent\", \"banshee record toggle --tell\")
+o.bind(\"F5\", \"Banshee: tap to dictate\", \"banshee record toggle\")
 -- END BANSHEE MANAGED BLOCK
 "
         )

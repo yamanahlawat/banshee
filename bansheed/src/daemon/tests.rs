@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::Caller;
 use crate::state::RecordingMode;
 use banshee_common::{BANSHEE_ASK_USER, BANSHEE_STATUS, DownloadProgress};
 use tokio::net::UnixStream;
@@ -37,7 +38,7 @@ async fn send(writer: &mut OwnedWriteHalf, method: &str, params: serde_json::Val
 // Hands back the writer: dropping it closes the connection under the server
 fn connect(state: &Arc<DaemonState>) -> (Incoming, OwnedWriteHalf) {
     let (client, server) = UnixStream::pair().expect("no socket pair");
-    tokio::spawn(serve(server, Arc::clone(state)));
+    tokio::spawn(serve(server, Arc::clone(state), Caller::unread()));
     let (reader, writer) = client.into_split();
     (BufReader::new(reader).lines(), writer)
 }
@@ -129,19 +130,19 @@ async fn a_cue_subscriber_that_lags_still_hears_what_comes_next() {
     for _ in 0..300 {
         state.cues().emit(crate::audio::cues::Signal::Disarm);
     }
-    state.cues().emit(crate::audio::cues::Signal::Told);
+    state.cues().emit(crate::audio::cues::Signal::Onset);
 
-    let told = tokio::time::timeout(ARRIVES * 5, async {
+    let after = tokio::time::timeout(ARRIVES * 5, async {
         loop {
             let pushed = next_message(&mut lines).await;
-            if pushed["params"]["cue"] == "told" {
+            if pushed["params"]["cue"] == "onset" {
                 return pushed;
             }
         }
     })
     .await
     .expect("the signal after the lag never arrived");
-    assert_eq!(told["method"], banshee_common::BANSHEE_CUE);
+    assert_eq!(after["method"], banshee_common::BANSHEE_CUE);
 }
 
 #[tokio::test]
@@ -283,6 +284,127 @@ async fn a_level_subscriber_hears_the_level() {
     );
 }
 
+#[tokio::test]
+async fn a_words_subscriber_is_a_viewer_until_it_goes() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    assert!(!state.is_words_watched());
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["words"]}),
+    )
+    .await;
+    next_message(&mut lines).await;
+    let deadline = std::time::Instant::now() + ARRIVES;
+    while !state.is_words_watched() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(state.is_words_watched());
+
+    drop(writer);
+    drop(lines);
+    let deadline = std::time::Instant::now() + ARRIVES;
+    while state.is_words_watched() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !state.is_words_watched(),
+        "a viewer that left must not keep the stream running"
+    );
+}
+
+#[tokio::test]
+async fn a_words_subscriber_hears_the_words_and_their_end() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["words"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+
+    state.publish_words("hello there");
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_WORDS);
+    assert_eq!(pushed["params"]["text"], "hello there");
+
+    state.publish_words("");
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["params"]["text"], "", "the recording ended");
+}
+
+#[tokio::test]
+async fn a_new_question_subscriber_gets_the_live_question_at_once() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    state.publish_question("Ship it?", None);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["question"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_QUESTION);
+    assert_eq!(
+        pushed["params"],
+        serde_json::json!({"text": "Ship it?", "client": null})
+    );
+}
+
+#[tokio::test]
+async fn the_question_line_names_who_asks() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["question"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+    let _idle = next_message(&mut lines).await;
+
+    state.publish_question("Ship it?", Some("claude"));
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_QUESTION);
+    assert_eq!(
+        pushed["params"],
+        serde_json::json!({"text": "Ship it?", "client": "claude"})
+    );
+}
+
+#[tokio::test]
+async fn a_cues_only_subscriber_never_receives_the_question() {
+    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (mut lines, mut writer) = connect(&state);
+    send(
+        &mut writer,
+        BANSHEE_SUBSCRIBE,
+        serde_json::json!({"events": ["cues"]}),
+    )
+    .await;
+    let _reply = next_message(&mut lines).await;
+
+    state.publish_question("Ship it?", None);
+    state.cues().emit(crate::audio::cues::Signal::Arm);
+
+    let pushed = next_message(&mut lines).await;
+    assert_eq!(pushed["method"], banshee_common::BANSHEE_CUE);
+    assert!(
+        tokio::time::timeout(SILENT, lines.next_line())
+            .await
+            .is_err(),
+        "the question was pushed to a cues subscriber"
+    );
+}
+
 // The select loop is the only thing that writes a notification, so no unit
 // test reaches it. These drive a real socket.
 #[tokio::test]
@@ -326,7 +448,7 @@ async fn a_subscriber_hears_the_pipeline_open() {
     let (mut lines, _writer, reply) = subscribed(&state).await;
     assert_eq!(reply["result"]["pipeline"], "opening");
 
-    state.set_pipeline(crate::state::Pipeline::Open);
+    state.set_mic(crate::state::Mic::Open);
 
     let pushed = next_message(&mut lines).await;
     assert_eq!(pushed["method"], BANSHEE_STATE_CHANGED);
@@ -479,6 +601,118 @@ async fn a_rewritten_device_name_pushes_nothing() {
     );
 }
 
+/// On the test's single thread, one yield runs the woken task through its turn.
+async fn let_the_task_look() {
+    tokio::task::yield_now().await;
+}
+
+async fn watch_problems(state: &Arc<DaemonState>) {
+    tokio::spawn(speak_new_problems(
+        Arc::clone(state),
+        StateWatches::of(state),
+    ));
+    let_the_task_look().await;
+}
+
+async fn set_mic_and_look(state: &DaemonState, mic: crate::state::Mic) {
+    state.set_mic(mic);
+    let_the_task_look().await;
+}
+
+fn no_device() -> crate::state::Mic {
+    crate::state::Mic::Faulted(crate::state::RecordingError::Microphone(
+        "no device".to_string(),
+    ))
+}
+
+fn spoken_lines(spoken: &crate::test_support::SpokenLines, count: usize) -> Vec<String> {
+    let deadline = std::time::Instant::now() + ARRIVES;
+    while spoken.lock().unwrap().len() < count {
+        assert!(std::time::Instant::now() < deadline, "nothing was spoken");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    spoken.lock().unwrap().clone()
+}
+
+fn unreachable_listener() -> crate::state::RecordingError {
+    crate::state::RecordingError::Provider("connection refused".to_string()).at_start()
+}
+
+/// What the voice is handed for a listener that would not build at start,
+/// after the player reads symbols out as words.
+fn said_for_a_dead_listener() -> String {
+    crate::text_to_speech::pronunciation::normalize(
+        "The remote listener is not reachable. Fix [stt.remote] base_url in config.toml, \
+         then restart: banshee start.",
+    )
+}
+
+// A pipeline that breaks as the daemon starts is part of the start, so the
+// line spoken is the later problem's, and only that.
+#[tokio::test]
+async fn a_blocker_present_at_start_is_not_spoken() {
+    let (state, spoken) = crate::test_support::daemon_state_before_the_pipeline_recording_speech();
+    watch_problems(&state).await;
+
+    set_mic_and_look(&state, no_device()).await;
+    set_mic_and_look(&state, crate::state::Mic::Closed).await;
+    set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
+
+    assert_eq!(spoken_lines(&spoken, 1), [said_for_a_dead_listener()]);
+}
+
+#[tokio::test]
+async fn a_blocker_that_clears_and_returns_is_spoken_again() {
+    let (state, spoken) =
+        crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
+    watch_problems(&state).await;
+
+    set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
+    set_mic_and_look(&state, crate::state::Mic::Closed).await;
+    set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
+
+    let said = said_for_a_dead_listener();
+    assert_eq!(spoken_lines(&spoken, 2), [said.clone(), said]);
+}
+
+// Grants rank before the pipeline, and only macOS has a microphone grant to
+// refuse.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn two_problems_at_once_speak_only_the_higher_ranked() {
+    let (state, spoken) =
+        crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
+    watch_problems(&state).await;
+
+    state.set_mic(crate::state::Mic::Faulted(unreachable_listener()));
+    state.set_microphone_refusal(Some(crate::state::Refusal::Denied));
+    let_the_task_look().await;
+
+    let lines = spoken_lines(&spoken, 1);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].starts_with("Microphone access is not allowed."),
+        "{lines:?}"
+    );
+    assert_eq!(spoken.lock().unwrap().len(), 1, "a second line was spoken");
+}
+
+#[tokio::test]
+async fn a_problem_is_not_spoken_while_speak_problems_is_off() {
+    let (state, spoken) =
+        crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
+    watch_problems(&state).await;
+
+    state.set_speak_problems(false);
+    set_mic_and_look(&state, no_device()).await;
+    state.set_speak_problems(true);
+    set_mic_and_look(&state, crate::state::Mic::Closed).await;
+    set_mic_and_look(&state, crate::state::Mic::Faulted(unreachable_listener())).await;
+
+    assert_eq!(spoken_lines(&spoken, 1), [said_for_a_dead_listener()]);
+}
+
 fn test_socket_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("banshee-{name}-{}.sock", std::process::id()))
 }
@@ -513,8 +747,8 @@ async fn stale_socket_is_reclaimed() {
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
     assert!(path.exists());
 
-    // Between fork and exec a `say` child holds a copy of the dead listener
-    // fd, so the probe can transiently see the socket as alive
+    // Between fork and exec a child another test spawns holds a copy of the
+    // dead listener fd, so the probe can transiently see the socket as alive
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let claimed = loop {
         match claim_socket(&path) {
@@ -560,6 +794,22 @@ async fn a_line_that_is_not_a_request_is_answered_with_a_parse_error() {
     );
 }
 
+#[tokio::test]
+async fn a_connection_is_read_as_the_process_that_made_it() {
+    let path = test_socket_path("caller");
+    let _ = std::fs::remove_file(&path);
+    let listener = tokio::net::UnixListener::bind(&path).expect("bind");
+    let _client = UnixStream::connect(&path).await.expect("connect");
+    let (accepted, _) = listener.accept().await.unwrap();
+    let _ = std::fs::remove_file(&path);
+
+    let me = std::env::current_exe().unwrap();
+    assert_eq!(
+        caller_of(&accepted).client().name.as_deref(),
+        Some(&*me.file_name().unwrap().to_string_lossy())
+    );
+}
+
 // The socket is bound in `claim()`, before the microphone is open. A client
 // that connects in that gap must be answered, not left waiting for a device.
 #[tokio::test]
@@ -600,21 +850,27 @@ async fn a_requested_shutdown_takes_the_socket_file_with_it() {
 // the connection while it does. A client that leaves must not be waited for.
 #[tokio::test]
 async fn a_client_that_leaves_ends_the_call_it_parked() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (commands, never_answered) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
     let (client, server) = UnixStream::pair().expect("no socket pair");
-    let serving = tokio::spawn(serve(server, Arc::clone(&state)));
+    let serving = tokio::spawn(serve(server, Arc::clone(&state), Caller::unread()));
 
     let (reader, mut writer) = client.into_split();
     send(
         &mut writer,
-        banshee_common::BANSHEE_GET_TRANSCRIPTION,
-        serde_json::json!({ "wait_ms": 5000 }),
+        BANSHEE_ASK_USER,
+        serde_json::json!({"question": "ready?"}),
     )
     .await;
+    // Held unanswered to the end, so only the client leaving can end the call
+    let _parked = tokio::task::spawn_blocking(move || never_answered.recv_timeout(ARRIVES))
+        .await
+        .expect("no panic")
+        .expect("the question never reached the pipeline");
     drop(writer);
     drop(reader);
 
-    // Well inside the five seconds the call would otherwise hold: a bound for
+    // Well inside the two minutes the call would otherwise hold: a bound for
     // the test, not a limit the daemon promises.
     tokio::time::timeout(std::time::Duration::from_secs(1), serving)
         .await
@@ -626,23 +882,35 @@ async fn a_client_that_leaves_ends_the_call_it_parked() {
 // before the first one answered must be held and served, never swallowed.
 #[tokio::test]
 async fn a_request_sent_during_a_call_is_still_answered() {
-    let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+    let (commands, answerer) = std::sync::mpsc::channel();
+    let state = crate::test_support::daemon_state(commands);
     let (client, server) = UnixStream::pair().expect("no socket pair");
-    tokio::spawn(serve(server, Arc::clone(&state)));
+    tokio::spawn(serve(server, Arc::clone(&state), Caller::unread()));
     let (reader, mut writer) = client.into_split();
     let mut lines = BufReader::new(reader).lines();
 
     // The first parks; the second arrives while it does
     send(
         &mut writer,
-        banshee_common::BANSHEE_GET_TRANSCRIPTION,
-        serde_json::json!({ "wait_ms": 300 }),
+        BANSHEE_ASK_USER,
+        serde_json::json!({"question": "ready?"}),
     )
     .await;
     send(&mut writer, BANSHEE_STATUS, serde_json::json!({})).await;
 
+    let parked = tokio::task::spawn_blocking(move || answerer.recv_timeout(ARRIVES))
+        .await
+        .expect("no panic")
+        .expect("the question never reached the pipeline");
+    let ConsumerCommand::Ask(ask) = parked else {
+        panic!("a question is the only thing sent");
+    };
+    ask.reply
+        .send(Ok("yes".to_string()))
+        .expect("the call is parked");
+
     let first = next_message(&mut lines).await;
-    assert!(first["result"]["transcriptions"].is_array(), "{first}");
+    assert_eq!(first["result"]["text"], "yes", "{first}");
     let second = next_message(&mut lines).await;
     assert_eq!(second["result"]["running"], true, "{second}");
 }
@@ -660,4 +928,30 @@ async fn a_stale_socket_is_left_to_the_claim_that_holds_the_lock() {
     assert!(path.exists());
     let _ = fs::remove_file(&path);
     let _ = fs::remove_file(path.with_extension("lock"));
+}
+
+#[test]
+fn the_microphone_line_reads_its_menu_path_as_steps() {
+    let blocker = banshee_common::Blocker {
+        kind: banshee_common::BlockerKind::Permission,
+        id: "microphone".to_string(),
+        name: "Microphone access is not allowed".to_string(),
+        role: None,
+        remedy: Some(banshee_common::Remedy::Grant),
+        consequence: "dictation and spoken answers fail".to_string(),
+        fix: crate::state::Refusal::Denied.fix().to_string(),
+        command: None,
+    };
+
+    let line = spoken_problem(&blocker);
+
+    assert!(
+        line.starts_with(
+            "Microphone access is not allowed. Allow Banshee in System Settings, then "
+        ),
+        "{line}"
+    );
+    assert!(line.contains(", then "), "{line}");
+    assert!(!line.contains('>'), "the voice drops '>': {line}");
+    assert!(line.ends_with('.'), "{line}");
 }

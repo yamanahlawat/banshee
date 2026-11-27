@@ -30,58 +30,36 @@
 - **`hyprctl reload`** runs after the write.
 - **`banshee bind` alone** prints the block for you to paste, and names the
   file it would write.
-- **It binds a tell key too.** Hold it and speak, and your coding agent changes
-  the config. See
-  [cli.md](cli.md#telling-your-agent-to-change-the-desktop).
-- **The tell chord is the dictate chord plus one modifier,** the first free one
-  of `Super`, `Ctrl` and `Alt`.
-- **`Shift` is not among them.** The record bind holds it.
-- **A dictate key that already holds all three** gets no tell bind, and `bind`
-  says so.
 
 ```lua
 -- BEGIN BANSHEE MANAGED BLOCK
-o.bind("F9", "Banshee: hold to dictate", "banshee record start --dictate")
+o.bind("F9", "Banshee: hold to dictate", "banshee record start")
 o.bind("F9", nil, "banshee record stop", { release = true })
-o.bind("SHIFT + F9", "Banshee: hold to record", "banshee record start")
-o.bind("SHIFT + F9", nil, "banshee record stop", { release = true })
-o.bind("SUPER + F9", "Banshee: hold to tell the agent", "banshee record start --tell")
-o.bind("SUPER + F9", nil, "banshee record stop", { release = true })
 -- END BANSHEE MANAGED BLOCK
 ```
 
 ```conf
 # BEGIN BANSHEE MANAGED BLOCK
-bind  = , F9, exec, banshee record start --dictate
+bind  = , F9, exec, banshee record start
 bindr = , F9, exec, banshee record stop
-bind  = SHIFT, F9, exec, banshee record start
-bindr = SHIFT, F9, exec, banshee record stop
-bind  = SUPER, F9, exec, banshee record start --tell
-bindr = SUPER, F9, exec, banshee record stop
 # END BANSHEE MANAGED BLOCK
 ```
 
-- **Tap** binds one toggle for each key, with no release bind:
+- **Tap** binds one toggle, with no release bind:
 
 ```lua
 -- BEGIN BANSHEE MANAGED BLOCK
-o.bind("F9", "Banshee: tap to dictate", "banshee record toggle --dictate")
-o.bind("SHIFT + F9", "Banshee: tap to record", "banshee record toggle")
-o.bind("SUPER + F9", "Banshee: tap to tell the agent", "banshee record toggle --tell")
+o.bind("F9", "Banshee: tap to dictate", "banshee record toggle")
 -- END BANSHEE MANAGED BLOCK
 ```
 
 ```conf
 # BEGIN BANSHEE MANAGED BLOCK
-bind = , F9, exec, banshee record toggle --dictate
-bind = SHIFT, F9, exec, banshee record toggle
-bind = SUPER, F9, exec, banshee record toggle --tell
+bind = , F9, exec, banshee record toggle
 # END BANSHEE MANAGED BLOCK
 ```
 
-- **Both release binds** in the hold block are there on purpose, in either config style.
-- **Hyprland** matches modifiers exactly, and `Shift` may be released before
-  `F9`.
+- **The release bind** in the hold block is there on purpose, in either config style.
 - **Bind an ordinary key,** not a modifier.
 - **A bare modifier's press action** waits, because the press might still become
   the start of a different chord.
@@ -91,7 +69,7 @@ bind = SUPER, F9, exec, banshee record toggle --tell
   audio.
 - **`F9` is not a modifier,** so it has no such ambiguity, and it dispatches its
   press bind at once.
-- **`banshee record toggle --dictate`** is one key that starts and stops, for a
+- **`banshee record toggle`** is one key that starts and stops, for a
   compositor with no release bind.
 
 ## Typing into the focused app
@@ -102,18 +80,28 @@ bind = SUPER, F9, exec, banshee record toggle --tell
   `banshee history`.
 - **`banshee status`** tells you which one it found.
 
+## When Banshee runs
+
+- **`banshee start`** runs the daemon with your desktop session, like the tray:
+  it starts when the desktop does, and stops when you log out.
+- **A desktop that never starts `graphical-session.target`,** such as Sway
+  without its systemd integration or `startx`, starts neither. Run
+  `banshee serve` and `banshee-tray` from its autostart instead.
+
 ## Showing the state in a bar
 
 - **`banshee tray`** puts the mark in any bar that hosts StatusNotifierItem.
+- **The entries in the tray's `Listening model` and `Voice` submenus** draw as checkboxes on StatusNotifierItem hosts.
 - **`banshee watch --waybar`** feeds a Waybar module.
 - **It emits** one custom-module object per line:
 
 ```json
-{"text":"recording","alt":"recording","class":"recording","tooltip":"Banshee is recording. Microphone: Blue Yeti"}
+{"text":"recording","alt":"recording","class":"recording","tooltip":"Banshee: Recording. Microphone: Blue Yeti"}
 ```
 
 - **`text`** shows.
 - **`alt`** picks a `format-icons` entry.
+- **`alt` reads `problem`** while Banshee is idle with a problem, and the tooltip names it.
 - **`class`** is the CSS hook.
 - **Put this** in your Waybar config:
 
@@ -123,7 +111,7 @@ bind = SUPER, F9, exec, banshee record toggle --tell
     "return-type": "json",
     "restart-interval": 5,
     "format": "{icon}",
-    "format-icons": { "idle": "mic", "recording": "REC", "busy": "...", "speaking": "spk" }
+    "format-icons": { "idle": "mic", "recording": "REC", "busy": "...", "speaking": "spk", "problem": "!" }
 }
 ```
 
@@ -139,19 +127,34 @@ bind = SUPER, F9, exec, banshee record toggle --tell
 - **That exit** is how the module reconnects once the daemon comes back.
 - **The same channel** is open to any client over `banshee.subscribe`.
 
+## The figure on screen
+
+- **The figure** is a small rust capsule at the bottom centre of the focused screen, 86 pixels above the edge.
+- **It shows** while Banshee records, works, waits for your answer, copies or fails.
+- **Live words** show in it as you speak.
+- **It needs layer shell.** Hyprland, Sway, KDE and most other Wayland desktops have it.
+- **It never takes keyboard focus,** so it never steals typing from the app you dictate into.
+- **It takes no clicks** except on a failure.
+- **GNOME and X11** draw nothing. Banshee plays every sound there.
+- **`feedback.mode`** picks the figure, the sounds or both. A new install starts on `visual`.
+- **The layer namespace is `banshee`.** A Hyprland layer rule on that namespace, such as `no_screen_share`, hides it from screen shares.
+
 ## Building the desktop window
 
 - **The window** is a Tauri app. It needs WebKitGTK, GTK 3 and Node: 22 from
   22.22.2, 24 from 24.15, or 26 or newer.
+- **Playing a kept recording** needs GStreamer's good plugins, for
+  `autoaudiosink` and `wavparse`. Without them WebKit's web process crashes on
+  play.
 - **The daemon, the CLI and the tray** need none of them.
 
 ```bash
 # Arch
-sudo pacman -S --needed webkit2gtk-4.1
+sudo pacman -S --needed webkit2gtk-4.1 gst-plugins-good
 # Debian and Ubuntu
-sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev gstreamer1.0-plugins-good
 # Fedora (untested)
-sudo dnf install webkit2gtk4.1-devel gtk3-devel librsvg2-devel
+sudo dnf install webkit2gtk4.1-devel gtk3-devel librsvg2-devel gstreamer1-plugins-good
 ```
 
 Then:

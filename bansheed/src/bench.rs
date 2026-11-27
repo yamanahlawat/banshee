@@ -1,10 +1,8 @@
 use banshee_common::KokoroTTSConfig;
 use banshee_common::error::BansheeError;
 
-use crate::config::TTSConfig;
 use crate::text_to_speech::local::kokoro;
 use crate::text_to_speech::local::kokoro::KokoroEngine;
-use crate::text_to_speech::local::oov::OovFallback;
 use crate::text_to_speech::{pronunciation, sanitizer};
 
 pub const SAMPLE_RATE: u32 = crate::text_to_speech::output::SAMPLE_RATE.get();
@@ -38,11 +36,8 @@ pub fn english_g2p() -> misaki_rs::G2P {
     kokoro::english_g2p()
 }
 
-fn defaults() -> (TTSConfig, KokoroTTSConfig) {
-    let tts = TTSConfig::default();
-    let kokoro = KokoroTTSConfig::new(&tts.voice);
-    (tts, kokoro)
-}
+/// The Kokoro voice every measurement speaks in.
+const VOICE: &str = "af_sky";
 
 pub fn missing_model() -> Option<String> {
     match crate::models::download::models_dir() {
@@ -52,7 +47,7 @@ pub fn missing_model() -> Option<String> {
 }
 
 fn missing_file(dir: &std::path::Path) -> Option<String> {
-    let (_, config) = defaults();
+    let config = KokoroTTSConfig::new(VOICE);
     crate::models::missing_in(dir, &[&config.model_name, &config.voice_name])
         .into_iter()
         .next()
@@ -60,23 +55,15 @@ fn missing_file(dir: &std::path::Path) -> Option<String> {
 }
 
 pub fn engine() -> Result<KokoroEngine, BansheeError> {
-    let (tts, config) = defaults();
-    KokoroEngine::new(&config, tts.speed)
+    KokoroEngine::new(
+        &crate::models::download::models_dir()?,
+        VOICE,
+        banshee_common::utils::oov_log_path(),
+    )
 }
 
 pub fn run_facts() -> String {
-    let (tts, _) = defaults();
-    let espeak = if OovFallback::available() {
-        "found"
-    } else {
-        "absent"
-    };
-    format!(
-        "voice {}, speed {}, threads {}, espeak-ng {espeak}",
-        tts.voice,
-        tts.speed,
-        crate::models::kokoro_threads()
-    )
+    format!("voice {VOICE}, threads {}", crate::models::thread_count())
 }
 
 #[cfg(test)]

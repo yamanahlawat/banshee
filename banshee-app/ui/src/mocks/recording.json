@@ -3,13 +3,17 @@
   "armed": false,
   "transcribing": false,
   "loading_model": false,
-  "telling": false,
   "speaking": false,
   "audio_device": "MacBook Pro Microphone",
   "missing_device": null,
+  "microphone_open": true,
+  "microphone_refused": false,
   "last_error": null,
   "last_speech_error": null,
   "pipeline": "open",
   "feedback": "both",
+  "blockers": [],
+  "history_changes": 0,
+  "settings_changes": 0,
   "activity": "recording"
 }

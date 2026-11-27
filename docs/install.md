@@ -2,7 +2,7 @@
 
 - **The README** shows the shortest route on each platform.
 - **This page** holds every route, and how to remove each one.
-- **Disk:** every route needs ~860 MB for the models.
+- **Disk:** every route needs about 1.1 GB for the models.
 - **Intel Macs** are not supported.
 
 ## macOS, with the window
@@ -19,16 +19,19 @@ xattr -dr com.apple.quarantine /Applications/Banshee.app
   terminal. It asks first, and only ever asks a person.
 - **Update it** with `brew upgrade --cask banshee`.
 - **Remove it** with `brew uninstall --cask banshee`, and add `--zap` to take
-  `~/.banshee` as well.
+  `~/.banshee` and `~/Library/Logs/com.banshee.app` as well.
 - **The `banshee` command** is on your `PATH` as well as in the app.
 
 ## macOS, without Homebrew
 
 ```bash
-curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Banshee.app.tar.gz \
-  | tar -xzf - -C /Applications
+tmp="$(mktemp)" && curl -fsSL https://github.com/yamanahlawat/banshee/releases/latest/download/Banshee.app.tar.gz -o "$tmp" \
+  && rm -rf /Applications/Banshee.app && tar -xzf "$tmp" -C /Applications && rm "$tmp"
 ```
 
+- **The command removes the old app after the download succeeds.** Unpacking over it leaves files
+  the new app no longer has, and they break its signature. A first install has nothing to remove,
+  and `rm -rf` says nothing.
 - **The unpacked app** sets no quarantine flag, so it needs no `xattr` line.
 - **Opening the app** puts the `banshee` command on your `PATH`, at
   `/usr/local/bin/banshee`. That directory is first in `/etc/paths`, so it
@@ -48,9 +51,10 @@ sudo mkdir -p /usr/local/bin && sudo ln -s \
 - **The command inside the app** stays at
   `/Applications/Banshee.app/Contents/MacOS/banshee`, whether it is linked or
   not.
-- **No admin account?** Unpack into `~/Applications`, and read that path
+- **No admin account?** Use `~/Applications` in every line that names `/Applications`, and read that path
   instead.
-- **Update it** by running the same command again: it replaces the app in place.
+- **Update it** by running the same command again. Then run `banshee start`, then `banshee tray`,
+  so the daemon and the menu bar restart on the new app.
 - **Remove it** with `banshee uninstall`, which stops the daemon and takes the
   login entries and the link with it.
 
@@ -77,6 +81,9 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/yamanahlawat/banshee/re
 - **Clone the repo** and run `make install`. See
   [CONTRIBUTING.md](../CONTRIBUTING.md).
 - **It works** on macOS and Linux.
+- **On macOS** it registers the daemon and the tray as Login Items. They show
+  in System Settings > General > Login Items under "Allow in the Background",
+  where you can switch them off.
 - **On Linux** it also registers and starts the `systemd --user` service, where
   systemd answers.
 - **Without systemd** the install still finishes, and `banshee serve` starts the
@@ -93,7 +100,9 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/yamanahlawat/banshee/re
 banshee setup
 ```
 
-- **It fetches** what is missing: Whisper, Silero VAD, Kokoro, about 860 MB.
+- **It fetches** what is missing: the Parakeet listening model (731 MB), Silero VAD and the companion voice (about 400 MB).
+- **Until the listening model arrives,** the daemon stays up and silent. Listening loads by itself when the file lands.
+- **Linux releases** need a CPU with AVX2 (x86_64) or any armv8-a, and no system BLAS.
 - **An interrupted download** resumes, and a re-run fetches only what is still missing.
 
 **2. Start it:**
@@ -135,7 +144,8 @@ banshee uninstall
 - **A source build stays:** `make install` records nothing, so the command
   names the binary it runs from and leaves every file the install placed.
 - **`--data`** also deletes `~/.banshee`: the models, the history and the keys.
+  On macOS it deletes the logs in `~/Library/Logs/com.banshee.app` too.
   Without it, they stay.
 - **`--yes`** removes without asking, for a script.
 - **The cask alone:** `brew uninstall --zap --cask banshee` does the same in one
-  step, and `--zap` takes `~/.banshee` with it.
+  step, and `--zap` takes `~/.banshee` and the logs with it.

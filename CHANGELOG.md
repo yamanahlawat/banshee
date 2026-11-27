@@ -7,6 +7,325 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A download shows its speed and the time left,** on History and under the voice or model that started it.
+- **The question card, History and the log name the program that asked.** The card shows
+  the name above the question on macOS and Linux. History keeps it on question rows, shows it
+  under the time in the list, and above the question in the detail. Dictation shows no name,
+  including dictation through `banshee record`. The log names every socket use that opens the
+  microphone, and who set `audio.keep_open`. When the name does not read, none shows. The
+  daemon reads the name from the operating system, so a renamed program shows its new name.
+  The shim reports its parent, which reads as `claude` for Claude Code in the desktop app.
+  The parent is not measured for Cursor, OpenCode or the npm Claude Code.
+- **An agent's question shows on screen while you answer.** When an agent asks, the capsule
+  becomes a card above the Dock: the whole question, with the ask in larger type, and a row
+  that says whether it is your turn next, your turn or Banshee is working. A long question
+  keeps the card's height and scrolls: it opens on the ask, and you scroll up for the start.
+  Clicks pass through the card, except while its question scrolls.
+  History keeps the whole question. When you pause and Banshee hears you as unfinished, the
+  line between the question and your words closes in from both ends. Speaking fills it
+  again. If you stay quiet and Banshee still hears you as unfinished, it refills and runs
+  again. Until Banshee has the turn detection model, the line runs from the first pause. The
+  window or `banshee setup` fetches the model. "Keep talking to add more" shows under your
+  words the first time the line runs after the tray starts. On macOS with Reduce Motion, the
+  line goes out in five steps. When the answer is sent, the card shrinks to a pill with the
+  figure and the word Sent. A question nobody answered becomes a small pill, "You missed a
+  question", that stays until you click it. The click opens History at that question. A
+  second missed question makes it "You missed 2 questions". VoiceOver reads the pill as a
+  button. On Linux the card shows on the same desktops as the capsule.
+- **A pause to think rarely ends your answer to an agent now.** After the pause, Banshee
+  checks whether you sound finished. If you don't, it keeps listening and checks again after
+  each further pause of the same length. Speaking again starts the checks over. An existing
+  install fetches the 9 MB turn detection model from the window or with `banshee setup`.
+  Until then, answers end on the pause as before. Dictation is unchanged.
+- **The capsule shows on Linux.** On Hyprland, Sway, KDE and any other desktop with
+  layer shell, the Banshee figure appears at the bottom centre of the screen while Banshee
+  records, works, waits for your answer, copies or fails, with the live words as you speak.
+  It never takes focus. On GNOME and X11 there is no capsule, and every sound plays as
+  before. A new Linux install starts on On screen. A click on a failure opens the window
+  at the fix.
+- **The Waybar module shows a lasting problem.** While Banshee is idle with a problem, the
+  module's `alt` reads `problem` and the tooltip leads with the problem's name, the same
+  words the tray shows.
+- **The menu bar switches the listening model and the voice.** `Listening model` and
+  `Voice` list the models and voices already on this machine, mark the one chosen, and
+  switch with no restart. Downloads stay in the window. Under a transcription or speech
+  server, the row names the server and stays greyed out.
+- **The window follows a setting changed in the menu bar or with `banshee config set`.**
+  It shows the new value without a reload.
+- **History keeps the questions agents ask you, with your answer.** A question you did
+  not answer is kept with what happened: no answer heard, closed, not transcribed, or
+  not asked aloud. A dictation that failed to transcribe is kept with the reason.
+  Status updates are not kept. With Save history off, nothing new is kept, and what is
+  there stays until you clear it. The menu bar's "Copy last dictation" works with
+  Save history off and copies only dictations.
+- **History keeps the audio of each dictation and answer, for 7 days by default.**
+  Keep audio on Saved history chooses Off, 1 day, 7 days, 30 days or Forever, and
+  `daemon.keep_audio` sets the same. A shorter period deletes older audio at once,
+  so the window asks first when it would. Play a row's audio from its detail. A
+  dictation can be retried from its audio, and a retry through a transcription
+  server sends the recording there.
+- **The menu bar icon shows a lasting problem, and Banshee says it once.** The idle
+  figure gets an exclamation badge while a permission or model is missing. The first
+  menu row says what is wrong, for example `Accessibility is not granted`, and opens
+  Banshee. When Banshee is not running, that row reads `Start Banshee` and runs
+  `banshee start`. When Banshee started without Accessibility, the daemon
+  restarts once that grant lands and nothing is in flight, and the badge clears.
+  On macOS 14 and later, a microphone grant or refusal reaches Banshee at its
+  next use, with no restart, except while `audio.keep_open` holds the microphone. A problem that appears
+  after the daemon starts is spoken once, and never at login.
+  A model file that goes missing shows at the next use.
+  `feedback.speak_problems = false` turns the speech off.
+- **When Banshee cannot type a dictation, it copies it.** With no Accessibility
+  grant, no Wayland typer, or a typer that fails, the words stay on the
+  clipboard. The capsule says "Copied" for 3 s. A
+  level two-note sound plays in place of the error sound. Paste them yourself.
+  The old clipboard is not put back.
+- **A dictation is copied when you switch apps before it lands.** If the app in
+  front when the words arrive is not the one you were in when you stopped
+  recording, Banshee copies them and plays the two-note sound. The capsule
+  also says "Copied". This works on macOS and on Hyprland. Elsewhere,
+  and whenever Banshee cannot tell, it types as before. A wrong field inside the
+  same app still gets the words.
+
+### Changed
+
+- **History rows show the time and the agent's name down the right edge,** and a missed question's flag where the answer would be.
+- **The window's small notes are easier to read,** in a slightly heavier, wider cut with more space between lines.
+- **Speaking lists your voices apart from voices to get,** so the arrow keys move only among voices that can speak.
+- **Every settings page puts its labels in one column,** so each control starts on the same edge.
+- **Agents lists connected agents apart from installed ones,** and an agent's review opens under its name.
+- **Feedback is a row on Hotkey,** and the sidebar has no Feedback page.
+- **Listening puts the microphone settings first,** then the listener and its words, then memory.
+- **Saved history says how many dictations and questions it keeps,** and Clear asks before it clears everything.
+- **History says who asked and who answered.** A question's detail shows "Claude asked"
+  above the question and "You answered" above your answer, in small capitals. With no
+  program name stored, it reads "An agent asked".
+- **Every surface names a state with the same word.** The menu bar, its tooltip, the
+  window, the question card and the Waybar tooltip say Ready, Recording, Speaking, Your
+  turn, Working or Not running. With a lasting problem, the menu says Not ready, as the
+  window does. Waybar's `text`, `alt` and `class` and `banshee watch` keep their words, so
+  a Waybar config needs no change.
+- **Every pill on screen has the card's bright edge.** The dictation pill, Your turn and
+  Copied now carry it, so they stand out on a dark desktop. Sent shows the figure beside the
+  word, like Copied. Pill words are a little larger. The card keeps even space on all four
+  sides, and the countdown line has round ends.
+- **The window's controls share one shape and one height.** Choice buttons are rounded and
+  use plain words in place of capitals, as buttons do. Drop-down menus and the hotkey box
+  are boxed like text fields, with darker borders that are easier to see. Sidebar items and
+  choices shade under the pointer.
+- **The window has a sidebar, and History shows a list with the selected row beside
+  it.** Every page is one click away, and the window can grow or fill the screen.
+  The sidebar folds into a button when the window is narrow, and it says when audio
+  leaves this machine. The window opens at its default size each time. A search
+  marks what it matched in each row.
+- **banshee config set knows every setting.** It refuses a key that is no setting.
+  A text setting keeps digits as text, so `'"12"'` is no longer needed. It says
+  `Banshee uses it now.` when the daemon took the change.
+- **Settings apply at once, with no restart.** The quiet length after an agent's
+  question applies to the next answer. The answer already open keeps its length.
+  The hotkey and its press behaviour apply at the next press. A key held at the
+  change keeps working until its release. On Wayland, `config set audio.hotkey`
+  names `banshee bind hyprland`. A new or removed listener key is in use at the
+  next dictation. A remote listener with no key no longer stops the daemon's
+  pipeline from building. A switch to or from a transcription server takes the
+  next dictation. Turning the server off, or removing its key, stops a recording
+  on its way there and transcribes it here. Without the local model, that
+  dictation fails and says why. A switch to or from a voice server takes the
+  next reply. The reply already speaking finishes in its voice. Turning the
+  server off, or removing its key, stops the reply, and the local voice speaks
+  it from the start. A dictation recorded for one server goes to another if you
+  switch to it before the release. One started on this machine stays here. A
+  dictation or reply already on its way to one server finishes there when you
+  switch to another. The window no longer offers
+  "Restart to apply", and `banshee config set` no longer asks for a restart.
+- **The microphone opens for a use and closes right after it.** It opens for a
+  hotkey press, or after an agent's question has played, so the orange dot is off
+  between uses. A Bluetooth headset keeps stereo sound between uses. Set
+  `audio.keep_open = true` to keep the old always-open microphone. It applies at once.
+- **Local models unload after 5 idle minutes.** The listening model, the voice
+  detector and the voice free their memory, and the next use loads them again.
+  `models.unload_after` sets the minutes, and 0 never unloads. It applies at once.
+  On macOS the process keeps the freed memory for reuse and gives it back when the
+  system runs short. On Linux it goes back at once.
+  The first reply after an idle spell pays a voice load, 195 to 320 ms measured.
+- **The listener, the detector and the voice still load at start.** The idle
+  unload applies after that. The fallback voice behind a voice server loads only
+  when a failed reply needs it.
+- **The start cue plays when sound first arrives,** and so does an agent
+  question's cue. A Bluetooth headset gives its first sound about 300 ms after
+  the open, measured on one headset, so the cue follows it.
+- **A microphone or a model that fails to open fails that use with its cause and fix.**
+  Status shows it, and the next use tries again.
+- **An idle microphone reads `<device>, opens when you speak`.** It is not a
+  fault. When macOS refuses the microphone, every screen reads "not allowed by
+  macOS" and names the problem "Microphone access is not allowed".
+- **The window shows the two new settings on Listening,** Microphone and Free memory.
+- **Breaking: `preset` and `language` are gone from `[stt]`.** Delete both from
+  `config.toml`, or the daemon won't start. The error names the key and its line,
+  and the window shows it. The tray's first row runs `banshee start`.
+- **Breaking: a config that names no model moves to Parakeet Unified.** Listening
+  stays silent until `banshee setup` fetches its 731 MB. The daemon stays up,
+  and `banshee status` says why. Listening loads by itself when the file lands.
+- **Breaking: Whisper turbo does not translate.** `stt.translate` has no effect
+  on it. A model or a server that translates still honours it.
+- **Breaking: Banshee deletes the old Whisper files at start.** It removes
+  `ggml-base.en.bin`, `ggml-large-v3-turbo-q5_0.bin` and `ggml-large-v3-q5_0.bin`
+  from `~/.banshee/models`, those names only. An older Banshee that you roll back
+  to downloads its Whisper file again.
+- **Listening runs on transcribe.cpp, and Parakeet Unified is the default.**
+  Whisper turbo is the second suggestion. `stt.model` takes a model id, and
+  `whisper-rs` is gone.
+- **Every transcribe.cpp model downloads by id.** `banshee setup --model <id>`
+  fetches one of 73, and `banshee setup --list` shows each id with its size,
+  languages, whether it streams and its licence. 18 models need
+  `--accept-licence`: the CC-BY-NC ones, Moonshine, HAI-DEF and FunASR.
+- **The chip shows live words while you speak.** They appear during
+  dictation and spoken answers. When you let go, one full pass over the recording
+  produces the typed text.
+- **Words to know start empty, and work on every model.** A model that takes
+  vocabulary receives the list. For any other model, a corrector swaps a close-sounding
+  word for a listed one, with the rule from Handy (threshold 0.10, Soundex weight 0.5).
+- **The window lists the suggested and the downloaded models.** Each row shows size,
+  languages and whether it streams.
+- **A transcription server gets no language hint.** `stt.language` is gone.
+- **Linux releases need AVX2 on x86_64,** or plain armv8-a on aarch64, and no system BLAS.
+- **On macOS, the daemon and the tray start at login through Login Items.**
+  They show in System Settings > General > Login Items under "Allow in the
+  Background", where you can switch them off. macOS shows "Background Items
+  Added" when they register, and may show it again after a later
+  `banshee start`. If you switch Banshee off there, `banshee start` and
+  `banshee status` say so and name the setting.
+- **macOS asks for microphone and accessibility permission once more.** Each
+  program has its own signing identifier now. Grant both again when asked.
+- **`banshee start` removes the old launchd plists on macOS.** It deletes
+  `~/Library/LaunchAgents/com.banshee.daemon.plist` and `com.banshee.tray.plist`.
+  The tray stays off until you run `banshee tray` or open the window.
+- **On macOS the logs move to `~/Library/Logs/com.banshee.app/`.** `daemon.log`
+  and `tray.log` rotate at 1000 KB and keep 5 files. Console.app shows them
+  under Log Reports, and `banshee status` prints the path. You can delete
+  `~/.banshee/daemon.log` and `~/.banshee/tray.log`. Linux keeps the systemd journal.
+- **`BANSHEE_LOG` no longer reaches the background daemon on macOS.** For a
+  debug log, stop Banshee and run `BANSHEE_LOG=debug banshee serve` in a
+  terminal. Raw output from native libraries such as whisper and ggml no
+  longer lands in a file on macOS.
+- **The default voice is the companion, a synthetic voice on Pocket TTS by
+  Kyutai (CC-BY-4.0).** A config that names no voice moves to the companion,
+  and `tts.voice = "af_sky"` keeps the old voice. Kokoro's voices stay as
+  choices: set any other `tts.voice`, and the change applies at once. The
+  companion's files, about 400 MB, download to
+  `~/.banshee/models/pocket-english_2026-04/` with `banshee setup` or the
+  window's Get button. Until they arrive the daemon stays up and silent,
+  `speak` fails naming `banshee setup`, and `banshee status` says why. The
+  next reply after the files arrive loads the voice with no restart. On an M5
+  Pro Mac, first audio took about 30 ms and speech ran at 8.2x to 8.8x real
+  time.
+- **A failed remote reply is spoken by the local voice.** `tts.fallback` is now
+  `local` (the default) or `none`. With `local`, when a remote server fails
+  before a reply starts, the voice that `tts.voice` names speaks it, and it
+  loads on first use. With `none` you hear silence, and a remote speaker
+  downloads no local voice.
+- **A remote request no longer sends a `speed` field.**
+- **The window's Voice panel lists Companion first,** with the credit "Pocket
+  TTS by Kyutai, CC-BY-4.0", and has no speaking rate.
+- **Kokoro uses misaki-rs 0.8.0 from crates.io instead of a fork.** A word it
+  does not know is spelled letter by letter. With `espeak-ng` installed, such a
+  word used to be pronounced, so `tokenizers` was said as a word and is now
+  spelled. See Removed.
+- **Banshee uses jiff for time instead of chrono, which is unmaintained, and
+  rotates its own log.** The log still moves aside at 1000 KB and keeps five
+  old files. Timestamps in History read the same.
+- **Both local voices read versions, paths, file names, PR numbers, units and
+  rates aloud.** `0.12.1` is "zero point twelve point one", `src/main.rs` is
+  "src slash main dot rs" with or without backticks, `PR #218` is "PR number
+  218", `1.2 GB` is "one point two gigabytes", and `2 MB/s` is "2 megabytes
+  per second". A decimal reads digit by digit after "point": `3.14` is "three
+  point one four". A hyphenated lowercase name reads as separate words:
+  `banshee-mcp-shim` is "banshee mcp shim", and "mid-sentence" is "mid
+  sentence". `w/o` is "without". The step runs before every voice, so a remote
+  voice server gets the same text.
+
+### Removed
+
+- **`banshee connect claude` no longer replaces the Stop hook from 0.15 and earlier.** If
+  your Claude Code settings still run `banshee-speak-check.sh`, delete that Stop hook entry
+  and the script, then run `banshee connect claude` again.
+- **`banshee tell` and the `[tell]` section are gone.** Delete `[tell]` from
+  `config.toml`, or the daemon won't start. `banshee status` names the key.
+  You can delete `~/.banshee/tell/`.
+- **`banshee listen`, `listen_for_prompt` and Shift plus the hotkey are gone.**
+  A recording always dictates. On Hyprland, run `banshee bind hyprland` again;
+  it rewrites the managed block. With Pi, run `banshee connect pi` again. A
+  bind that passes `--dictate` now fails, so rewrite it without the flag.
+- **`banshee service uninstall` and `banshee tray --uninstall` are gone.**
+  `banshee uninstall` replaces `service uninstall`. No switch stops only the
+  tray yet. To stop the tray starting at login and keep the rest of Banshee,
+  on macOS switch off the tray under "Allow in the Background" in System
+  Settings > General > Login Items. On Linux, run
+  `systemctl --user disable --now banshee-tray.service`. `banshee tray` puts
+  it back.
+- **`tts.speed` is gone.** Delete `speed` from `[tts]` in `config.toml`, or the
+  daemon won't start. `banshee status` names the key. Speech plays at 1x.
+- **The system voice is gone,** which was `say` on macOS and `espeak-ng` as a
+  voice on Linux. If `config.toml` holds `fallback = "system"`, change it to
+  `"local"` or `"none"`, or the daemon won't start.
+- **`audio.cues.enabled` is no longer read.** `feedback.mode` replaced it. A
+  `config.toml` that still holds `[audio.cues]` stops the daemon, and the error
+  names the key and its line. Delete the section. If it held `enabled = false`,
+  set `feedback.mode = "none"` to keep the silence. `banshee config set` no
+  longer takes any removed key, so delete each one from the file by hand.
+- **`espeak-ng` is no longer used or needed.** Kokoro spells a word it does not
+  know by letter names instead. If you installed `espeak-ng` for Banshee, you
+  can remove it. No config key changes.
+
+### Fixed
+
+- **The Dock, Spotlight and Finder open the window again.** The menu bar runs as its own app,
+  Banshee Menu Bar, so Banshee shows one Dock icon while the window is open and none once it
+  closes. If you update with the curl command, use the new one in the README once: it removes the
+  old app first. Then run `banshee start` and `banshee tray` once, or the old menu bar keeps
+  running until you log in again.
+- **History shows as soon as the window opens.** It used to wait for the window to finish
+  looking for agents. A control pressed while Agents reads its list answers at once too.
+- **Apply says it is working.** On Agents, the button reads Applying until the agent is
+  connected. Cancel and Connect wait until then.
+- **A setting Banshee refuses says so on its row,** in words, instead of only to a screen reader.
+- **Sensitivity reads the right way round.** High now hears quiet speech. If you chose High or Low
+  before, check it once.
+- **On macOS, a running Banshee follows the Accessibility switch.** Switched off,
+  Banshee shows the problem within about 2 s, says it once, and copies each
+  dictation instead of losing it. Switched on, the problem clears. If Banshee
+  started without the grant, it restarts once nothing is recording, transcribing,
+  typing, speaking or downloading.
+- **On macOS, a dictation puts back what was on the clipboard.** An image,
+  files, styled text and several items come back, and an empty clipboard stays
+  empty. A copy you make while the words land wins. On Linux X11, only copied text comes back.
+- **On Linux, dictation types after you log in.** Banshee started at login before
+  the desktop shared its display. Until you ran `banshee start`, it could not
+  type, copy or hear the X11 hotkey, and `banshee status` said all was well.
+  Banshee now starts with your desktop and stops when you log out. Run
+  `banshee start` once from your desktop after updating.
+
+- **A macOS dictation stays out of clipboard history.** Banshee marks the text it
+  pastes as transient, as nspasteboard.org describes, so clipboard managers that
+  follow it skip the paste. Linux already kept it out.
+
+- **`banshee start` and `banshee tray` wait until Banshee runs.** After an upgrade,
+  macOS can refuse the first launch of the new build. They now register it once
+  more, and say so when it still does not start. Before, they said Banshee was
+  running when it was not.
+
+### Security
+
+- **A remote server out on the internet needs `https`.** Plain `http` used to
+  send audio, text and the key in the clear to any host. It now works only for
+  this machine and your own network, including Tailscale. `banshee config set`
+  refuses plain `http` to a public host. A config that already holds one still
+  loads, but that side refuses to send, and `banshee status` names the setting.
+  Change the URL to `https`. A server's redirect to plain `http` on the
+  internet is refused the same way.
+
 ## [0.17.0] - 2026-10-27
 
 ### Removed

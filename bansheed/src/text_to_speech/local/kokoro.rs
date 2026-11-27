@@ -1,15 +1,18 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use banshee_common::{KokoroTTSConfig, error::BansheeError, utils::oov_log_path};
-use misaki_rs::lexicon::{Lexicon, PhonemeEntry};
-use misaki_rs::{G2P, Language, MToken};
+use banshee_common::{KokoroTTSConfig, error::BansheeError};
+use misaki_rs::fallback::FallbackError;
+use misaki_rs::lexicon::PhonemeEntry;
+use misaki_rs::{Fallback, G2P, Language, MToken};
 use ort::session::Session;
 
-use super::oov::OovFallback;
-use crate::text_to_speech::output::{CHANNELS, Chunk, Output, SAMPLE_RATE};
-use crate::text_to_speech::{ActiveUtterance, Fault, TtsBackend, lock};
+use super::chunk_or_fault;
+use crate::text_to_speech::output::Output;
+use crate::text_to_speech::pronunciation::DIGITS;
+use crate::text_to_speech::{ActiveUtterance, Faults, TtsBackend, lock, lock_read, lock_write};
 
 // Voice files hold one style row per input token count: 510 rows x 256 floats
 const STYLE_DIM: usize = 256;
@@ -161,12 +164,8 @@ fn read_voice_file(voice_path: &std::path::Path) -> Result<Vec<f32>, BansheeErro
     Ok(voice)
 }
 
-fn strip_bin_suffix(voice_name: &str) -> &str {
-    voice_name.strip_suffix(".bin").unwrap_or(voice_name)
-}
-
-fn installed(voice: &str) -> Result<(), BansheeError> {
-    if crate::models::installed_voices()
+pub(crate) fn installed(models: &Path, voice: &str) -> Result<(), BansheeError> {
+    if crate::models::installed_voices_in(models)
         .iter()
         .any(|id| id == voice)
     {
@@ -209,7 +208,8 @@ pub(crate) fn sentences(text: &str) -> impl Iterator<Item = &str> {
 }
 
 pub(crate) fn english_g2p() -> G2P {
-    let mut g2p = G2P::new(Language::EnglishUS);
+    let mut g2p = G2P::with_fallback(Language::EnglishUS, Some(Box::new(Spelled)));
+    LETTER_NAMES.get_or_init(|| letter_names(&g2p.lexicon.golds));
     crate::text_to_speech::pronunciation::install_dictionary(&mut g2p);
     g2p
 }
@@ -217,18 +217,19 @@ pub(crate) fn english_g2p() -> G2P {
 pub struct KokoroEngine {
     session: Session,
     g2p: G2P,
+    models: PathBuf,
     voice: Vec<f32>,
     loaded_voice: String,
-    speed: f32,
-    oov: Option<OovFallback>,
     logged_oov: HashSet<String>,
+    oov_log: Option<PathBuf>,
 }
 
 impl KokoroEngine {
-    pub fn new(kokoro_config: &KokoroTTSConfig, speed: f32) -> Result<Self, BansheeError> {
-        let threads = crate::models::kokoro_threads();
-        let model_path = crate::models::model_path(&kokoro_config.model_name)?;
-        let voice_path = crate::models::model_path(&kokoro_config.voice_name)?;
+    pub fn new(models: &Path, voice: &str, oov_log: Option<PathBuf>) -> Result<Self, BansheeError> {
+        let kokoro_config = KokoroTTSConfig::new(voice);
+        let threads = crate::models::thread_count();
+        let model_path = models.join(&kokoro_config.model_name);
+        let voice_path = models.join(&kokoro_config.voice_name);
 
         // Pre-packed weights cost 32 MB of resident memory and bought no synthesis
         // time: three timed runs each way of a two-sentence utterance all took 1.2 s.
@@ -238,33 +239,25 @@ impl KokoroEngine {
             &[("session.disable_prepacking", "1")],
         )?;
 
-        let voice = read_voice_file(&voice_path)?;
+        let style = read_voice_file(&voice_path)?;
 
         let g2p = english_g2p();
-
-        let oov = OovFallback::detect();
-        if oov.is_none() {
-            log::warn!(
-                "espeak-ng not found; unknown words will be spelled out. \
-                 Install espeak-ng for better pronunciation (run 'banshee status')."
-            );
-        }
 
         Ok(Self {
             session,
             g2p,
-            voice,
-            loaded_voice: strip_bin_suffix(&kokoro_config.voice_name).to_string(),
-            speed,
-            oov,
+            models: models.to_path_buf(),
+            voice: style,
+            loaded_voice: voice.to_string(),
             logged_oov: HashSet::new(),
+            oov_log,
         })
     }
 
     pub fn set_voice(&mut self, voice_name: &str) -> Result<(), BansheeError> {
-        installed(voice_name)?;
+        installed(&self.models, voice_name)?;
         let voice_config = KokoroTTSConfig::new(voice_name);
-        let voice_path = crate::models::model_path(&voice_config.voice_name)?;
+        let voice_path = self.models.join(&voice_config.voice_name);
         self.voice = read_voice_file(&voice_path)?;
         self.loaded_voice = voice_name.to_string();
         Ok(())
@@ -281,12 +274,6 @@ impl KokoroEngine {
         &self.loaded_voice
     }
 
-    /// Read into the synthesis tensor for each sentence, so the next one is
-    /// spoken at the new rate without the model loading again.
-    pub fn set_speed(&mut self, speed: f32) {
-        self.speed = speed;
-    }
-
     #[cfg(test)]
     fn style_fingerprint(&self) -> (usize, Option<f32>) {
         (self.voice.len(), self.voice.first().copied())
@@ -299,19 +286,10 @@ impl KokoroEngine {
 
     // Text in, 24kHz mono samples out; empty when nothing is speakable
     pub fn synthesize(&mut self, text: &str) -> Result<Vec<f32>, BansheeError> {
-        let mut out = self
+        let (phonemes, tokens) = self
             .g2p
             .g2p(text)
             .map_err(|e| BansheeError::Other(format!("G2P failed: {e}")))?;
-
-        // Re-run g2p so misaki reassembles with the inserted pronunciations.
-        if self.resolve_oov(&out.1) {
-            out = self
-                .g2p
-                .g2p(text)
-                .map_err(|e| BansheeError::Other(format!("G2P failed: {e}")))?;
-        }
-        let (phonemes, tokens) = out;
 
         self.note_letter_spelled(&tokens);
 
@@ -327,33 +305,14 @@ impl KokoroEngine {
         Ok(samples)
     }
 
-    fn resolve_oov(&mut self, tokens: &[MToken]) -> bool {
-        let Some(oov) = &self.oov else { return false };
-        let mut resolved = Vec::new();
-        for tk in tokens {
-            // Skip words with a curated gold entry so espeak never overrides it.
-            if is_letter_spelled(tk)
-                && !curated(&self.g2p.lexicon, &tk.text)
-                && let Some(phonemes) = oov.phonemize(&tk.text)
-            {
-                // One casing serves the other, so the word is kept as it was spoken.
-                resolved.push((tk.text.clone(), phonemes));
-            }
-        }
-        for (word, phonemes) in &resolved {
-            self.g2p
-                .lexicon
-                .golds
-                .insert(word.clone(), PhonemeEntry::Simple(phonemes.clone()));
-        }
-        !resolved.is_empty()
-    }
-
     // Log words still spelled out as table candidates; never changes audio.
     fn note_letter_spelled(&mut self, tokens: &[MToken]) {
         for tk in tokens {
-            if is_letter_spelled(tk) && self.logged_oov.insert(tk.text.to_lowercase()) {
-                append_oov(&tk.text);
+            if is_letter_spelled(tk)
+                && self.logged_oov.insert(tk.text.to_lowercase())
+                && let Some(path) = &self.oov_log
+            {
+                append_oov(path, &tk.text);
             }
         }
     }
@@ -378,9 +337,8 @@ impl KokoroEngine {
                 .map_err(|e| BansheeError::Other(e.to_string()))?,
         )
         .map_err(|e| BansheeError::Other(e.to_string()))?;
-        let speed_tensor =
-            ort::value::Tensor::from_array(ndarray::Array1::from_vec(vec![self.speed]))
-                .map_err(|e| BansheeError::Other(e.to_string()))?;
+        let speed_tensor = ort::value::Tensor::from_array(ndarray::Array1::from_vec(vec![1.0f32]))
+            .map_err(|e| BansheeError::Other(e.to_string()))?;
 
         let outputs = self
             .session
@@ -399,10 +357,6 @@ impl KokoroEngine {
     }
 }
 
-fn lock_read<T>(value: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    value.read().unwrap_or_else(|poison| poison.into_inner())
-}
-
 /// The voice a live `[tts]` write puts in effect, or `None` when this machine
 /// does not hold it. A voice accepted here but missing fails later inside the
 /// chunk iterator, which can only report the fault after the reply went silent.
@@ -416,49 +370,21 @@ fn voice_for(requested: Option<&str>, configured: &str) -> String {
     requested.unwrap_or(configured).to_string()
 }
 
-/// One sentence's audio, or the fault that ends the utterance. The first
-/// sentence that plays clears the last speech error, like the remote speaker's.
-fn chunk_or_fault(
-    synthesized: Result<Vec<f32>, BansheeError>,
-    played: &mut bool,
-    faults: &std::sync::mpsc::Sender<Fault>,
-) -> Option<Chunk> {
-    match synthesized {
-        Ok(samples) => {
-            if !*played {
-                *played = true;
-                let _ = faults.send(Fault::Played);
-            }
-            Some(Chunk {
-                samples,
-                rate: SAMPLE_RATE,
-                channels: CHANNELS,
-            })
-        }
-        Err(error) => {
-            let _ = faults.send(Fault::Failed(format!("Kokoro synthesis failed: {error}")));
-            None
-        }
-    }
-}
-
 pub struct KokoroBackend {
     engine: Arc<Mutex<KokoroEngine>>,
+    models: PathBuf,
     output: Arc<Output>,
     // What an utterance that names no voice speaks in. A live `tts.voice`
     // moves it, so it cannot be fixed at construction.
     configured_voice: RwLock<String>,
-    faults: std::sync::mpsc::Sender<Fault>,
+    faults: Faults,
 }
 
 impl KokoroBackend {
-    pub fn new(
-        engine: KokoroEngine,
-        output: Arc<Output>,
-        faults: std::sync::mpsc::Sender<Fault>,
-    ) -> Self {
+    pub fn new(engine: KokoroEngine, output: Arc<Output>, faults: Faults) -> Self {
         let configured_voice = engine.loaded_voice().to_string();
         Self {
+            models: engine.models.clone(),
             engine: Arc::new(Mutex::new(engine)),
             output,
             configured_voice: RwLock::new(configured_voice),
@@ -469,12 +395,11 @@ impl KokoroBackend {
 
 impl TtsBackend for KokoroBackend {
     fn reconfigure(&self, tts: &crate::config::TTSConfig) -> Option<String> {
-        let taken = voice_to_take(&tts.voice, &crate::models::installed_voices())?;
-        *self
-            .configured_voice
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = taken.clone();
-        lock(&self.engine).set_speed(tts.speed);
+        let taken = voice_to_take(
+            &tts.voice,
+            &crate::models::installed_voices_in(&self.models),
+        )?;
+        *lock_write(&self.configured_voice) = taken.clone();
         Some(taken)
     }
 
@@ -484,7 +409,7 @@ impl TtsBackend for KokoroBackend {
         voice: Option<&str>,
     ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
         if let Some(requested) = voice {
-            installed(requested)?;
+            installed(&self.models, requested)?;
         }
         let desired = voice_for(voice, &lock_read(&self.configured_voice));
         let engine = Arc::clone(&self.engine);
@@ -504,31 +429,59 @@ impl TtsBackend for KokoroBackend {
                     .ensure_voice(&desired)
                     .and_then(|()| engine.synthesize(&sentence))
             };
-            chunk_or_fault(synthesized, &mut played, &faults)
+            chunk_or_fault("Kokoro", synthesized, &mut played, &faults)
         });
         Ok(Box::new(self.output.play(chunks, self.faults.clone())?))
     }
 }
 
-// A word misaki can't resolve is spelled letter-by-letter, giving one all-alphabetic
-// token whose phonemes are the per-letter names joined by spaces. Resolved words are a
-// single contiguous group; hyphenated/numeric tokens aren't all-alphabetic.
-// misaki answers the all-caps form from the lowercase entry, so the guard asks the same way.
-fn curated(lexicon: &Lexicon, word: &str) -> bool {
-    lexicon.in_gold(word) || lexicon.in_gold(&word.to_lowercase())
+/// misaki's fallback for a word outside its lexicon: the word read letter by letter.
+struct Spelled;
+
+impl Fallback for Spelled {
+    fn phonemize(&self, word: &str) -> Result<String, FallbackError> {
+        Ok(letters(word))
+    }
+}
+
+static LETTER_NAMES: OnceLock<HashMap<char, String>> = OnceLock::new();
+
+fn letter_names(golds: &HashMap<String, PhonemeEntry>) -> HashMap<char, String> {
+    let alphabet = ('A'..='Z').map(|letter| (letter, letter.to_string()));
+    let digits = ('0'..='9').zip(DIGITS.map(str::to_string));
+    alphabet
+        .chain(digits)
+        .filter_map(|(c, name)| match golds.get(&name) {
+            Some(PhonemeEntry::Simple(phonemes)) => Some((c, phonemes.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each letter and digit of `word` by its name, as misaki's lexicon says it.
+/// Any other character has no name and is skipped.
+fn letters(word: &str) -> String {
+    // english_g2p fills the table from its own lexicon; this load serves a
+    // caller that runs before any G2P exists
+    let names = LETTER_NAMES.get_or_init(|| letter_names(&misaki_rs::data::load_us_gold()));
+    word.chars()
+        .filter(char::is_ascii)
+        .map(|c| c.to_ascii_uppercase())
+        .filter_map(|c| names.get(&c).map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn is_letter_spelled(tk: &MToken) -> bool {
-    let w = tk.text.trim();
-    let is_word = w.chars().count() > 1 && w.chars().all(|c| c.is_alphabetic());
-    is_word && tk.phonemes.as_deref().is_some_and(|p| p.contains(' '))
+    tk.text.chars().filter(char::is_ascii_alphanumeric).count() > 1
+        && tk
+            .phonemes
+            .as_deref()
+            .is_some_and(|phonemes| phonemes.contains(' ') && phonemes == letters(&tk.text))
 }
 
 // Dedup is per run, so a word can repeat across restarts; sort -u at read time
-fn append_oov(word: &str) {
-    let Some(path) = oov_log_path() else {
-        return;
-    };
+fn append_oov(path: &Path, word: &str) {
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
         let _ = writeln!(f, "{word}"); // logging must never break playback

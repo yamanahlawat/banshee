@@ -14,13 +14,19 @@ pub enum CommandType {
     /// Stops the running daemon
     Stop,
     /// Shows the tray icon now and at every login
-    Tray {
-        /// Stop the icon and remove its start-at-login service
-        #[clap(long)]
-        uninstall: bool,
-    },
+    Tray,
     /// Download required models locally
-    Setup,
+    Setup {
+        /// Download this listening model instead, by its id
+        #[clap(long)]
+        model: Option<String>,
+        /// Accept the model's licence where it asks for acceptance
+        #[clap(long, requires = "model")]
+        accept_licence: bool,
+        /// List every listening model Banshee can download
+        #[clap(long, conflicts_with_all = ["model", "accept_licence"])]
+        list: bool,
+    },
     /// Reports what Banshee is doing and what stops it working
     Status {
         /// Print the daemon's raw reply instead of the checklist
@@ -34,7 +40,7 @@ pub enum CommandType {
         /// Emit Waybar custom-module JSON instead of one word
         #[clap(long)]
         waybar: bool,
-        /// Print these events as JSON lines instead: cues, level
+        /// Print these events as JSON lines instead: cues, level, words, question
         #[clap(long, value_delimiter = ',', conflicts_with = "waybar")]
         events: Vec<String>,
     },
@@ -45,8 +51,6 @@ pub enum CommandType {
         #[clap(subcommand)]
         action: ConfigAction,
     },
-    /// Gets latest transcription
-    Listen,
     /// Start, stop or toggle push-to-talk recording (for compositor keybinds and scripts)
     Record {
         #[clap(subcommand)]
@@ -54,25 +58,12 @@ pub enum CommandType {
     },
     /// Speaks a message via text-to-speech
     Speak { text: String },
-    /// Sends a command to your coding agent, which changes your desktop
-    Tell {
-        /// What to tell it. Leave it out with --undo.
-        text: Option<String>,
-        /// Put the config folders back as they were before the last command
-        #[clap(long, conflicts_with = "text")]
-        undo: bool,
-    },
-    /// List all transcriptions in the database
+    /// List your dictations and the questions agents asked you, with your answers
     History,
-    /// Clears all transcriptions in the database
+    /// Clear your dictations and the questions agents asked you, with your answers
     ClearHistory,
     /// Runs the daemon in the foreground (what the start-at-login service executes)
     Serve,
-    /// Manage the start-at-login service: launchd on macOS, systemd on Linux
-    Service {
-        #[clap(subcommand)]
-        action: ServiceAction,
-    },
     /// Remove Banshee: stops it, takes it out of login, and names what owns the rest
     Uninstall {
         /// Also delete ~/.banshee: the models, the history and the keys
@@ -104,6 +95,10 @@ pub enum CommandType {
         /// The agent whose hook runs this
         agent: crate::turn_end::GatedAgent,
     },
+    /// Prints the frontmost app's pid, read fresh in this process
+    #[cfg(target_os = "macos")]
+    #[clap(hide = true)]
+    FrontmostPid,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -124,9 +119,9 @@ pub enum CompositorName {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
-    /// Write one setting, as in: banshee config set stt.language de
+    /// Write one setting, as in: banshee config set stt.model whisper-large-v3-turbo, then banshee setup
     Set {
-        /// A section and a field from config.toml, as in stt.vad_threshold
+        /// A section and a field from config.toml, as in stt.vad_threshold. A key that is no setting is refused
         key: String,
         /// Left out for stt.remote.api_key or tts.remote.api_key, which is then read without echo
         value: Option<String>,
@@ -136,33 +131,13 @@ pub enum ConfigAction {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ServiceAction {
-    /// Stop and remove the launch agent
-    Uninstall,
-}
-
-#[derive(Debug, Subcommand)]
 pub enum RecordAction {
     /// Begin recording (like pressing the hotkey)
-    Start {
-        /// Type the transcription into the focused app instead of saving it
-        #[clap(long)]
-        dictate: bool,
-        /// Send the transcription to your coding agent instead of typing it
-        #[clap(long, conflicts_with = "dictate")]
-        tell: bool,
-    },
+    Start,
     /// Stop recording and transcribe (like releasing the hotkey)
     Stop,
     /// Start when idle, stop when recording (one key for compositors with no release bind)
-    Toggle {
-        /// Type the transcription into the focused app instead of saving it
-        #[clap(long)]
-        dictate: bool,
-        /// Send the transcription to your coding agent instead of typing it
-        #[clap(long, conflicts_with = "dictate")]
-        tell: bool,
-    },
+    Toggle,
 }
 
 #[cfg(test)]
@@ -177,5 +152,13 @@ mod tests {
             .expect("events alone must parse");
         Cli::try_parse_from(["banshee", "watch", "--waybar", "--events", "cues"])
             .expect_err("waybar and events together must be refused");
+    }
+
+    #[test]
+    fn a_record_bind_that_passes_dictate_is_refused() {
+        for action in ["start", "toggle"] {
+            Cli::try_parse_from(["banshee", "record", action, "--dictate"])
+                .expect_err("--dictate is not a flag");
+        }
     }
 }

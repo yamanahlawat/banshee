@@ -5,17 +5,18 @@ pub mod remote;
 pub mod sanitizer;
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::path::Path;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use banshee_common::{KokoroTTSConfig, error::BansheeError};
+use banshee_common::error::BansheeError;
 use tokio::sync::watch;
 
 use crate::audio::cues::{Cues, Reason, ReasonCode, Signal};
-use crate::config::{Provider, TTSConfig, TTSFallback};
-use local::kokoro::{KokoroBackend, KokoroEngine};
-use local::say::SayBackend;
+use crate::config::{Provider, RemoteTtsConfig, TTSConfig, TTSFallback};
+use local::{Engine, OnDemand, local_backend, local_on_demand};
 use output::Output;
 use remote::openai_compatible::RemoteSpeechBackend;
 
@@ -32,7 +33,11 @@ pub enum Fault {
     /// The speaker `[tts]` names failed before its first sample, and the
     /// fallback voice took the sentence. The reason is that speaker's.
     SpokenByFallback(String),
+    /// An utterance played its first sample.
     Played,
+    /// The local voice `[tts]` names loaded after the daemon started, or
+    /// again after it idled out.
+    Loaded,
 }
 
 impl Fault {
@@ -46,13 +51,49 @@ impl Fault {
                 log::Level::Warn,
                 format!("the fallback voice took over the reply: {reason}"),
             )),
-            Fault::Played => None,
+            Fault::Played | Fault::Loaded => None,
         }
     }
 
     pub fn log(&self) {
         if let Some((level, line)) = self.log_line() {
             log::log!(level, "{line}");
+        }
+    }
+}
+
+/// The fault channel as one speaker holds it. The voice standing in for a
+/// remote speaker reports what fails and nothing else, so its playing clears no
+/// reason the remote speaker left and its load does not start that speaker.
+#[derive(Clone)]
+pub struct Faults {
+    sender: Sender<Fault>,
+    reports_progress: bool,
+}
+
+impl Faults {
+    pub fn new(sender: Sender<Fault>) -> Self {
+        Self {
+            sender,
+            reports_progress: true,
+        }
+    }
+
+    pub(crate) fn standing_in(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            reports_progress: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reports_progress(&self) -> bool {
+        self.reports_progress
+    }
+
+    pub fn send(&self, fault: Fault) {
+        if self.reports_progress || !matches!(fault, Fault::Played | Fault::Loaded) {
+            let _ = self.sender.send(fault);
         }
     }
 }
@@ -64,17 +105,23 @@ pub fn drain_faults(
     cues: Cues,
     faults: std::sync::mpsc::Receiver<Fault>,
 ) {
+    let failed = |reason: String| {
+        cues.emit(Signal::Error {
+            reason: Reason::new(ReasonCode::SpeechFailed, None),
+            target: None,
+        });
+        state.set_last_speech_error(Some(reason));
+    };
     for fault in faults {
         fault.log();
         match fault {
             Fault::Played => state.set_last_speech_error(None),
-            Fault::Failed(reason) | Fault::SpokenByFallback(reason) => {
-                cues.emit(Signal::Error {
-                    reason: Reason::new(ReasonCode::SpeechFailed, None),
-                    target: None,
-                });
-                state.set_last_speech_error(Some(reason));
+            // A local voice an earlier speaker still loads names no server
+            Fault::Loaded if state.speaker_provider() == Provider::Local => {
+                state.set_speaker_started(true)
             }
+            Fault::Loaded => {}
+            Fault::Failed(reason) | Fault::SpokenByFallback(reason) => failed(reason),
         }
     }
 }
@@ -89,11 +136,61 @@ pub trait TtsBackend: Send + Sync {
         voice: Option<&str>,
     ) -> Result<Box<dyn ActiveUtterance>, BansheeError>;
 
+    /// `start` for a caller that holds no lock, so a backend that loads on
+    /// first use may load here rather than on a thread of its own.
+    fn start_unlocked(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+        self.start(text, voice)
+    }
+
     /// A live `[tts]` change. Answers the voice utterances now speak in, or
-    /// `None` when the backend cannot honour the change: the system fallback
-    /// speaks in whatever voice the OS is set to and takes no rate.
+    /// `None` when the backend cannot honour the change, as silence cannot.
     fn reconfigure(&self, _tts: &TTSConfig) -> Option<String> {
         None
+    }
+
+    /// Takes the local voice out of memory, and hands it over so the caller
+    /// drops it outside any lock. `None` when no voice is loaded.
+    fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
+        None
+    }
+
+    /// The server each line's text goes to, or `None` when it stays here.
+    fn sends_to(&self) -> Option<&str> {
+        None
+    }
+}
+
+impl<T: TtsBackend + ?Sized> TtsBackend for Arc<T> {
+    fn start(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+        (**self).start(text, voice)
+    }
+
+    fn start_unlocked(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+        (**self).start_unlocked(text, voice)
+    }
+
+    fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
+        (**self).reconfigure(tts)
+    }
+
+    fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
+        (**self).unload()
+    }
+
+    fn sends_to(&self) -> Option<&str> {
+        (**self).sends_to()
     }
 }
 
@@ -103,8 +200,8 @@ pub trait ActiveUtterance: Send {
 }
 
 /// Which speaker started, said by the branch that built it. `Configured` is the
-/// one `[tts]` asks for, with the voice it speaks in; `Fallback` is the OS voice
-/// or silence, which speaks in whatever the OS is set to and sends no text out.
+/// one `[tts]` asks for, with the voice it speaks in; `Fallback` is a local
+/// voice still to load, or silence behind a remote speaker that did not start.
 pub enum Speaker {
     Configured(String),
     Fallback,
@@ -124,6 +221,36 @@ impl Speaker {
     }
 }
 
+/// What decides which speaker runs. `tts.voice` is not part of it: a voice
+/// moves on the speaker in force. The local voice reads neither `fallback`
+/// nor `remote`, so under it both hold their defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeakerSpec {
+    pub provider: Provider,
+    pub fallback: TTSFallback,
+    pub remote: RemoteTtsConfig,
+}
+
+impl SpeakerSpec {
+    pub fn of(tts: &TTSConfig) -> Self {
+        match tts.provider {
+            Provider::Local => {
+                let unread = TTSConfig::default();
+                Self {
+                    provider: Provider::Local,
+                    fallback: unread.fallback,
+                    remote: unread.remote,
+                }
+            }
+            Provider::Remote => Self {
+                provider: Provider::Remote,
+                fallback: tts.fallback,
+                remote: tts.remote.clone(),
+            },
+        }
+    }
+}
+
 /// `fault` holds the reason the speaker `[tts]` names did not start. It has no
 /// utterance in flight, so the fault channel never carries that reason.
 pub struct Selection {
@@ -133,47 +260,76 @@ pub struct Selection {
 }
 
 /// The selection `[tts]` asks for. `faults` is where a backend reports an
-/// utterance it could not speak.
+/// utterance it could not speak, and `credentials` is the key file a remote
+/// speaker reads at each request.
 pub fn select_backend(
     tts_config: &TTSConfig,
-    faults: std::sync::mpsc::Sender<Fault>,
+    models: &Path,
+    credentials: &Path,
+    faults: Sender<Fault>,
     output: Arc<Output>,
-) -> Result<Selection, BansheeError> {
+) -> Selection {
+    let faults = Faults::new(faults);
     match tts_config.provider {
-        Provider::Local => select_local_backend(tts_config, faults, output),
-        Provider::Remote => {
-            // Not propagated: a credentials file that will not parse holds no
-            // key the speaker can use, so it takes the path a missing key takes
-            // and the daemon stays up.
-            let api_key = crate::credentials::Credentials::load().map(|credentials| {
-                credentials
-                    .key(crate::credentials::RemoteKey::Tts)
-                    .map(str::to_string)
-            });
-            select_remote_backend(tts_config, faults, api_key, output)
-        }
+        Provider::Local => select_local_backend(tts_config, models, faults, output),
+        Provider::Remote => select_remote_backend(tts_config, models, faults, credentials, output),
     }
 }
 
-/// `api_key` is the key, its absence, or the fault that hid it.
+/// `select_backend` for a switch while the daemon runs. The local voice loads
+/// at its first line, so a switch loads nothing, and it counts as the speaker
+/// `[tts]` names from the switch on.
+pub fn select_live(
+    tts: &TTSConfig,
+    models: &Path,
+    credentials: &Path,
+    faults: Sender<Fault>,
+    output: Arc<Output>,
+) -> Selection {
+    let faults = Faults::new(faults);
+    match tts.provider {
+        Provider::Local => local_selection(
+            tts,
+            Box::new(local_on_demand(models, &tts.voice, output, faults)),
+        ),
+        Provider::Remote => select_remote_backend(tts, models, faults, credentials, output),
+    }
+}
+
+/// The local voice `tts` names, speaking through `backend`.
+fn local_selection(tts: &TTSConfig, backend: Box<dyn TtsBackend>) -> Selection {
+    log::info!(
+        "TTS: {} (voice {})",
+        Engine::of(&tts.voice).name(),
+        tts.voice
+    );
+    Selection {
+        backend,
+        speaker: Speaker::Configured(tts.voice.clone()),
+        fault: None,
+    }
+}
+
+/// A key file that will not parse holds no key the speaker can use, so it
+/// takes the path a missing key takes and the daemon stays up.
 fn select_remote_backend(
     tts_config: &TTSConfig,
-    faults: std::sync::mpsc::Sender<Fault>,
-    api_key: Result<Option<String>, BansheeError>,
+    models: &Path,
+    faults: Faults,
+    credentials: &Path,
     output: Arc<Output>,
-) -> Result<Selection, BansheeError> {
-    let built = match api_key {
+) -> Selection {
+    let fallback = fallback_for(tts_config, models, Arc::clone(&output), &faults);
+    let side = crate::credentials::RemoteKey::Tts;
+    let built = match crate::credentials::Credentials::key_at(credentials, side) {
         Err(unreadable) => Err(unreadable),
-        Ok(None) => Err(BansheeError::Other(
-            crate::credentials::RemoteKey::Tts.no_key(),
-        )),
-        Ok(Some(key)) => RemoteSpeechBackend::new(
+        Ok(None) => Err(BansheeError::Other(side.no_key())),
+        Ok(Some(_)) => RemoteSpeechBackend::new(
             &tts_config.remote,
-            key,
-            tts_config.speed,
-            fallback_for(tts_config),
+            credentials.to_path_buf(),
+            fallback.clone().map(|f| f as Arc<dyn TtsBackend>),
             output,
-            faults.clone(),
+            faults,
         ),
     };
     match built {
@@ -184,43 +340,54 @@ fn select_remote_backend(
                 tts_config.remote.voice
             );
             let voice = tts_config.remote.voice.clone();
-            Ok(Selection {
+            Selection {
                 backend: Box::new(backend),
                 speaker: Speaker::Configured(voice),
                 fault: None,
-            })
+            }
         }
         // The daemon stays up: a speaker is not the recording pipeline, and an
         // agent's question still has to be heard.
         Err(error) => {
             let reason = error.to_string();
             log::warn!("The remote speaker will not start: {reason}");
-            let backend: Box<dyn TtsBackend> = match tts_config.fallback {
-                TTSFallback::System => Box::new(SayBackend),
-                TTSFallback::None => Box::new(Silent {
+            let backend: Box<dyn TtsBackend> = match fallback {
+                Some(fallback) => Box::new(fallback),
+                None => Box::new(Silent {
                     reason: reason.clone(),
                 }),
             };
-            Ok(Selection {
+            Selection {
                 backend,
                 speaker: Speaker::Fallback,
                 fault: Some(reason),
-            })
+            }
         }
     }
 }
 
 /// What speaks when the server does not. `tts.fallback = "none"` asks for
 /// silence, and silence needs no backend.
-fn fallback_for(tts_config: &TTSConfig) -> Option<Arc<dyn TtsBackend>> {
+fn fallback_for(
+    tts_config: &TTSConfig,
+    models: &Path,
+    output: Arc<Output>,
+    faults: &Faults,
+) -> Option<Arc<OnDemand>> {
     match tts_config.fallback {
-        TTSFallback::System => Some(Arc::new(SayBackend)),
+        TTSFallback::Local => Some(Arc::new(local_on_demand(
+            models,
+            &tts_config.voice,
+            output,
+            faults.standing_in(),
+        ))),
         TTSFallback::None => None,
     }
 }
 
-/// Answers every utterance with the reason there is no speaker, so `speak`
-/// fails with it rather than reporting an utterance nobody will hear.
+/// A remote speaker that did not start, under `tts.fallback = "none"`. Answers
+/// every utterance with the reason, so `speak` fails with it rather than
+/// reporting an utterance nobody will hear.
 struct Silent {
     reason: String,
 }
@@ -235,43 +402,67 @@ impl TtsBackend for Silent {
     }
 }
 
-/// Kokoro, or the OS voice when `tts.fallback` allows it and Kokoro cannot load.
-/// The output opens here rather than in `daemon.rs`: a machine with no output
-/// device has to reach the system voice, not stop the daemon.
+/// The local voice, loaded at start and again by the first utterance after
+/// it idles out. One that will not load is tried again by each utterance,
+/// whatever `tts.fallback` says: the speaker is not the recording pipeline,
+/// and its files may still be arriving.
 fn select_local_backend(
     tts_config: &TTSConfig,
-    faults: std::sync::mpsc::Sender<Fault>,
+    models: &Path,
+    faults: Faults,
     output: Arc<Output>,
-) -> Result<Selection, BansheeError> {
-    let kokoro_config = KokoroTTSConfig::new(&tts_config.voice);
-    let loaded = KokoroEngine::new(&kokoro_config, tts_config.speed)
-        .map(|engine| KokoroBackend::new(engine, output, faults));
-    match loaded {
-        Ok(backend) => {
-            log::info!("TTS: Kokoro (voice {})", tts_config.voice);
-            Ok(Selection {
-                backend: Box::new(backend),
-                speaker: Speaker::Configured(tts_config.voice.clone()),
-                fault: None,
-            })
-        }
-        Err(e) => match tts_config.fallback {
-            TTSFallback::System => {
-                log::warn!("Kokoro unavailable, falling back to system TTS: {e}");
-                Ok(Selection {
-                    backend: Box::new(SayBackend),
-                    speaker: Speaker::Fallback,
-                    fault: Some(e.to_string()),
-                })
+) -> Selection {
+    let voice = local_on_demand(
+        models,
+        &tts_config.voice,
+        Arc::clone(&output),
+        faults.clone(),
+    );
+    match local_backend(models, &tts_config.voice, output, faults) {
+        Ok(backend) => local_selection(tts_config, Box::new(voice.holding(backend))),
+        Err(error) => {
+            let reason = error.to_string();
+            log::warn!("The local voice will not load: {reason}");
+            Selection {
+                backend: Box::new(voice),
+                speaker: Speaker::Fallback,
+                fault: Some(reason),
             }
-            TTSFallback::None => Err(e),
-        },
+        }
     }
+}
+
+/// Frees the voice once it idles past `models.unload_after`, on a thread of
+/// its own: every thread that speaks shares the voice, so none of them owns
+/// it. The caller hands the thread to the state, which wakes it when the
+/// limit moves.
+pub fn unload_when_idle(state: Arc<crate::state::DaemonState>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        loop {
+            let now = Instant::now();
+            match state.speech().unload_idle(now, state.unload_after()) {
+                Some(due) => thread::park_timeout(due.saturating_duration_since(now)),
+                None => thread::park(),
+            }
+        }
+    })
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) fn lock_read<T>(value: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    value
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) fn lock_write<T>(value: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    value
+        .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -296,30 +487,63 @@ impl Hold {
 struct Active {
     utterance_id: u64,
     utterance: Box<dyn ActiveUtterance>,
+    text: String,
+    voice: Option<String>,
+    /// The server the text went to, or `None` when it stayed here.
+    sent_to: Option<String>,
 }
 
 struct Playback {
+    backend: Arc<dyn TtsBackend>,
     utterance_id: u64,
     last_started: u64,
     active: Option<Active>,
     queue: VecDeque<Line>,
     watcher_running: bool,
+    /// A switch is building the next speaker, so no line starts until it is
+    /// in place.
+    switching: bool,
     hold: Hold,
+    /// When an utterance last began or ended, which the voice's idle unload
+    /// counts from.
+    used: Instant,
 }
 
 impl Playback {
     fn stop_active(&mut self) {
         if let Some(mut active) = self.active.take() {
             active.utterance.stop();
+            self.used = Instant::now();
         }
     }
 
-    fn begin(&mut self, utterance_id: u64, utterance: Box<dyn ActiveUtterance>) {
-        self.last_started = utterance_id;
+    fn begin(&mut self, line: Line, utterance: Box<dyn ActiveUtterance>) {
+        self.last_started = line.utterance_id;
+        self.used = Instant::now();
         self.active = Some(Active {
-            utterance_id,
+            utterance_id: line.utterance_id,
             utterance,
+            text: line.text,
+            voice: line.voice,
+            sent_to: self.backend.sends_to().map(str::to_string),
         });
+    }
+
+    /// Stops the utterance playing and puts its line back at the front.
+    fn take_back_active(&mut self) {
+        if let Some(mut active) = self.active.take() {
+            active.utterance.stop();
+            self.used = Instant::now();
+            self.queue.push_front(Line {
+                utterance_id: active.utterance_id,
+                text: active.text,
+                voice: active.voice,
+            });
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.active.is_some() || !self.queue.is_empty()
     }
 
     fn drop_unheld(&mut self) {
@@ -334,31 +558,129 @@ impl Playback {
     }
 }
 
+/// Builds the speaker a `[tts]` write names.
+pub type BuildSpeaker = Box<dyn Fn(&TTSConfig) -> Selection + Send + Sync>;
+
+/// Clears `switching` when the switch that set it ends, even by a panic in
+/// the build.
+struct Switching<'a>(&'a SpeechPlayer);
+
+impl Drop for Switching<'_> {
+    fn drop(&mut self) {
+        self.0.lock().switching = false;
+    }
+}
+
+/// The speaker a switch put in place. `fault` is why the speaker `[tts]` names
+/// did not start.
+pub struct Switched {
+    pub speaker: Speaker,
+    pub fault: Option<String>,
+}
+
 pub struct SpeechPlayer {
-    backend: Box<dyn TtsBackend>,
     playback: Mutex<Playback>,
     playing: watch::Sender<Option<u64>>,
+    builder: std::sync::OnceLock<BuildSpeaker>,
 }
 
 impl SpeechPlayer {
     /// What a live `[tts]` write reaches. An utterance already speaking keeps
-    /// the voice and rate it started with.
+    /// the voice it started with.
     pub fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
-        self.backend.reconfigure(tts)
+        let backend = {
+            let mut playback = self.lock();
+            playback.used = Instant::now();
+            Arc::clone(&playback.backend)
+        };
+        backend.reconfigure(tts)
+    }
+
+    pub fn set_builder(&self, build: BuildSpeaker) {
+        let _ = self.builder.set(build);
+    }
+
+    /// Puts the speaker `tts` names in place for the next line. With
+    /// `cut_off`, a line playing from a server stops and starts again from its
+    /// beginning on the new speaker. Any other line finishes on the speaker it
+    /// started on. No line starts while the new speaker builds, so each one
+    /// after the switch starts on it. `None` when no builder is set.
+    pub fn switch(self: &Arc<Self>, tts: &TTSConfig, cut_off: bool) -> Option<Switched> {
+        let build = self.builder.get()?;
+        self.lock().switching = true;
+        let _switching = Switching(self);
+        let Selection {
+            backend,
+            speaker,
+            fault,
+        } = build(tts);
+        let old = {
+            let mut playback = self.lock();
+            let old = std::mem::replace(&mut playback.backend, Arc::from(backend));
+            playback.switching = false;
+            let from_a_server = playback
+                .active
+                .as_ref()
+                .and_then(|active| active.sent_to.as_deref())
+                .map(crate::config::host_of);
+            if cut_off && let Some(host) = from_a_server {
+                log::info!("The reply from {host} stopped, and the speaker in force says it again");
+                playback.take_back_active();
+            }
+            if playback.active.is_none() && self.start_next(&mut playback) {
+                self.publish_and_watch(playback);
+            } else {
+                // A queued line whose start failed is gone with no change to
+                // publish, and a question waiting on it has to look again
+                let playing = playback.active.as_ref().map(|active| active.utterance_id);
+                self.playing.send_modify(|was| *was = playing);
+            }
+            old
+        };
+        drop(old);
+        Some(Switched { speaker, fault })
+    }
+
+    /// Frees the voice once nothing has played for `limit`, and answers when
+    /// to look again: `None` when the voice stays loaded. The voice leaves
+    /// under the playback lock, so no utterance starts on it as it goes, and
+    /// drops after the lock, so a stop never waits on the drop.
+    pub fn unload_idle(&self, now: Instant, limit: Option<Duration>) -> Option<Instant> {
+        let freed = {
+            let mut playback = self.lock();
+            if playback.busy() {
+                return crate::models::unload_due(now, limit);
+            }
+            let due = crate::models::unload_due(playback.used, limit)?;
+            if now < due {
+                return Some(due);
+            }
+            playback.used = now;
+            playback.backend.unload()
+        };
+        if let Some(voice) = freed {
+            drop(voice);
+            crate::models::return_freed_memory();
+            log::info!("The voice unloaded after it idled");
+        }
+        crate::models::unload_due(now, limit)
     }
 
     pub fn new(backend: Box<dyn TtsBackend>) -> Self {
         Self {
-            backend,
             playback: Mutex::new(Playback {
+                backend: Arc::from(backend),
                 utterance_id: 0,
                 last_started: 0,
                 active: None,
                 queue: VecDeque::new(),
                 watcher_running: false,
+                switching: false,
                 hold: Hold(None),
+                used: Instant::now(),
             }),
             playing: watch::channel(None).0,
+            builder: std::sync::OnceLock::new(),
         }
     }
 
@@ -375,6 +697,13 @@ impl SpeechPlayer {
     /// it until `release`. What is already playing or queued up to it still plays.
     pub fn speak_and_hold(self: &Arc<Self>, text: &str) -> Result<u64, BansheeError> {
         self.submit(text, false, None, true)
+    }
+
+    pub fn is_queued(&self, utterance_id: u64) -> bool {
+        self.lock()
+            .queue
+            .iter()
+            .any(|line| line.utterance_id == utterance_id)
     }
 
     pub fn has_started(&self, utterance_id: u64) -> bool {
@@ -408,6 +737,7 @@ impl SpeechPlayer {
         voice: Option<&str>,
         hold: bool,
     ) -> Result<u64, BansheeError> {
+        // Callers sanitize first, so a URL is already cut to its host
         let normalized = pronunciation::normalize(text);
         let text = normalized.as_str();
         let mut playback = self.lock();
@@ -429,19 +759,21 @@ impl SpeechPlayer {
             return Ok(utterance_id);
         }
 
-        if playback.active.is_some() || playback.hold.keeps_back(utterance_id) {
-            playback.queue.push_back(Line {
-                utterance_id,
-                text: text.to_string(),
-                voice: voice.map(str::to_string),
-            });
+        let line = Line {
+            utterance_id,
+            text: text.to_string(),
+            voice: voice.map(str::to_string),
+        };
+        if playback.active.is_some() || playback.switching || playback.hold.keeps_back(utterance_id)
+        {
+            playback.queue.push_back(line);
             // The interrupt above may have stopped what played
             self.publish(&playback);
             return Ok(utterance_id);
         }
 
-        match self.backend.start(text, voice) {
-            Ok(utterance) => playback.begin(utterance_id, utterance),
+        match playback.backend.start(text, voice) {
+            Ok(utterance) => playback.begin(line, utterance),
             // An interrupt stopped whatever was speaking and nothing replaced
             // it. The hotkey listener discards every chunk it captures while
             // this reads true, so a reply that never starts would leave the
@@ -498,6 +830,7 @@ impl SpeechPlayer {
                 continue;
             }
             playback.active = None;
+            playback.used = Instant::now();
             let next = self.start_next(&mut playback);
             self.publish(&playback);
             if !next {
@@ -508,13 +841,16 @@ impl SpeechPlayer {
     }
 
     fn start_next(&self, playback: &mut Playback) -> bool {
+        if playback.switching {
+            return false;
+        }
         while let Some(line) = playback
             .queue
             .pop_front_if(|line| !playback.hold.keeps_back(line.utterance_id))
         {
-            match self.backend.start(&line.text, line.voice.as_deref()) {
+            match playback.backend.start(&line.text, line.voice.as_deref()) {
                 Ok(utterance) => {
-                    playback.begin(line.utterance_id, utterance);
+                    playback.begin(line, utterance);
                     return true;
                 }
                 Err(e) => {
@@ -546,12 +882,6 @@ impl SpeechPlayer {
         let playing = playback.active.as_ref().map(|active| active.utterance_id);
         self.playing
             .send_if_modified(|was| std::mem::replace(was, playing) != playing);
-    }
-}
-
-impl Default for SpeechPlayer {
-    fn default() -> Self {
-        Self::new(Box::new(SayBackend))
     }
 }
 
@@ -590,22 +920,106 @@ mod tests {
         assert_eq!(Fault::Played.log_line(), None);
     }
 
+    /// A voice whose replies run until they are stopped, counting each time
+    /// it is freed.
+    struct Freed(Arc<Mutex<usize>>);
+
+    struct Endless;
+
+    impl ActiveUtterance for Endless {
+        fn is_finished(&mut self) -> bool {
+            false
+        }
+        fn stop(&mut self) {}
+    }
+
+    impl TtsBackend for Freed {
+        fn start(
+            &self,
+            _text: &str,
+            _voice: Option<&str>,
+        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+            Ok(Box::new(Endless))
+        }
+
+        fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
+            *lock(&self.0) += 1;
+            Some(Arc::new(Silent {
+                reason: String::new(),
+            }))
+        }
+    }
+
+    const LIMIT: Duration = Duration::from_secs(300);
+
     #[test]
-    fn utterance_ids_increment_and_stop_clears() {
-        let player = Arc::new(SpeechPlayer::default());
+    fn the_voice_unloads_once_nothing_has_played_for_the_limit_and_not_before() {
+        let unloads = Arc::new(Mutex::new(0));
+        let before = Instant::now();
+        let player = SpeechPlayer::new(Box::new(Freed(Arc::clone(&unloads))));
+        let after = Instant::now();
+        let returns = crate::models::returns_on_this_thread();
+
+        assert_eq!(
+            player.unload_idle(after + LIMIT, None),
+            None,
+            "zero keeps it"
+        );
+        assert!(
+            player
+                .unload_idle(before + LIMIT - Duration::from_millis(1), Some(LIMIT))
+                .is_some()
+        );
+        assert_eq!(*lock(&unloads), 0);
+        assert_eq!(crate::models::returns_on_this_thread(), returns);
+
+        assert_eq!(
+            player.unload_idle(after + LIMIT, Some(LIMIT)),
+            Some(after + LIMIT + LIMIT)
+        );
+        assert_eq!(*lock(&unloads), 1);
+        assert_eq!(
+            crate::models::returns_on_this_thread(),
+            returns + 1,
+            "the freed memory goes back to the system"
+        );
+    }
+
+    #[test]
+    fn a_voice_that_is_speaking_never_unloads_and_its_idle_wait_starts_when_it_stops() {
+        let unloads = Arc::new(Mutex::new(0));
+        let player = Arc::new(SpeechPlayer::new(Box::new(Freed(Arc::clone(&unloads)))));
+        player.speak("a long reply", false, None).unwrap();
+
+        assert!(
+            player
+                .unload_idle(Instant::now() + LIMIT + LIMIT, Some(LIMIT))
+                .is_some()
+        );
+        assert_eq!(*lock(&unloads), 0, "mid-reply");
+
+        let stopping = Instant::now();
+        player.stop();
+        let stopped = Instant::now();
+        player.unload_idle(stopping + LIMIT - Duration::from_nanos(1), Some(LIMIT));
+        assert_eq!(*lock(&unloads), 0, "the wait counts from the stop");
+        player.unload_idle(stopped + LIMIT, Some(LIMIT));
+        assert_eq!(*lock(&unloads), 1);
+    }
+
+    #[test]
+    fn utterance_ids_increment() {
+        let player = Arc::new(crate::test_support::quiet_speech());
         assert!(!player.is_speaking());
 
         let first = player.speak("", false, None).unwrap();
         let second = player.speak("", false, None).unwrap();
         assert_eq!((first, second), (1, 2));
-
-        player.stop();
-        assert!(!player.is_speaking());
     }
 
     #[tokio::test]
     async fn queued_utterances_drain_and_signal_completion() {
-        let player = Arc::new(SpeechPlayer::default());
+        let player = Arc::new(crate::test_support::quiet_speech());
         let mut playing = player.subscribe_playing();
         player.speak("", false, None).unwrap();
         player.speak("", false, None).unwrap();
@@ -616,24 +1030,32 @@ mod tests {
             .expect("playing sender dropped");
     }
 
-    #[test]
-    fn a_remote_speaker_with_no_key_falls_back_and_says_why() {
-        let tts = crate::config::TTSConfig {
-            provider: crate::config::Provider::Remote,
+    /// `keys` is what the speaker's key file holds.
+    fn remote_without_a_key(fallback: TTSFallback, keys: &str) -> Selection {
+        let tts = TTSConfig {
+            provider: Provider::Remote,
             remote: crate::config::RemoteTtsConfig {
                 voice: "marin".to_string(),
                 ..Default::default()
             },
-            fallback: crate::config::TTSFallback::System,
+            fallback,
             ..Default::default()
         };
-        let (faults, _reports) = std::sync::mpsc::channel();
+        select_remote_backend(
+            &tts,
+            &crate::test_support::unique_scratch("remote-models"),
+            Faults::new(std::sync::mpsc::channel().0),
+            &crate::test_support::key_file(keys),
+            Arc::new(Output::silent()),
+        )
+    }
 
-        let selected =
-            select_remote_backend(&tts, faults, Ok(None), Arc::new(Output::silent())).unwrap();
+    #[test]
+    fn a_remote_speaker_with_no_key_falls_back_and_says_why() {
+        let selected = remote_without_a_key(TTSFallback::Local, "");
         assert!(
             !selected.speaker.started(),
-            "the system voice is not the speaker the config names"
+            "the local voice is not the speaker the config names"
         );
         let reason = selected.fault.expect("the missing key must be reported");
         assert!(
@@ -644,26 +1066,13 @@ mod tests {
 
     #[test]
     fn a_credentials_file_that_will_not_parse_falls_back_and_says_why() {
-        let tts = crate::config::TTSConfig {
-            provider: crate::config::Provider::Remote,
-            remote: crate::config::RemoteTtsConfig {
-                voice: "marin".to_string(),
-                ..Default::default()
-            },
-            fallback: crate::config::TTSFallback::System,
-            ..Default::default()
-        };
-        let (faults, _reports) = std::sync::mpsc::channel();
-        let unreadable = Err(BansheeError::Other(
-            "/tmp/credentials.toml does not parse; fix it or delete it and set the keys again"
-                .to_string(),
-        ));
-
-        let selected =
-            select_remote_backend(&tts, faults, unreadable, Arc::new(Output::silent())).unwrap();
+        let selected = remote_without_a_key(
+            TTSFallback::Local,
+            "[tts.remote]\napi_key = sk-live-SECRET123\n",
+        );
         assert!(
             !selected.speaker.started(),
-            "the system voice is not the speaker the config names"
+            "the local voice is not the speaker the config names"
         );
         let reason = selected.fault.expect("the parse fault must be reported");
         assert!(reason.contains("does not parse"), "{reason}");
@@ -671,19 +1080,7 @@ mod tests {
 
     #[test]
     fn with_no_fallback_every_utterance_fails_with_the_reason() {
-        let tts = crate::config::TTSConfig {
-            provider: crate::config::Provider::Remote,
-            remote: crate::config::RemoteTtsConfig {
-                voice: "marin".to_string(),
-                ..Default::default()
-            },
-            fallback: crate::config::TTSFallback::None,
-            ..Default::default()
-        };
-        let (faults, _reasons) = std::sync::mpsc::channel();
-
-        let selected =
-            select_remote_backend(&tts, faults, Ok(None), Arc::new(Output::silent())).unwrap();
+        let selected = remote_without_a_key(TTSFallback::None, "");
         let reason = refusal_of(selected.backend.as_ref());
         assert!(
             reason.contains("banshee config set tts.remote.api_key"),
@@ -693,51 +1090,69 @@ mod tests {
 
     #[test]
     fn a_remote_speaker_with_no_voice_names_the_voice_key() {
-        let tts = crate::config::TTSConfig {
-            provider: crate::config::Provider::Remote,
-            fallback: crate::config::TTSFallback::None,
+        let tts = TTSConfig {
+            provider: Provider::Remote,
+            fallback: TTSFallback::None,
             ..Default::default()
         };
-        let (faults, _reasons) = std::sync::mpsc::channel();
 
         let selected = select_remote_backend(
             &tts,
-            faults,
-            Ok(Some("sk-test".to_string())),
+            &crate::test_support::unique_scratch("remote-models"),
+            Faults::new(std::sync::mpsc::channel().0),
+            &crate::test_support::key_file("[tts.remote]\napi_key = \"sk-test\"\n"),
             Arc::new(Output::silent()),
-        )
-        .unwrap();
+        );
         let reason = refusal_of(selected.backend.as_ref());
         assert!(reason.contains("tts.remote.voice"), "{reason}");
     }
 
     #[test]
-    fn a_kokoro_start_failure_falls_back_and_says_why() {
-        let tts = crate::config::TTSConfig {
-            voice: "banshee-test-nonexistent-voice".to_string(),
-            fallback: crate::config::TTSFallback::System,
+    fn the_local_fallback_stands_in_and_the_local_speaker_does_not() {
+        let tts = TTSConfig::default();
+        let models = crate::test_support::companion_models();
+        let faults = Faults::new(std::sync::mpsc::channel().0);
+
+        let fallback = fallback_for(&tts, &models, Arc::new(Output::silent()), &faults)
+            .expect("a local fallback");
+        assert!(!fallback.faults().reports_progress());
+        assert!(faults.reports_progress());
+    }
+
+    /// The companion in an empty models folder, which is a first run before
+    /// `banshee setup` or a download cut short.
+    fn unloadable(fallback: TTSFallback) -> Selection {
+        let tts = TTSConfig {
+            voice: banshee_common::COMPANION_VOICE.to_string(),
+            fallback,
             ..Default::default()
         };
-        let kokoro_config = KokoroTTSConfig::new(&tts.voice);
-        let expected = KokoroEngine::new(&kokoro_config, tts.speed)
-            .err()
-            .expect("a nonexistent voice must not load")
-            .to_string();
-
-        let selected = select_local_backend(
+        select_local_backend(
             &tts,
-            std::sync::mpsc::channel().0,
+            &crate::test_support::unique_scratch("empty-models"),
+            Faults::new(std::sync::mpsc::channel().0),
             Arc::new(Output::silent()),
         )
-        .unwrap();
+    }
+
+    fn refused_with_a_reason(selected: Selection) {
         assert!(
             !selected.speaker.started(),
-            "the system voice is not the speaker the config names"
+            "a voice that did not load is not the speaker the config names"
         );
-        let reason = selected
-            .fault
-            .expect("the Kokoro start failure must be reported");
-        assert_eq!(reason, expected);
+        let reason = selected.fault.expect("the load failure must be reported");
+        assert!(reason.contains("banshee setup"), "{reason}");
+        assert_eq!(refusal_of(selected.backend.as_ref()), reason);
+    }
+
+    #[test]
+    fn a_local_voice_that_will_not_load_keeps_the_daemon_up_with_a_reason() {
+        refused_with_a_reason(unloadable(TTSFallback::Local));
+    }
+
+    #[test]
+    fn none_also_stays_up() {
+        refused_with_a_reason(unloadable(TTSFallback::None));
     }
 
     /// A voice that goes missing between two replies, which `installed` refuses
@@ -778,15 +1193,6 @@ mod tests {
         ends: Arc<std::sync::atomic::AtomicBool>,
     }
 
-    struct UntilEnds(Arc<std::sync::atomic::AtomicBool>);
-
-    impl ActiveUtterance for UntilEnds {
-        fn is_finished(&mut self) -> bool {
-            self.0.load(std::sync::atomic::Ordering::SeqCst)
-        }
-        fn stop(&mut self) {}
-    }
-
     impl TtsBackend for Gated {
         fn start(
             &self,
@@ -797,7 +1203,9 @@ mod tests {
                 return Err(BansheeError::Other("refused".to_string()));
             }
             self.started.lock().unwrap().push(text.to_string());
-            Ok(Box::new(UntilEnds(Arc::clone(&self.ends))))
+            Ok(Box::new(crate::test_support::UntilEnds(Arc::clone(
+                &self.ends,
+            ))))
         }
     }
 
@@ -851,9 +1259,7 @@ mod tests {
     #[tokio::test]
     async fn lines_queued_up_to_the_question_play_and_the_rest_wait() {
         let (player, started, ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
+        player.speak("Agent C was speaking.", false, None).unwrap();
         player.speak_and_hold("The question.").unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
@@ -861,26 +1267,20 @@ mod tests {
         falls_silent(&player).await;
         assert_eq!(
             started_lines(&started),
-            ["Agent C was mid-sentence.", "The question."]
+            ["Agent C was speaking.", "The question."]
         );
 
         player.release();
         assert_eq!(
             started_lines(&started),
-            [
-                "Agent C was mid-sentence.",
-                "The question.",
-                "Agent B reports."
-            ]
+            ["Agent C was speaking.", "The question.", "Agent B reports."]
         );
     }
 
     #[test]
     fn a_stop_during_a_hold_drops_the_backlog_and_keeps_the_lines_it_holds() {
         let (player, started, _ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
+        player.speak("Agent C was speaking.", false, None).unwrap();
         player.speak_and_hold("The question.").unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
@@ -890,7 +1290,7 @@ mod tests {
         player.release();
         assert_eq!(
             started_lines(&started),
-            ["Agent C was mid-sentence.", "Agent B reports."]
+            ["Agent C was speaking.", "Agent B reports."]
         );
     }
 
@@ -925,9 +1325,7 @@ mod tests {
     #[tokio::test]
     async fn a_line_that_will_not_start_keeps_the_lines_the_hold_keeps_back() {
         let (player, started, ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
+        player.speak("Agent C was speaking.", false, None).unwrap();
         player.speak_and_hold(REFUSED).unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
@@ -936,16 +1334,14 @@ mod tests {
         player.release();
         assert_eq!(
             started_lines(&started),
-            ["Agent C was mid-sentence.", "Agent B reports."]
+            ["Agent C was speaking.", "Agent B reports."]
         );
     }
 
     #[tokio::test]
     async fn a_line_that_will_not_start_before_the_question_leaves_the_question_to_play() {
         let (player, started, ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
+        player.speak("Agent C was speaking.", false, None).unwrap();
         player.speak(REFUSED, false, None).unwrap();
         player.speak_and_hold("The question.").unwrap();
 
@@ -953,16 +1349,14 @@ mod tests {
         falls_silent(&player).await;
         assert_eq!(
             started_lines(&started),
-            ["Agent C was mid-sentence.", "The question."]
+            ["Agent C was speaking.", "The question."]
         );
     }
 
     #[tokio::test]
     async fn a_release_drops_a_question_that_never_started() {
         let (player, started, ends) = gated();
-        player
-            .speak("Agent C was mid-sentence.", false, None)
-            .unwrap();
+        player.speak("Agent C was speaking.", false, None).unwrap();
         player.speak_and_hold("The question.").unwrap();
         player.speak("Agent B reports.", false, None).unwrap();
 
@@ -971,7 +1365,7 @@ mod tests {
         falls_silent(&player).await;
         assert_eq!(
             started_lines(&started),
-            ["Agent C was mid-sentence.", "Agent B reports."]
+            ["Agent C was speaking.", "Agent B reports."]
         );
     }
 
@@ -1031,5 +1425,91 @@ mod tests {
             .await
             .expect("a reply that never started left the daemon deaf to the microphone")
             .expect("playing sender dropped");
+    }
+
+    /// A daemon holding each line for `hold`, and the lines the speaker it
+    /// switches to says.
+    fn switching_here(
+        hold: Duration,
+    ) -> (
+        crate::test_support::HoldingSpeech,
+        crate::test_support::SpokenLines,
+    ) {
+        let held =
+            crate::test_support::daemon_state_holding_speech(hold, std::sync::mpsc::channel().0);
+        let spoken_here = crate::test_support::SpokenLines::default();
+        held.state
+            .speech()
+            .set_builder(crate::test_support::here(&spoken_here, "af_sky"));
+        (held, spoken_here)
+    }
+
+    #[test]
+    fn a_switch_lets_the_reply_playing_finish_in_its_voice() {
+        let (held, spoken_here) = switching_here(Duration::from_millis(200));
+        held.state.speech().speak("first", false, None).unwrap();
+        held.state
+            .speech()
+            .switch(&TTSConfig::default(), false)
+            .unwrap();
+        held.state.speech().speak("second", false, None).unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            !held.cut_short.load(std::sync::atomic::Ordering::Relaxed),
+            "the reply playing was not cut"
+        );
+        assert_eq!(*held.spoken.lock().unwrap(), ["first"]);
+        assert_eq!(*spoken_here.lock().unwrap(), ["second"]);
+    }
+
+    #[test]
+    fn turning_the_server_off_stops_the_reply_and_speaks_it_here() {
+        let (held, spoken_here) = switching_here(Duration::from_secs(30));
+        held.state
+            .speech()
+            .speak("the long reply", false, None)
+            .unwrap();
+        held.state
+            .speech()
+            .switch(&TTSConfig::default(), true)
+            .unwrap();
+        assert!(
+            held.cut_short.load(std::sync::atomic::Ordering::Relaxed),
+            "the reply on the server stopped"
+        );
+        assert_eq!(*spoken_here.lock().unwrap(), ["the long reply"]);
+    }
+
+    #[test]
+    fn a_switch_keeps_a_held_question_held() {
+        let (held, spoken_here) = switching_here(Duration::from_secs(30));
+        let line = held.state.speech().speak("a line", false, None).unwrap();
+        held.state.speech().speak_and_hold("a question?").unwrap();
+        held.state
+            .speech()
+            .switch(&TTSConfig::default(), false)
+            .unwrap();
+        assert!(
+            spoken_here.lock().unwrap().is_empty(),
+            "the question still waits behind the line"
+        );
+        held.state.speech().skip_to_question(line);
+        assert_eq!(*spoken_here.lock().unwrap(), ["a question?"]);
+    }
+
+    #[test]
+    fn a_build_that_panics_leaves_lines_free_to_start() {
+        let (state, spoken) =
+            crate::test_support::daemon_state_recording_speech_for(std::sync::mpsc::channel().0);
+        state
+            .speech()
+            .set_builder(Box::new(|_| panic!("the build failed")));
+        let switching = Arc::clone(state.speech());
+        let switched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            switching.switch(&TTSConfig::default(), false)
+        }));
+        assert!(switched.is_err());
+        state.speech().speak("after", false, None).unwrap();
+        assert_eq!(*spoken.lock().unwrap(), ["after"]);
     }
 }

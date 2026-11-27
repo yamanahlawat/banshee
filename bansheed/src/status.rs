@@ -2,11 +2,12 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use banshee_common::{Blocker, BlockerKind, KokoroTTSConfig, error::BansheeError, utils};
+use banshee_common::{Blocker, BlockerKind, error::BansheeError, utils};
 
-use crate::config::{BargeInMode, Config, HotkeyMode, STTPreset, TTSFallback};
+use crate::config::{BargeInMode, Config, HotkeyMode};
 #[cfg(target_os = "macos")]
 use crate::permissions::Access;
+use crate::text_to_speech::local::Engine;
 
 // Reports and names the fix, never mutates; true when every required check passed
 pub async fn run(config: Result<Config, BansheeError>) -> bool {
@@ -26,14 +27,7 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             let path = utils::config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "config.toml".to_string());
-            // First line only: toml's diagnostic runs five lines with a caret,
-            // and `main` has already printed it in full
-            let reason = e.to_string();
-            let reason = reason.lines().next().unwrap_or("could not be read");
-            healthy &= fail(
-                &format!("config.toml invalid: {reason}"),
-                &format!("edit {path}, or delete it to use defaults"),
-            );
+            healthy &= fail(&invalid_config_line(&e), &invalid_config_fix(&path));
             Config::default()
         }
     };
@@ -62,8 +56,8 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
             stt_answer,
         );
     }
-    // A remote speaker loads no Kokoro model and no espeak-ng table, so each
-    // local check would name a fix that changes nothing.
+    // A remote speaker loads no local voice until it fails, so each local
+    // check would name a fix for a speaker that is not running.
     if config.tts.provider.is_remote() {
         healthy &= check_remote_side(
             crate::credentials::RemoteKey::Tts,
@@ -73,28 +67,10 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         );
         healthy &= check_remote_voice(&config.tts.remote.voice);
     } else {
-        let kokoro = KokoroTTSConfig::new(&config.tts.voice);
-        let kokoro_present = models_dir.join(&kokoro.model_name).exists()
-            && models_dir.join(&kokoro.voice_name).exists();
-        match (kokoro_present, &config.tts.fallback) {
-            (true, _) => {
-                pass(&format!(
-                    "kokoro tts model present (voice {})",
-                    config.tts.voice
-                ));
-            }
-            (false, TTSFallback::System) => note(
-                "kokoro tts model missing, will fall back to system voice (run: banshee setup)",
-            ),
-            (false, TTSFallback::None) => {
-                healthy &= fail(
-                    "kokoro tts model missing and [tts] fallback = \"none\"",
-                    "run: banshee setup",
-                );
-            }
-        }
-
-        check_espeak();
+        healthy &= match local_voice_check(&config.tts.voice, &models_dir) {
+            (line, None) => pass(&line),
+            (line, Some(fix)) => fail(&line, fix),
+        };
     }
 
     // Before the checks that depend on it: a dead daemon causes the microphone
@@ -135,17 +111,35 @@ pub async fn run(config: Result<Config, BansheeError>) -> bool {
         }
     }
 
-    report_tell(&config);
+    #[cfg(target_os = "macos")]
+    {
+        use banshee_common::utils::Registration;
 
+        use crate::service::Agent;
+
+        match crate::service::registration(Agent::Daemon) {
+            Ok(Registration::Enabled) => note("the daemon starts at login"),
+            Ok(Registration::RequiresApproval) => {
+                note(&crate::service::awaits_approval(Agent::Daemon))
+            }
+            Ok(Registration::NotRegistered | Registration::NotFound) => {
+                note("the daemon does not start at login (start it with: banshee start)")
+            }
+            Err(error) => note(&format!("could not read the login items: {error}")),
+        }
+        if let Ok(follow) = crate::service::follow_the_log(Agent::Daemon) {
+            note(&format!("daemon log: {follow}"));
+        }
+        if let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) {
+            note(&format!("running from {}", install_shape(&exe)));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(service) = crate::service::service_file_path() {
         if service.exists() {
             note("start-at-login service installed");
         } else {
             note("no start-at-login service (install with: banshee start)");
-        }
-        #[cfg(target_os = "macos")]
-        if let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) {
-            note(&format!("running from {}", install_shape(&exe)));
         }
     }
 
@@ -173,66 +167,6 @@ fn check_credentials_mode() -> bool {
     }
 }
 
-/// What `banshee tell` would run. A note and never a failure: a machine with
-/// no headless agent still records, types and speaks.
-fn report_tell(config: &Config) {
-    // The same call `tell` makes, so the checklist cannot name one agent while
-    // a command runs another.
-    let agent = crate::connect::Env::from_machine()
-        .and_then(|env| crate::tell::resolved_agent(&config.tell, &env, &env.home));
-    let found = agent.is_ok();
-    note(&tell_line(agent));
-    if let Some(line) = silent_tell_line(found, config.feedback_mode()) {
-        note(line);
-    }
-}
-
-/// The note for a mode where a failed tell makes no sound: `none`, and `visual`
-/// on macOS, where the figure shows the failure.
-fn silent_tell_line(agent_found: bool, mode: crate::config::FeedbackMode) -> Option<&'static str> {
-    if !agent_found {
-        return None;
-    }
-    match mode {
-        crate::config::FeedbackMode::Off => Some(
-            "feedback is none, so a failed tell makes no sound; \
-             run banshee config set feedback.mode sound to hear it",
-        ),
-        crate::config::FeedbackMode::Visual if cfg!(target_os = "macos") => Some(
-            "feedback is visual, so a failed tell makes no sound while the menu bar icon \
-             draws the figure; the figure shows the failure instead",
-        ),
-        _ => None,
-    }
-}
-
-/// The failure carries its own fix, so this adds none.
-fn tell_line(agent: Result<crate::tell::Headless, BansheeError>) -> String {
-    match agent {
-        Ok(agent) if agent.scoped() => format!(
-            "tell runs {}, and it gets the folders in tell.paths, and its own run directory",
-            agent.name()
-        ),
-        Ok(agent) => format!(
-            "tell runs {}, which takes no folder list, so it can edit any file",
-            agent.name()
-        ),
-        Err(reason) => format!("tell has no agent: {reason}"),
-    }
-}
-
-// Optional dependency, so it reports but never fails the health check.
-fn check_espeak() {
-    if crate::text_to_speech::local::oov::OovFallback::available() {
-        pass("espeak-ng present (pronounces unknown words)");
-    } else {
-        note(&format!(
-            "espeak-ng not installed; unknown words are spelled out. install: {}",
-            crate::text_to_speech::local::oov::espeak_install_hint()
-        ));
-    }
-}
-
 // Walks the given PATH directly: `which` is its own package on minimal systems.
 // Answers with the file, because a caller that has to run it cannot resolve the
 // name again: a supervised process is handed a different PATH.
@@ -255,11 +189,26 @@ fn runnable(candidate: &Path) -> bool {
     candidate.is_file()
 }
 
+/// The line for the local voice, and the fix when a file it speaks with is
+/// missing. Nothing else speaks in its place, so a missing file is a failure.
+fn local_voice_check(voice: &str, models_dir: &Path) -> (String, Option<&'static str>) {
+    let engine = Engine::of(voice).name();
+    let files = crate::models::download::voice_files(voice);
+    match crate::models::download::still_missing(&files, models_dir).first() {
+        None => (format!("local voice {voice} present ({engine})"), None),
+        Some(file) => (
+            format!("local voice {voice} ({engine}) is missing {}", file.name),
+            Some("run: banshee setup"),
+        ),
+    }
+}
+
 fn check_model(models_dir: &Path, name: &str) -> bool {
+    let named = crate::models::name_of(name);
     if models_dir.join(name).exists() {
-        pass(&format!("model present: {name}"))
+        pass(&format!("{named} is here"))
     } else {
-        fail(&format!("model missing: {name}"), "run: banshee setup")
+        fail(&format!("{named} is missing"), "run: banshee setup")
     }
 }
 
@@ -306,10 +255,22 @@ fn probe_remote_sides(
     );
     std::thread::scope(|scope| {
         let stt = stt_key.map(|key| {
-            scope.spawn(|| crate::remote_probe::probe(&config.stt.remote.base_url, key))
+            scope.spawn(|| {
+                crate::remote_probe::probe(
+                    crate::credentials::RemoteKey::Stt,
+                    &config.stt.remote.base_url,
+                    key,
+                )
+            })
         });
         let tts = tts_key.map(|key| {
-            scope.spawn(|| crate::remote_probe::probe(&config.tts.remote.base_url, key))
+            scope.spawn(|| {
+                crate::remote_probe::probe(
+                    crate::credentials::RemoteKey::Tts,
+                    &config.tts.remote.base_url,
+                    key,
+                )
+            })
         });
         let joined = |handle: Option<std::thread::ScopedJoinHandle<'_, _>>| {
             handle.map(|handle| handle.join().unwrap())
@@ -326,7 +287,15 @@ fn check_remote_side(
     answer: Option<crate::remote_probe::Probe>,
 ) -> bool {
     let mut healthy = check_remote_key(side, credentials);
-    if let Some(answer) = answer {
+    if let Err(refusal) = crate::config::refuse_plain_http_to_the_internet(side, base_url) {
+        healthy &= fail(
+            &refusal,
+            &format!(
+                "banshee config set {} <an https URL>",
+                side.base_url_setting()
+            ),
+        );
+    } else if let Some(answer) = answer {
         healthy &= check_remote_answer(side, base_url, answer);
     }
     healthy
@@ -467,10 +436,7 @@ fn check_grants(daemon: &Daemon) -> bool {
 
     let mut healthy = true;
     for (name, consequence, fix) in denied {
-        healthy &= fail(
-            &format!("{name} missing for the daemon: {consequence}"),
-            fix,
-        );
+        healthy &= fail(&format!("{name} for the daemon: {consequence}"), fix);
     }
     healthy
 }
@@ -511,23 +477,13 @@ const MICROPHONE_FIX: &str = "check Microphone is allowed in System Settings > \
 #[cfg(not(target_os = "macos"))]
 const MICROPHONE_FIX: &str = "connect a microphone, or fix [audio] input_device in config.toml";
 
-// One line for both paths, so a substitution reads the same whether the daemon
-// reports it or the checklist opens the device itself.
-fn microphone_line(lead: &str, open: Option<&str>, missing: Option<&str>) -> String {
-    format!(
-        "{lead}: {}",
-        banshee_common::microphone_label(open, missing)
-    )
-}
-
 // Split out so the decision is testable without a microphone: a substitute
 // records, so it passes, and only a device that will not open fails.
 fn report_probe(probed: Result<(String, Option<String>), String>) -> bool {
     match probed {
-        Ok((open, missing)) => pass(&microphone_line(
-            "microphone opens for capture",
-            Some(&open),
-            missing.as_deref(),
+        Ok((open, missing)) => pass(&format!(
+            "microphone opens for capture: {}",
+            banshee_common::microphone_name(Some(&open), missing.as_deref()).unwrap_or(open)
         )),
         Err(e) => fail(&format!("microphone will not open: {e}"), MICROPHONE_FIX),
     }
@@ -564,31 +520,94 @@ fn shared_device(open: &str, speaker: Option<(String, u32)>) -> Option<String> {
     })
 }
 
-fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
-    match banshee_common::audio_device(status) {
-        Some(open) => {
-            let held = pass(&microphone_line(
-                "daemon has the microphone",
-                Some(open),
-                banshee_common::missing_device(status),
-            ));
-            // After the line it annotates, or it reads as a note on the check
-            // above it.
-            if let Some(cost) = shared_device(open, crate::audio::default_output()) {
-                note(&cost);
-            }
-            held
-        }
-        None => fail("the daemon has no microphone open", open_fix(blockers)),
-    }
+/// One checklist line, so a test reads what would print.
+#[derive(Debug, PartialEq, Eq)]
+enum Line {
+    Pass(String),
+    Note(String),
+    Fail(String, String),
 }
 
-/// A daemon still building its pipeline has no device to name and no fault to
-/// report. `None` once it is open or broken, which the lines below answer for.
-/// The word is the daemon's own, so the two sides cannot spell it differently.
+fn say(lines: Vec<Line>) -> bool {
+    lines.into_iter().fold(true, |healthy, line| {
+        healthy
+            & match line {
+                Line::Pass(text) => pass(&text),
+                Line::Note(text) => {
+                    note(&text);
+                    true
+                }
+                Line::Fail(text, fix) => fail(&text, &fix),
+            }
+    })
+}
+
+fn report_open(status: &serde_json::Value, blockers: &[Blocker]) -> bool {
+    say(microphone_lines(
+        status,
+        blockers,
+        crate::audio::default_output(),
+    ))
+}
+
+/// The microphone of a daemon that can record. A closed one is no fault: the
+/// next use opens the device named, so naming it is the whole check.
+fn microphone_lines(
+    status: &serde_json::Value,
+    blockers: &[Blocker],
+    speaker: Option<(String, u32)>,
+) -> Vec<Line> {
+    let device = banshee_common::audio_device(status);
+    let missing = banshee_common::missing_device(status);
+    let open = banshee_common::microphone_open(status);
+    let refused = banshee_common::microphone_refused(status);
+    let line = format!(
+        "microphone: {}",
+        banshee_common::microphone_label(device, missing, open, refused)
+    );
+    let mut lines = Vec::new();
+    lines.push(match device {
+        None => Line::Fail(
+            "no microphone is available to open".to_string(),
+            open_fix(blockers).to_string(),
+        ),
+        // The grant check below fails with the fix, so this line only says
+        // what the device waits on.
+        Some(_) if refused => Line::Note(line),
+        Some(_) => Line::Pass(line),
+    });
+    // After the line it annotates, or it reads as a note on the check above it.
+    if let Some(cost) = device
+        .filter(|_| open)
+        .and_then(|name| shared_device(name, speaker))
+    {
+        lines.push(Line::Note(cost));
+    }
+    if open && status["config"]["audio"]["keep_open"].as_bool() == Some(true) {
+        lines.push(Line::Note(
+            "audio.keep_open is on, so the microphone stays open between uses".to_string(),
+        ));
+    }
+    // A remote listener loads no model of its own, only the detector.
+    if banshee_common::flag(status, "loading_model") {
+        lines.push(Line::Note(
+            if status["remote"]["stt"]["remote"].as_bool() == Some(true) {
+                "loading the voice detection model"
+            } else {
+                "loading the listening model"
+            }
+            .to_string(),
+        ));
+    }
+    lines
+}
+
+/// A daemon still building its pipeline has no fault to report yet. `None`
+/// once it is open or broken, which the lines below answer for. The word is
+/// the daemon's own, so the two sides cannot spell it differently.
 fn still_opening(status: &serde_json::Value) -> Option<&'static str> {
     (banshee_common::pipeline(status) == Some(crate::state::Pipeline::Opening.as_str()))
-        .then_some("the microphone is still opening")
+        .then_some("the daemon is still starting")
 }
 
 // Opening a second stream fails on backends that allow only one, which would
@@ -678,11 +697,6 @@ fn report_settings(config: &Config, daemon: &Daemon) {
         BargeInMode::Stop => "stop",
         BargeInMode::None => "none",
     };
-    let preset = match config.stt.preset {
-        STTPreset::Fast => "fast",
-        STTPreset::Balanced => "balanced",
-        STTPreset::Quality => "quality",
-    };
     let on_off = |enabled: bool| if enabled { "on" } else { "off" };
 
     note(&format!(
@@ -696,24 +710,27 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     .map_or(config.stt.vad_threshold, |live| live as f32);
 
     note(&format!(
-        "stt {preset}, vad {}, endpoint {} ms, {} vocabulary {}",
+        "stt {}, vad {}, endpoint {} ms, {} {} to know",
+        config.stt.model,
         vad_threshold,
         config.stt.endpoint_silence_ms,
         config.stt.vocabulary.len(),
         if config.stt.vocabulary.len() == 1 {
-            "term"
+            "word"
         } else {
-            "terms"
+            "words"
         }
     ));
+    if let Some(line) = translate_line(config) {
+        note(&line);
+    }
     let stt_remote = live(daemon, |status| status["remote"]["stt"]["remote"].as_bool())
         .unwrap_or(config.stt.provider.is_remote());
     let tts_remote = live(daemon, |status| status["remote"]["tts"]["remote"].as_bool())
         .unwrap_or(config.tts.provider.is_remote());
     note(&format!(
-        "tts {} at {}x, history {}",
+        "tts {}, history {}",
         settings_voice(config, tts_remote),
-        config.tts.speed,
         on_off(config.daemon.save_history)
     ));
     if !stt_remote && !tts_remote {
@@ -751,8 +768,20 @@ fn report_settings(config: &Config, daemon: &Daemon) {
     }
 }
 
-/// The voice the settings line names. Each speaker keeps its own, and nothing
-/// reads `tts.voice` while a remote speaker is in force.
+/// `None` unless `stt.translate` asks a listening model that cannot translate.
+fn translate_line(config: &Config) -> Option<String> {
+    let model = crate::models::stt_model(config)?;
+    let facts = crate::speech_to_text::ModelFacts::of(Some(model));
+    (config.stt.translate && !facts.translates).then(|| {
+        format!(
+            "stt.translate is on, but {} does not translate, so it writes what it hears",
+            model.id
+        )
+    })
+}
+
+/// The voice the settings line names. Each speaker keeps its own, and a remote
+/// speaker in force speaks in `tts.remote.voice`.
 fn settings_voice(config: &Config, tts_remote: bool) -> &str {
     if tts_remote {
         &config.tts.remote.voice
@@ -761,8 +790,8 @@ fn settings_voice(config: &Config, tts_remote: bool) -> &str {
     }
 }
 
-/// Names no producer: four paths write `last_error`, and naming one lies about
-/// the other three.
+/// Names no producer: several paths write `last_error`, and naming one lies
+/// about the others.
 fn last_error_line(error: &str) -> String {
     format!("the last attempt failed: {error}")
 }
@@ -797,6 +826,15 @@ fn install_shape(exe: &std::path::Path) -> &'static str {
     } else {
         "a loose binary"
     }
+}
+
+fn invalid_config_line(error: &BansheeError) -> String {
+    format!("config.toml invalid: {error}")
+}
+
+/// The line above names each key and its section, so the fix points there.
+fn invalid_config_fix(path: &str) -> String {
+    format!("edit {path} as the line above says, then run banshee start")
 }
 
 fn pass(msg: &str) -> bool {

@@ -4,7 +4,7 @@ import { derived, writable } from 'svelte/store';
 /// neither answers what a client has to route on. Both are absent from a
 /// daemon older than them.
 export type Remedy = 'download' | 'restart' | 'grant';
-type FileRole = 'speech' | 'detector' | 'engine' | 'voice';
+type FileRole = 'speech' | 'detector' | 'engine' | 'voice' | 'turn';
 export type BlockerKind = 'permission' | 'model' | 'pipeline' | 'provider' | 'keyfile';
 export type Blocker = {
   kind: BlockerKind;
@@ -16,12 +16,44 @@ export type Blocker = {
   fix: string;
   command?: string;
 };
-/// A file the daemon has not got. Absent is not blocked: a heavier preset
-/// chosen while dictation runs on the loaded model is one of these and no
-/// blocker, so the two lists answer different questions.
+/// A file the daemon has not got. Absent is not blocked: another model chosen
+/// while dictation runs on the loaded one is one of these and no blocker, so
+/// the two lists answer different questions.
 export type MissingFile = { name: string; role: FileRole; megabytes: number };
+/// A listening model the window offers, with the facts its catalogue entry
+/// holds. `accept_command` is set while its licence waits to be accepted.
+export type ListeningModel = {
+  id: string;
+  label: string;
+  megabytes: number;
+  downloaded: boolean;
+  suggested: boolean;
+  languages: string[];
+  streams: boolean;
+  credit: string | null;
+  licence: { name: string; summary: string };
+  accept_command: string | null;
+};
+/// A listening model whose licence waits, with the command that accepts it.
+export type WaitsOnLicence = ListeningModel & { accept_command: string };
+
+/// The chosen model when its licence waits. The window cannot accept a
+/// licence and the daemon refuses the download, so the window shows the
+/// licence and the command in place of a Download.
+export function chosenWaitsOnLicence(
+  models: ListeningModel[],
+  chosen: string,
+): WaitsOnLicence | null {
+  return (
+    models.find((one): one is WaitsOnLicence => one.id === chosen && !!one.accept_command) ?? null
+  );
+}
 export type Status = Record<string, unknown> & {
-  english_only?: boolean;
+  /// Whether the listener in use can write what it hears in English.
+  stt_translates?: boolean;
+  stt_models?: ListeningModel[];
+  /// The id of the listening model in force, null under a remote listener.
+  stt_model?: string | null;
   download_megabytes?: number;
   missing_downloads?: MissingFile[];
   running: boolean;
@@ -40,9 +72,7 @@ export type Status = Record<string, unknown> & {
     tts: {
       remote: boolean;
       host: string | null;
-      /// Whether the speaker the config names is the one running. False
-      /// whenever the system voice took over instead, a local Kokoro that
-      /// failed to load included.
+      /// Whether the speaker the config names is the one running.
       speaker_started: boolean;
       key_present: boolean;
     };
@@ -50,20 +80,32 @@ export type Status = Record<string, unknown> & {
 };
 export type Live = {
   /// Which of the daemon's five activities is in force. The flags below stay
-  /// because a panel names them one by one; only the ranking is the daemon's.
+  /// because a page names them one by one; only the ranking is the daemon's.
   activity: 'idle' | 'recording' | 'speaking' | 'listening' | 'busy';
   recording: boolean;
   speaking: boolean;
   armed: boolean;
   transcribing: boolean;
-  /// A Whisper file being read off disk. The listener answers on the model it
-  /// still holds while this runs, so it is work and not a stop.
+  /// A listening model being read off disk. The listener answers on the model
+  /// it still holds while this runs, so it is work and not a stop.
   loading_model: boolean;
-  telling: boolean;
+  /// The device the next use opens while the microphone is closed, and the
+  /// one recording while it is open.
   audio_device: string | null;
   missing_device: string | null;
+  /// Whether capture is open now: for a use, or for good under
+  /// `audio.keep_open`.
+  microphone_open: boolean;
+  /// macOS refuses Banshee the microphone. Always false elsewhere.
+  microphone_refused: boolean;
   last_error: string | null;
   last_speech_error: string | null;
+  /// The cues in force: `visual`, `sound`, `both` or `none`. Null until read.
+  feedback: string | null;
+  /// Moves on every kept row and every clear.
+  history_changes: number;
+  /// Moves on every settings write, from any surface.
+  settings_changes: number;
 };
 export type Daemon = {
   status: Status | null;
@@ -85,7 +127,7 @@ export type Word =
   | 'Ready'
   | 'Recording'
   | 'Speaking'
-  | 'Listening'
+  | 'Your turn'
   | 'Working'
   | 'Not ready'
   | 'Downloading'
@@ -102,11 +144,15 @@ export function empty(): Daemon {
       armed: false,
       transcribing: false,
       loading_model: false,
-      telling: false,
       audio_device: null,
       missing_device: null,
+      microphone_open: false,
+      microphone_refused: false,
       last_error: null,
       last_speech_error: null,
+      feedback: null,
+      history_changes: 0,
+      settings_changes: 0,
     },
     pending: new Set(),
     down: null,
@@ -153,17 +199,25 @@ export function isReady(state: Daemon): boolean {
   return state.status?.ready !== false;
 }
 // `ready` comes only with the full status, but a push carries the pipeline it
-// was judged against.
-export function readinessIsStale(state: Daemon, pushed: { pipeline?: string }): boolean {
-  if (state.status === null || pushed.pipeline === undefined) return false;
-  return pushed.pipeline !== state.status.pipeline;
+// was judged against. The blockers come only with it too, and a pushed
+// microphone refusal that differs from the one held says they are out of date.
+export function readinessIsStale(
+  state: Daemon,
+  pushed: { pipeline?: string; microphone_refused?: boolean },
+): boolean {
+  if (state.status === null) return false;
+  if (pushed.pipeline !== undefined && pushed.pipeline !== state.status.pipeline) return true;
+  return (
+    pushed.microphone_refused !== undefined &&
+    pushed.microphone_refused !== state.live.microphone_refused
+  );
 }
 export function isDown(state: Daemon): boolean {
   return state.down !== null || state.status?.running === false;
 }
 // The daemon ranks them; this only reads its answer.
 const SAYS: Record<string, Word> = {
-  listening: 'Listening',
+  listening: 'Your turn',
   recording: 'Recording',
   speaking: 'Speaking',
   busy: 'Working',
@@ -186,7 +240,7 @@ export function lampForm(word: Word): LampForm {
   // The one state where doing nothing is the wrong answer, so it cannot share
   // a silhouette with Ready. Downloading and Not ready still do: each resolves
   // on its own, and the window shouts them in the body anyway.
-  if (word === 'Listening') return 'listening';
+  if (word === 'Your turn') return 'listening';
   if (word === 'Working') return 'busy';
   return 'idle';
 }
@@ -241,7 +295,9 @@ function names(progress: Progress): string {
     : progress.model;
 }
 
-const megabytes = (bytes: number) => Math.round(bytes / 1_048_576);
+export const MEGABYTE = 1_048_576;
+
+const megabytes = (bytes: number) => Math.round(bytes / MEGABYTE);
 
 export function downloadLine(progress: Progress): string {
   const done = percent(progress.bytes, progress.total);
@@ -280,12 +336,22 @@ export function endsTheRun(progress: Progress): boolean {
   return !progress.count || progress.index === progress.count;
 }
 
-/// A key that refuses for want of a file is answered by the download that
-/// brings it, and the daemon asks it again as the run ends, so naming a restart
-/// while one is arriving is advice that cannot work.
-const WAITS_ON_A_FILE = new Set(['stt.preset', 'tts.voice', 'tts.speed']);
+/// Whether the run is fetching a listening model. The progress label is the
+/// file in the user's words; the role the daemon gives each missing file is
+/// what tells a model from a voice.
+export function fetchingSpeech(state: Daemon): boolean {
+  const file = state.download?.model;
+  return (state.status?.missing_downloads ?? []).some(
+    (missing) => missing.name === file && missing.role === 'speech',
+  );
+}
 
-export const waitsOnARestart = derived(daemon, (state) => {
+/// A key that refuses for want of a file is answered by the download that
+/// brings it, and the daemon asks it again as the run ends, so the download
+/// speaks for it while one is arriving.
+export const WAITS_ON_A_FILE = new Set(['stt.model', 'tts.voice']);
+
+export const waiting = derived(daemon, (state) => {
   const fetching =
     state.download !== null ||
     (state.status?.blockers ?? []).some((blocker) => blocker.remedy === 'download');
@@ -293,34 +359,32 @@ export const waitsOnARestart = derived(daemon, (state) => {
   return new Set(keys);
 });
 
-// What one side of the pipeline is doing, read once so the panel that
+// What one side of the pipeline is doing, read once so the page that
 // configures it and the line that reports it cannot state a different truth.
-// `host` is the side in force and `willUse` is the side the config asks for.
+// `host` is the side in force.
 type Side = {
   live: boolean;
   remote: boolean;
   keyPresent: boolean;
-  pending: boolean;
   host: string | null;
-  willUse: string | null;
 };
 
 export type Listening = Side & {
   device: string | null;
+  /// Capture is open now. Closed is no fault: the next use opens `device`.
+  open: boolean;
+  /// `audio.keep_open` holds the microphone open between uses.
+  keepOpen: boolean;
+  /// The listening model is being read into memory.
+  loading: boolean;
+  /// macOS refuses Banshee the microphone.
+  refused: boolean;
   /// The kind of the first blocker that stops the listener, or null when none
   /// stops it.
   stoppedBy: BlockerKind | null;
 };
 
-export type Speech = Side & { started: boolean; voiceName: string };
-
-function hostOf(url: string): string | null {
-  try {
-    return new URL(url).hostname || null;
-  } catch {
-    return null;
-  }
-}
+export type Speech = Side & { started: boolean; voiceName: string; voiceDownloaded: boolean };
 
 // The daemon answers an empty host, not null, when the address the side runs on
 // is no URL, so one absence reaches every reader.
@@ -332,43 +396,41 @@ function table(config: Record<string, unknown>): Record<string, unknown> {
   return (config.remote ?? {}) as Record<string, unknown>;
 }
 
-export function listeningFacts(state: Daemon, waits: Set<string>): Listening {
-  const stt = (state.status?.config?.stt ?? {}) as Record<string, unknown>;
+export function listeningFacts(state: Daemon): Listening {
+  const blockers = state.status?.blockers ?? [];
   return {
     live: !isDown(state),
     remote: state.status?.remote?.stt?.remote === true,
     keyPresent: state.status?.remote?.stt?.key_present === true,
-    pending: waits.has('stt.provider'),
     host: inForce(state.status?.remote?.stt?.host),
-    willUse: hostOf(String(table(stt).base_url ?? '')),
     device: state.live.audio_device,
-    stoppedBy:
-      (state.status?.blockers ?? []).find((one) => one.id === 'recording_pipeline')?.kind ?? null,
+    open: state.live.microphone_open,
+    keepOpen: state.status?.config?.audio?.keep_open === true,
+    loading: state.live.loading_model,
+    refused: state.live.microphone_refused,
+    stoppedBy: blockers.find((one) => one.id === 'recording_pipeline')?.kind ?? null,
   };
 }
 
 export function speechFacts(
   state: Daemon,
-  waits: Set<string>,
-  voices: { id: string; name: string }[],
+  voices: { id: string; name: string; downloaded?: boolean }[],
 ): Speech {
   const tts = (state.status?.config?.tts ?? {}) as Record<string, unknown>;
   const remote = state.status?.remote?.tts?.remote === true;
   const id = String(tts.voice ?? '');
+  const listed = voices.find((one) => one.id === id);
   return {
     live: !isDown(state),
     remote,
     started: state.status?.remote?.tts?.speaker_started === true,
     keyPresent: state.status?.remote?.tts?.key_present === true,
-    pending: waits.has('tts.provider'),
     host: inForce(state.status?.remote?.tts?.host),
-    willUse: hostOf(String(table(tts).base_url ?? '')),
     // The config leads, as it does for every value the window shows. A remote
     // speaker names its voice in its own table, and Kokoro's list holds no
     // entry for it, so there is no name to look up.
-    voiceName: remote
-      ? String(table(tts).voice ?? '')
-      : (voices.find((one) => one.id === id)?.name ?? id),
+    voiceName: remote ? String(table(tts).voice ?? '') : (listed?.name ?? id),
+    voiceDownloaded: listed?.downloaded !== false,
   };
 }
 

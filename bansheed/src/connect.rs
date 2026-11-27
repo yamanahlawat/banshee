@@ -132,10 +132,6 @@ pub enum Change {
         before: Option<String>,
         after: String,
     },
-    RemoveFile {
-        path: PathBuf,
-        before: String,
-    },
 }
 
 pub fn detect(agent: Agent, env: &Env) -> Presence {
@@ -172,9 +168,7 @@ pub fn row(agent: Agent, env: &Env) -> AgentRow {
 pub fn planned_change(change: &Change) -> PlannedChange {
     PlannedChange {
         path: match change {
-            Change::WriteFile { path, .. } | Change::RemoveFile { path, .. } => {
-                Some(path.display().to_string())
-            }
+            Change::WriteFile { path, .. } => Some(path.display().to_string()),
             Change::Run { .. } => None,
         },
         diff: render(change),
@@ -275,8 +269,7 @@ fn plan_claude(env: &Env) -> Result<Vec<Change>, BansheeError> {
 }
 
 /// Sets Banshee's Stop hook to `command` at `path`, whose text the plan
-/// already read as `before`, and removes the `banshee-speak-check.sh` script
-/// that the file's Stop hook names.
+/// already read as `before`.
 fn claude_hook(
     path: PathBuf,
     before: Option<String>,
@@ -287,24 +280,9 @@ fn claude_hook(
         .and_then(OsStr::to_str)
         .unwrap_or("settings.json")
         .to_string();
-    let retired = old_script(before.as_deref(), &file)?;
-    let mut changes = rewrite_from(path, before, |before| {
+    rewrite_from(path, before, |before| {
         hooks::with_turn_end(before, &file, command, crate::turn_end::GatedAgent::Claude)
-    })?;
-    changes.extend(retired);
-    Ok(changes)
-}
-
-/// The removal of the script that the Stop hook in `file` runs, whatever the script holds.
-fn old_script(settings: Option<&str>, file: &str) -> Result<Option<Change>, BansheeError> {
-    let root = parse_settings(settings, file)?;
-    let Some(script) = hooks::stop_hook_commands(&root).find_map(hook_script_path) else {
-        return Ok(None);
-    };
-    Ok(read_if_present(&script)?.map(|before| Change::RemoveFile {
-        path: script,
-        before,
-    }))
+    })
 }
 
 /// The command's words, with a quoted one kept whole and its quotes dropped.
@@ -332,13 +310,6 @@ fn command_words(command: &str) -> Vec<String> {
         words.push(word);
     }
     words
-}
-
-fn hook_script_path(command: &str) -> Option<PathBuf> {
-    command_words(command)
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|path| path.file_name() == Some(OsStr::new(HOOK_SCRIPT_NAME)))
 }
 
 pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
@@ -565,8 +536,6 @@ fn write_if_changed(path: PathBuf, after: &str) -> Result<Option<Change>, Banshe
     }))
 }
 
-pub(crate) const HOOK_SCRIPT_NAME: &str = "banshee-speak-check.sh";
-
 fn parse_settings(settings: Option<&str>, file: &str) -> Result<serde_json::Value, BansheeError> {
     match settings {
         Some(text) => serde_json::from_str(text)
@@ -593,12 +562,11 @@ pub fn render(change: &Change) -> String {
                 .header(old_name, &name)
                 .to_string()
         }
-        Change::RemoveFile { path, .. } => format!("remove {}\n", path.display()),
     }
 }
 
 // POSIX single quotes, which a shell and `command_words` both read back as the one word
-fn shell_word(word: &str) -> String {
+pub(crate) fn shell_word(word: &str) -> String {
     let plain = word
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || "-_./=:".contains(c));
@@ -639,16 +607,6 @@ pub fn apply(change: &Change, path: &OsStr) -> Result<(), BansheeError> {
                 )));
             }
             banshee_common::utils::write_atomically(path, after.as_bytes(), None)?;
-            Ok(())
-        }
-        Change::RemoveFile { path, before } => {
-            if read_if_present(path)?.as_deref() != Some(before.as_str()) {
-                return Err(BansheeError::Rejected(format!(
-                    "{} changed after the plan was made. Nothing was removed; run the command again.",
-                    path.display()
-                )));
-            }
-            std::fs::remove_file(path)?;
             Ok(())
         }
     }
@@ -765,17 +723,22 @@ fn remaining(deadline: std::time::Instant) -> std::time::Duration {
     deadline.saturating_duration_since(std::time::Instant::now())
 }
 
-/// The exit status, or `None` when the shell still runs at the deadline.
-fn exit_status(child: &mut std::process::Child, deadline: std::time::Instant) -> Option<String> {
+/// The exit status, or `None` when the child still runs at the deadline. A
+/// failed poll counts as the answer.
+pub(crate) fn exit_by(
+    deadline: std::time::Instant,
+    poll: std::time::Duration,
+    mut try_wait: impl FnMut() -> std::io::Result<Option<std::process::ExitStatus>>,
+) -> Option<std::io::Result<std::process::ExitStatus>> {
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status.to_string()),
-            Err(error) => return Some(error.to_string()),
+        match try_wait() {
+            Ok(Some(status)) => return Some(Ok(status)),
+            Err(error) => return Some(Err(error)),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     return None;
                 }
-                std::thread::sleep(SHELL_POLL);
+                std::thread::sleep(poll);
             }
         }
     }
@@ -834,7 +797,10 @@ fn probe(shell: &OsStr, flags: &[&str], wait: std::time::Duration) -> Probe {
     let found = extract_path(&answer);
     let ended = match found {
         Some(_) => None,
-        None => exit_status(&mut child, deadline),
+        None => exit_by(deadline, SHELL_POLL, || child.try_wait()).map(|status| match status {
+            Ok(status) => status.to_string(),
+            Err(error) => error.to_string(),
+        }),
     };
     reap(&mut child);
     if let Some(path) = found {
@@ -876,7 +842,7 @@ impl SearchPath {
 
     /// The PATH in hand, or `probe`'s answer when nothing is in hand yet.
     fn get(&self, probe: impl FnOnce() -> OsString) -> OsString {
-        if let Some(path) = self.held().clone() {
+        if let Some(path) = self.in_hand() {
             return path;
         }
         // No probe runs under the lock. A reader that waited behind another
@@ -884,6 +850,10 @@ impl SearchPath {
         // race probes twice instead, and the first answer stored wins.
         let probed = probe();
         self.held().get_or_insert(probed).clone()
+    }
+
+    fn in_hand(&self) -> Option<OsString> {
+        self.held().clone()
     }
 
     /// Puts a PATH in hand, and answers what readers now get.
@@ -907,8 +877,8 @@ fn answered(shell_path: Option<OsString>) -> Option<OsString> {
 }
 
 fn searchable(path: OsString) -> OsString {
-    // `tell show`, dictation, the status report and the readiness check all
-    // search this PATH. None of them builds an `Env`, so the call belongs here.
+    // Dictation, the status report and the readiness check all search this
+    // PATH. None of them builds an `Env`, so the call belongs here.
     let path = match crate::service::home_dir() {
         Ok(home) => with_local_bin(path, &home),
         Err(_) => path,
@@ -936,14 +906,21 @@ fn refreshed(
     match probe() {
         Some(path) => cache.replace(path),
         // The fallback holds almost nothing under a service manager. Writing
-        // it over a working PATH would take detection, dictation and `tell`
-        // down until a later probe happened to answer.
+        // it over a working PATH would take detection and dictation down until
+        // a later probe happened to answer.
         None => cache.get(fallback),
     }
 }
 
 pub(crate) fn resolved_path() -> OsString {
     SEARCH_PATH.get(|| probed_path().unwrap_or_else(fallback_path))
+}
+
+/// The PATH `resolved_path` answers, once a reader has resolved it. Never asks
+/// a shell.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn resolved_path_in_hand() -> Option<OsString> {
+    SEARCH_PATH.in_hand()
 }
 
 /// Asks the shell again, so an agent installed since the daemon started
@@ -959,12 +936,6 @@ impl Env {
 
     pub fn from_machine_refreshed() -> Result<Env, BansheeError> {
         Env::with_path(refreshed_path())
-    }
-
-    #[cfg(test)]
-    fn with_shell_path(shell_path: Option<OsString>) -> Result<Env, BansheeError> {
-        let path = answered(shell_path).map(searchable);
-        Env::with_path(path.unwrap_or_else(fallback_path))
     }
 
     /// Where detection found this agent's binary. `None` for an agent found by
@@ -992,16 +963,7 @@ impl Env {
         let banshee = std::fs::canonicalize(&exe)?;
         let shim = banshee_common::utils::sibling(&exe, SHIM_NAME).ok();
         // Starting Claude Code makes it rewrite its own config, so detection never spawns an agent
-        let on_path = Agent::ALL
-            .iter()
-            .filter_map(|agent| match agent.signal() {
-                Signal::OnPath(binary) => Some(binary),
-                Signal::HomeDir(_) => None,
-            })
-            .filter_map(|binary| {
-                crate::status::resolve(binary, &path).map(|program| (binary, program))
-            })
-            .collect();
+        let on_path = found_on(&path);
         Ok(Env {
             home,
             claude_config_dir,
@@ -1012,6 +974,17 @@ impl Env {
             claude_shim: registered_claude_shim(&claude_global),
         })
     }
+}
+
+fn found_on(path: &OsStr) -> Vec<(&'static str, PathBuf)> {
+    Agent::ALL
+        .iter()
+        .filter_map(|agent| match agent.signal() {
+            Signal::OnPath(binary) => Some(binary),
+            Signal::HomeDir(_) => None,
+        })
+        .filter_map(|binary| crate::status::resolve(binary, path).map(|program| (binary, program)))
+        .collect()
 }
 
 /// Applies in order and names what is left when one fails.
@@ -1077,7 +1050,6 @@ pub fn apply_plan(
     }
     apply_all(changes, path, |change| match change {
         Change::WriteFile { path, .. } => println!("wrote {}", path.display()),
-        Change::RemoveFile { path, .. } => println!("removed {}", path.display()),
         Change::Run { .. } => {}
     })?;
     println!("{done}");

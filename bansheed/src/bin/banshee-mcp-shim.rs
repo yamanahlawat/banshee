@@ -1,7 +1,6 @@
 use banshee_common::error::BansheeError;
 use banshee_common::{
-    BANSHEE_ASK_USER, BANSHEE_GET_TRANSCRIPTION, BANSHEE_SPEAK, JsonRpcRequest, JsonRpcResponse,
-    rpc_code, utils,
+    BANSHEE_ASK_USER, BANSHEE_SPEAK, JsonRpcRequest, JsonRpcResponse, rpc_code, utils,
 };
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -25,23 +24,6 @@ fn tool_failed(id: Option<serde_json::Value>, error: BansheeError) -> JsonRpcRes
         id,
         serde_json::json!({"content": [{"type": "text", "text": error.rpc_message()}], "isError": true}),
     )
-}
-
-fn latest_id(result: &serde_json::Value) -> Option<u64> {
-    result
-        .get("transcriptions")?
-        .as_array()?
-        .iter()
-        .filter_map(|item| item.get("id").and_then(|v| v.as_u64()))
-        .max()
-}
-
-/// The model's arguments with `agent_pid` set to this shim's agent, over any the model sent.
-fn for_agent(mut arguments: serde_json::Value, agent_pid: u32) -> serde_json::Value {
-    if let Some(object) = arguments.as_object_mut() {
-        object.insert("agent_pid".into(), serde_json::json!(agent_pid));
-    }
-    arguments
 }
 
 /// What `tools/list` advertises. The MCP client sends a name from here back
@@ -69,14 +51,6 @@ fn tools_list() -> serde_json::Value {
                 },
                 "required": ["question"]
             }
-        },
-        {
-            "name": "listen_for_prompt",
-            "description": "Read what the user has said since your last call. Use it to pick up speech you did not explicitly ask for; when you have a question, prefer ask_user, which speaks it and waits in one step. It returns at once unless you pass timeout_ms, and empty text if the user said nothing.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"timeout_ms": {"type": "number", "description": "Wait up to this many milliseconds for new speech before returning, e.g. 30000 when expecting an answer. Capped at 30000."}}
-            }
         }
     ]
     })
@@ -87,8 +61,6 @@ fn tools_list() -> serde_json::Value {
 async fn tools_call(
     id: Option<serde_json::Value>,
     params: Option<&serde_json::Value>,
-    last_seen_id: &mut u64,
-    agent_pid: u32,
     daemon: &impl AsyncFn(&str, serde_json::Value) -> Result<serde_json::Value, BansheeError>,
 ) -> JsonRpcResponse {
     let tool_name = params.and_then(|p| p.get("name")).and_then(|n| n.as_str());
@@ -100,49 +72,19 @@ async fn tools_call(
         .unwrap_or_else(|| serde_json::json!({}));
     match tool_name {
         Some(name) if name.ends_with("speak_status") => {
-            match daemon(BANSHEE_SPEAK, for_agent(arguments, agent_pid)).await {
+            match daemon(BANSHEE_SPEAK, arguments).await {
                 Ok(result) => tool_text(id, &result.to_string()),
                 Err(error) => tool_failed(id, error),
             }
         }
         Some(name) if name.ends_with("ask_user") => {
-            match daemon(BANSHEE_ASK_USER, for_agent(arguments, agent_pid)).await {
+            match daemon(BANSHEE_ASK_USER, arguments).await {
                 Ok(result) => {
                     let text = result
                         .get("text")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     tool_text(id, text)
-                }
-                Err(error) => tool_failed(id, error),
-            }
-        }
-        Some(name) if name.ends_with("listen_for_prompt") => {
-            let wait_ms = arguments
-                .get("timeout_ms")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let daemon_response = daemon(
-                BANSHEE_GET_TRANSCRIPTION,
-                serde_json::json!({"since_id": *last_seen_id, "wait_ms": wait_ms}),
-            )
-            .await;
-            match daemon_response {
-                Ok(result) => {
-                    if let Some(id) = latest_id(&result) {
-                        *last_seen_id = (*last_seen_id).max(id);
-                    }
-                    let transcriptions = result
-                        .get("transcriptions")
-                        .and_then(|v| v.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    let text = transcriptions
-                        .iter()
-                        .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    tool_text(id, &text)
                 }
                 Err(error) => tool_failed(id, error),
             }
@@ -159,8 +101,6 @@ async fn tools_call(
 /// The reply one stdin line owes, or `None` where the protocol expects silence.
 async fn respond(
     line: &str,
-    last_seen_id: &mut u64,
-    agent_pid: u32,
     daemon: impl AsyncFn(&str, serde_json::Value) -> Result<serde_json::Value, BansheeError>,
 ) -> Option<JsonRpcResponse> {
     let request = match serde_json::from_str::<JsonRpcRequest>(line) {
@@ -183,16 +123,7 @@ async fn respond(
             }),
         ),
         "tools/list" => JsonRpcResponse::success(request.id, tools_list()),
-        "tools/call" => {
-            tools_call(
-                request.id,
-                request.params.as_ref(),
-                last_seen_id,
-                agent_pid,
-                &daemon,
-            )
-            .await
-        }
+        "tools/call" => tools_call(request.id, request.params.as_ref(), &daemon).await,
         _ => JsonRpcResponse::error(request.id, rpc_code::METHOD_NOT_FOUND, "Method not found!"),
     })
 }
@@ -203,8 +134,6 @@ async fn respond(
 async fn serve(
     input: impl tokio::io::AsyncBufRead + Unpin,
     mut output: impl tokio::io::AsyncWrite + Unpin,
-    agent_pid: u32,
-    mut last_seen_id: u64,
     daemon: impl AsyncFn(&str, serde_json::Value) -> Result<serde_json::Value, BansheeError>,
 ) {
     let mut lines = input.lines();
@@ -218,7 +147,7 @@ async fn serve(
             },
         };
         let running = request_id(&line);
-        let mut call = std::pin::pin!(respond(&line, &mut last_seen_id, agent_pid, &daemon));
+        let mut call = std::pin::pin!(respond(&line, &daemon));
         let response = loop {
             tokio::select! {
                 response = &mut call => break response,
@@ -254,28 +183,13 @@ fn cancelled_id(line: &str) -> Option<serde_json::Value> {
 
 #[tokio::main]
 async fn main() {
-    banshee_common::logging::install();
-
-    // Ring cursor, primed so the first poll skips pre-session speech.
-    // On error the daemon is down and its ring will start empty, so 0 is right.
-    let last_seen_id: u64 = utils::call_daemon(
-        BANSHEE_GET_TRANSCRIPTION,
-        serde_json::json!({"since_id": 0, "wait_ms": 0}),
-    )
-    .await
-    .ok()
-    .and_then(|result| latest_id(&result))
-    .unwrap_or(0);
-
-    let agent_pid = std::os::unix::process::parent_id();
+    banshee_common::logging::install("mcp-shim");
 
     log::info!("Banshee MCP shim started");
 
     serve(
         BufReader::new(io::stdin()),
         io::stdout(),
-        agent_pid,
-        last_seen_id,
         utils::call_daemon,
     )
     .await;
@@ -284,8 +198,6 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const AGENT: u32 = 4242;
 
     async fn no_daemon(
         _method: &str,
@@ -334,7 +246,7 @@ mod tests {
             drop(client);
             got
         };
-        let serving = serve(BufReader::new(input), output, AGENT, 0, daemon);
+        let serving = serve(BufReader::new(input), output, daemon);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             tokio::join!(serving, reading).1
         })
@@ -428,13 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_ping_is_answered_on_its_own_id() {
-        let reply = respond(
-            &request("ping", serde_json::json!({}), Some(3)),
-            &mut 0,
-            AGENT,
-            no_daemon,
-        )
-        .await;
+        let reply = respond(&request("ping", serde_json::json!({}), Some(3)), no_daemon).await;
 
         match reply {
             Some(JsonRpcResponse::Success { id, .. }) => assert_eq!(id, Some(serde_json::json!(3))),
@@ -444,7 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_notification_gets_no_reply() {
-        let reply = respond(&cancel(3), &mut 0, AGENT, no_daemon).await;
+        let reply = respond(&cancel(3), no_daemon).await;
 
         assert!(
             reply.is_none(),
@@ -456,8 +362,6 @@ mod tests {
     async fn an_unknown_method_with_an_id_is_method_not_found() {
         let reply = respond(
             &request("resources/list", serde_json::json!({}), Some(4)),
-            &mut 0,
-            AGENT,
             no_daemon,
         )
         .await;
@@ -479,8 +383,6 @@ mod tests {
                 serde_json::json!({"name": "frobnicate", "arguments": {}}),
                 Some(7),
             ),
-            &mut 0,
-            AGENT,
             no_daemon,
         )
         .await;
@@ -503,8 +405,6 @@ mod tests {
     async fn a_tool_call_with_no_name_says_so() {
         let reply = respond(
             &request("tools/call", serde_json::json!({"arguments": {}}), Some(8)),
-            &mut 0,
-            AGENT,
             no_daemon,
         )
         .await;
@@ -523,41 +423,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_listen_never_moves_the_cursor_backwards() {
-        let older_ring = async |_method: &str, params: serde_json::Value| {
-            assert_eq!(
-                params["since_id"], 20,
-                "the daemon is asked from the cursor"
-            );
-            Ok(serde_json::json!({"transcriptions": [
-                {"id": 4, "text": "first"},
-                {"id": 9, "text": "second"}
-            ]}))
-        };
-        let mut cursor = 20;
-
-        let reply = respond(
-            &request(
-                "tools/call",
-                serde_json::json!({"name": "listen_for_prompt", "arguments": {}}),
-                Some(9),
-            ),
-            &mut cursor,
-            AGENT,
-            older_ring,
-        )
-        .await;
-
-        assert_eq!(cursor, 20, "ids below the cursor do not pull it back");
-        match reply {
-            Some(JsonRpcResponse::Success { result, .. }) => {
-                assert_eq!(result["content"][0]["text"], "first\nsecond");
-            }
-            other => panic!("a listen answers the text it read, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn a_daemon_refusal_is_a_tool_result_the_model_can_read() {
         let refusing = async |_method: &str, _params: serde_json::Value| {
             Err(BansheeError::Rpc {
@@ -572,8 +437,6 @@ mod tests {
                 serde_json::json!({"name": "speak_status", "arguments": {}}),
                 Some(5),
             ),
-            &mut 0,
-            AGENT,
             refusing,
         )
         .await;
@@ -592,13 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_line_that_is_not_a_request_is_answered_with_a_parse_error() {
-        let reply = respond(
-            "{\"jsonrpc\": \"2.0\", \"method\": 3",
-            &mut 0,
-            AGENT,
-            no_daemon,
-        )
-        .await;
+        let reply = respond("{\"jsonrpc\": \"2.0\", \"method\": 3", no_daemon).await;
 
         match reply {
             Some(JsonRpcResponse::Error { error, id, .. }) => {
@@ -613,15 +470,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn both_voice_tools_name_the_agent_over_what_the_model_sent() {
+    async fn both_voice_tools_send_the_models_arguments_with_no_agent_pid() {
         for (tool, arguments) in [
-            (
-                "speak_status",
-                serde_json::json!({"text": "hi", "agent_pid": 1}),
-            ),
+            ("speak_status", serde_json::json!({"text": "hi"})),
             (
                 "ask_user",
-                serde_json::json!({"question": "ready?", "agent_pid": 1}),
+                serde_json::json!({"question": "ready?", "timeout_ms": 5000}),
             ),
         ] {
             let sent = std::sync::Mutex::new(None);
@@ -629,52 +483,18 @@ mod tests {
                 *sent.lock().unwrap() = Some(params);
                 Ok(serde_json::json!({"ok": true, "text": ""}))
             };
-            let mut last_seen_id = 0;
             respond(
                 &request(
                     "tools/call",
                     serde_json::json!({"name": tool, "arguments": arguments}),
                     Some(1),
                 ),
-                &mut last_seen_id,
-                AGENT,
                 recording,
             )
             .await;
-            assert_eq!(
-                sent.lock().unwrap().as_ref().unwrap()["agent_pid"],
-                AGENT,
-                "{tool}"
-            );
+            let sent = sent.lock().unwrap().take().unwrap();
+            assert_eq!(sent, arguments, "{tool}");
+            assert!(sent.get("agent_pid").is_none(), "{tool}");
         }
-    }
-
-    #[tokio::test]
-    async fn a_listen_names_no_agent() {
-        let sent = std::sync::Mutex::new(None);
-        let recording = async |_method: &str, params: serde_json::Value| {
-            *sent.lock().unwrap() = Some(params);
-            Ok(serde_json::json!({"transcriptions": []}))
-        };
-        let mut last_seen_id = 0;
-        respond(
-            &request(
-                "tools/call",
-                serde_json::json!({"name": "listen_for_prompt", "arguments": {}}),
-                Some(1),
-            ),
-            &mut last_seen_id,
-            AGENT,
-            recording,
-        )
-        .await;
-        assert!(
-            sent.lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .get("agent_pid")
-                .is_none()
-        );
     }
 }

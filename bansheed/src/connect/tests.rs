@@ -44,18 +44,6 @@ fn installed_env(home: &std::path::Path, agent: Agent) -> Env {
 const SHIM: &str = "/opt/banshee/bin/banshee-mcp-shim";
 
 #[test]
-fn detection_searches_the_resolved_path_not_the_process_path() {
-    let dir = scratch("resolved-path");
-    // Executable, because an installed CLI is: a file it cannot run is not one
-    crate::test_support::write_executable(&dir.join("codex"), "#!/bin/sh\n");
-
-    let env = Env::with_shell_path(Some(OsString::from(&dir))).unwrap();
-    let expected = dir.join("codex");
-    assert_eq!(env.program(Agent::Codex), Some(expected.as_path()));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn the_searched_path_holds_the_installer_directory() {
     let path = with_local_bin(OsString::from("/usr/bin:/bin"), Path::new("/home/someone"));
     assert_eq!(
@@ -93,6 +81,14 @@ fn readers_after_the_first_share_its_probe() {
     assert_eq!(path.get(&probe), OsString::from("/probe/1"));
     assert_eq!(path.get(&probe), OsString::from("/probe/1"));
     assert_eq!(probes.get(), 1);
+}
+
+#[test]
+fn the_path_in_hand_is_read_without_a_probe() {
+    let path = SearchPath::new();
+    assert_eq!(path.in_hand(), None);
+    path.get(|| OsString::from("/probed"));
+    assert_eq!(path.in_hand(), Some(OsString::from("/probed")));
 }
 
 #[test]
@@ -142,21 +138,6 @@ fn an_empty_answer_is_no_answer() {
         answered(Some(OsString::from("/usr/bin"))),
         Some(OsString::from("/usr/bin"))
     );
-}
-
-#[test]
-fn the_fallback_keeps_every_directory_the_process_had() {
-    let fallback = fallback_path();
-    for dir in path_dirs(&std::env::var_os("PATH").unwrap_or_default()) {
-        assert!(path_holds(&fallback, &dir), "{} is lost", dir.display());
-    }
-}
-
-#[test]
-fn every_caller_of_the_resolved_path_gets_the_installer_directory() {
-    let local_bin = crate::service::home_dir().unwrap().join(".local/bin");
-    let path = resolved_path();
-    assert!(path_holds(&path, &local_bin), "{path:?}");
 }
 
 fn fake_shell(name: &str, body: &str) -> PathBuf {
@@ -882,44 +863,6 @@ fn pi_plan_is_empty_when_already_connected() {
 }
 
 #[test]
-fn a_hook_whose_script_only_contains_banshees_name_is_not_banshees() {
-    let before = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash '/x/my-banshee-speak-check.sh'"}]}]}}"#;
-    let command = hooks::turn_end_command(GatedAgent::Claude, Path::new(BANSHEE));
-    let after = hooks::with_turn_end(Some(before), "settings.json", &command, GatedAgent::Claude)
-        .unwrap()
-        .expect("a script of the user's own is not Banshee's hook, so Banshee's must be added");
-    let value: serde_json::Value = serde_json::from_str(&after).unwrap();
-    assert_eq!(value["hooks"]["Stop"][1]["hooks"][0]["command"], command);
-}
-
-#[test]
-fn the_hook_script_path_is_the_word_named_exactly_like_the_script() {
-    let cases = [
-        (
-            "bash '/x/banshee-speak-check.sh'",
-            Some("/x/banshee-speak-check.sh"),
-        ),
-        ("bash /x/banshee-speak-check.sh.bak", None),
-        ("bash '/x/my-banshee-speak-check.sh'", None),
-        (
-            "bash '/x/my hooks/banshee-speak-check.sh'",
-            Some("/x/my hooks/banshee-speak-check.sh"),
-        ),
-        (
-            "bash \"/x/my hooks/banshee-speak-check.sh\"",
-            Some("/x/my hooks/banshee-speak-check.sh"),
-        ),
-    ];
-    for (command, want) in cases {
-        assert_eq!(
-            hook_script_path(command),
-            want.map(std::path::PathBuf::from),
-            "{command}"
-        );
-    }
-}
-
-#[test]
 fn unreadable_settings_are_an_error_not_a_rewrite() {
     let error = hooks::with_turn_end(Some("{ not json"), "settings.json", "x", GatedAgent::Claude)
         .expect_err("must not guess");
@@ -1058,7 +1001,7 @@ fn claude_plan_honours_the_config_dir() {
         .iter()
         .filter_map(|c| match c {
             Change::WriteFile { path, .. } => Some(path),
-            Change::Run { .. } | Change::RemoveFile { .. } => None,
+            Change::Run { .. } => None,
         })
         .collect();
     assert_eq!(paths, [&home.join(".claude-work/settings.json")]);
@@ -1150,6 +1093,14 @@ fn a_command_renders_as_one_quoted_line() {
     assert_eq!(
         render(&change),
         "$ claude mcp add -- '/Applications/My Tools/banshee-mcp-shim'\n"
+    );
+}
+
+#[test]
+fn a_word_holding_a_quote_stays_one_word() {
+    assert_eq!(
+        shell_word("/home/ada's box/bin/banshee"),
+        "'/home/ada'\\''s box/bin/banshee'"
     );
 }
 
@@ -1415,10 +1366,6 @@ fn the_turn_end_command_is_recognised_for_its_own_agent_only() {
         let claude = hooks::turn_end_command(GatedAgent::Claude, Path::new(banshee));
         assert!(!hooks::is_turn_end_command(&claude, GatedAgent::Codex));
     }
-    assert!(!hooks::is_turn_end_command(
-        "bash '/x/banshee-speak-check.sh'",
-        GatedAgent::Claude
-    ));
     for theirs in [
         "/opt/banshee/bin/banshee turn-end claude",
         "/bin/sh -c 'echo done' /x/banshee",
@@ -1583,19 +1530,6 @@ fn a_moved_banshee_rewrites_its_hook_in_place() {
 }
 
 #[test]
-fn the_old_script_entry_is_replaced_in_place() {
-    let command = hooks::turn_end_command(GatedAgent::Claude, Path::new(BANSHEE));
-    let before = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash '/x/banshee-speak-check.sh'","timeout":15,"statusMessage":"Checking you spoke"}]}]}}"#;
-    let after = hooks::with_turn_end(Some(before), "settings.json", &command, GatedAgent::Claude)
-        .unwrap()
-        .unwrap();
-    let root: serde_json::Value = serde_json::from_str(&after).unwrap();
-    let stop = root["hooks"]["Stop"].as_array().unwrap();
-    assert_eq!(stop.len(), 1);
-    assert_eq!(stop[0]["hooks"][0]["command"], command);
-}
-
-#[test]
 fn antigravity_lists_its_stop_handler_directly_under_the_event() {
     let command = hooks::turn_end_command(GatedAgent::Antigravity, Path::new(BANSHEE));
     let after = hooks::with_antigravity_turn_end(Some(r#"{"theirs":{"enabled":true}}"#), &command)
@@ -1662,104 +1596,6 @@ fn codex_and_antigravity_plan_their_server_and_their_hook() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-fn claude_with_old_script(name: &str, script_body: Option<&str>) -> (PathBuf, Env, PathBuf) {
-    let home = scratch(name);
-    let mut env = env_at(&home);
-    found(&mut env, "claude");
-    env.claude_shim = Some(SHIM.into());
-    let script = home.join("elsewhere/banshee-speak-check.sh");
-    if let Some(body) = script_body {
-        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-        std::fs::write(&script, body).unwrap();
-    }
-    std::fs::create_dir_all(home.join(".claude")).unwrap();
-    std::fs::write(
-        home.join(".claude/settings.json"),
-        serde_json::json!({"hooks": {"Stop": [{"hooks": [{
-            "type": "command",
-            "command": format!("bash '{}'", script.display()),
-        }]}]}})
-        .to_string(),
-    )
-    .unwrap();
-    (home, env, script)
-}
-
-#[test]
-fn reconnecting_claude_retires_banshees_script() {
-    let old_script = format!("#!/bin/sh\n{BANSHEE} --check\n");
-    let (home, env, script) = claude_with_old_script("claude-retire", Some(&old_script));
-    let changes = plan(Agent::ClaudeCode, &env).unwrap();
-    assert!(
-        changes.contains(&Change::RemoveFile {
-            path: script.clone(),
-            before: old_script
-        }),
-        "{changes:?}"
-    );
-    for change in &changes {
-        apply_write(change).unwrap();
-    }
-    assert!(!script.exists());
-    let settings = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
-    assert!(settings.contains("turn-end claude"), "{settings}");
-    assert!(!settings.contains("banshee-speak-check.sh"), "{settings}");
-    assert!(
-        plan(Agent::ClaudeCode, &env).unwrap().is_empty(),
-        "a second run is empty"
-    );
-    let _ = std::fs::remove_dir_all(&home);
-}
-
-#[test]
-fn reconnecting_claude_removes_an_edited_copy_of_the_script() {
-    let edited = "#!/bin/sh\n# the user's own edit\necho spoke\n";
-    let (home, env, script) = claude_with_old_script("claude-edited", Some(edited));
-    let changes = plan(Agent::ClaudeCode, &env).unwrap();
-    assert!(
-        changes.contains(&Change::RemoveFile {
-            path: script.clone(),
-            before: edited.into()
-        }),
-        "{changes:?}"
-    );
-    for change in &changes {
-        apply_write(change).unwrap();
-    }
-    assert!(!script.exists());
-    let settings = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
-    assert!(settings.contains("turn-end claude"), "{settings}");
-    let _ = std::fs::remove_dir_all(&home);
-}
-
-#[test]
-fn reconnecting_claude_leaves_a_missing_script_alone() {
-    let (home, env, script) = claude_with_old_script("claude-missing", None);
-    let changes = plan(Agent::ClaudeCode, &env).unwrap();
-    assert!(
-        !changes
-            .iter()
-            .any(|c| matches!(c, Change::RemoveFile { .. })),
-        "{changes:?}"
-    );
-    assert!(!script.exists());
-    let _ = std::fs::remove_dir_all(&home);
-}
-
-#[test]
-fn a_removal_is_refused_when_the_file_changed_after_the_plan() {
-    let dir = scratch("remove-changed");
-    let path = dir.join("f");
-    std::fs::write(&path, "new\n").unwrap();
-    let change = Change::RemoveFile {
-        path: path.clone(),
-        before: "old\n".into(),
-    };
-    assert!(apply_write(&change).is_err());
-    assert!(path.exists());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 #[test]
 fn only_codex_carries_a_note_after_connecting() {
     assert!(Agent::Codex.connect_note().unwrap().contains("/hooks"));
@@ -1769,4 +1605,43 @@ fn only_codex_carries_a_note_after_connecting() {
     {
         assert_eq!(agent.connect_note(), None, "{agent:?}");
     }
+}
+
+#[test]
+fn detection_finds_an_agent_on_the_path_it_is_given() {
+    let bin = scratch("found-on");
+    let codex = bin.join("codex");
+    crate::test_support::write_executable(&codex, "#!/bin/sh\n");
+    let found = found_on(bin.as_os_str());
+    assert_eq!(found, vec![("codex", codex)]);
+    let _ = std::fs::remove_dir_all(&bin);
+}
+
+#[test]
+fn a_child_is_waited_for_until_the_deadline_and_no_longer() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+    use std::time::{Duration, Instant};
+
+    const POLL: Duration = Duration::from_millis(1);
+    const CAP: Duration = Duration::from_millis(250);
+
+    let deadline = Instant::now() + Duration::from_millis(20);
+    assert!(exit_by(deadline, POLL, || Ok(None)).is_none());
+    assert!(Instant::now() >= deadline);
+
+    let exited = ExitStatus::from_raw(0);
+    let mut polls = 0;
+    let third = || {
+        polls += 1;
+        Ok((polls == 3).then_some(exited))
+    };
+    assert_eq!(
+        exit_by(Instant::now() + CAP, POLL, third).map(Result::unwrap),
+        Some(exited)
+    );
+
+    let gone = || Err(std::io::Error::other("gone"));
+    let failed = exit_by(Instant::now() + CAP, POLL, gone).expect("an error is an answer");
+    assert_eq!(failed.unwrap_err().to_string(), "gone");
 }

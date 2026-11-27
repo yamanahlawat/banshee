@@ -2,12 +2,16 @@ use std::path::Path;
 use std::time::Duration;
 
 use banshee_common::{
-    DownloadProgress, DownloadState, FileRole, KokoroTTSConfig, SileroVADConfig, WhisperConfig,
-    error::BansheeError, utils::models_path,
+    COMPANION_VOICE, DownloadProgress, DownloadState, FileRole, KokoroTTSConfig, POCKET_DIR,
+    SileroVADConfig,
+    error::BansheeError,
+    listening::{self, ListeningModel},
+    utils::models_path,
 };
 use tokio::io::AsyncWriteExt;
 
-use crate::config::Config;
+use crate::config::{Config, Provider, TTSFallback};
+use crate::models::licences::{self, Accepted};
 
 pub fn percent(bytes: u64, total: Option<u64>) -> Option<u64> {
     let total = total?;
@@ -34,56 +38,116 @@ fn milestone(bytes: u64, total: Option<u64>) -> u64 {
 
 #[derive(Clone)]
 pub struct Download {
-    /// What the server sends for this file, measured on 2026-08-30. Shown as
-    /// "about", because it is upstream's to change and nothing here checks.
+    /// Shown as "about", because it is upstream's to change and nothing here
+    /// checks. A listening model's is its catalogue bytes over 1,000,000.
     pub megabytes: u64,
     pub name: String,
     pub url: String,
+    /// Checked before the file is renamed into place. A listening model and the
+    /// turn model carry one.
+    pub sha256: Option<&'static str>,
+    /// The listening model this file is, whose licence may hold it back.
+    pub model: Option<&'static ListeningModel>,
 }
 
-/// Every preset also pulls these three. Measured on disk on 2026-08-30.
+/// Measured on disk on 2026-08-30.
 const KOKORO_MEGABYTES: u64 = 311;
 const DETECTOR_MEGABYTES: u64 = 2;
 const VOICE_MEGABYTES: u64 = 1;
+const TURN_MEGABYTES: u64 = 9;
 
-/// The published `Content-Length` of each speech model, measured 2026-08-30.
-fn speech_megabytes(file: &str) -> u64 {
-    match file {
-        "ggml-base.en.bin" => 141,
-        "ggml-large-v3-q5_0.bin" => 1031,
-        _ => 547,
-    }
+/// Pinned to revisions so a repo update cannot silently change the model.
+pub fn pocket_files() -> Vec<Download> {
+    const ONNX_REPO: &str = "https://huggingface.co/KevinAHM/pocket-tts-onnx/resolve/58a6d00cf13d239b6748cb0769f35c580a8f606c/onnx/english_2026-04";
+    const KYUTAI_REPO: &str = "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/a7056f505a4a8ca72d8b5fb1440071d6f1a35739";
+    [
+        (ONNX_REPO, "flow_lm_main.onnx", 303),
+        (ONNX_REPO, "flow_lm_flow.onnx", 40),
+        (ONNX_REPO, "mimi_decoder.onnx", 42),
+        (ONNX_REPO, "text_conditioner.onnx", 17),
+        (ONNX_REPO, "bundle.json", 1),
+        (ONNX_REPO, "bos_before_voice.npy", 1),
+        (KYUTAI_REPO, "tokenizer.json", 1),
+    ]
+    .into_iter()
+    .map(|(repo, file, megabytes)| Download {
+        megabytes,
+        name: format!("{POCKET_DIR}/{file}"),
+        url: format!("{repo}/{file}"),
+        sha256: None,
+        model: None,
+    })
+    .collect()
 }
 
-pub fn wanted(config: &Config) -> Vec<Download> {
-    let vad = SileroVADConfig::new(crate::models::VAD_MODEL);
-    let kokoro = KokoroTTSConfig::new(&config.tts.voice);
-    let mut downloads = Vec::with_capacity(4);
-    if let Some(speech) = crate::models::stt_file(config) {
-        let whisper = WhisperConfig::new(speech);
-        downloads.push(Download {
-            megabytes: speech_megabytes(&whisper.model_name),
-            name: whisper.model_name,
-            url: whisper.download_url,
-        });
+/// Every file a local voice speaks with: Pocket's for the companion, Kokoro and
+/// the voice's own file for any other id.
+pub fn voice_files(voice: &str) -> Vec<Download> {
+    if voice == COMPANION_VOICE {
+        return pocket_files();
     }
-    downloads.extend([
-        Download {
-            megabytes: DETECTOR_MEGABYTES,
-            name: vad.model_name,
-            url: vad.download_url,
-        },
+    let kokoro = KokoroTTSConfig::new(voice);
+    vec![
         Download {
             megabytes: KOKORO_MEGABYTES,
             name: kokoro.model_name,
             url: kokoro.model_url,
+            sha256: None,
+            model: None,
         },
         Download {
             megabytes: VOICE_MEGABYTES,
             name: kokoro.voice_name,
             url: kokoro.voice_url,
+            sha256: None,
+            model: None,
         },
-    ]);
+    ]
+}
+
+/// The local voice speaks under a local speaker, and under a remote one that
+/// falls back to it.
+fn speaks_locally(config: &Config) -> bool {
+    config.tts.provider == Provider::Local || config.tts.fallback == TTSFallback::Local
+}
+
+pub fn listening_file(model: &'static ListeningModel) -> Download {
+    Download {
+        megabytes: model.bytes / 1_000_000,
+        name: model.file.to_string(),
+        url: model.url(),
+        sha256: Some(model.sha256),
+        model: Some(model),
+    }
+}
+
+fn turn_file() -> Download {
+    Download {
+        megabytes: TURN_MEGABYTES,
+        name: crate::models::TURN_MODEL.to_string(),
+        url: "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-cpu.onnx".to_string(),
+        sha256: Some("2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f"),
+        model: None,
+    }
+}
+
+pub fn wanted(config: &Config) -> Vec<Download> {
+    let vad = SileroVADConfig::new(crate::models::VAD_MODEL);
+    let mut downloads = Vec::new();
+    if let Some(model) = crate::models::stt_model(config) {
+        downloads.push(listening_file(model));
+    }
+    downloads.push(Download {
+        megabytes: DETECTOR_MEGABYTES,
+        name: vad.model_name,
+        url: vad.download_url,
+        sha256: None,
+        model: None,
+    });
+    downloads.push(turn_file());
+    if speaks_locally(config) {
+        downloads.extend(voice_files(&config.tts.voice));
+    }
     downloads
 }
 
@@ -114,17 +178,16 @@ fn other(error: reqwest::Error) -> BansheeError {
     BansheeError::Other(error.to_string())
 }
 
-/// Only the daemon holds the preset table, so a client that has to tell the
+/// Only the daemon holds the catalogue, so a client that has to tell the
 /// speech model from the voice asks this rather than reading the filename.
 pub fn role(file: &str) -> FileRole {
-    if crate::config::STTPreset::ALL
-        .iter()
-        .any(|preset| preset.model_name() == file)
-    {
+    if listening::find_file(file).is_some() {
         FileRole::Speech
     } else if file == crate::models::VAD_MODEL {
         FileRole::Detector
-    } else if file == banshee_common::KOKORO_MODEL {
+    } else if file == crate::models::TURN_MODEL {
+        FileRole::Turn
+    } else if file == banshee_common::KOKORO_MODEL || Path::new(file).starts_with(POCKET_DIR) {
         FileRole::Engine
     } else {
         FileRole::Voice
@@ -135,10 +198,11 @@ pub fn role(file: &str) -> FileRole {
 /// role, so rewording this cannot move what a client routes on.
 pub fn label(file: &str) -> &'static str {
     match role(file) {
-        FileRole::Speech => "Speech model",
+        FileRole::Speech => "Listening model",
         FileRole::Detector => "Voice detection model",
         FileRole::Engine => "Speech engine",
         FileRole::Voice => "Voice",
+        FileRole::Turn => "Turn detection model",
     }
 }
 
@@ -184,6 +248,9 @@ async fn fetch(
     on_progress: &mut impl FnMut(DownloadProgress),
 ) -> Result<(), BansheeError> {
     let part = dir.join(format!("{}.part", download.name));
+    if let Some(folder) = part.parent() {
+        tokio::fs::create_dir_all(folder).await?;
+    }
     let partial = tokio::fs::metadata(&part)
         .await
         .map(|meta| meta.len())
@@ -233,9 +300,36 @@ async fn fetch(
 
     file.flush().await?;
     drop(file);
+    if let Some(expected) = download.sha256 {
+        verify(&part, expected).await?;
+    }
     tokio::fs::rename(&part, dir.join(&download.name)).await?;
     report(sent, DownloadState::Done);
     Ok(())
+}
+
+/// A file that fails is deleted, since resuming it only appends to bytes that
+/// are already wrong.
+async fn verify(part: &Path, expected: &str) -> Result<(), BansheeError> {
+    let path = part.to_path_buf();
+    let actual = tokio::task::spawn_blocking(move || sha256_of(&path))
+        .await
+        .map_err(|error| BansheeError::Other(error.to_string()))??;
+    if actual == expected {
+        return Ok(());
+    }
+    let _ = tokio::fs::remove_file(part).await;
+    Err(BansheeError::Other(
+        "the download failed its sha256 check against Banshee's record, so it was deleted. If it fails again, report it: the file upstream may have changed."
+            .to_string(),
+    ))
+}
+
+fn sha256_of(path: &Path) -> std::io::Result<String> {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut std::fs::File::open(path)?, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// reqwest sets no timeout of its own, so a connect that never completes holds
@@ -253,11 +347,15 @@ fn build_client() -> Result<reqwest::Client, BansheeError> {
         .map_err(other)
 }
 
+/// A listening model whose licence limits commercial use is refused here,
+/// before any request, until the person has accepted that licence.
+///
 /// The partial file of a failed download stays on disk, so the next call
 /// continues it rather than starting over.
 pub async fn download_all(
     dir: &Path,
     downloads: &[Download],
+    accepted: &Accepted,
     on_progress: &mut impl FnMut(DownloadProgress),
 ) -> Result<(), BansheeError> {
     tokio::fs::create_dir_all(dir).await?;
@@ -269,7 +367,14 @@ pub async fn download_all(
         let index = position + 1;
         // One bad file must not strand the rest, and a caller counting terminal
         // notifications is owed one for every name it was given
-        if let Err(error) = fetch(&client, download, dir, index, count, on_progress).await {
+        let refused = download
+            .model
+            .and_then(|model| licences::refusal(model, accepted));
+        let fetched = match refused {
+            Some(reason) => Err(BansheeError::Rejected(reason)),
+            None => fetch(&client, download, dir, index, count, on_progress).await,
+        };
+        if let Err(error) = fetched {
             on_progress(progress(
                 &download.name,
                 index,
@@ -291,30 +396,45 @@ pub async fn download_all(
 #[cfg(test)]
 mod size_tests {
     use super::{pending_megabytes, wanted};
-    use crate::config::{Config, Provider, STTPreset};
+    use crate::config::{Config, Provider};
+
+    #[test]
+    fn wanted_puts_the_configured_model_first() {
+        let mut config = Config::default();
+        config.stt.model = "whisper-large-v3-turbo".to_string();
+        let turbo = banshee_common::listening::find("whisper-large-v3-turbo").unwrap();
+
+        let first = wanted(&config).remove(0);
+        assert_eq!(first.name, turbo.file);
+        assert_eq!(first.url, turbo.url());
+        assert_eq!(first.sha256, Some(turbo.sha256));
+    }
 
     /// The window shows this instead of summing a file list it does not hold,
-    /// so it has to follow the preset rather than a fixed total.
+    /// so it has to follow the model rather than a fixed total.
     #[test]
-    fn the_speech_model_decides_most_of_a_first_run() {
+    fn the_speech_model_moves_the_first_run() {
         let dir = std::path::Path::new("/no-such-models-dir-9f3a");
         let mut config = Config::default();
-
-        config.stt.preset = STTPreset::Fast;
-        let fast = pending_megabytes(&wanted(&config), dir);
-        config.stt.preset = STTPreset::Quality;
-        let quality = pending_megabytes(&wanted(&config), dir);
-
-        assert!(quality > fast * 2, "fast {fast}, quality {quality}");
+        let parakeet = pending_megabytes(&wanted(&config), dir);
+        config.stt.model = "whisper-large-v3-turbo".to_string();
+        let turbo = pending_megabytes(&wanted(&config), dir);
+        let price = |id: &str| {
+            super::listening_file(banshee_common::listening::find(id).unwrap()).megabytes
+        };
+        assert_eq!(
+            parakeet - turbo,
+            price(banshee_common::listening::DEFAULT_MODEL) - price("whisper-large-v3-turbo")
+        );
     }
 
     #[test]
-    fn a_remote_listener_downloads_no_whisper_file() {
+    fn a_remote_listener_downloads_no_listening_model() {
         let mut config = Config::default();
         config.stt.provider = Provider::Remote;
         let names: Vec<String> = wanted(&config).into_iter().map(|d| d.name).collect();
         assert!(
-            !names.iter().any(|name| name.starts_with("ggml-")),
+            !names.iter().any(|name| name.ends_with(".gguf")),
             "{names:?}"
         );
         assert!(names.contains(&crate::models::VAD_MODEL.to_string()));
@@ -324,8 +444,7 @@ mod size_tests {
     #[test]
     fn each_missing_file_carries_its_own_price_and_role() {
         let dir = std::path::Path::new("/no-such-models-dir-9f3a");
-        let mut config = Config::default();
-        config.stt.preset = STTPreset::Quality;
+        let config = Config::default();
 
         let missing = super::still_missing(&wanted(&config), dir);
         let speech = missing
@@ -340,14 +459,199 @@ mod size_tests {
             pending_megabytes(&wanted(&config), dir)
         );
     }
+}
 
-    /// Nothing left to fetch costs nothing, which is what a client shows once
-    /// setup is done.
+#[cfg(test)]
+mod sha256_tests {
+    use super::{Download, download_all};
+    use crate::models::licences::Accepted;
+    use std::io::Write;
+
+    fn nothing_accepted() -> Accepted {
+        Accepted::at("/no-such-dir-9f3a/accepted-licences".into())
+    }
+
+    const HI_SHA256: &str = "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4";
+
+    /// Answers one request with two bytes, then stops listening. Loopback only.
+    fn serve_two_bytes() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Some(stream) = listener.incoming().next() {
+                let mut stream = stream.unwrap();
+                crate::test_support::read_request(&mut stream);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
+                );
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_listening_file_failing_its_sha256_is_deleted() {
+        let dir = crate::test_support::unique_scratch("sha256");
+        let file = Download {
+            megabytes: 1,
+            name: "model.gguf".to_string(),
+            url: serve_two_bytes(),
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+            model: None,
+        };
+
+        let error = download_all(&dir, &[file], &nothing_accepted(), &mut |_| {})
+            .await
+            .expect_err("two bytes cannot match that hash");
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(error.to_string().contains("model.gguf"), "{error}");
+        assert!(error.to_string().contains("sha256"), "{error}");
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// The hash of `hi`, so the check passes a body that matches.
+    #[tokio::test]
+    async fn a_listening_file_matching_its_sha256_is_kept() {
+        let dir = crate::test_support::unique_scratch("sha256-ok");
+        let file = Download {
+            megabytes: 1,
+            name: "model.gguf".to_string(),
+            url: serve_two_bytes(),
+            sha256: Some(HI_SHA256),
+            model: None,
+        };
+
+        download_all(&dir, &[file], &nothing_accepted(), &mut |_| {})
+            .await
+            .unwrap();
+        let body = std::fs::read(dir.join("model.gguf")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(body, b"hi");
+    }
+
+    /// The server would answer, so only the licence check can stop the file.
+    #[tokio::test]
+    async fn a_model_whose_licence_limits_commercial_use_waits_for_acceptance() {
+        let dir = crate::test_support::unique_scratch("licence-gate");
+        let canary = banshee_common::listening::find("canary-1b").unwrap();
+        let file = Download {
+            megabytes: 1,
+            name: canary.file.to_string(),
+            url: serve_two_bytes(),
+            sha256: Some(HI_SHA256),
+            model: Some(canary),
+        };
+        let mut accepted = Accepted::at(dir.join("accepted-licences"));
+
+        let refused = download_all(&dir, std::slice::from_ref(&file), &accepted, &mut |_| {}).await;
+        let arrived_unaccepted = dir.join(canary.file).exists();
+        accepted.add(canary.licence.name).unwrap();
+        let after = download_all(&dir, &[file], &accepted, &mut |_| {}).await;
+        let arrived = dir.join(canary.file).exists();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let error = refused
+            .expect_err("an unaccepted licence refuses the file")
+            .to_string();
+        assert!(error.contains("CC-BY-NC-4.0"), "{error}");
+        assert!(error.contains("--accept-licence"), "{error}");
+        assert!(!arrived_unaccepted);
+        after.unwrap();
+        assert!(arrived);
+    }
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::{label, role, wanted};
+    use crate::config::{Config, Provider};
+    use crate::models::TURN_MODEL;
+    use banshee_common::FileRole;
+
+    const TURN_SHA256: &str = "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f";
+
     #[test]
-    fn a_run_with_nothing_missing_costs_nothing() {
-        let dir = std::env::temp_dir();
-        let held: Vec<super::Download> = Vec::new();
-        assert_eq!(pending_megabytes(&held, &dir), 0);
+    fn setup_fetches_the_turn_model_with_its_hash() {
+        let mut remote = Config::default();
+        remote.stt.provider = Provider::Remote;
+        for config in [Config::default(), remote] {
+            let turn = wanted(&config)
+                .into_iter()
+                .find(|download| download.name == TURN_MODEL)
+                .expect("setup wants the turn model");
+            assert_eq!(turn.sha256, Some(TURN_SHA256));
+            assert!(turn.model.is_none());
+        }
+    }
+
+    #[test]
+    fn the_turn_model_is_named_for_what_it_does() {
+        assert_eq!(role(TURN_MODEL), FileRole::Turn);
+        assert_eq!(label(TURN_MODEL), "Turn detection model");
+    }
+
+    #[test]
+    fn the_daemon_starts_without_the_turn_model() {
+        assert!(!crate::models::required(&Config::default()).contains(&TURN_MODEL));
+    }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::{pocket_files, role, wanted};
+    use crate::config::{Config, Provider, TTSFallback};
+    use banshee_common::{FileRole, KOKORO_MODEL};
+
+    fn names(config: &Config) -> Vec<String> {
+        wanted(config).into_iter().map(|d| d.name).collect()
+    }
+
+    fn pocket_names() -> Vec<String> {
+        pocket_files().into_iter().map(|file| file.name).collect()
+    }
+
+    fn speaker_files(config: &Config) -> Vec<String> {
+        names(config)
+            .into_iter()
+            .filter(|name| matches!(role(name), FileRole::Engine | FileRole::Voice))
+            .collect()
+    }
+
+    #[test]
+    fn a_companion_config_wants_the_seven_pocket_files() {
+        let config = Config::default();
+        assert_eq!(speaker_files(&config), pocket_names());
+        assert_eq!(pocket_names().len(), 7);
+        for name in pocket_names() {
+            assert_eq!(role(&name), FileRole::Engine, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_kokoro_voice_wants_kokoro_and_its_voice() {
+        let mut config = Config::default();
+        config.tts.voice = "am_adam".to_string();
+        assert_eq!(speaker_files(&config), [KOKORO_MODEL, "am_adam.bin"]);
+    }
+
+    #[test]
+    fn a_remote_speaker_with_no_fallback_wants_no_voice() {
+        let mut config = Config::default();
+        config.tts.provider = Provider::Remote;
+        config.tts.fallback = TTSFallback::None;
+        assert_eq!(speaker_files(&config), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_remote_speaker_with_a_local_fallback_wants_the_local_voice() {
+        let mut config = Config::default();
+        config.tts.provider = Provider::Remote;
+        config.tts.fallback = TTSFallback::Local;
+        assert_eq!(speaker_files(&config), pocket_names());
     }
 }
 
@@ -392,7 +696,10 @@ mod tests {
     #[test]
     fn a_file_is_labelled_by_what_it_is() {
         use super::label;
-        assert_eq!(label("ggml-large-v3-turbo-q5_0.bin"), "Speech model");
+        assert_eq!(
+            label("parakeet-unified-en-0.6b-Q8_0.gguf"),
+            "Listening model"
+        );
         assert_eq!(label("silero_vad.onnx"), "Voice detection model");
         assert_eq!(label("af_sky.bin"), "Voice");
         assert_eq!(label("kokoro-v1.0.onnx"), "Speech engine");

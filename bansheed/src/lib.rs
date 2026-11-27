@@ -5,12 +5,14 @@ mod audio;
 pub mod bench;
 mod binding;
 mod cli;
+mod client;
 mod compositor;
 mod config;
 mod connect;
 mod credentials;
 mod daemon;
 mod dictation;
+mod frontmost;
 mod history;
 mod hotkey;
 mod level;
@@ -25,7 +27,6 @@ mod settings;
 mod speech_to_text;
 mod state;
 mod status;
-mod tell;
 #[cfg(test)]
 mod test_support;
 mod text_to_speech;
@@ -36,22 +37,32 @@ mod uninstall;
 use std::process::ExitCode;
 
 use args::{Cli, CommandType};
+use banshee_common::error::BansheeError;
 use clap::Parser;
 
 use crate::config::Config;
 
 pub async fn run() -> ExitCode {
-    banshee_common::logging::install();
+    banshee_common::logging::install("daemon");
     let cli = Cli::parse();
+
+    // The helper that `frontmost` starts never loads the config.
+    #[cfg(target_os = "macos")]
+    if matches!(cli.command, CommandType::FrontmostPid) {
+        return frontmost::print_pid();
+    }
+
     // Unwrapped only by the arms that read it: RPC works without a parseable
     // config, and the checklist diagnoses a broken one
     let config_result = Config::load();
 
     let outcome = match cli.command {
-        CommandType::Serve => match config_result {
-            Ok(config) => daemon::start(config).await,
-            Err(error) => Err(error),
-        },
+        CommandType::Serve => {
+            return exit_code(match config_result {
+                Ok(config) => daemon::start(config).await,
+                Err(error) => Err(error),
+            });
+        }
         CommandType::Stop => cli::stop().await,
         CommandType::Devices => cli::devices().await,
         CommandType::Voices => cli::voices().await,
@@ -62,29 +73,41 @@ pub async fn run() -> ExitCode {
         CommandType::Config {
             action: args::ConfigAction::Remote,
         } => cli::config_remote().await,
-        CommandType::Setup => cli::setup(config_result).await,
+        CommandType::Setup { list: true, .. } => {
+            cli::list_models();
+            Ok(())
+        }
+        CommandType::Setup {
+            model: Some(id),
+            accept_licence,
+            ..
+        } => cli::setup_model(&id, accept_licence).await,
+        CommandType::Setup { model: None, .. } => cli::setup(config_result).await,
         CommandType::Status { json } => cli::status(json, config_result).await,
-        CommandType::Listen => cli::listen().await,
         CommandType::Speak { text } => cli::speak(text).await,
-        CommandType::Tell { text, undo } => cli::tell(text, undo, config_result),
         CommandType::History => cli::history().await,
         CommandType::ClearHistory => cli::clear_history().await,
         CommandType::Record { action } => cli::record(action).await,
         CommandType::Start => cli::start(config_result).await,
-        CommandType::Tray { uninstall } => cli::tray(uninstall),
+        CommandType::Tray => cli::tray(),
         CommandType::Connect { agent, yes } => cli::connect(agent, yes),
         CommandType::Bind { compositor, yes } => cli::bind(compositor, yes, config_result).await,
-        CommandType::Service { action } => cli::service(action),
         CommandType::Uninstall { data, yes } => cli::uninstall(data, yes).await,
         CommandType::TurnEnd { agent } => {
             turn_end::run(agent).await;
             Ok(())
         }
+        #[cfg(target_os = "macos")]
+        CommandType::FrontmostPid => unreachable!("handled before the config loads"),
     };
+    exit_code(outcome.map(|()| 0))
+}
+
+fn exit_code(outcome: Result<u8, BansheeError>) -> ExitCode {
     match outcome {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("{}", cli::failure_line(&error));
+            banshee_common::logging::failure(&cli::failure_line(&error));
             ExitCode::FAILURE
         }
     }

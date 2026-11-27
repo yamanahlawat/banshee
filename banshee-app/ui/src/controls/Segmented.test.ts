@@ -87,3 +87,15 @@ it('steps from the cell a click chose, not the one the arrows left', async () =>
   await fireEvent.keyDown(screen.getByRole('radio', { name: 'Quality' }), { key: 'ArrowRight' });
   expect(chosen).toEqual(['balanced', 'quality', 'fast']);
 });
+
+it('segment labels are in sentence case', () => {
+  render(Segmented, {
+    label: 'Transcription',
+    value: 'balanced',
+    options: OPTIONS,
+    change: () => {},
+  });
+  for (const radio of screen.getAllByRole('radio')) {
+    expect(radio.classList.contains('caps')).toBe(false);
+  }
+});

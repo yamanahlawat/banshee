@@ -41,23 +41,52 @@ export type PlannedChange = { path: string | null; diff: string };
 /// them, and `total` is null when the server sent no Content-Length.
 export type { Progress as DownloadProgress } from './daemon';
 export type Down = { reason: string };
-export type HistoryRow = { id: string | number; text: string; timestamp: string };
+export type Reopened = { missed: boolean };
+export type HistoryRow = {
+  id: string | number;
+  kind: 'dictation' | 'question';
+  question: string | null;
+  text: string | null;
+  outcome: 'transcribed' | 'failed' | 'no_answer' | 'closed' | 'unasked';
+  reason: string | null;
+  timestamp: string;
+  /// The program that asked, on a question row only.
+  client: string | null;
+  /// `until` is local RFC 3339, and null while Keep audio is Forever.
+  audio: { seconds: number; until: string | null } | null;
+};
+
+export type Domain =
+  | { kind: 'toggle' }
+  | { kind: 'choice'; values: string[] }
+  | { kind: 'number'; min: number; max: number | null; whole: boolean }
+  | { kind: 'words' }
+  | { kind: 'text'; empty_allowed: boolean }
+  | { kind: 'url' }
+  | { kind: 'hotkey' }
+  | { kind: 'listening_model' }
+  | { kind: 'voice' }
+  | { kind: 'secret' };
+/// A row of the table in `banshee-common`. `default` is the JSON text of what an absent key reads as.
+export type Setting = {
+  key: string;
+  domain: Domain;
+  default: string | null;
+  sends_out: boolean;
+  description: string;
+};
 
 export function status(): Promise<Status> {
   return call('status');
+}
+export function settingsTable(): Promise<Setting[]> {
+  return call('settings_table');
 }
 export function setSetting(key: string, value: unknown): Promise<string[]> {
   return call('set_setting', { key, value });
 }
 export function listDevices(): Promise<Devices> {
   return call('list_devices');
-}
-export type Language = { code: string; name: string };
-export type Languages = { languages: Language[] };
-
-/// Whisper's own list, so the window cannot offer a code the engine refuses.
-export function listLanguages(): Promise<Languages> {
-  return call('list_languages');
 }
 export function listVoices(): Promise<Voices> {
   return call('list_voices');
@@ -80,6 +109,13 @@ export function applyConnect(id: string, disconnect: boolean): Promise<string | 
 export function history(limit?: number): Promise<HistoryRow[]> {
   return call('history', { limit: limit ?? null });
 }
+export function historyAudio(id: HistoryRow['id']): Promise<ArrayBuffer> {
+  return call('history_audio', { id });
+}
+/// Transcribes the row's kept audio again, and answers the row as it now stands.
+export function retry(id: HistoryRow['id']): Promise<HistoryRow> {
+  return call('retry', { id });
+}
 export function clearHistory(): Promise<void> {
   return call('clear_history');
 }
@@ -89,13 +125,21 @@ export function openPermissionPane(id: string): Promise<void> {
 export function copyText(text: string): Promise<void> {
   return call('copy_text', { text });
 }
+/// Opens the licence of a listening model, named by its id.
+export function openLicence(model: string): Promise<void> {
+  return call('open_licence', { model });
+}
+
+/// Whether the tray started this process for a missed question, true once.
+export function launchMissed(): Promise<boolean> {
+  return call('launch_missed');
+}
 
 export function startDaemon(): Promise<void> {
   return call('start_daemon');
 }
-/// Replaces the running daemon. `startDaemon` leaves one that is already up,
-/// which is right for a daemon that has stopped and useless for one whose
-/// pipeline died at startup.
+/// Replaces the running daemon, which a pipeline that died at startup needs.
+/// `startDaemon` is for a daemon that is down.
 export function restartDaemon(): Promise<void> {
   return call('restart_daemon');
 }

@@ -32,6 +32,8 @@ precise-builds = true
 # The bundle workflow listens for the release event, but a release published with the
 # workflow token raises no event another workflow can see, so dist calls it instead.
 post-announce-jobs = ["./app-bundle"]
+# Steps the release build runs before `dist build`, read from .github/build-setup.yml.
+github-build-setup = "../build-setup.yml"
 
 # Pin Linux runners to 24.04; the ORT prebuilt needs glibc 2.38+.
 [dist.github-custom-runners]

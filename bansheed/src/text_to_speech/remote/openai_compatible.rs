@@ -1,21 +1,20 @@
-use std::io::Read;
-use std::sync::{Arc, Mutex, RwLock};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use banshee_common::error::BansheeError;
-use reqwest::blocking::Client;
+use reqwest::Client;
+use tokio::sync::Notify;
 
 use crate::config::{RemoteTtsConfig, SpeechFormat, TTSConfig};
 use crate::credentials::{self, RemoteKey};
-use crate::text_to_speech::local::say::VOICE_NEEDS_KOKORO;
 use crate::text_to_speech::output::{Chunk, Output};
 use crate::text_to_speech::remote::arrival::{Arrival, declared};
-use crate::text_to_speech::{ActiveUtterance, Fault, TtsBackend, lock};
+use crate::text_to_speech::{ActiveUtterance, Fault, Faults, TtsBackend, lock};
 
-// The bound applies to the wait for headers and to each read, since the
-// blocking client keeps one timeout. The test bound is short, because a
-// fifteen-second test is a test nobody runs, and the fixture divides it for
-// the pause it leaves between two chunks.
+// The bound applies to the wait for headers and to each read. The test bound
+// is short, because a fifteen-second test is a test nobody runs, and the
+// fixture divides it for the pause it leaves between two chunks.
 /// Unmeasured. A ceiling on a server that has stopped answering.
 const READ_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(1)
@@ -34,8 +33,12 @@ const MESSAGE_LIMIT: usize = 240;
 /// and a cut there would answer a couple of characters in place of a message.
 const CUT_WINDOW: usize = 4;
 
-/// One OpenAI-compatible speech server. Blocking, because the utterance owns a
-/// thread and the response's `Read` is how the stream is consumed.
+const ONE_REMOTE_VOICE: &str =
+    "the remote speaker speaks in tts.remote.voice and takes no voice per reply";
+
+/// One OpenAI-compatible speech server. Each request runs on a runtime of its
+/// own on the thread that plays the reply, so a stop can drop it mid-send. It
+/// holds the key file's path and never the key.
 pub struct RemoteSpeechBackend {
     client: Client,
     base_url: String,
@@ -45,11 +48,10 @@ pub struct RemoteSpeechBackend {
     instructions: Option<String>,
     response_format: SpeechFormat,
     sample_rate: Option<std::num::NonZero<u32>>,
-    speed: RwLock<f32>,
-    api_key: String,
+    credentials: PathBuf,
     output: Arc<Output>,
     fallback: Option<Arc<dyn TtsBackend>>,
-    faults: std::sync::mpsc::Sender<Fault>,
+    faults: Faults,
 }
 
 fn first_audio(host: &str, waited: Duration, chunk: &Chunk) -> String {
@@ -119,11 +121,10 @@ fn shortened(message: &str) -> String {
 impl RemoteSpeechBackend {
     pub fn new(
         remote: &RemoteTtsConfig,
-        api_key: String,
-        speed: f32,
+        credentials: PathBuf,
         fallback: Option<Arc<dyn TtsBackend>>,
         output: Arc<Output>,
-        faults: std::sync::mpsc::Sender<Fault>,
+        faults: Faults,
     ) -> Result<Self, BansheeError> {
         if remote.voice.is_empty() {
             return Err(BansheeError::Other(
@@ -133,7 +134,12 @@ impl RemoteSpeechBackend {
         }
         let base_url = remote.base_url.trim_end_matches('/').to_string();
         Ok(Self {
-            client: crate::remote::build_client(READ_TIMEOUT, "speaker")?,
+            // Bounds the wait for the headers and each read after them, since
+            // a long answer may take longer than any bound on the whole
+            client: crate::remote::async_builder(RemoteKey::Tts, &remote.base_url)?
+                .read_timeout(READ_TIMEOUT)
+                .build()
+                .map_err(|error| BansheeError::Other(error.to_string()))?,
             host: crate::config::host_of(&base_url),
             base_url,
             model: remote.model.clone(),
@@ -141,8 +147,7 @@ impl RemoteSpeechBackend {
             instructions: (!remote.instructions.is_empty()).then(|| remote.instructions.clone()),
             response_format: remote.response_format,
             sample_rate: remote.sample_rate,
-            speed: RwLock::new(speed),
-            api_key,
+            credentials,
             output,
             fallback,
             faults,
@@ -156,15 +161,6 @@ impl RemoteSpeechBackend {
             "voice": self.voice,
             "response_format": self.response_format,
         });
-        // 1.0 is the API's default, and a server whose model cannot change pace
-        // refuses the request when the field is present at all
-        let speed = *self
-            .speed
-            .read()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if speed != 1.0 {
-            body["speed"] = speed.into();
-        }
         if let Some(instructions) = &self.instructions {
             body["instructions"] = instructions.clone().into();
         }
@@ -181,31 +177,56 @@ impl RemoteSpeechBackend {
         body
     }
 
+    /// The key on file, read for one request.
+    fn key(&self) -> Result<String, String> {
+        credentials::Credentials::key_at(&self.credentials, RemoteKey::Tts)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| RemoteKey::Tts.no_key())
+    }
+
     /// Sends the request and hands back the answer to read, or the reason it
-    /// failed before a single byte of audio.
-    fn open(&self, text: &str) -> Result<Reading, String> {
-        let response = self
+    /// failed before a single byte of audio. `None` when a stop lands before
+    /// the answer: `stopped` reads true, or `stop` is notified.
+    fn open(
+        &self,
+        text: &str,
+        stopped: impl Fn() -> bool,
+        stop: &Notify,
+    ) -> Result<Option<Reading>, String> {
+        let api_key = self.key()?;
+        if stopped() {
+            return Ok(None);
+        }
+        let runtime = crate::remote::request_runtime().map_err(|error| error.to_string())?;
+        let request = self
             .client
             .post(format!("{}/audio/speech", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&self.body(text))
-            .send()
-            .map_err(|error| credentials::describe_send_error(&self.host, &error))?;
+            .bearer_auth(&api_key)
+            .json(&self.body(text));
+        // A stop drops the request, which closes the connection, so the rest
+        // of the text never leaves. What the system already holds to send
+        // still goes.
+        let Some(sent) = crate::remote::run_until_stopped(&runtime, stop, || request.send()) else {
+            return Ok(None);
+        };
+        let response =
+            sent.map_err(|error| credentials::describe_send_error(&self.host, &error))?;
         let status = response.status();
         if !status.is_success() {
             // A refused key is the one body nothing reads: it is the likeliest
             // place for a server to echo the key back, and the sentence the
             // status carries is already the whole fault
-            let said = credentials::may_read_body(status).then(|| credentials::read_body(response));
+            let said = credentials::may_read_body(status)
+                .then(|| runtime.block_on(credentials::read_body(response)));
             log::warn!(
                 "{}",
-                crate::remote::log_line(RemoteKey::Tts, status, said.as_deref(), &self.api_key)
+                crate::remote::log_line(RemoteKey::Tts, status, said.as_deref(), &api_key)
             );
             return Err(describe_refusal(
                 &self.host,
                 status,
                 said.as_deref(),
-                &self.api_key,
+                &api_key,
             ));
         }
         let format = declared(
@@ -215,10 +236,12 @@ impl RemoteSpeechBackend {
                 .and_then(|value| value.to_str().ok()),
             self.response_format,
         )?;
-        Ok(Reading {
+        Ok(Some(Reading {
             body: response,
+            arrived: bytes::Bytes::new(),
             arrival: Arrival::new(format, self.sample_rate),
-        })
+            runtime,
+        }))
     }
 }
 
@@ -227,22 +250,48 @@ enum Report {
     Fault(Fault),
 }
 
-/// The response being read, and what turns its bytes into samples.
+/// The response being read, and what turns its bytes into samples. The body
+/// drops before the runtime that reads it.
 struct Reading {
-    body: reqwest::blocking::Response,
+    body: reqwest::Response,
+    /// What is left of the last piece the server sent.
+    arrived: bytes::Bytes,
     arrival: Arrival,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl Reading {
+    /// Fills `buffer` from the answer: `Ok(0)` at its end, and `None` once
+    /// `stop` is notified.
+    fn read(&mut self, buffer: &mut [u8], stop: &Notify) -> Option<Result<usize, reqwest::Error>> {
+        while self.arrived.is_empty() {
+            let next = crate::remote::run_until_stopped(&self.runtime, stop, || self.body.chunk())?;
+            match next {
+                Ok(Some(piece)) => self.arrived = piece,
+                Ok(None) => return Some(Ok(0)),
+                Err(error) => return Some(Err(error)),
+            }
+        }
+        let read = buffer.len().min(self.arrived.len());
+        buffer[..read].copy_from_slice(&self.arrived.split_to(read));
+        Some(Ok(read))
+    }
 }
 
 impl TtsBackend for RemoteSpeechBackend {
-    /// Stores the rate and answers the voice utterances now speak in. The
-    /// `[tts.remote]` keys are read when the daemon starts, so the voice does
-    /// not move here.
+    /// Hands `tts.voice` to the local fallback and answers the voice replies
+    /// speak in. A `[tts.remote]` change builds another speaker, so this
+    /// voice does not move here.
     fn reconfigure(&self, tts: &TTSConfig) -> Option<String> {
-        *self
-            .speed
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = tts.speed;
-        Some(self.voice.clone())
+        match &self.fallback {
+            Some(fallback) => fallback.reconfigure(tts).map(|_| self.voice.clone()),
+            None => Some(self.voice.clone()),
+        }
+    }
+
+    /// The server holds no voice here, so only the fallback has one to free.
+    fn unload(&self) -> Option<Arc<dyn TtsBackend>> {
+        self.fallback.as_ref()?.unload()
     }
 
     fn start(
@@ -251,7 +300,7 @@ impl TtsBackend for RemoteSpeechBackend {
         voice: Option<&str>,
     ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
         if voice.is_some() {
-            return Err(BansheeError::Rejected(VOICE_NEEDS_KOKORO.into()));
+            return Err(BansheeError::Rejected(ONE_REMOTE_VOICE.into()));
         }
         Ok(Box::new(self.speak(text)?))
     }
@@ -262,6 +311,8 @@ impl RemoteSpeechBackend {
     fn speak(&self, text: &str) -> Result<RemoteUtterance, BansheeError> {
         let handover: Arc<Mutex<Handover>> = Arc::default();
         let worker_handover = Arc::clone(&handover);
+        let stop = Arc::new(Notify::new());
+        let worker_stop = Arc::clone(&stop);
         let fallback = self.fallback.clone();
         let faults = self.faults.clone();
         let text = text.to_string();
@@ -283,24 +334,28 @@ impl RemoteSpeechBackend {
                 }
                 match said {
                     Report::Line(line) => log::info!("{line}"),
-                    Report::Fault(fault) => {
-                        let _ = faults.send(fault);
-                    }
+                    Report::Fault(fault) => faults.send(fault),
                 }
             };
             // Every failure before the first sample: say why, and let the
             // fallback speak the sentence nobody has heard yet.
             let unheard = |reason: String| {
-                // Under the one lock a stop takes, so the fallback never
-                // starts on a sentence nothing can stop
-                let mut handover = lock(&worker_handover);
-                if handover.stopped {
+                if lock(&worker_handover).stopped {
                     return;
                 }
-                let fault = match fallback
+                // Outside the lock a stop takes, because a fallback may load a
+                // model to start. A stop that lands meanwhile is seen below.
+                let started = fallback
                     .as_ref()
-                    .map(|fallback| fallback.start(&text, None))
-                {
+                    .map(|fallback| fallback.start_unlocked(&text, None));
+                let mut handover = lock(&worker_handover);
+                if handover.stopped {
+                    if let Some(Ok(mut utterance)) = started {
+                        utterance.stop();
+                    }
+                    return;
+                }
+                let fault = match started {
                     Some(Ok(utterance)) => {
                         handover.speaking = Some(utterance);
                         Fault::SpokenByFallback(reason)
@@ -315,16 +370,20 @@ impl RemoteSpeechBackend {
             loop {
                 let source = match &mut reading {
                     Some(source) => source,
-                    None => match opener.open(&text) {
-                        Ok(source) => reading.insert(source),
-                        Err(reason) => {
-                            unheard(reason);
-                            return None;
+                    None => {
+                        match opener.open(&text, || lock(&worker_handover).stopped, &worker_stop) {
+                            Ok(Some(source)) => reading.insert(source),
+                            Ok(None) => return None,
+                            Err(reason) => {
+                                unheard(reason);
+                                return None;
+                            }
                         }
-                    },
+                    }
                 };
-                let read = match source.body.read(&mut buffer) {
-                    Ok(0) => {
+                let read = match source.read(&mut buffer, &worker_stop) {
+                    None => return None,
+                    Some(Ok(0)) => {
                         match source.arrival.ended() {
                             // A WAV header with no samples behind it still ends Ok
                             Ok(()) if !played => {
@@ -342,8 +401,8 @@ impl RemoteSpeechBackend {
                         }
                         return None;
                     }
-                    Ok(read) => read,
-                    Err(error) => {
+                    Some(Ok(read)) => read,
+                    Some(Err(error)) => {
                         let reason = format!("{} stopped answering: {error}", opener.host);
                         // Words already heard are not spoken again in another
                         // voice, so only a silent failure reaches the fallback
@@ -384,12 +443,12 @@ impl RemoteSpeechBackend {
         Ok(RemoteUtterance {
             player: self.output.play(chunks, self.faults.clone())?,
             handover,
+            stop,
         })
     }
 
     /// Everything the worker needs to send the request, without the fallback it
-    /// must not touch. The client is an `Arc` inside, so this clone shares the
-    /// connection pool.
+    /// must not touch.
     fn clone_for_worker(&self) -> Self {
         Self {
             client: self.client.clone(),
@@ -400,8 +459,7 @@ impl RemoteSpeechBackend {
             instructions: self.instructions.clone(),
             response_format: self.response_format,
             sample_rate: self.sample_rate,
-            speed: RwLock::new(*self.speed.read().unwrap_or_else(|p| p.into_inner())),
-            api_key: self.api_key.clone(),
+            credentials: self.credentials.clone(),
             output: Arc::clone(&self.output),
             fallback: None,
             faults: self.faults.clone(),
@@ -411,17 +469,19 @@ impl RemoteSpeechBackend {
 
 /// What the worker may hand the utterance to, and whether a stop got there
 /// first. One lock over both: a stop that lands between the two would leave the
-/// system voice speaking a cancelled sentence, with nothing holding it.
+/// fallback voice speaking a cancelled sentence, with nothing holding it.
 #[derive(Default)]
 struct Handover {
     stopped: bool,
-    /// The system voice speaking instead, when the request failed before a byte.
+    /// The fallback voice speaking instead, when the request failed before a byte.
     speaking: Option<Box<dyn ActiveUtterance>>,
 }
 
 struct RemoteUtterance {
     player: crate::text_to_speech::output::PlayerUtterance,
     handover: Arc<Mutex<Handover>>,
+    /// Wakes the request or the read the reply's thread is waiting on.
+    stop: Arc<Notify>,
 }
 
 #[cfg(test)]
@@ -454,6 +514,7 @@ impl ActiveUtterance for RemoteUtterance {
 
     fn stop(&mut self) {
         self.player.stop();
+        self.stop.notify_one();
         let mut handover = lock(&self.handover);
         handover.stopped = true;
         if let Some(utterance) = handover.speaking.as_mut() {
@@ -466,9 +527,13 @@ impl ActiveUtterance for RemoteUtterance {
 mod tests {
     use super::{READ_TIMEOUT, RemoteSpeechBackend, lock};
     use crate::config::{RemoteTtsConfig, SpeechFormat};
-    use crate::test_support::read_request;
+    use crate::test_support::{
+        Asked, Listening, companion_models, companion_models_with, ignored_faults, on_demand,
+        read_request,
+    };
     use crate::text_to_speech::output::Output;
-    use crate::text_to_speech::{ActiveUtterance, Fault, TtsBackend};
+    use crate::text_to_speech::{ActiveUtterance, Fault, Faults, TtsBackend};
+    use banshee_common::COMPANION_VOICE;
     use banshee_common::error::BansheeError;
     use std::io::Write;
     use std::net::TcpListener;
@@ -532,48 +597,8 @@ mod tests {
         (base_url, handle)
     }
 
-    /// What a fallback was asked to say. `SayBackend` would start a real `say`
-    /// process, so the tests use this instead.
-    #[derive(Default)]
-    struct Spoken(Arc<Mutex<Vec<String>>>);
-
-    struct Nothing;
-
-    impl ActiveUtterance for Nothing {
-        fn is_finished(&mut self) -> bool {
-            true
-        }
-        fn stop(&mut self) {}
-    }
-
-    impl TtsBackend for Spoken {
-        fn start(
-            &self,
-            text: &str,
-            _voice: Option<&str>,
-        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
-            self.0
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .push(text.to_string());
-            Ok(Box::new(Nothing))
-        }
-    }
-
-    struct Refusing;
-
-    impl TtsBackend for Refusing {
-        fn start(
-            &self,
-            _text: &str,
-            _voice: Option<&str>,
-        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
-            Err(BansheeError::Other("no voice here".into()))
-        }
-    }
-
     /// A fallback whose sentence ends when the test says so, and what it was
-    /// asked to say. `Spoken` finishes at once, which states no ordering.
+    /// asked to say. `Listening` finishes at once, which states no ordering.
     #[derive(Default)]
     struct HoldingFallback {
         said: Arc<Mutex<Vec<String>>>,
@@ -618,7 +643,7 @@ mod tests {
     struct Built {
         backend: RemoteSpeechBackend,
         faults: std::sync::mpsc::Receiver<Fault>,
-        fallback_said: Arc<Mutex<Vec<String>>>,
+        fallback_said: Asked,
         /// How many devices the output behind the backend has opened.
         opened: Arc<std::sync::atomic::AtomicU64>,
     }
@@ -632,9 +657,9 @@ mod tests {
     }
 
     fn keyed(remote: RemoteTtsConfig, with_fallback: bool, api_key: &str) -> Built {
-        let fallback_said: Arc<Mutex<Vec<String>>> = Arc::default();
+        let fallback_said = Asked::default();
         let fallback: Option<Arc<dyn TtsBackend>> = with_fallback
-            .then(|| Arc::new(Spoken(Arc::clone(&fallback_said))) as Arc<dyn TtsBackend>);
+            .then(|| Arc::new(Listening(Arc::clone(&fallback_said))) as Arc<dyn TtsBackend>);
         let (output, opened) = Output::counting();
         let (backend, faults) = assembled(&remote, api_key, fallback, output);
         Built {
@@ -654,17 +679,67 @@ mod tests {
         fallback: Option<Arc<dyn TtsBackend>>,
         output: Output,
     ) -> (RemoteSpeechBackend, std::sync::mpsc::Receiver<Fault>) {
+        let (backend, faults) = speaker(remote, api_key, fallback, output);
+        (backend.unwrap(), faults)
+    }
+
+    fn speaker(
+        remote: &RemoteTtsConfig,
+        api_key: &str,
+        fallback: Option<Arc<dyn TtsBackend>>,
+        output: Output,
+    ) -> (
+        Result<RemoteSpeechBackend, BansheeError>,
+        std::sync::mpsc::Receiver<Fault>,
+    ) {
         let (sender, faults) = std::sync::mpsc::channel();
         let backend = RemoteSpeechBackend::new(
             remote,
-            api_key.to_string(),
-            1.2,
+            crate::test_support::key_file_holding(crate::credentials::RemoteKey::Tts, api_key),
             fallback,
             Arc::new(output),
-            sender,
+            Faults::new(sender),
+        );
+        (backend, faults)
+    }
+
+    #[test]
+    fn a_reply_with_no_key_on_file_sends_nothing_and_names_the_key() {
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote = table(format!("http://{}/v1", server.local_addr().unwrap()), "");
+        let (sender, faults) = std::sync::mpsc::channel();
+        let keys =
+            crate::test_support::key_file_holding(crate::credentials::RemoteKey::Tts, "sk-test");
+        let backend = RemoteSpeechBackend::new(
+            &remote,
+            keys.clone(),
+            None,
+            Arc::new(Output::silent()),
+            Faults::new(sender),
         )
         .unwrap();
-        (backend, faults)
+        crate::test_support::write_key(&keys, crate::credentials::RemoteKey::Tts, "");
+
+        let _utterance = backend.start("Hello.", None).unwrap();
+        let reason = failure(&faults);
+        assert!(reason.contains("tts.remote.api_key"), "{reason}");
+        server.set_nonblocking(true).unwrap();
+        assert!(server.accept().is_err(), "nothing connected to the server");
+    }
+
+    #[test]
+    fn plain_http_to_the_internet_builds_no_speaker() {
+        let (output, _opened) = Output::counting();
+        let remote = table("http://api.example.com/v1".to_string(), "");
+        let (Err(error), _faults) = speaker(&remote, "sk-test", None, output) else {
+            panic!("plain http to the internet must build no speaker");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("tts.remote.base_url needs https for api.example.com"),
+            "{error}"
+        );
     }
 
     fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
@@ -726,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn an_utterance_posts_the_whole_text_the_model_the_voice_the_rate_and_the_instructions() {
+    fn an_utterance_posts_the_whole_text_the_model_the_voice_and_the_instructions() {
         let (base_url, served) = serve_speech("200 OK", vec![pcm(&[0, 1, 2, 3, 4, 5])], false);
         let built = built(base_url, "Calm and even", false);
         let utterance = built
@@ -752,8 +827,18 @@ mod tests {
         assert_eq!(sent["voice"], "marin");
         assert_eq!(sent["response_format"], "pcm");
         assert_eq!(sent["stream_format"], "audio");
-        assert_eq!(sent["speed"].as_f64().map(|rate| rate as f32), Some(1.2));
         assert_eq!(sent["instructions"], "Calm and even");
+    }
+
+    #[test]
+    fn the_request_carries_no_speed() {
+        let (base_url, served) = serve_speech("200 OK", vec![pcm(&[0, 1, 2, 3, 4, 5])], false);
+        let built = built(base_url, "", false);
+        let utterance = built.backend.speak("Hello.").expect("a test device opens");
+        wait_until("the reply is read", || utterance.spoken());
+
+        let sent = sent_body(&served.join().unwrap());
+        assert!(sent.get("speed").is_none(), "{sent}");
     }
 
     #[test]
@@ -771,12 +856,12 @@ mod tests {
 
     #[test]
     fn a_voice_this_backend_cannot_apply_is_refused() {
-        let built = built("http://unused.invalid/v1".to_string(), "", false);
+        let built = built("https://unused.invalid/v1".to_string(), "", false);
         let Err(error) = built.backend.start("Hello.", Some("cedar")) else {
             panic!("the remote speaker cannot honour a per-request voice, so it must refuse");
         };
         assert!(matches!(error, BansheeError::Rejected(_)), "{error:?}");
-        assert!(error.to_string().contains("Kokoro"), "{error}");
+        assert!(error.to_string().contains("tts.remote.voice"), "{error}");
     }
 
     #[test]
@@ -887,11 +972,13 @@ mod tests {
             let _ = held.recv();
             let head =
                 "HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nTransfer-Encoding: chunked\r\n\r\n";
-            stream.write_all(head.as_bytes()).unwrap();
             let piece = pcm(&[1; 480]);
             let chunk = [format!("{:x}\r\n", piece.len()).as_bytes(), &piece, b"\r\n"].concat();
-            stream.write_all(&chunk).unwrap();
-            stream.write_all(b"0\r\n\r\n").unwrap();
+            // The stop closed the connection, so a write here may fail
+            let _ = stream
+                .write_all(head.as_bytes())
+                .and_then(|()| stream.write_all(&chunk))
+                .and_then(|()| stream.write_all(b"0\r\n\r\n"));
         });
 
         let built = built(base_url, "", false);
@@ -911,7 +998,7 @@ mod tests {
                 Ok(Fault::Played) => {
                     panic!("a stopped sentence must not report a played utterance")
                 }
-                Ok(fault @ (Fault::Failed(_) | Fault::SpokenByFallback(_))) => {
+                Ok(fault) => {
                     panic!("a stopped sentence must not report a failure: {fault:?}")
                 }
                 Err(_) if utterance.spoken() => break,
@@ -925,29 +1012,9 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_key_is_named_and_the_fallback_speaks_the_text() {
-        let (base_url, served) = serve_speech("401 Unauthorized", vec![], false);
-        let built = built(base_url, "", true);
-        let mut utterance = built.backend.start("Say this anyway.", None).unwrap();
-        assert_eq!(
-            spoken_by_fallback(&built.faults),
-            "the remote speaker refused the key"
-        );
-        wait_until("the fallback is asked", || {
-            !built.fallback_said.lock().unwrap().is_empty()
-        });
-        assert_eq!(
-            built.fallback_said.lock().unwrap().as_slice(),
-            ["Say this anyway.".to_string()]
-        );
-        wait_until("the utterance ends", || utterance.is_finished());
-        let _ = served.join();
-    }
-
-    #[test]
     fn a_fallback_that_does_not_start_is_named_in_the_reason() {
         let (base_url, served) = serve_speech("401 Unauthorized", vec![], false);
-        let fallback: Option<Arc<dyn TtsBackend>> = Some(Arc::new(Refusing));
+        let fallback: Option<Arc<dyn TtsBackend>> = Some(Arc::new(crate::test_support::Refusing));
         let (backend, faults) =
             assembled(&table(base_url, ""), "sk-test", fallback, Output::silent());
         let mut utterance = backend.start("Say this anyway.", None).unwrap();
@@ -979,7 +1046,7 @@ mod tests {
         });
         assert_eq!(
             built.fallback_said.lock().unwrap().as_slice(),
-            ["Say this anyway.".to_string()]
+            [("Say this anyway.".to_string(), None)]
         );
         wait_until("the utterance ends", || utterance.is_finished());
         let _ = served.join();
@@ -1144,34 +1211,221 @@ mod tests {
         served.join().unwrap();
     }
 
-    /// The voice a rate write reports, and the body of the next request.
-    fn sent_after_a_rate_write(speed: f32) -> (Option<String>, serde_json::Value) {
-        let (base_url, served) = serve_speech("200 OK", vec![pcm(&[0, 1, 2, 3, 4, 5])], false);
-        let built = built(base_url, "", false);
+    // The local voice reports its own first sample on the channel the remote
+    // speaker shares, a moment after the remote speaker said why it failed.
+    #[test]
+    fn the_reason_the_fallback_spoke_survives_the_fallback_playing() {
+        let (base_url, served) = serve_speech("401 Unauthorized", vec![], false);
+        let (faults, reports) = std::sync::mpsc::channel();
+        let faults = Faults::new(faults);
+        let fallback_faults = faults.standing_in();
+        let backend = RemoteSpeechBackend::new(
+            &table(base_url, ""),
+            crate::test_support::key_file_holding(crate::credentials::RemoteKey::Tts, "sk-test"),
+            Some(Arc::new(Listening(Asked::default())) as Arc<dyn TtsBackend>),
+            Arc::new(Output::silent()),
+            faults,
+        )
+        .unwrap();
+        let state = crate::test_support::daemon_state(std::sync::mpsc::channel().0);
+        let (cues, _heard) = crate::audio::cues::Cues::recording();
+        let draining = Arc::clone(&state);
+        let drain = std::thread::spawn(move || {
+            crate::text_to_speech::drain_faults(draining, cues, reports);
+        });
+
+        let mut utterance = backend.start("Say this anyway.", None).unwrap();
+        wait_until("the reason is recorded", || {
+            state.last_speech_error().is_some()
+        });
+        fallback_faults.send(Fault::Played);
+        wait_until("the utterance ends", || utterance.is_finished());
+        drop((utterance, backend, fallback_faults));
+        wait_until("every fault is drained", || drain.is_finished());
+
+        assert_eq!(
+            state.last_speech_error().as_deref(),
+            Some("the remote speaker refused the key")
+        );
+        let _ = served.join();
+    }
+
+    /// A local voice built on first use, counting its builds and naming the
+    /// voice each was asked for.
+    fn counted_on_demand(said: &Asked, builds: &Arc<Mutex<Vec<String>>>) -> Arc<dyn TtsBackend> {
+        let said = Arc::clone(said);
+        let builds = Arc::clone(builds);
+        Arc::new(on_demand(
+            &companion_models_with(&["am_adam"]),
+            move |voice: &str| {
+                lock(&builds).push(voice.to_string());
+                Ok(Box::new(Listening(Arc::clone(&said))) as Box<dyn TtsBackend>)
+            },
+            ignored_faults(),
+        ))
+    }
+
+    #[test]
+    fn a_failed_reply_is_spoken_by_the_local_voice() {
+        let (said, builds) = (Arc::default(), Arc::default());
+        let fallback = Some(counted_on_demand(&said, &builds));
+        assert!(
+            lock(&builds).is_empty(),
+            "a remote speaker that works never loads it"
+        );
+
+        let (base_url, served) = serve_speech("401 Unauthorized", vec![], false);
+        let (backend, faults) =
+            assembled(&table(base_url, ""), "sk-test", fallback, Output::silent());
+        let mut utterance = backend.start("Say this anyway.", None).unwrap();
+
+        assert_eq!(
+            spoken_by_fallback(&faults),
+            "the remote speaker refused the key"
+        );
+        wait_until("the fallback speaks", || !lock(&said).is_empty());
+        wait_until("the utterance ends", || utterance.is_finished());
+        assert_eq!(
+            lock(&said).as_slice(),
+            [("Say this anyway.".to_string(), None)]
+        );
+        assert_eq!(lock(&builds).as_slice(), [COMPANION_VOICE.to_string()]);
+        let _ = served.join();
+    }
+
+    #[test]
+    fn a_voice_write_reaches_the_local_fallback() {
+        let (said, builds) = (Arc::default(), Arc::default());
+        let built = build_with(counted_on_demand(&said, &builds));
         let tts = crate::config::TTSConfig {
-            speed,
-            remote: table("http://unused.invalid/v1".to_string(), ""),
+            voice: "am_adam".to_string(),
             ..Default::default()
         };
-        let voice = built.backend.reconfigure(&tts);
 
-        let utterance = built.backend.speak("Hello.").expect("a test device opens");
-        wait_until("the reply is read", || utterance.spoken());
-        (voice, sent_body(&served.join().unwrap()))
+        assert_eq!(built.0.reconfigure(&tts).as_deref(), Some("marin"));
+        built
+            .0
+            .fallback
+            .as_ref()
+            .unwrap()
+            .start("Hello.", None)
+            .unwrap();
+        wait_until("the fallback loads", || !lock(&builds).is_empty());
+        assert_eq!(lock(&builds).as_slice(), ["am_adam".to_string()]);
     }
 
     #[test]
-    fn a_live_rate_write_reaches_the_next_utterance() {
-        let (voice, sent) = sent_after_a_rate_write(0.8);
-        assert_eq!(voice.as_deref(), Some("marin"));
-        assert_eq!(sent["speed"].as_f64().map(|rate| rate as f32), Some(0.8));
-        assert_eq!(sent["voice"], "marin");
+    fn the_fallback_voice_is_freed_when_idle_and_read_again_when_next_needed() {
+        let (said, builds) = (Arc::default(), Arc::default());
+        let built = build_with(counted_on_demand(&said, &builds));
+        assert!(
+            built.0.unload().is_none(),
+            "a server that works loads nothing"
+        );
+        let fallback = Arc::clone(built.0.fallback.as_ref().unwrap());
+
+        fallback.start("One.", None).unwrap();
+        wait_until("the fallback loads", || lock(&builds).len() == 1);
+        wait_until("the fallback is kept", || built.0.unload().is_some());
+        fallback.start("Two.", None).unwrap();
+        wait_until("the fallback loads again", || lock(&builds).len() == 2);
     }
 
     #[test]
-    fn a_rate_of_one_is_left_out() {
-        let (_, sent) = sent_after_a_rate_write(1.0);
-        assert!(sent.get("speed").is_none(), "{sent}");
+    fn a_fallback_that_will_not_load_is_one_fault_with_both_reasons() {
+        let fallback: Arc<dyn TtsBackend> = Arc::new(on_demand(
+            &companion_models(),
+            |_voice: &str| Err(BansheeError::Other("the model will not load".into())),
+            ignored_faults(),
+        ));
+        let (base_url, served) = serve_speech("401 Unauthorized", vec![], false);
+        let (backend, faults) = assembled(
+            &table(base_url, ""),
+            "sk-test",
+            Some(fallback),
+            Output::silent(),
+        );
+        let mut utterance = backend.start("Say this anyway.", None).unwrap();
+
+        let reason = failure(&faults);
+        assert!(
+            reason.contains("the remote speaker refused the key"),
+            "{reason}"
+        );
+        assert!(reason.contains("the model will not load"), "{reason}");
+        wait_until("the utterance ends", || utterance.is_finished());
+        assert!(faults.recv_timeout(GAP).is_err(), "one fault, so one cue");
+        let _ = served.join();
+    }
+
+    /// A fallback whose start waits for the test, as a voice that is loading.
+    struct Loading {
+        entered: Mutex<std::sync::mpsc::Sender<()>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        ended: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl TtsBackend for Loading {
+        fn start(
+            &self,
+            _text: &str,
+            _voice: Option<&str>,
+        ) -> Result<Box<dyn ActiveUtterance>, BansheeError> {
+            let _ = lock(&self.entered).send(());
+            let _ = lock(&self.release).recv();
+            Ok(Box::new(Held(Arc::clone(&self.ended))))
+        }
+    }
+
+    #[test]
+    fn a_stop_while_the_fallback_starts_waits_for_nothing_and_leaves_nothing_playing() {
+        let (entered_to, entered) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let ended: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let fallback: Arc<dyn TtsBackend> = Arc::new(Loading {
+            entered: Mutex::new(entered_to),
+            release: Mutex::new(released),
+            ended: Arc::clone(&ended),
+        });
+        let (base_url, served) = serve_speech("401 Unauthorized", vec![], false);
+        let (backend, _faults) = assembled(
+            &table(base_url, ""),
+            "sk-test",
+            Some(fallback),
+            Output::silent(),
+        );
+        let mut utterance = backend.start("Cancel this.", None).unwrap();
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the fallback is starting");
+
+        let (stopped_to, stopped) = std::sync::mpsc::channel();
+        let stopper = std::thread::spawn(move || {
+            utterance.stop();
+            let _ = stopped_to.send(());
+            utterance
+        });
+        let waited = stopped.recv_timeout(Duration::from_secs(1));
+        release.send(()).unwrap();
+        waited.expect("a stop does not wait for a fallback to start");
+
+        let mut utterance = stopper.join().unwrap();
+        wait_until("the fallback is stopped", || {
+            ended.load(std::sync::atomic::Ordering::SeqCst)
+        });
+        wait_until("the utterance ends", || utterance.is_finished());
+        let _ = served.join();
+    }
+
+    fn build_with(
+        fallback: Arc<dyn TtsBackend>,
+    ) -> (RemoteSpeechBackend, std::sync::mpsc::Receiver<Fault>) {
+        assembled(
+            &table("https://unused.invalid/v1".to_string(), ""),
+            "sk-test",
+            Some(fallback),
+            Output::silent(),
+        )
     }
 
     /// A minimal 16-bit mono WAV. The chunk sizes are the ones a server that
@@ -1333,7 +1587,7 @@ mod tests {
         });
         assert_eq!(
             built.fallback_said.lock().unwrap().as_slice(),
-            ["Say this anyway.".to_string()]
+            [("Say this anyway.".to_string(), None)]
         );
         wait_until("the utterance ends", || utterance.is_finished());
         let _ = served.join();
@@ -1366,7 +1620,7 @@ mod tests {
         });
         assert_eq!(
             built.fallback_said.lock().unwrap().as_slice(),
-            ["Say this anyway.".to_string()]
+            [("Say this anyway.".to_string(), None)]
         );
         let _ = served.join();
     }
@@ -1579,11 +1833,10 @@ mod tests {
         remote.voice = String::new();
         let built = RemoteSpeechBackend::new(
             &remote,
-            "sk-test".to_string(),
-            1.0,
+            crate::test_support::key_file_holding(crate::credentials::RemoteKey::Tts, "sk-test"),
             None,
             Arc::new(Output::silent()),
-            std::sync::mpsc::channel().0,
+            ignored_faults(),
         );
         // `expect_err` would ask the backend for a Debug line, and the backend
         // holds the key
@@ -1591,5 +1844,134 @@ mod tests {
             panic!("a speaker with no voice must refuse");
         };
         assert!(error.to_string().contains("tts.remote.voice"), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_remote_speaker_dropped_on_a_runtime_worker_returns() {
+        let remote = RemoteTtsConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            voice: "alloy".to_string(),
+            ..RemoteTtsConfig::default()
+        };
+        let built = keyed(remote, false, "sk-test");
+        let dropped = tokio::spawn(async move { drop(built.backend) });
+        tokio::time::timeout(std::time::Duration::from_secs(30), dropped)
+            .await
+            .expect("dropping the speaker on a worker never returned")
+            .expect("dropping the speaker on a worker panicked");
+    }
+
+    /// The key file is a pipe, so the request waits on its key until the test
+    /// writes one. The stop lands in that wait.
+    #[cfg(unix)]
+    #[test]
+    fn a_reply_stopped_before_its_request_sends_nothing() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let remote = table(format!("http://{}/v1", listener.local_addr().unwrap()), "");
+        let keys = crate::test_support::unique_scratch("piped-keys").join("credentials.toml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&keys)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (output, _opened) = Output::counting();
+        let backend = RemoteSpeechBackend::new(
+            &remote,
+            keys.clone(),
+            None,
+            Arc::new(output),
+            crate::test_support::ignored_faults(),
+        )
+        .unwrap();
+        let mut utterance = backend.speak("A reply turned off.").unwrap();
+
+        utterance.stop();
+        std::fs::write(&keys, "[tts.remote]\napi_key = \"sk-test\"\n").unwrap();
+        wait_until("the reply's thread ends", || utterance.spoken());
+        assert!(
+            listener.accept().is_err(),
+            "the stopped reply reached the server"
+        );
+    }
+
+    /// The server takes the connection and reads nothing until the stop, so
+    /// the text is still on its way when the stop lands.
+    #[test]
+    fn a_stop_while_the_text_is_on_its_way_sends_no_more_of_it() {
+        use std::io::Read;
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", server.local_addr().unwrap());
+        let (accepted, accepting) = std::sync::mpsc::channel();
+        let (read, reading) = std::sync::mpsc::channel::<()>();
+        let received = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            accepted.send(()).unwrap();
+            let _ = reading.recv();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut total = 0;
+            let mut buffer = vec![0; 64 * 1024];
+            while let Ok(read) = stream.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                total += read;
+            }
+            total
+        });
+        let built = built(base_url, "", false);
+        let mut utterance = built.backend.speak(&"a".repeat(16_000_000)).unwrap();
+        accepting.recv_timeout(Duration::from_secs(5)).unwrap();
+        utterance.stop();
+        read.send(()).unwrap();
+        let received = received.join().unwrap();
+        assert!(
+            received < 8_000_000,
+            "{received} of 16 MB reached the server after the stop"
+        );
+    }
+
+    /// The server closes each kept-alive connection 50 ms after it answers,
+    /// and the next reply comes 300 ms later.
+    #[test]
+    fn a_connection_the_server_closed_while_idle_fails_no_reply() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_request(&mut stream);
+                let body = pcm(&[1000; 2400]);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let built = built(base_url, "", false);
+        for _ in 0..2 {
+            let utterance = built.backend.speak("Hello.").unwrap();
+            wait_until("the reply is read", || utterance.spoken());
+            // The test device takes no audio, so only a fault about the
+            // server counts here
+            let faults: Vec<Fault> = built.faults.try_iter().collect();
+            assert!(
+                faults.iter().any(|fault| matches!(fault, Fault::Played))
+                    && faults.iter().all(|fault| match fault {
+                        Fault::Failed(reason) => !reason.contains("127.0.0.1"),
+                        Fault::SpokenByFallback(_) => false,
+                        _ => true,
+                    }),
+                "{faults:?}"
+            );
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        served.join().unwrap();
     }
 }

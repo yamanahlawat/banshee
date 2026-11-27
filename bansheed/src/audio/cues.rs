@@ -9,7 +9,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::config::FeedbackMode;
 use crate::text_to_speech::output::{Chunk, Output};
-use crate::text_to_speech::{ActiveUtterance, Fault};
+use crate::text_to_speech::{ActiveUtterance, Fault, Faults};
 
 pub use banshee_common::cue::{Reason, ReasonCode, Signal, Target};
 
@@ -24,6 +24,7 @@ pub enum Cue {
     RecordStart,
     RecordStop,
     Ready,
+    Copied,
     Error,
     // The only signal that an armed mic went hot or shut
     Arm,
@@ -37,6 +38,7 @@ impl Cue {
             Cue::RecordStart => &[(660.0, 70), (880.0, 90)],
             Cue::RecordStop => &[(880.0, 70), (660.0, 90)],
             Cue::Ready => &[(523.0, 90), (784.0, 140)],
+            Cue::Copied => &[(784.0, 90), (784.0, 140)],
             Cue::Error => &[(220.0, 120), (196.0, 160)],
             Cue::Arm => &[(523.0, 70), (1046.0, 120)],
             Cue::Disarm => &[(1046.0, 70), (523.0, 120)],
@@ -64,20 +66,18 @@ pub fn sounds(mode: FeedbackMode, drawn: bool) -> bool {
     }
 }
 
-impl From<crate::state::TranscribeTarget> for Target {
-    fn from(target: crate::state::TranscribeTarget) -> Self {
-        match target {
-            crate::state::TranscribeTarget::Dictate => Target::Dictate,
-            crate::state::TranscribeTarget::Mailbox => Target::Mailbox,
-            crate::state::TranscribeTarget::Tell => Target::Tell,
-        }
-    }
-}
-
 pub fn broken(fault: &crate::state::RecordingError) -> Reason {
     Reason {
         code: ReasonCode::PipelineBroken,
-        text: crate::speech_to_text::local::languages::capitalised(&fault.consequence()),
+        text: capitalised(&fault.consequence()),
+    }
+}
+
+pub(crate) fn capitalised(text: &str) -> String {
+    let mut letters = text.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + letters.as_str(),
+        None => String::new(),
     }
 }
 
@@ -86,10 +86,15 @@ pub fn cue_of(signal: &Signal) -> Option<Cue> {
         Signal::RecordStart { .. } => Some(Cue::RecordStart),
         Signal::RecordStop { .. } => Some(Cue::RecordStop),
         Signal::Ready { .. } => Some(Cue::Ready),
+        Signal::Copied => Some(Cue::Copied),
         Signal::Error { .. } => Some(Cue::Error),
         Signal::Arm => Some(Cue::Arm),
         Signal::Disarm => Some(Cue::Disarm),
-        Signal::Answered { .. } | Signal::Told | Signal::Cancelled { .. } | Signal::Onset => None,
+        Signal::Answered { .. }
+        | Signal::Cancelled { .. }
+        | Signal::Onset
+        | Signal::Quiet { .. }
+        | Signal::Speech => None,
     }
 }
 
@@ -209,6 +214,7 @@ pub fn start_cue_player(mode: FeedbackMode, output: Arc<Output>) -> Cues {
         // faults are only logged and stay out of `last_speech_error`.
         let (faults, cue_faults) = mpsc::channel::<Fault>();
         thread::spawn(move || cue_faults.iter().for_each(|fault| fault.log()));
+        let faults = Faults::new(faults);
         serve_cues(receiver, &gate, |cue| play(&output, cue, &faults));
     });
 
@@ -228,7 +234,7 @@ fn serve_cues(receiver: mpsc::Receiver<Cue>, gate: &Gate, mut play: impl FnMut(C
 /// Plays one cue through the daemon's output and stays with it to the end, so a
 /// device that dies mid-cue is replaced the way it is mid-sentence. The wait is
 /// what keeps two cues from overlapping.
-fn play(output: &Arc<Output>, cue: Cue, faults: &mpsc::Sender<Fault>) {
+fn play(output: &Arc<Output>, cue: Cue, faults: &Faults) {
     let tones: Vec<Chunk> = cue
         .tones()
         .iter()
@@ -273,7 +279,6 @@ mod tests {
     #[test]
     fn only_the_silent_signals_have_no_cue() {
         assert_eq!(cue_of(&Signal::Answered { heard: true }), None);
-        assert_eq!(cue_of(&Signal::Told), None);
         assert_eq!(cue_of(&Signal::Onset), None);
         assert_eq!(
             cue_of(&Signal::Cancelled {
@@ -281,6 +286,12 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn the_countdown_edges_make_no_sound() {
+        assert_eq!(cue_of(&Signal::Quiet { remaining_ms: 1 }), None);
+        assert_eq!(cue_of(&Signal::Speech), None);
     }
 
     #[test]
@@ -307,11 +318,21 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_has_its_own_level_earcon() {
+        assert_eq!(cue_of(&Signal::Copied), Some(Cue::Copied));
+        let tones = Cue::Copied.tones();
+        assert_ne!(tones, Cue::Ready.tones());
+        assert_ne!(tones, Cue::Error.tones());
+        assert_eq!(tones.first().map(|t| t.0), tones.last().map(|t| t.0));
+    }
+
+    #[test]
     fn every_cue_has_audible_tones() {
         for cue in [
             Cue::RecordStart,
             Cue::RecordStop,
             Cue::Ready,
+            Cue::Copied,
             Cue::Error,
             Cue::Arm,
             Cue::Disarm,
@@ -341,7 +362,7 @@ mod tests {
     }
 
     // The gate reads only the mode and the drawn count, so a dictation, an
-    // agent's question, a tell failure and a speech failure share one answer.
+    // agent's question, a typing failure and a speech failure share one answer.
     #[test]
     fn a_chip_in_visual_silences_every_job_and_no_chip_sounds_them_all() {
         let jobs = [
@@ -353,13 +374,14 @@ mod tests {
                 target: Some(Target::Answer),
             },
             Signal::Error {
-                reason: Reason::new(ReasonCode::TellFailed, None),
-                target: Some(Target::Tell),
+                reason: Reason::new(ReasonCode::TypeFailed, None),
+                target: Some(Target::Dictate),
             },
             Signal::Error {
                 reason: Reason::new(ReasonCode::SpeechFailed, None),
                 target: None,
             },
+            Signal::Copied,
         ];
 
         let (cues, heard) = Cues::recording_in(FeedbackMode::Visual);
@@ -378,7 +400,7 @@ mod tests {
         }
         assert_eq!(
             heard.try_iter().count(),
-            4,
+            5,
             "with no chip, every job sounds again"
         );
     }

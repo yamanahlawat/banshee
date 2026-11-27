@@ -26,3 +26,5 @@ those is a security fault.
   others can read.
 - The daemon's socket is owner-only. Anything that can reach it can hear the
   microphone and speak through the speakers.
+- The name of a program that uses the microphone comes from the operating system. A program
+  can run under another name, so the name is a lead to check.

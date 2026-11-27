@@ -4,7 +4,7 @@ import ProviderGroup from './ProviderGroup.svelte';
 
 const OPTIONS = [
   { value: 'local', label: 'On this machine' },
-  { value: 'remote', label: 'A remote server' },
+  { value: 'remote', label: 'A transcription server' },
 ];
 
 function group(props: Record<string, unknown> = {}) {
@@ -15,6 +15,7 @@ function group(props: Record<string, unknown> = {}) {
     options: OPTIONS,
     note: 'Audio goes to api.openai.com.',
     noteId: 'listener-note',
+    setting: 'stt.provider',
     change: () => {},
     ...props,
   });

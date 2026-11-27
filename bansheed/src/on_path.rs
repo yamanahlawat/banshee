@@ -5,6 +5,8 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::connect::shell_word;
+
 // The only directory this writes to. It is first in `/etc/paths`, so a link
 // there answers in every login shell. Homebrew's prefix is left alone. The
 // `banshee` it holds is a wrapper that offers to clear the quarantine flag,
@@ -56,21 +58,23 @@ fn ensure_in(exe: &Path, path: impl FnOnce() -> OsString, target: &Path) -> Link
 fn advice(exe: &Path, target: &Path, link: &Path) -> String {
     let mut steps = Vec::new();
     if !target.is_dir() {
-        steps.push(format!("sudo mkdir -p {}", shell_word(target)));
+        steps.push(format!(
+            "sudo mkdir -p {}",
+            shell_word(&target.display().to_string())
+        ));
     }
     if dangling(link) {
-        steps.push(format!("sudo rm {}", shell_word(link)));
+        steps.push(format!(
+            "sudo rm {}",
+            shell_word(&link.display().to_string())
+        ));
     }
     steps.push(format!(
         "sudo ln -s {} {}",
-        shell_word(exe),
-        shell_word(link)
+        shell_word(&exe.display().to_string()),
+        shell_word(&link.display().to_string())
     ));
     steps.join(" && ")
-}
-
-fn shell_word(path: &Path) -> String {
-    crate::tell::quoted(&path.display().to_string())
 }
 
 fn place(exe: &Path, link: &Path) -> std::io::Result<()> {

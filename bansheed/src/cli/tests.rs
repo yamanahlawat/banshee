@@ -1,4 +1,4 @@
-use super::{failure_line, progress_line, state_word, watch_line, waybar_line};
+use super::{failure_line, problem_name, progress_line, state_word, watch_line, waybar_line};
 use banshee_common::InputDevice;
 use banshee_common::error::BansheeError;
 
@@ -20,7 +20,7 @@ fn a_download_line_names_the_file_and_its_place_in_the_run() {
 
 #[test]
 fn a_waybar_line_is_one_parseable_object() {
-    let line = waybar_line("recording", Some("Blue Yeti"), None);
+    let line = waybar_line("recording", Some("Blue Yeti"), None, true, false, None);
     assert!(
         !line.contains('\n'),
         "Waybar reads one object per line: {line}"
@@ -40,7 +40,7 @@ fn a_waybar_line_is_one_parseable_object() {
 // escaped rather than pasted into the line
 #[test]
 fn a_quote_in_the_device_name_does_not_break_the_line() {
-    let line = waybar_line("idle", Some("Bob\"s \\ Mic"), None);
+    let line = waybar_line("idle", Some("Bob\"s \\ Mic"), None, false, false, None);
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
     assert!(
         parsed["tooltip"]
@@ -52,53 +52,95 @@ fn a_quote_in_the_device_name_does_not_break_the_line() {
 
 #[test]
 fn an_unknown_device_is_left_out_rather_than_named_empty() {
-    let line = waybar_line("idle", None, None);
+    let line = waybar_line("idle", None, None, false, false, None);
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
     let tooltip = parsed["tooltip"].as_str().unwrap();
     assert!(
         !tooltip.contains("Microphone"),
         "no device means none is named: {tooltip}"
     );
-    assert!(tooltip.contains("idle"), "{tooltip}");
+    assert!(tooltip.contains("Banshee: Ready"), "{tooltip}");
 }
 
 // A bar reader has the tooltip only, so a substitution has to show there or
 // the bar names a device that is gone
 #[test]
 fn a_waybar_tooltip_names_what_the_config_still_waits_for() {
-    let line = waybar_line("idle", None, Some("Yeti Nano"));
-    let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
-    let tooltip = parsed["tooltip"].as_str().unwrap();
-    assert!(tooltip.contains("Not open"), "{tooltip}");
-    assert!(
-        !tooltip.contains("No microphone"),
-        "a closed stream is not an absent device: {tooltip}"
+    let line = waybar_line(
+        "idle",
+        Some("MacBook Pro Microphone"),
+        Some("Yeti Nano"),
+        false,
+        false,
+        None,
     );
-    assert!(tooltip.contains("\"Yeti Nano\""), "{tooltip}");
+    let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    assert_eq!(
+        parsed["tooltip"],
+        "Banshee: Ready. Microphone: MacBook Pro Microphone (waiting for \"Yeti Nano\"), opens when you speak"
+    );
+}
+
+// A closed microphone between uses is the idle daemon's normal state, and an
+// open one under `audio.keep_open` is too, so the tooltip says which.
+#[test]
+fn a_waybar_tooltip_says_whether_the_microphone_is_open() {
+    let tooltip = |open, refused| {
+        let line = waybar_line(
+            "idle",
+            Some("MacBook Pro Microphone"),
+            None,
+            open,
+            refused,
+            None,
+        );
+        serde_json::from_str::<serde_json::Value>(&line).expect("valid JSON")["tooltip"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        tooltip(false, false),
+        "Banshee: Ready. Microphone: MacBook Pro Microphone, opens when you speak"
+    );
+    assert_eq!(
+        tooltip(true, false),
+        "Banshee: Ready. Microphone: MacBook Pro Microphone, open"
+    );
+    assert_eq!(
+        tooltip(false, true),
+        "Banshee: Ready. Microphone: MacBook Pro Microphone, not allowed by macOS"
+    );
 }
 
 // The reader sees the line, so the dedupe compares lines. A plain reader
 // cannot see the device, so the same word twice would be noise.
 #[test]
 fn a_device_change_alone_moves_the_line_only_where_the_device_shows() {
-    let plain_bound = watch_line(false, "idle", Some("Yeti Nano"), None);
+    let plain_bound = watch_line(false, "idle", Some("Yeti Nano"), None, false, false, None);
     let plain_substituted = watch_line(
         false,
         "idle",
         Some("MacBook Pro Microphone"),
         Some("Yeti Nano"),
+        false,
+        false,
+        None,
     );
     assert_eq!(
         plain_bound, plain_substituted,
         "plain mode prints the word alone"
     );
 
-    let waybar_bound = watch_line(true, "idle", Some("Yeti Nano"), None);
+    let waybar_bound = watch_line(true, "idle", Some("Yeti Nano"), None, false, false, None);
     let waybar_substituted = watch_line(
         true,
         "idle",
         Some("MacBook Pro Microphone"),
         Some("Yeti Nano"),
+        false,
+        false,
+        None,
     );
     assert_ne!(
         waybar_bound, waybar_substituted,
@@ -135,37 +177,38 @@ fn device(name: &str, default: bool) -> InputDevice {
 }
 
 #[test]
-fn the_recording_device_carries_both_labels_when_it_is_also_the_preference() {
-    assert_eq!(
-        super::device_labels(&device("Blue Yeti", true), Some("Blue Yeti")),
-        "system default, in use"
-    );
-}
+fn a_device_carries_a_label_for_each_thing_that_points_at_it() {
+    let cases = [
+        (
+            "both",
+            device("Blue Yeti", true),
+            Some("Blue Yeti"),
+            "system default, in use",
+        ),
+        (
+            "the daemon passed it over",
+            device("Built-in", true),
+            Some("Blue Yeti"),
+            "system default",
+        ),
+        (
+            "only in use",
+            device("Blue Yeti", false),
+            Some("Blue Yeti"),
+            "in use",
+        ),
+        ("nothing points at it", device("BlackHole", false), None, ""),
+        (
+            "no daemon: a device nobody opened must not read as recording",
+            device("Built-in", true),
+            None,
+            "system default",
+        ),
+    ];
 
-#[test]
-fn a_device_the_daemon_passed_over_keeps_its_preference_label() {
-    assert_eq!(
-        super::device_labels(&device("Built-in", true), Some("Blue Yeti")),
-        "system default"
-    );
-    assert_eq!(
-        super::device_labels(&device("Blue Yeti", false), Some("Blue Yeti")),
-        "in use"
-    );
-}
-
-#[test]
-fn a_device_nothing_points_at_carries_no_label() {
-    assert_eq!(super::device_labels(&device("BlackHole", false), None), "");
-}
-
-#[test]
-fn no_daemon_means_no_in_use_label_even_for_the_preference() {
-    assert_eq!(
-        super::device_labels(&device("Built-in", true), None),
-        "system default",
-        "a device nobody opened must not read as recording"
-    );
+    for (name, device, current, labels) in cases {
+        assert_eq!(super::device_labels(&device, current), labels, "{name}");
+    }
 }
 
 // The prompt cannot say "remove it", so an empty answer must not be read as one
@@ -257,18 +300,19 @@ fn a_failed_download_ends_the_wait_and_is_named_in_the_error() {
         (0, &["b.onnx".to_string()][..])
     );
 
-    let error = super::downloads_settled(&failed).expect_err("a failed model is an error");
+    let error =
+        super::downloads_settled(&failed, "banshee setup").expect_err("a failed model is an error");
     assert!(error.to_string().contains("b.onnx"), "{error}");
-    assert!(error.to_string().contains("banshee setup"), "{error}");
-    assert!(super::downloads_settled(&[]).is_ok());
+    assert!(error.to_string().contains("run: banshee setup"), "{error}");
+    assert!(super::downloads_settled(&[], "banshee setup").is_ok());
 }
 
 #[test]
 fn a_rejection_reads_as_the_daemon_wrote_it() {
-    let error = BansheeError::Rejected("say what to tell it, or pass --undo".into());
+    let error = BansheeError::Rejected("'stt.model' needs a value".into());
     assert_eq!(
         failure_line(&error),
-        "say what to tell it, or pass --undo",
+        "'stt.model' needs a value",
         "the caller's own mistake needs no wrapper and no Debug form"
     );
 }
@@ -307,6 +351,16 @@ fn an_io_failure_away_from_the_socket_is_not_blamed_on_the_daemon() {
 }
 
 #[test]
+fn a_missing_listening_model_is_named_by_its_id() {
+    let note = super::missing_models_note(&["parakeet-unified-en-0.6b-Q8_0.gguf".to_string()])
+        .expect("a missing model has something to say");
+    assert_eq!(
+        note,
+        "Recording waits on the listening model parakeet-unified-en-0.6b: run banshee setup"
+    );
+}
+
+#[test]
 fn a_missing_model_is_named_beside_the_command_that_fetches_it() {
     let note = super::missing_models_note(&["silero_vad.onnx".to_string()])
         .expect("a missing model has something to say");
@@ -315,25 +369,193 @@ fn a_missing_model_is_named_beside_the_command_that_fetches_it() {
         note.contains("banshee setup"),
         "the line must name the command that downloads: {note}"
     );
+    assert_eq!(
+        super::missing_models_note(&[]),
+        None,
+        "nothing is said when every model is on disk"
+    );
+}
+
+#[tokio::test]
+async fn a_config_that_does_not_load_starts_nothing() {
+    let mut registered = false;
+    let refused = super::start_with(
+        Err(BansheeError::Rejected(
+            "Delete `preset` under [stt]: Banshee listens with stt.model now.".to_string(),
+        )),
+        || {
+            registered = true;
+            Ok(String::new())
+        },
+    )
+    .await
+    .expect_err("a config the daemon refuses is no start");
+    assert!(!registered, "nothing may start a daemon that exits at once");
+    let refused = refused.to_string();
+    assert!(refused.contains("`preset` under [stt]"), "{refused}");
+    assert!(refused.contains("banshee start"), "{refused}");
+}
+
+fn scratch() -> std::path::PathBuf {
+    crate::test_support::unique_scratch("cli-after-write")
 }
 
 #[test]
-fn nothing_is_said_when_every_model_is_on_disk() {
-    assert_eq!(super::missing_models_note(&[]), None);
-}
-
-#[test]
-fn a_file_that_arrived_through_a_running_daemon_names_the_restart() {
-    let note = super::restart_note(1).expect("a file that arrived has something to say");
+fn a_listening_model_not_downloaded_names_the_download_and_never_the_start() {
+    let dir = crate::test_support::unique_scratch("cli-model");
+    let turbo = serde_json::json!("whisper-large-v3-turbo");
+    let waiting = super::Written::Waiting(vec!["stt.model".into()]);
+    let lines = super::after_write("stt.model", &turbo, &waiting, true, &dir);
+    let line = lines.join("\n");
+    assert!(line.contains("banshee setup"), "{line}");
+    assert!(line.contains("whisper-large-v3-turbo"), "{line}");
+    assert!(!line.contains("banshee start"), "{line}");
     assert!(
-        note.contains("banshee start"),
-        "the line must name the command that reloads: {note}"
+        !line.contains("the model it has"),
+        "a daemon waiting for its first model has none: {line}"
+    );
+
+    std::fs::write(dir.join("whisper-large-v3-turbo-Q5_K_M.gguf"), b"").unwrap();
+    let lines = super::after_write("stt.model", &turbo, &waiting, true, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(lines, ["Banshee could not use it yet."]);
+}
+
+#[test]
+fn a_model_not_downloaded_gets_the_download_line_with_no_daemon_too() {
+    let dir = crate::test_support::unique_scratch("cli-model-nodaemon");
+    let turbo = serde_json::json!("whisper-large-v3-turbo");
+    let lines = super::after_write("stt.model", &turbo, &super::Written::NoDaemon, true, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    let line = lines.join("\n");
+    assert!(line.contains("banshee setup"), "{line}");
+    assert!(!line.contains("banshee start"), "{line}");
+}
+
+#[test]
+fn no_line_names_a_restart() {
+    for written in [
+        super::Written::Now,
+        super::Written::NoDaemon,
+        super::Written::Waiting(vec!["audio.keep_open".into()]),
+    ] {
+        let lines = super::after_write(
+            "audio.keep_open",
+            &serde_json::json!(true),
+            &written,
+            true,
+            &scratch(),
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("Restart")),
+            "{lines:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_key_is_refused_before_the_daemon_is_called() {
+    assert!(banshee_common::settings::find("stt.vadthreshold").is_none());
+    assert_eq!(
+        crate::settings::not_a_setting("stt.vadthreshold").to_string(),
+        "'stt.vadthreshold' is not a setting"
+    );
+}
+
+fn sent_value(key: &str, word: &str) -> serde_json::Value {
+    banshee_common::settings::find(key)
+        .unwrap()
+        .domain
+        .typed(word)
+}
+
+#[test]
+fn a_known_key_takes_its_row_s_type() {
+    assert_eq!(
+        sent_value("stt.vad_threshold", "0.6"),
+        serde_json::json!(0.6)
+    );
+    assert_eq!(
+        sent_value("audio.input_device", "12"),
+        serde_json::json!("12")
     );
 }
 
 #[test]
-fn a_run_that_fetched_nothing_asks_for_no_restart() {
-    assert_eq!(super::restart_note(0), None);
+fn a_setting_the_daemon_took_says_it_is_in_use() {
+    let lines = super::after_write(
+        "stt.vad_threshold",
+        &serde_json::json!(0.6),
+        &super::Written::Now,
+        true,
+        &scratch(),
+    );
+    assert_eq!(lines, ["Banshee uses it now."]);
+}
+
+#[test]
+fn a_setting_written_with_no_daemon_names_the_start() {
+    let lines = super::after_write(
+        "stt.vad_threshold",
+        &serde_json::json!(0.6),
+        &super::Written::NoDaemon,
+        true,
+        &scratch(),
+    );
+    assert_eq!(lines, ["Banshee uses it when it starts: banshee start"]);
+}
+
+#[test]
+fn a_hotkey_the_compositor_holds_says_only_where_to_bind_it() {
+    let lines = super::after_write(
+        "audio.hotkey",
+        &serde_json::json!("F6"),
+        &super::Written::Now,
+        false,
+        &scratch(),
+    );
+    assert_eq!(lines.join("\n"), super::hotkey_hint(false).unwrap());
+}
+
+#[test]
+fn a_null_write_says_the_key_was_removed() {
+    assert_eq!(
+        super::written_line("stt.vad_threshold", &serde_json::Value::Null),
+        "Removed stt.vad_threshold from config.toml."
+    );
+    assert_eq!(
+        super::written_line("stt.vad_threshold", &serde_json::json!(0.6)),
+        "Set stt.vad_threshold in config.toml."
+    );
+}
+
+#[test]
+fn only_the_detector_that_arrived_through_a_running_daemon_names_the_restart() {
+    let note =
+        super::restart_note(&[crate::models::VAD_MODEL]).expect("the detector loads only at start");
+    assert!(
+        note.contains("banshee start"),
+        "the line must name the command that reloads: {note}"
+    );
+    let parakeet = banshee_common::listening::SUGGESTED[0].file;
+    assert_eq!(
+        super::restart_note(&[parakeet]),
+        None,
+        "the daemon loads a listening model once its file arrives"
+    );
+    assert_eq!(super::restart_note(&[]), None, "nothing arrived");
+}
+
+#[test]
+fn a_voice_that_arrived_asks_for_no_restart() {
+    let companion: Vec<String> =
+        crate::models::download::voice_files(banshee_common::COMPANION_VOICE)
+            .into_iter()
+            .map(|file| file.name)
+            .collect();
+    let names: Vec<&str> = companion.iter().map(String::as_str).collect();
+    assert_eq!(super::restart_note(&names), None, "the next reply loads it");
+    assert_eq!(super::restart_note(&["af_sky.bin"]), None);
 }
 
 // Both halves of what an orphaned socket answers with: nothing at all, and a
@@ -406,11 +628,16 @@ async fn watch_into_a_file_never_reads_as_a_closed_reader() {
 }
 
 #[test]
-fn only_cues_and_level_can_be_watched_as_events() {
-    let names = vec!["cues".to_string(), "level".to_string()];
+fn only_cues_level_words_and_question_can_be_watched_as_events() {
+    let names = vec![
+        "cues".to_string(),
+        "level".to_string(),
+        "words".to_string(),
+        "question".to_string(),
+    ];
     assert_eq!(
         super::watched_events(&names).unwrap(),
-        vec!["cues", "level"]
+        vec!["cues", "level", "words", "question"]
     );
     assert!(super::watched_events(&["downloads".to_string()]).is_err());
 }
@@ -426,4 +653,185 @@ fn an_event_prints_as_one_json_line() {
     let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(parsed["method"], "banshee.cue");
     assert_eq!(parsed["params"]["cue"], "arm");
+}
+
+#[test]
+fn a_non_commercial_model_needs_the_licence_accepted() {
+    let dir = crate::test_support::unique_scratch("setup-licence");
+    let mut accepted = crate::models::licences::Accepted::at(dir.join("accepted-licences"));
+
+    let refused = super::model_to_fetch("canary-1b", false, &mut accepted);
+    let accepting = super::model_to_fetch("canary-1b", true, &mut accepted).map(|model| model.id);
+    let later = super::model_to_fetch("canary-1b", false, &mut accepted).map(|model| model.id);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let error = refused
+        .expect_err("an unaccepted licence refuses")
+        .to_string();
+    assert!(error.contains("CC-BY-NC-4.0"), "{error}");
+    assert!(error.contains("non-commercial purposes only"), "{error}");
+    assert!(
+        error.contains("https://creativecommons.org/licenses/by-nc/4.0/"),
+        "{error}"
+    );
+    assert!(
+        error.contains("banshee setup --model canary-1b --accept-licence"),
+        "{error}"
+    );
+    assert_eq!(accepting.unwrap(), "canary-1b");
+    assert_eq!(later.unwrap(), "canary-1b", "acceptance is recorded once");
+}
+
+#[test]
+fn an_unknown_model_id_names_the_id() {
+    let mut accepted =
+        crate::models::licences::Accepted::at("/no-such-dir-9f3a/accepted-licences".into());
+    let error = super::model_to_fetch("whisper-tiny-en", false, &mut accepted)
+        .expect_err("an id the catalogue lacks is refused")
+        .to_string();
+    assert!(error.contains("'whisper-tiny-en'"), "{error}");
+    assert!(
+        error.contains(banshee_common::listening::DEFAULT_MODEL),
+        "{error}"
+    );
+    assert!(error.contains("whisper-large-v3-turbo"), "{error}");
+    assert!(error.contains("whisper-tiny.en"), "the closest id: {error}");
+    assert!(error.contains("banshee setup --list"), "{error}");
+}
+
+#[test]
+fn a_model_id_in_any_case_fetches_the_catalogue_id() {
+    let mut accepted =
+        crate::models::licences::Accepted::at("/no-such-dir-9f3a/accepted-licences".into());
+    let model = super::model_to_fetch("QWEN3-asr-0.6b", false, &mut accepted).unwrap();
+    assert_eq!(model.id, "Qwen3-ASR-0.6B");
+}
+
+#[test]
+fn the_list_has_a_row_per_model_with_its_size_languages_streaming_and_licence() {
+    let lines = super::catalogue_lines();
+    assert_eq!(lines.len(), banshee_common::listening::CATALOGUE.len() + 1);
+    let parakeet = lines
+        .iter()
+        .find(|line| line.starts_with("parakeet-unified-en-0.6b "))
+        .expect("the default model is listed");
+    for column in [
+        "731 MB",
+        "English",
+        "yes",
+        "NVIDIA Open Model License (2025-10-24)",
+    ] {
+        assert!(parakeet.contains(column), "{parakeet}");
+    }
+    let voxtral = lines
+        .iter()
+        .find(|line| line.starts_with("Voxtral-Small-24B-2507 "))
+        .expect("the largest model is listed");
+    let heard = banshee_common::listening::find("Voxtral-Small-24B-2507")
+        .unwrap()
+        .languages
+        .len();
+    assert!(heard > 3, "this row stands for a count");
+    for column in ["GB", &format!("{heard} languages"), "no", "Apache-2.0"] {
+        assert!(voxtral.contains(column), "{voxtral}");
+    }
+    let moonshine = lines
+        .iter()
+        .find(|line| line.starts_with("moonshine-tiny-ja "))
+        .expect("a Moonshine build is listed");
+    assert!(moonshine.contains("Powered by Moonshine AI"), "{moonshine}");
+}
+
+#[test]
+fn up_to_three_languages_print_their_codes() {
+    assert_eq!(super::languages_heard(&["en"]), "English");
+    assert_eq!(super::languages_heard(&["zh", "en", "ja"]), "zh, en, ja");
+    assert_eq!(super::languages_heard(&["a", "b", "c", "d"]), "4 languages");
+}
+
+#[test]
+fn a_hotkey_the_compositor_holds_names_the_bind_command() {
+    assert!(
+        super::hotkey_hint(false)
+            .unwrap()
+            .contains("banshee bind hyprland")
+    );
+    assert_eq!(super::hotkey_hint(true), None);
+}
+
+#[test]
+fn an_idle_bar_with_a_problem_picks_the_problem_icon_and_names_it_first() {
+    let line: serde_json::Value = serde_json::from_str(&waybar_line(
+        "idle",
+        Some("Blue Yeti"),
+        None,
+        false,
+        false,
+        Some("Accessibility is not granted"),
+    ))
+    .unwrap();
+    assert_eq!(line["text"], "idle");
+    assert_eq!(line["alt"], "problem");
+    assert_eq!(line["class"], "idle");
+    assert!(
+        line["tooltip"]
+            .as_str()
+            .unwrap()
+            .starts_with("Accessibility is not granted. Banshee: Not ready. Microphone: ")
+    );
+}
+
+#[test]
+fn a_problem_while_recording_leaves_the_bar_on_the_state() {
+    let line: serde_json::Value = serde_json::from_str(&waybar_line(
+        "recording",
+        Some("Blue Yeti"),
+        None,
+        true,
+        false,
+        Some("Accessibility is not granted"),
+    ))
+    .unwrap();
+    assert_eq!(line["alt"], "recording");
+    assert!(
+        line["tooltip"]
+            .as_str()
+            .unwrap()
+            .starts_with("Banshee: Recording")
+    );
+}
+
+#[test]
+fn a_status_with_a_blocker_reaches_the_waybar_line_as_a_problem() {
+    let state = serde_json::json!({
+        "blockers": [{"name": "Accessibility is not granted"}],
+    });
+    let line: serde_json::Value = serde_json::from_str(&watch_line(
+        true,
+        "idle",
+        None,
+        None,
+        false,
+        false,
+        problem_name(&state),
+    ))
+    .unwrap();
+    assert_eq!(line["alt"], "problem");
+    assert_eq!(problem_name(&serde_json::json!({"blockers": []})), None);
+    assert_eq!(problem_name(&serde_json::json!({})), None);
+}
+
+#[test]
+fn a_waybar_tooltip_names_every_state_with_its_human_word() {
+    for (wire, human) in [
+        ("idle", "Ready"),
+        ("recording", "Recording"),
+        ("speaking", "Speaking"),
+        ("listening", "Your turn"),
+        ("busy", "Working"),
+    ] {
+        let line: serde_json::Value =
+            serde_json::from_str(&waybar_line(wire, None, None, false, false, None)).unwrap();
+        assert_eq!(line["tooltip"], format!("Banshee: {human}"));
+    }
 }
