@@ -234,7 +234,3 @@ Each piece runs once on an upgraded machine. Remove it in the release after the 
   (`bansheed/src/models.rs`, `OLD_WHISPER_FILES`; `bansheed/src/daemon.rs`).
 - `migrate_legacy` and `bootout_legacy` remove the old launch agents on macOS
   (`bansheed/src/service.rs`; `LEGACY_AGENTS` in `banshee-common/src/utils.rs`).
-- `banshee connect claude` replaces the old `banshee-speak-check.sh` hook entry in place and
-  deletes the script (`old_script`, `hook_script_path` and `Change::RemoveFile` in
-  `bansheed/src/connect.rs`; `is_banshee_hook` in `bansheed/src/connect/hooks.rs`). It shipped
-  in 0.16.0, so a user on 0.15 or older who skips the next release gets two Stop hooks.

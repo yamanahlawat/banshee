@@ -8,7 +8,6 @@ edition = "2024"
 authors = ["Yaman Ahlawat"]
 license = "MIT"
 repository = "https://github.com/yamanahlawat/banshee"
-homepage = "https://github.com/yamanahlawat/banshee"
 readme = "README.md"
 keywords = ["voice", "dictation", "mcp", "speech-to-text", "tts"]
 categories = ["command-line-utilities", "multimedia::audio"]

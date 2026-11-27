@@ -20,7 +20,7 @@ today, and `CHANGELOG.md` holds what has shipped.
 
 - More agents for `banshee connect`: Windsurf (#55), Zed (#56) and Kiro (#58). Cline and Roo
   Code, Goose and Continue have no issue yet.
-- Confirm `banshee connect cursor` (#53) and `banshee connect codex` (#54) on a real install.
+- Confirm `banshee connect cursor` (#53) on a real install.
 
 ## Not planned
 

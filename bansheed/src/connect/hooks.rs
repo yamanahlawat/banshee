@@ -2,7 +2,7 @@ use std::path::Path;
 
 use banshee_common::error::BansheeError;
 
-use super::{command_words, hook_script_path, malformed, parse_settings, pretty_json, shell_word};
+use super::{command_words, malformed, parse_settings, pretty_json, shell_word};
 use crate::turn_end::GatedAgent;
 
 fn script_end(agent: GatedAgent) -> String {
@@ -34,12 +34,8 @@ pub(super) fn is_turn_end_command(command: &str, agent: GatedAgent) -> bool {
     )
 }
 
-fn is_banshee_hook(command: &str, agent: GatedAgent) -> bool {
-    is_turn_end_command(command, agent) || hook_script_path(command).is_some()
-}
-
 /// The commands under `hooks.Stop[].hooks[]`, the shape Claude Code and Codex share.
-pub(super) fn stop_hook_commands(root: &serde_json::Value) -> impl Iterator<Item = &str> {
+fn stop_hook_commands(root: &serde_json::Value) -> impl Iterator<Item = &str> {
     root["hooks"]["Stop"]
         .as_array()
         .into_iter()
@@ -49,14 +45,13 @@ pub(super) fn stop_hook_commands(root: &serde_json::Value) -> impl Iterator<Item
 }
 
 /// Whether a settings file in the `hooks.Stop[].hooks[]` shape holds Banshee's
-/// hook, as the script entry or as the turn-end command. A file that does not
-/// parse holds none.
+/// turn-end hook. A file that does not parse holds none.
 pub(super) fn holds_banshee_hook(settings: Option<&str>, agent: GatedAgent) -> bool {
     let Some(root) = settings.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
     else {
         return false;
     };
-    stop_hook_commands(&root).any(|command| is_banshee_hook(command, agent))
+    stop_hook_commands(&root).any(|command| is_turn_end_command(command, agent))
 }
 
 /// `before` with Banshee's `hooks.Stop[].hooks[]` entry set to `command`, the
@@ -91,7 +86,7 @@ pub(super) fn with_turn_end(
         .find(|hook| {
             hook["command"]
                 .as_str()
-                .is_some_and(|c| is_banshee_hook(c, agent))
+                .is_some_and(|c| is_turn_end_command(c, agent))
         });
     match existing {
         Some(hook) if hook["command"] == command => return Ok(None),

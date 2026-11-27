@@ -33,11 +33,11 @@ banshee connect claude
 ```
 
 - The installer says how to put `banshee` on your PATH. Open a new shell if the next command is not found.
-- `banshee setup` downloads the models (~860 MB). `banshee start` then finds them and needs no restart.
+- `banshee setup` downloads the models (about 1.1 GB). `banshee start` then finds them and needs no restart.
 - `banshee bind hyprland` shows the block before it writes. Omarchy ships `wtype`, so nothing more is installed.
 - `banshee connect claude` shows the change before it writes.
 - Restart Claude Code.
-- **Hold `F9`** and speak. The text is typed into the app you are focused on. [All three keys](#the-keys)
+- **Hold `F9`** and speak. The text is typed into the app you are focused on. [The keys](#the-keys)
 - Omarchy's own dictation tool also uses `F9`. Unbind one if both are there.
 - `banshee status` names the fix, and changes nothing itself.
 - [Another compositor, or a status bar](docs/linux.md)
@@ -52,10 +52,11 @@ tmp="$(mktemp)" && curl -fsSL https://github.com/yamanahlawat/banshee/releases/l
 open /Applications/Banshee.app
 ```
 
-- The downloaded app needs no `xattr` line. Run the same lines again to update it. The command removes the old app after the download, because files left from it break the new signature. After each curl update, run `banshee start`, then `banshee tray`.
+- The downloaded app needs no `xattr` line.
+- **To update,** run the same lines again, then `banshee start` and `banshee tray` so the running Banshee moves to the new app.
 - No admin account? Use `~/Applications` in every line that names `/Applications`, open it from there, and read that path in the line below.
 - Opening the app puts the `banshee` command on your PATH, where `/usr/local/bin` takes it. A clean macOS has no such directory, and [one line makes it](docs/install.md#macos-without-homebrew).
-- The window asks before it downloads the models (~860 MB), and lets you pick the speech model first.
+- The window asks before it downloads the models (about 1.1 GB), and lets you pick the listening model first.
 - Approve the **Microphone** and **Accessibility** grants. Without them Banshee cannot record or type.
 - **Hold `Right Option`**, speak, let go. The text is typed into the app you are focused on.
 - `banshee status` names the fix, and changes nothing itself.
@@ -82,10 +83,10 @@ This is the step that closes the voice loop: the agent speaks, and you answer ou
 2. Press **Apply**.
 3. Restart the agent. It speaks its decisions and asks you questions out loud.
 
-- Antigravity, Claude Code, Copilot, OpenCode and Pi are verified on a real install. Codex and Cursor follow their published formats, and wait for a report.
+- Antigravity, Claude Code, Codex, Copilot, OpenCode and Pi are verified on a real install. Cursor follows its published format, and waits for a report.
 - Pi has its own extension API, so it gets a [native extension](integrations/pi) instead.
 
-<p align="center"><img src="assets/agents.png" width="360" alt="The Agents page: Claude Code and OpenCode are connected, and Codex and Cursor are installed with a Connect button beside each."></p>
+<p align="center"><img src="assets/agents.png" width="640" alt="The Agents page beside the sidebar: Claude Code, Codex and OpenCode under Connected, and Cursor under Installed with a Connect button."></p>
 
 **From the terminal,** the same work:
 
@@ -134,15 +135,17 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 
 ## Use it
 
-- **Talk over it.** The hotkey stops whatever Banshee says. `barge_in = "none"` lets it finish.
-- **The window.** `Open Banshee` in the menu bar. A sidebar reaches [History](#history), Agents and every setting. Quit it and dictation carries on.
-- **The figure at the bottom of the screen.** A small rust capsule shows while Banshee records, works, waits for your answer, copies or fails. Nothing shows at rest. On Linux it needs a desktop with layer shell, such as Hyprland, Sway or KDE. `feedback.mode` picks the figure, the earcons or both. [Feedback](docs/configuration.md)
+- **Talk over it.** The hotkey stops whatever Banshee says. `audio.barge_in = "none"` lets it finish.
+- **The window.** `Open Banshee` in the menu bar, or on macOS click Banshee in the Dock. A sidebar reaches [History](#history), Agents and every setting. Quit it and dictation carries on.
+- **The figure at the bottom of the screen.** A small rust capsule shows while Banshee records, works, waits for your answer, copies or fails. On Linux it needs a desktop with layer shell, such as Hyprland, Sway or KDE. `feedback.mode` picks the figure, the earcons, both or none. [Feedback](docs/configuration.md)
+- **An agent's question on screen.** When an agent asks, the capsule becomes a card with the whole question and whose turn it is. It shows `Sent` once your answer is in. A question you did not answer leaves a `You missed a question` pill; click it to read the question in History.
+- **The microphone and memory.** The microphone opens only while Banshee listens, so macOS's orange dot is off between uses. Local models free their memory after 5 idle minutes and load again at the next use. `audio.keep_open` and `models.unload_after` change both. [Configuration](docs/configuration.md)
 
-<p align="center"><img src="assets/window.png" width="360" alt="The Banshee window: the last dictation in large type with a copy button, the day's earlier dictations beneath it, and a footer naming the microphone, hotkey, voice and connected agents."></p>
+<p align="center"><img src="assets/window.png" width="640" alt="The Banshee window: a sidebar with History, Agents and the settings pages, the History list of today's questions and dictations, and the selected question beside it with the spoken answer, a play button and copy buttons."></p>
 
 - The menu bar icon answers one question: can I speak right now.
 - The menu's `Listening model` and `Voice` rows list the models and voices already on this machine. A pick takes effect with no restart. Downloads stay in the window. Under a transcription or speech server, the row names the server and is greyed out.
-- A lasting problem puts an exclamation badge on the idle figure. The first menu row says what is wrong, for example `Accessibility is not granted` or `Microphone access is not allowed`, and opens Banshee. When Banshee started without Accessibility, the daemon restarts as that grant lands, and the badge clears. On macOS 14 and later, a microphone grant or refusal reaches Banshee at its next use, with no restart.
+- A lasting problem puts an exclamation badge on the idle figure, and Ready reads `Not ready`. The first menu row says what is wrong, for example `Accessibility is not granted` or `Microphone access is not allowed`, and opens Banshee. When Banshee started without Accessibility, the daemon restarts as that grant lands, and the badge clears. On macOS 14 and later, a microphone grant or refusal reaches Banshee at its next use, with no restart.
 - When Banshee is not running, the first row reads `Start Banshee` and runs `banshee start`. It reads `Starting Banshee` while that runs, and `Start failed. Open Banshee` if it fails. The tooltip reads `Banshee: Not running`.
 - The badge shows only at rest. The recording, speaking, your turn and working marks keep their shape.
 - Banshee also says a new problem aloud once after it starts, never at login. `feedback.speak_problems = false` turns that off. [Feedback](docs/configuration.md)
@@ -151,7 +154,7 @@ The defaults. `banshee bind hyprland` writes the Linux column:
 |:----:|:---------:|:----:|:--------:|:---------------:|:-----------:|
 | <img src="assets/states/idle.png" width="52" alt=""> | <img src="assets/states/recording.png" width="52" alt=""> | <img src="assets/states/busy.png" width="52" alt=""> | <img src="assets/states/speaking.png" width="52" alt=""> | <img src="assets/states/listening.png" width="52" alt=""> | <img src="assets/states/notrunning.png" width="52" alt=""> |
 
-- Working means Banshee transcribes what you said.
+- Working means Banshee transcribes what you said, or loads a model it freed while idle.
 - Your turn means an agent asked a question and holds for your answer.
 - The states differ by shape, never by colour alone, and macOS tints the template image.
 
