@@ -132,10 +132,6 @@ pub enum Change {
         before: Option<String>,
         after: String,
     },
-    RemoveFile {
-        path: PathBuf,
-        before: String,
-    },
 }
 
 pub fn detect(agent: Agent, env: &Env) -> Presence {
@@ -172,9 +168,7 @@ pub fn row(agent: Agent, env: &Env) -> AgentRow {
 pub fn planned_change(change: &Change) -> PlannedChange {
     PlannedChange {
         path: match change {
-            Change::WriteFile { path, .. } | Change::RemoveFile { path, .. } => {
-                Some(path.display().to_string())
-            }
+            Change::WriteFile { path, .. } => Some(path.display().to_string()),
             Change::Run { .. } => None,
         },
         diff: render(change),
@@ -275,8 +269,7 @@ fn plan_claude(env: &Env) -> Result<Vec<Change>, BansheeError> {
 }
 
 /// Sets Banshee's Stop hook to `command` at `path`, whose text the plan
-/// already read as `before`, and removes the `banshee-speak-check.sh` script
-/// that the file's Stop hook names.
+/// already read as `before`.
 fn claude_hook(
     path: PathBuf,
     before: Option<String>,
@@ -287,24 +280,9 @@ fn claude_hook(
         .and_then(OsStr::to_str)
         .unwrap_or("settings.json")
         .to_string();
-    let retired = old_script(before.as_deref(), &file)?;
-    let mut changes = rewrite_from(path, before, |before| {
+    rewrite_from(path, before, |before| {
         hooks::with_turn_end(before, &file, command, crate::turn_end::GatedAgent::Claude)
-    })?;
-    changes.extend(retired);
-    Ok(changes)
-}
-
-/// The removal of the script that the Stop hook in `file` runs, whatever the script holds.
-fn old_script(settings: Option<&str>, file: &str) -> Result<Option<Change>, BansheeError> {
-    let root = parse_settings(settings, file)?;
-    let Some(script) = hooks::stop_hook_commands(&root).find_map(hook_script_path) else {
-        return Ok(None);
-    };
-    Ok(read_if_present(&script)?.map(|before| Change::RemoveFile {
-        path: script,
-        before,
-    }))
+    })
 }
 
 /// The command's words, with a quoted one kept whole and its quotes dropped.
@@ -332,13 +310,6 @@ fn command_words(command: &str) -> Vec<String> {
         words.push(word);
     }
     words
-}
-
-fn hook_script_path(command: &str) -> Option<PathBuf> {
-    command_words(command)
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|path| path.file_name() == Some(OsStr::new(HOOK_SCRIPT_NAME)))
 }
 
 pub fn plan(agent: Agent, env: &Env) -> Result<Vec<Change>, BansheeError> {
@@ -565,8 +536,6 @@ fn write_if_changed(path: PathBuf, after: &str) -> Result<Option<Change>, Banshe
     }))
 }
 
-pub(crate) const HOOK_SCRIPT_NAME: &str = "banshee-speak-check.sh";
-
 fn parse_settings(settings: Option<&str>, file: &str) -> Result<serde_json::Value, BansheeError> {
     match settings {
         Some(text) => serde_json::from_str(text)
@@ -593,7 +562,6 @@ pub fn render(change: &Change) -> String {
                 .header(old_name, &name)
                 .to_string()
         }
-        Change::RemoveFile { path, .. } => format!("remove {}\n", path.display()),
     }
 }
 
@@ -639,16 +607,6 @@ pub fn apply(change: &Change, path: &OsStr) -> Result<(), BansheeError> {
                 )));
             }
             banshee_common::utils::write_atomically(path, after.as_bytes(), None)?;
-            Ok(())
-        }
-        Change::RemoveFile { path, before } => {
-            if read_if_present(path)?.as_deref() != Some(before.as_str()) {
-                return Err(BansheeError::Rejected(format!(
-                    "{} changed after the plan was made. Nothing was removed; run the command again.",
-                    path.display()
-                )));
-            }
-            std::fs::remove_file(path)?;
             Ok(())
         }
     }
@@ -1092,7 +1050,6 @@ pub fn apply_plan(
     }
     apply_all(changes, path, |change| match change {
         Change::WriteFile { path, .. } => println!("wrote {}", path.display()),
-        Change::RemoveFile { path, .. } => println!("removed {}", path.display()),
         Change::Run { .. } => {}
     })?;
     println!("{done}");

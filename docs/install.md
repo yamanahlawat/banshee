@@ -2,7 +2,7 @@
 
 - **The README** shows the shortest route on each platform.
 - **This page** holds every route, and how to remove each one.
-- **Disk:** every route needs ~860 MB for the models.
+- **Disk:** every route needs about 1.1 GB for the models.
 - **Intel Macs** are not supported.
 
 ## macOS, with the window

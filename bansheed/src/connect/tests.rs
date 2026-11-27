@@ -863,44 +863,6 @@ fn pi_plan_is_empty_when_already_connected() {
 }
 
 #[test]
-fn a_hook_whose_script_only_contains_banshees_name_is_not_banshees() {
-    let before = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash '/x/my-banshee-speak-check.sh'"}]}]}}"#;
-    let command = hooks::turn_end_command(GatedAgent::Claude, Path::new(BANSHEE));
-    let after = hooks::with_turn_end(Some(before), "settings.json", &command, GatedAgent::Claude)
-        .unwrap()
-        .expect("a script of the user's own is not Banshee's hook, so Banshee's must be added");
-    let value: serde_json::Value = serde_json::from_str(&after).unwrap();
-    assert_eq!(value["hooks"]["Stop"][1]["hooks"][0]["command"], command);
-}
-
-#[test]
-fn the_hook_script_path_is_the_word_named_exactly_like_the_script() {
-    let cases = [
-        (
-            "bash '/x/banshee-speak-check.sh'",
-            Some("/x/banshee-speak-check.sh"),
-        ),
-        ("bash /x/banshee-speak-check.sh.bak", None),
-        ("bash '/x/my-banshee-speak-check.sh'", None),
-        (
-            "bash '/x/my hooks/banshee-speak-check.sh'",
-            Some("/x/my hooks/banshee-speak-check.sh"),
-        ),
-        (
-            "bash \"/x/my hooks/banshee-speak-check.sh\"",
-            Some("/x/my hooks/banshee-speak-check.sh"),
-        ),
-    ];
-    for (command, want) in cases {
-        assert_eq!(
-            hook_script_path(command),
-            want.map(std::path::PathBuf::from),
-            "{command}"
-        );
-    }
-}
-
-#[test]
 fn unreadable_settings_are_an_error_not_a_rewrite() {
     let error = hooks::with_turn_end(Some("{ not json"), "settings.json", "x", GatedAgent::Claude)
         .expect_err("must not guess");
@@ -1039,7 +1001,7 @@ fn claude_plan_honours_the_config_dir() {
         .iter()
         .filter_map(|c| match c {
             Change::WriteFile { path, .. } => Some(path),
-            Change::Run { .. } | Change::RemoveFile { .. } => None,
+            Change::Run { .. } => None,
         })
         .collect();
     assert_eq!(paths, [&home.join(".claude-work/settings.json")]);
@@ -1404,10 +1366,6 @@ fn the_turn_end_command_is_recognised_for_its_own_agent_only() {
         let claude = hooks::turn_end_command(GatedAgent::Claude, Path::new(banshee));
         assert!(!hooks::is_turn_end_command(&claude, GatedAgent::Codex));
     }
-    assert!(!hooks::is_turn_end_command(
-        "bash '/x/banshee-speak-check.sh'",
-        GatedAgent::Claude
-    ));
     for theirs in [
         "/opt/banshee/bin/banshee turn-end claude",
         "/bin/sh -c 'echo done' /x/banshee",
@@ -1572,19 +1530,6 @@ fn a_moved_banshee_rewrites_its_hook_in_place() {
 }
 
 #[test]
-fn the_old_script_entry_is_replaced_in_place() {
-    let command = hooks::turn_end_command(GatedAgent::Claude, Path::new(BANSHEE));
-    let before = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash '/x/banshee-speak-check.sh'","timeout":15,"statusMessage":"Checking you spoke"}]}]}}"#;
-    let after = hooks::with_turn_end(Some(before), "settings.json", &command, GatedAgent::Claude)
-        .unwrap()
-        .unwrap();
-    let root: serde_json::Value = serde_json::from_str(&after).unwrap();
-    let stop = root["hooks"]["Stop"].as_array().unwrap();
-    assert_eq!(stop.len(), 1);
-    assert_eq!(stop[0]["hooks"][0]["command"], command);
-}
-
-#[test]
 fn antigravity_lists_its_stop_handler_directly_under_the_event() {
     let command = hooks::turn_end_command(GatedAgent::Antigravity, Path::new(BANSHEE));
     let after = hooks::with_antigravity_turn_end(Some(r#"{"theirs":{"enabled":true}}"#), &command)
@@ -1649,104 +1594,6 @@ fn codex_and_antigravity_plan_their_server_and_their_hook() {
         );
     }
     let _ = std::fs::remove_dir_all(&home);
-}
-
-fn claude_with_old_script(name: &str, script_body: Option<&str>) -> (PathBuf, Env, PathBuf) {
-    let home = scratch(name);
-    let mut env = env_at(&home);
-    found(&mut env, "claude");
-    env.claude_shim = Some(SHIM.into());
-    let script = home.join("elsewhere/banshee-speak-check.sh");
-    if let Some(body) = script_body {
-        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-        std::fs::write(&script, body).unwrap();
-    }
-    std::fs::create_dir_all(home.join(".claude")).unwrap();
-    std::fs::write(
-        home.join(".claude/settings.json"),
-        serde_json::json!({"hooks": {"Stop": [{"hooks": [{
-            "type": "command",
-            "command": format!("bash '{}'", script.display()),
-        }]}]}})
-        .to_string(),
-    )
-    .unwrap();
-    (home, env, script)
-}
-
-#[test]
-fn reconnecting_claude_retires_banshees_script() {
-    let old_script = format!("#!/bin/sh\n{BANSHEE} --check\n");
-    let (home, env, script) = claude_with_old_script("claude-retire", Some(&old_script));
-    let changes = plan(Agent::ClaudeCode, &env).unwrap();
-    assert!(
-        changes.contains(&Change::RemoveFile {
-            path: script.clone(),
-            before: old_script
-        }),
-        "{changes:?}"
-    );
-    for change in &changes {
-        apply_write(change).unwrap();
-    }
-    assert!(!script.exists());
-    let settings = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
-    assert!(settings.contains("turn-end claude"), "{settings}");
-    assert!(!settings.contains("banshee-speak-check.sh"), "{settings}");
-    assert!(
-        plan(Agent::ClaudeCode, &env).unwrap().is_empty(),
-        "a second run is empty"
-    );
-    let _ = std::fs::remove_dir_all(&home);
-}
-
-#[test]
-fn reconnecting_claude_removes_an_edited_copy_of_the_script() {
-    let edited = "#!/bin/sh\n# the user's own edit\necho spoke\n";
-    let (home, env, script) = claude_with_old_script("claude-edited", Some(edited));
-    let changes = plan(Agent::ClaudeCode, &env).unwrap();
-    assert!(
-        changes.contains(&Change::RemoveFile {
-            path: script.clone(),
-            before: edited.into()
-        }),
-        "{changes:?}"
-    );
-    for change in &changes {
-        apply_write(change).unwrap();
-    }
-    assert!(!script.exists());
-    let settings = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
-    assert!(settings.contains("turn-end claude"), "{settings}");
-    let _ = std::fs::remove_dir_all(&home);
-}
-
-#[test]
-fn reconnecting_claude_leaves_a_missing_script_alone() {
-    let (home, env, script) = claude_with_old_script("claude-missing", None);
-    let changes = plan(Agent::ClaudeCode, &env).unwrap();
-    assert!(
-        !changes
-            .iter()
-            .any(|c| matches!(c, Change::RemoveFile { .. })),
-        "{changes:?}"
-    );
-    assert!(!script.exists());
-    let _ = std::fs::remove_dir_all(&home);
-}
-
-#[test]
-fn a_removal_is_refused_when_the_file_changed_after_the_plan() {
-    let dir = scratch("remove-changed");
-    let path = dir.join("f");
-    std::fs::write(&path, "new\n").unwrap();
-    let change = Change::RemoveFile {
-        path: path.clone(),
-        before: "old\n".into(),
-    };
-    assert!(apply_write(&change).is_err());
-    assert!(path.exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

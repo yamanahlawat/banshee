@@ -248,6 +248,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`banshee connect claude` no longer replaces the Stop hook from 0.15 and earlier.** If
+  your Claude Code settings still run `banshee-speak-check.sh`, delete that Stop hook entry
+  and the script, then run `banshee connect claude` again.
 - **`banshee tell` and the `[tell]` section are gone.** Delete `[tell]` from
   `config.toml`, or the daemon won't start. `banshee status` names the key.
   You can delete `~/.banshee/tell/`.
